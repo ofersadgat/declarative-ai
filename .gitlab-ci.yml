@@ -1,0 +1,13 @@
+# ai-exec CI — standalone monorepo (no external repo dependencies).
+default:
+  image: node:22
+
+stages:
+  - test
+
+build:
+  stage: test
+  script:
+    - npm install
+    - npm run typecheck
+    - npm test

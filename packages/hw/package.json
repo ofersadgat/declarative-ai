@@ -1,0 +1,12 @@
+{
+  "name": "@ai-exec/hw",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@ai-exec/core": "*",
+    "@ai-exec/services": "*"
+  }
+}
