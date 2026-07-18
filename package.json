@@ -1,0 +1,20 @@
+{
+  "name": "ai-exec",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Shared AI execution library: uniform contract for executing AI units (LLM calls, hierarchical workflows, agents) with validation, retry, rate limiting, metering, and a normalized event stream.",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p packages/core && tsc --noEmit -p packages/services && tsc --noEmit -p packages/llm && tsc --noEmit -p packages/hw",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  }
+}
