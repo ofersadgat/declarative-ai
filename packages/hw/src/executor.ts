@@ -1,8 +1,10 @@
 /**
  * The `hierarchical-workflow` executor (DESIGN §7): exposes one workflow run as an
- * ai-exec execution unit. The definition is a state-file bundle; `definitionHash`
- * must be its snapshot hash (SPEC §12) — which makes workflow executions memoizable
- * under the standard key (DESIGN §3.4) with no extra machinery.
+ * ai-exec execution unit. The definition is a state-file bundle; its content IDENTITY is the
+ * snapshot hash (SPEC §12), which `workflowDefinitionHash` computes from the bundle. That is a
+ * memoization concern — pass it to `withMemoize(cache, { identify: workflowDefinitionHash })` so a
+ * workflow run is memoizable under the standard key (DESIGN §3.4) without the caller carrying a
+ * `definitionHash` on the generic spec.
  */
 import {
   memoKey,
@@ -17,7 +19,7 @@ import {
   type Outcome,
   type ProducedArtifact,
   type UnitKind,
-} from "@ai-exec/core";
+} from "@declarative-ai/core";
 import { WorkflowEngine } from "./engine";
 import type { StateDef } from "./format";
 import { loadBundle, snapshotHash } from "./loader";
@@ -35,8 +37,6 @@ export interface HwExecutorOptions {
   providers: Record<string, ProviderBinding>;
   skills?: SkillResolver;
   persistence?: Persistence;
-  /** Default repair turns forwarded to child agent operations. */
-  repairTurns?: number;
   /**
    * When a definition contains interactive (ui) states and no `spec.interaction`
    * port is supplied: `"lazy"` (default) fails only if such a state is actually
@@ -58,11 +58,18 @@ const CAPABILITIES: ExecutorCapabilities = {
   runtime: "edge-safe",
 };
 
+/** The content identity of a workflow spec's definition — its snapshot hash (SPEC §12). This is the
+ *  memo-key identity component `withMemoize` needs: `withMemoize(cache, { identify: workflowDefinitionHash })`. */
+export function workflowDefinitionHash(spec: ExecutionSpec): string {
+  const def = spec.definition as HierarchicalWorkflowDefinition;
+  return snapshotHash(loadBundle(def.states as Record<string, unknown>, def.rootId));
+}
+
 /** Compute the memo key for a workflow execution (DESIGN §3.4). */
 export function workflowMemoKey(spec: ExecutionSpec): string {
   return memoKey({
     kind: spec.kind,
-    definitionHash: spec.definitionHash,
+    definitionHash: workflowDefinitionHash(spec),
     inputs: spec.inputs,
     workspaceTreeHash: spec.workspace?.treeHash,
   });
@@ -145,12 +152,8 @@ export class HierarchicalWorkflowExecutor implements Executor {
     } catch (e) {
       return fail("permanent", `definition failed to load: ${(e as Error).message}`);
     }
-    const hash = snapshotHash(bundle);
-    if (spec.definitionHash !== hash) {
-      // The memo key is built from definitionHash (DESIGN §3.4); executing a bundle
-      // that doesn't match it would poison every cache built on the key.
-      return fail("permanent", `definitionHash mismatch: spec says ${spec.definitionHash}, bundle hashes to ${hash}`);
-    }
+    // No caller-supplied `definitionHash` to reconcile: identity is derived from the bundle itself
+    // where it's needed (memoization), so there is no stale-hash footgun to guard against here.
     const report = validateBundle(bundle);
     if (report.errors.length > 0) {
       const first = report.errors
@@ -201,7 +204,6 @@ export class HierarchicalWorkflowExecutor implements Executor {
       persistence: this.options.persistence,
       services: ctx,
       clock: ctx.clock,
-      repairTurns: spec.repairTurns ?? this.options.repairTurns,
       onEvent: (event) => {
         // Normalized event surface (DESIGN §3.2): completions carry metrics for
         // budget/cost observers; the rest stream as progress.

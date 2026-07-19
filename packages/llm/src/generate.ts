@@ -1,7 +1,7 @@
-import { Output, jsonSchema, streamText, type LanguageModel } from "ai";
+import { Output, jsonSchema, streamText, type LanguageModel, type ModelMessage, type StopCondition, type SystemModelMessage, type ToolChoice, type ToolSet } from "ai";
 import { createLogger } from "./logger";
 import { computeCost } from "./model-catalog";
-import { classifyError, describeError, isRateLimit, retryAfterMs as retryAfterMsOf, type ErrorClass } from "@ai-exec/core";
+import { classifyError, describeError, isRateLimit, retryAfterMs as retryAfterMsOf, sha256Hex, type ErrorClass, type FileInput, type ProducedArtifact, type SamplingConfiguration, type ToolCall, type ToolResult } from "@declarative-ai/core";
 
 /**
  * The streaming structured-output call (§5/§5.1) + metrics. ONE LLM request; the §6.1
@@ -94,36 +94,134 @@ export interface CallFailure {
   rateLimited?: boolean;
 }
 
-export interface CallOutcome {
+export interface CallOutcome<T = unknown> {
   /** Parsed structured value when the model produced usable output (kept even when a
-   *  later validation fails); undefined only when nothing parseable was produced. */
-  value?: unknown;
+   *  later validation fails); undefined only when nothing parseable was produced. Typed
+   *  as `T`, the output type the call's `schema` describes (see {@link JsonSchema}). */
+  value?: T;
   /** Raw accumulated output text — always present (possibly ""); the partial on failure. */
   rawText: string;
   /** Structured reasoning trace, positioned against the output (§4/§5.1). */
   thinking?: ReasoningSegment[];
+  /** Tool calls the model requested — the primary output for a single-turn tool op (no executor supplied),
+   *  or the intermediate calls of an executed loop. Excludes the structured-output emulation tool. */
+  toolCalls?: ToolCall[];
+  /** Results of tool calls executed in-loop (present only when executors ran). */
+  toolResults?: ToolResult[];
+  /** FILES the model generated (image/audio/…) — a parallel output channel, never folded into `value`.
+   *  Each carries inline base64 `content` + `format` (media type) + a `contentHash`. */
+  artifacts?: ProducedArtifact[];
   finishReason: string;
   metrics: CallMetrics;
   /** Present iff the call failed; `value`/`rawText`/`thinking` are then best-effort partials. */
   error?: CallFailure;
 }
 
-export interface GenerateStructuredParams {
+/**
+ * A JSON Schema document, optionally BRANDED with the type `T` of the value it validates. The
+ * brand (`__out`) is PHANTOM — never present at runtime, never read — so a plain
+ * `Record<string, unknown>` is still a valid `JsonSchema<unknown>` (backward compatible), and any
+ * `JsonSchema<T>` is still a plain record for the schema-transform/validation code. It exists only
+ * to thread the output type from a call's `schema` through to `CallOutcome<T>.value`; the §4 Ajv
+ * boundary is what actually ENFORCES conformance at runtime. Brand a plain schema with `typedSchema`.
+ */
+export type JsonSchema<T = unknown> = Record<string, unknown> & { readonly __out?: T };
+
+/** Brand a plain JSON Schema document with the output type it produces — identity at runtime, so it
+ *  can also be inlined. Lets `T` be INFERRED at the call site instead of spelled out as a type arg. */
+export function typedSchema<T>(schema: Record<string, unknown>): JsonSchema<T> {
+  return schema as JsonSchema<T>;
+}
+
+/**
+ * The prompt inputs for a call, mirroring the AI SDK `Prompt` capability surface so no expressiveness is
+ * lost: a `system` prompt (a plain string OR structured system message(s)) plus EITHER a `prompt` (a plain
+ * string or a message array) OR a `messages` array — the latter two carry multi-turn conversation and
+ * MULTIMODAL content (image/file parts live inside `ModelMessage`). Provide exactly ONE of
+ * `prompt`/`messages`; both are optional at the type level so the shape threads cleanly through the layers,
+ * and the SDK enforces the "one or the other" rule at the call. NB for the definition to stay serializable,
+ * any file/image data inside messages must be a base64 string or URL (not a live `Uint8Array`).
+ */
+export interface CallPromptInput {
+  system?: string | SystemModelMessage | SystemModelMessage[];
+  prompt?: string | ModelMessage[];
+  messages?: ModelMessage[];
+  /** Neutral file/media inputs (pdf/image/audio/video) lowered to provider file parts + merged into the
+   *  user turn at the call boundary (content-hash/path refs resolved via the injected blob store). */
+  attachments?: FileInput[];
+}
+
+/** The plain-text content of a message's `content` (a string, or the text parts of a content array). */
+function messageContentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : ""))
+      .filter(Boolean)
+      .join(" ");
+  }
+  return "";
+}
+
+/** Normalize a prompt input to its MESSAGE-LIST form: explicit `messages` win, an array prompt IS the
+ *  messages, a non-empty string prompt becomes one user turn, nothing ⇒ `[]`. The SINGLE implementation of
+ *  the three-way prompt-shape branch (session transcripts, attachment lowering, repair hints). */
+export function promptAsMessages(p: CallPromptInput): ModelMessage[] {
+  if (p.messages) return p.messages;
+  if (Array.isArray(p.prompt)) return p.prompt;
+  if (typeof p.prompt === "string" && p.prompt.length > 0) return [{ role: "user", content: p.prompt }];
+  return [];
+}
+
+/** Extract all plain text from a prompt input (system + prompt/messages) — used for the json-specifier
+ *  check (§5.1) and cheap token estimation. Non-text parts (images/files/tool calls) contribute nothing. */
+export function promptText(p: CallPromptInput): string {
+  const parts: string[] = [];
+  if (typeof p.system === "string") parts.push(p.system);
+  else if (Array.isArray(p.system)) parts.push(p.system.map((m) => m.content).join("\n"));
+  else if (p.system) parts.push(p.system.content);
+  if (typeof p.prompt === "string") parts.push(p.prompt);
+  else if (Array.isArray(p.prompt)) parts.push(p.prompt.map((m) => messageContentText(m.content)).join("\n"));
+  if (p.messages) parts.push(p.messages.map((m) => messageContentText(m.content)).join("\n"));
+  return parts.join("\n");
+}
+
+/**
+ * The RESOLVED transport call `generateStructured` runs — the FLAT serializable decoding knobs reused
+ * from core's `SamplingConfiguration` (temperature/topP/topK/penalties + base's maxOutputTokens/
+ * stopSequences/seed) PLUS the pieces the executor reconstructs from a `StructuredCallParams` at the call
+ * boundary: the live `model` handle (resolved from the config's `model` string via the router), the
+ * provider-ADAPTED `schema` + `postProcess`, the merged `providerOptions` (raw config passthrough + the
+ * neutral `reasoning` adapted at the boundary), the `abortSignal` (from `timeoutMs`), and the boundary
+ * `validate`. It is deliberately distinct from the serializable `StructuredCallParams` — this one holds
+ * live handles + closures and never persists — but reuses the decoding-knob surface (via
+ * `SamplingConfiguration`, whose optional knobs are the flat superset once reasoning is adapted away)
+ * instead of re-listing it. `model` (the config's string id) is replaced by the resolved handle, and the
+ * neutral `reasoning` is replaced by `providerOptions`; both are re-supplied below.
+ */
+export interface GenerateStructuredParams<T = unknown>
+  extends Omit<SamplingConfiguration, "model" | "providerOptions" | "tools" | "toolChoice" | "maxSteps">,
+    CallPromptInput {
+  /** The resolved model handle (the router turns the config's `model` string into this). */
   model: LanguageModel;
-  /** The routing id — for pricing and provider detection. */
+  /** The routing id — for pricing and provider detection. Kept alongside `model` because the handle's
+   *  own id isn't a reliable pricing/routing key (OpenRouter prefixing, etc.). */
   modelId: string;
-  prompt: string;
-  system?: string;
-  /** The ORIGINAL JSON Schema (reconstruction + validation target). OMITTED for a TEXT-output op
-   *  (§3.14): no schema → plain `streamText`, the raw text IS the value (the user's text→text flow). */
-  schema?: Record<string, unknown>;
+  /** The ORIGINAL/OUTGOING JSON Schema (reconstruction + validation target), branded with the output
+   *  type `T`. OMITTED for a TEXT-output op (§3.14): no schema → plain `streamText`, the raw text IS
+   *  the value (the user's text→text flow). */
+  schema?: JsonSchema<T>;
   abortSignal?: AbortSignal;
-  maxOutputTokens?: number;
-  temperature?: number;
-  topP?: number;
-  topK?: number;
-  stopSequences?: string[];
+  /** Merged provider options (raw config passthrough + adapted reasoning) forwarded to the SDK. */
   providerOptions?: Record<string, unknown>;
+  /** The RESOLVED tool set (declarations from the config combined with runtime `execute` impls), keyed
+   *  by name. The executor builds this; `generateStructured` just forwards it to the SDK. */
+  tools?: ToolSet;
+  /** How the model may select among `tools`. */
+  toolChoice?: ToolChoice<ToolSet>;
+  /** The stop condition bounding an executed tool loop (e.g. `stepCountIs(n)`); set only when tools have
+   *  executors. Absent ⇒ a single step (tool calls are returned, not executed in a loop). */
+  stopWhen?: StopCondition<ToolSet> | Array<StopCondition<ToolSet>>;
   /**
    * Milestone 4 Ajv hook: throw to signal a PERMANENT validation failure of the
    * reconstructed value against the original schema (§5.1). Default: no-op.
@@ -192,7 +290,7 @@ export function extractTokenCounts(usage: unknown): TokenCounts {
   };
 }
 
-export async function generateStructured(params: GenerateStructuredParams): Promise<CallOutcome> {
+export async function generateStructured<T = unknown>(params: GenerateStructuredParams<T>): Promise<CallOutcome<T>> {
   const startMs = Date.now();
 
   const metricsOf = (t: TokenCounts): CallMetrics => {
@@ -227,6 +325,11 @@ export async function generateStructured(params: GenerateStructuredParams): Prom
   // Tool-call ids known to be the structured-output (jsonTool) tool vs intermediate tools.
   const structuredToolIds = new Set<string>();
   const toolSegById = new Map<string, ReasoningSegment>();
+  // First-class tool calls/results (REAL tools only — never the structured-output emulation tool).
+  const toolCalls: ToolCall[] = [];
+  const toolResults: ToolResult[] = [];
+  // Files the model generated (image/audio/…) — a parallel output channel.
+  const producedFiles: ProducedArtifact[] = [];
   let salvage: TokenCounts | undefined;
   // Provider's exact usage object (ground truth). NB the SDK's cross-step aggregate
   // (`finish.totalUsage`) DROPS `raw`; it survives only on the per-step `finish-step.usage`
@@ -288,11 +391,16 @@ export async function generateStructured(params: GenerateStructuredParams): Prom
     finishReason: string;
     tokens: TokenCounts;
     failure?: CallFailure;
-  }): CallOutcome => {
-    const outcome: CallOutcome = {
-      value: args.value,
+  }): CallOutcome<T> => {
+    // `value` is reconstructed as `unknown` (parsed JSON / postProcess output) and asserted to `T`
+    // here, the single construction site — the §4 Ajv boundary is what makes that assertion sound.
+    const outcome: CallOutcome<T> = {
+      value: args.value as T | undefined,
       rawText: outputText(),
       thinking: thinking.length > 0 ? thinking : undefined,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      toolResults: toolResults.length > 0 ? toolResults : undefined,
+      artifacts: producedFiles.length > 0 ? producedFiles : undefined,
       finishReason: args.finishReason,
       metrics: metricsOf(args.tokens),
       error: args.failure,
@@ -348,18 +456,29 @@ export async function generateStructured(params: GenerateStructuredParams): Prom
     schema: params.schema ? (params.schema as { title?: string }).title : "(text)",
   });
 
+  // Forward the prompt as the SDK's `Prompt`: `system` plus EXACTLY ONE of `messages`/`prompt` (the SDK
+  // rejects both). `messages` wins when present; otherwise the `prompt` (string or message array).
+  const promptPart: { messages: ModelMessage[] } | { prompt: string | ModelMessage[] } =
+    params.messages !== undefined ? { messages: params.messages } : { prompt: params.prompt ?? "" };
+
   const result = streamText({
     model: params.model,
     system: params.system,
-    prompt: params.prompt,
+    ...promptPart,
     maxRetries: 0,
     abortSignal: params.abortSignal,
     maxOutputTokens: params.maxOutputTokens,
     temperature: params.temperature,
     topP: params.topP,
     topK: params.topK,
+    presencePenalty: params.presencePenalty,
+    frequencyPenalty: params.frequencyPenalty,
+    seed: params.seed,
     stopSequences: params.stopSequences,
     providerOptions: params.providerOptions as never,
+    ...(params.tools ? { tools: params.tools } : {}),
+    ...(params.toolChoice ? { toolChoice: params.toolChoice } : {}),
+    ...(params.stopWhen ? { stopWhen: params.stopWhen } : {}),
     ...(outgoing && attachStructuredOutput ? { output: Output.object({ schema: jsonSchema(outgoing as never) }) } : {}),
     onAbort: ({ steps }) => {
       const lastUsage = steps.at(-1)?.usage;
@@ -391,10 +510,15 @@ export async function generateStructured(params: GenerateStructuredParams): Prom
         text?: string;
         delta?: string;
         input?: unknown;
+        output?: unknown;
+        result?: unknown;
         error?: unknown;
         usage?: unknown;
         totalUsage?: unknown;
         providerMetadata?: Record<string, unknown>;
+        file?: { base64?: string; uint8Array?: Uint8Array; mediaType?: string };
+        mediaType?: string;
+        data?: unknown;
       };
       switch (p.type) {
         case "text-delta":
@@ -434,6 +558,42 @@ export async function generateStructured(params: GenerateStructuredParams): Prom
               const seg = intermediateToolSegment(id, p.toolName);
               seg.text = typeof p.input === "string" ? p.input : safeStringify(p.input);
             }
+            // Surface the REAL tool call as a first-class outcome entry (positioned trace above is kept
+            // for diagnostics). `input` is the parsed args; parse a streamed string if that's all we have.
+            const toolName = p.toolName ?? existing?.toolName ?? "";
+            let input: unknown = p.input;
+            if (typeof input === "string") {
+              try {
+                input = JSON.parse(input);
+              } catch {
+                /* keep the raw string when it isn't JSON */
+              }
+            }
+            toolCalls.push({ ...(id !== undefined ? { toolCallId: id } : {}), toolName, input });
+          }
+          break;
+        }
+        case "tool-result": {
+          // A tool executed in-loop returned a result (streamText ran the executor). Not the structured-
+          // output tool (that never executes). Surface it for diagnostics / the caller.
+          const id = p.toolCallId ?? p.id;
+          if (!isStructuredOutputTool(p.toolName) && !(id !== undefined && structuredToolIds.has(id))) {
+            toolResults.push({
+              ...(id !== undefined ? { toolCallId: id } : {}),
+              ...(p.toolName !== undefined ? { toolName: p.toolName } : {}),
+              output: p.output ?? p.result,
+            });
+          }
+          break;
+        }
+        case "file": {
+          // A model-GENERATED file (image/audio/…). The high-level fullStream emits `{file: GeneratedFile}`;
+          // be defensive about a low-level `{mediaType, data}` shape too. Captured as an inline artifact.
+          const gf = p.file;
+          const mediaType = gf?.mediaType ?? p.mediaType;
+          const base64 = gf?.base64 ?? (typeof p.data === "string" ? p.data : undefined);
+          if (base64 !== undefined && base64.length > 0 && mediaType !== undefined) {
+            producedFiles.push({ name: `file-${producedFiles.length}`, content: base64, format: mediaType, contentHash: sha256Hex(base64) });
           }
           break;
         }

@@ -1,12 +1,12 @@
 {
-  "name": "@ai-exec/hw",
+  "name": "@declarative-ai/hw",
   "version": "0.1.0",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@ai-exec/core": "*",
-    "@ai-exec/services": "*"
+    "@declarative-ai/core": "*",
+    "@declarative-ai/services": "*"
   }
 }

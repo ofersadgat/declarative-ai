@@ -1,13 +1,13 @@
 {
-  "name": "@ai-exec/llm",
+  "name": "@declarative-ai/llm",
   "version": "0.1.0",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@ai-exec/core": "*",
-    "@ai-exec/services": "*",
+    "@declarative-ai/core": "*",
+    "@declarative-ai/services": "*",
     "@ai-sdk/anthropic": "^3.0.81",
     "@openrouter/ai-sdk-provider": "^2.9.0",
     "ai": "^6.0.195",

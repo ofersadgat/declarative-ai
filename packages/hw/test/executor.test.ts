@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { MapExecutorRegistry, memoKey, type ExecEvent, type ExecutionSpec, type ExecServices } from "@ai-exec/core";
-import { SchemaValidator } from "@ai-exec/services";
+import { MapExecutorRegistry, memoKey, type ExecEvent, type ExecutionSpec, type ExecServices } from "@declarative-ai/core";
+import { SchemaValidator } from "@declarative-ai/services";
 import {
   createHierarchicalWorkflowExecutor,
   workflowMemoKey,
@@ -17,10 +17,10 @@ const PROVIDERS = {
   fixer: llmCallBinding({ model: "fixer" }),
 };
 
-function planningDefinition(): { definition: HierarchicalWorkflowDefinition; definitionHash: string } {
+function planningDefinition(): { definition: HierarchicalWorkflowDefinition } {
   const states = specPlanningFiles();
   const definition = { rootId: PLAN_ID, states };
-  return { definition, definitionHash: snapshotHash(loadBundle(states, PLAN_ID)) };
+  return { definition };
 }
 
 const happyScript: Script = (spec) => {
@@ -43,8 +43,8 @@ function makeCtx(script: Script): { ctx: ExecServices; fake: FakeExecutor } {
 }
 
 function specFor(inputs: Record<string, unknown>, overrides?: Partial<ExecutionSpec>): ExecutionSpec {
-  const { definition, definitionHash } = planningDefinition();
-  return { kind: "hierarchical-workflow", definition, definitionHash, inputs, ...overrides };
+  const { definition } = planningDefinition();
+  return { kind: "hierarchical-workflow", definition, inputs, ...overrides };
 }
 
 describe("hierarchical-workflow executor", () => {
@@ -73,24 +73,14 @@ describe("hierarchical-workflow executor", () => {
     expect(seen.some((e) => e.type === "progress" && e.message.includes("entered feature/plan"))).toBe(true);
   });
 
-  it("rejects a definitionHash mismatch before spending anything", async () => {
-    const executor = createHierarchicalWorkflowExecutor({ providers: PROVIDERS });
-    const { ctx, fake } = makeCtx(happyScript);
-    const outcome = await executor.start(specFor({ issue: "i" }, { definitionHash: "wrong" }), ctx).outcome;
-    expect(outcome.error?.classification).toBe("permanent");
-    expect(outcome.error?.reason).toMatch(/definitionHash mismatch/);
-    expect(fake.calls).toHaveLength(0);
-  });
-
   it("rejects an invalid bundle with the validation report", async () => {
     const { definition } = planningDefinition();
     const states = definition.states as ReturnType<typeof specPlanningFiles>;
     states[PLAN_ID]!.transitions!.push({ to: "nowhere" });
-    const definitionHash = snapshotHash(loadBundle(states, PLAN_ID));
     const executor = createHierarchicalWorkflowExecutor({ providers: PROVIDERS });
     const { ctx, fake } = makeCtx(happyScript);
     const outcome = await executor
-      .start({ kind: "hierarchical-workflow", definition, definitionHash, inputs: { issue: "i" } }, ctx)
+      .start({ kind: "hierarchical-workflow", definition, inputs: { issue: "i" } }, ctx)
       .outcome;
     expect(outcome.error?.classification).toBe("permanent");
     expect(outcome.error?.reason).toMatch(/validation failed/);
@@ -185,10 +175,11 @@ describe("hierarchical-workflow executor", () => {
     expect((outcome.value as Record<string, unknown>)["outcome"]).toBe("complete"); // value preserved on failure
   });
 
-  it("workflowMemoKey matches core memoKey over (kind, definitionHash, inputs)", () => {
+  it("workflowMemoKey matches core memoKey over (kind, snapshot hash, inputs)", () => {
     const spec = specFor({ issue: "i" });
+    const definitionHash = snapshotHash(loadBundle(specPlanningFiles(), PLAN_ID));
     expect(workflowMemoKey(spec)).toBe(
-      memoKey({ kind: "hierarchical-workflow", definitionHash: spec.definitionHash, inputs: spec.inputs }),
+      memoKey({ kind: "hierarchical-workflow", definitionHash, inputs: spec.inputs }),
     );
     // Same workflow version + same inputs ⇒ same key; any change ⇒ new key.
     expect(workflowMemoKey(specFor({ issue: "i" }))).toBe(workflowMemoKey(spec));

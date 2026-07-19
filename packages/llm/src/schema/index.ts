@@ -1,4 +1,4 @@
-export { adaptSchema } from "./adapt";
+export { adaptSchema, adaptSchemaCached } from "./adapt";
 export type {
   AdaptNote,
   AdaptResult,

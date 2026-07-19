@@ -7,36 +7,63 @@ import { installLongTimeoutDispatcher } from "./dispatcher";
 const log = createLogger("engine.providers.router");
 
 /**
- * Provider router (§5): Anthropic models -> the native Anthropic provider; everything
- * else -> OpenRouter as the catch-all. The model id is part of a candidate's identity,
- * so routing is a pure function of it.
+ * Provider router (§5): a model id is REQUIRED to name its serving route as a `{route}/{model}`
+ * prefix — `anthropic/…` → the native Anthropic provider, `openrouter/…` → OpenRouter. Routing is a
+ * pure, EXPLICIT function of that prefix (no `startsWith("claude-")` sniffing), so the same underlying
+ * model can be reached either natively (`anthropic/claude-opus-4-8`) or via OpenRouter
+ * (`openrouter/anthropic/claude-opus-4.8`) with no ambiguity. The remainder after the first "/" is the
+ * provider-native id — what the catalog / pricing / schema-profile layer keys on.
  *
- * `ProviderRouter` is the seam §6.1's `RunCtx` depends on — a swappable interface, not
- * a hardcoded call.
+ * `ProviderRouter` is the seam §6.1's `RunCtx` depends on — a swappable interface, not a hardcoded call.
  */
 export type ModelFamily = "anthropic" | "openrouter";
+/** The two serving ROUTES a model id may name in its `{route}/…` prefix (same set as {@link ModelFamily}). */
+export type ModelRoute = ModelFamily;
 
-export function isAnthropicModel(modelId: string): boolean {
-  return modelId.startsWith("claude-");
-}
-
-export function familyForModel(modelId: string): ModelFamily {
-  return isAnthropicModel(modelId) ? "anthropic" : "openrouter";
+/** A model id's parsed serving route + the provider-native id that route serves. */
+export interface ParsedModel {
+  route: ModelRoute;
+  /** The provider-native id (route prefix stripped) — the catalog / pricing / profile key. */
+  providerId: string;
 }
 
 /**
- * Whether a resolved model runs on Anthropic's native provider — which is what decides
- * if the structured-output schema patch is needed (§5.1). Derived from the model object
- * itself (its `.provider`), falling back to the model id; callers never pass a flag.
- * An Anthropic model reached *via OpenRouter* reports the OpenRouter provider and is
- * (correctly) treated as non-native.
+ * Parse a route-prefixed model id `{route}/{model}` (route ∈ "anthropic" | "openrouter"). Throws a clear
+ * error on a bare/unprefixed id — routing is explicit by contract, never guessed. Examples:
+ * `anthropic/claude-sonnet-5` → `{ route:"anthropic", providerId:"claude-sonnet-5" }`;
+ * `openrouter/openai/gpt-5` → `{ route:"openrouter", providerId:"openai/gpt-5" }`.
  */
-export function providerIsAnthropic(model: LanguageModel, modelId: string): boolean {
-  const provider = (model as { provider?: unknown }).provider;
-  if (typeof provider === "string" && provider.length > 0) {
-    return provider.toLowerCase().includes("anthropic");
+export function parseModelRoute(modelId: string): ParsedModel {
+  const slash = modelId.indexOf("/");
+  const route = slash > 0 ? modelId.slice(0, slash) : "";
+  if (route !== "anthropic" && route !== "openrouter") {
+    throw new Error(
+      `model "${modelId}" must be route-prefixed as "{route}/{model}" with route "anthropic" or "openrouter" ` +
+        `(e.g. "anthropic/claude-sonnet-5", "openrouter/openai/gpt-5")`,
+    );
   }
-  return isAnthropicModel(modelId);
+  return { route, providerId: modelId.slice(slash + 1) };
+}
+
+/** The provider-native id of a route-prefixed model id (route prefix stripped) — the id the catalog /
+ *  pricing / schema-profile layer keys on. Throws on a bare/unprefixed id (see {@link parseModelRoute}). */
+export function providerNativeId(modelId: string): string {
+  return parseModelRoute(modelId).providerId;
+}
+
+/** The serving route (family) of a route-prefixed model id. Throws on a bare/unprefixed id. */
+export function familyForModel(modelId: string): ModelFamily {
+  return parseModelRoute(modelId).route;
+}
+
+/**
+ * True iff a PROVIDER-NATIVE id (route prefix already stripped) is a native-Anthropic model — a bare
+ * `claude-*` id with NO vendor prefix. This operates on the native-id space (catalog seed/import + schema
+ * profile selection, where `anthropic/claude-…` means "Anthropic-via-OpenRouter" and is correctly NON-native);
+ * for routing a user-facing id, use {@link parseModelRoute}/{@link familyForModel} instead.
+ */
+export function isAnthropicModel(modelId: string): boolean {
+  return modelId.startsWith("claude-");
 }
 
 /** Per-call model-resolution options. Today: the schema adapter's enforce decision, which sets the
@@ -96,13 +123,13 @@ export function createRouter(options: RouterOptions = {}): ProviderRouter {
   let openrouter: ReturnType<typeof createOpenRouter> | undefined;
 
   const resolveModel = (modelId: string, opts: ResolveModelOptions = {}): LanguageModel => {
-    const family = familyForModel(modelId);
-    log.debug("resolve model", { modelId, family, strict: opts.strictStructuredOutput });
-    if (family === "anthropic") {
+    const { route, providerId } = parseModelRoute(modelId);
+    log.debug("resolve model", { modelId, route, providerId, strict: opts.strictStructuredOutput });
+    if (route === "anthropic") {
       anthropic ??= createAnthropic({
         apiKey: options.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY,
       });
-      return anthropic(modelId);
+      return anthropic(providerId);
     }
     openrouter ??= createOpenRouter({
       apiKey: options.openRouterApiKey ?? process.env.OPENROUTER_API_KEY,
@@ -115,7 +142,7 @@ export function createRouter(options: RouterOptions = {}): ProviderRouter {
     // schema fits the provider's constrained-decoder bounds. Falls back to the router-level default
     // (then off), where correctness still comes from the §4 Ajv check (see openRouterStrictStructuredOutputs).
     const strict = opts.strictStructuredOutput ?? options.openRouterStrictStructuredOutputs ?? false;
-    return openrouter(modelId, {
+    return openrouter(providerId, {
       ...(usageAccounting ? { usage: { include: true } } : {}),
       structuredOutputs: { strict },
       // When we actually request strict, constrain routing to upstreams that support ALL request
@@ -128,8 +155,8 @@ export function createRouter(options: RouterOptions = {}): ProviderRouter {
 
   return {
     resolveModel,
-    // Provider-based (not id-based): aligns with the schema-patch decision in generate.ts
-    // so a claude model reached *via OpenRouter* is correctly treated as non-native (§5.1).
-    isAnthropic: (modelId: string) => providerIsAnthropic(resolveModel(modelId), modelId),
+    // Route-based (§5.1): the explicit `{route}/…` prefix decides native-vs-OpenRouter, so a claude model
+    // reached via `openrouter/anthropic/claude-…` is correctly treated as non-native (route "openrouter").
+    isAnthropic: (modelId: string) => parseModelRoute(modelId).route === "anthropic",
   };
 }

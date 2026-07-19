@@ -1,6 +1,6 @@
 /**
  * Deadline cutoff, extracted from findmyprompt `src/engine/execution/deadline.ts`
- * (Clock/DeadlineConfig types now live in @ai-exec/core). A serverless step has no
+ * (Clock/DeadlineConfig types now live in @declarative-ai/core). A serverless step has no
  * per-step timeout API, so the step computes its own deadline from a captured
  * `stepStartMs` and a configured `maxDurationMs`; the result drives
  * `AbortSignal.timeout(remainingMs)` so a long generation is cut off and salvaged
@@ -9,7 +9,7 @@
  * Pure + clock-injectable so the floor-guard and margin arithmetic are deterministically
  * testable without real timers.
  */
-import type { Clock, DeadlineConfig } from "@ai-exec/core";
+import type { Clock, DeadlineConfig } from "@declarative-ai/core";
 
 export type { Clock, DeadlineConfig };
 

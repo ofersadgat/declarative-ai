@@ -37,9 +37,9 @@ import {
   type InteractionPort,
   type OutputValidator,
   type Clock,
-  hashCanonical,
-} from "@ai-exec/core";
-import { SchemaValidator } from "@ai-exec/services";
+  MapSessionStore,
+} from "@declarative-ai/core";
+import { SchemaValidator } from "@declarative-ai/services";
 import { evaluate, isPending, parseExpression, PENDING, type Expr } from "./expr";
 import type {
   AgentConfig,
@@ -74,8 +74,6 @@ export interface EngineConfig {
   services?: ExecServices;
   clock?: Clock;
   onEvent?: (event: EngineEvent) => void;
-  /** Default repair turns for agent/skill operations (see core ExecutionSpec.repairTurns). */
-  repairTurns?: number;
 }
 
 export interface WorkflowRunOptions {
@@ -155,6 +153,10 @@ export class WorkflowEngine {
   private rootAbort?: AbortController;
   private readonly artifacts: ArtifactRef[] = [];
   private readonly conversation: Array<{ role: "user" | "assistant"; content: string }> = [];
+  /** RUN-SCOPED session store: states sharing a logical `sessionId` continue the same conversation when the
+   *  llm executor is composed with `withSession` (opt-in; orthogonal to the built-in `conversationMode`
+   *  preamble). Exposed to child executors via `ctx.sessions`; an app-provided store takes precedence. */
+  private readonly sessionStore = new MapSessionStore();
   private childCalls = 0;
   private childCost = 0;
 
@@ -704,7 +706,10 @@ export class WorkflowEngine {
     return this.runExecutorOperation(instance, "skill", {
       provider: skill.provider,
       template: skill.template,
-      config: { ...skill.config, ...skillCfg.params },
+      // The SkillDef's own `config` is the config surface; the invocation's `params` are TEMPLATE
+      // variables (`{{params.x}}`, format.ts) — never silently folded into the llm config.
+      config: { ...skill.config },
+      templateParams: skillCfg.params,
       conversationMode: "fresh",
     });
   }
@@ -716,6 +721,8 @@ export class WorkflowEngine {
       provider: string;
       template: string;
       config: Record<string, unknown>;
+      /** Extra `{{params.*}}` values for THIS render (skill invocation params), over the instance's own. */
+      templateParams?: Record<string, unknown>;
       conversationMode: ConversationMode;
       conversationArtifacts?: string[];
     },
@@ -731,28 +738,36 @@ export class WorkflowEngine {
     const executor = this.config.registry.get(binding.kind);
     if (!executor) return fail({ classification: "permanent", reason: `no executor registered for kind '${binding.kind}'` });
 
-    const rendered = this.renderTemplate(req.template, instance);
+    const rendered = this.renderTemplate(req.template, instance, req.templateParams);
     const preamble = this.conversationPreamble(req.conversationMode, req.conversationArtifacts);
     const prompt = preamble ? `${preamble}\n\n${rendered}` : rendered;
 
     const produced = this.producedOutputFields(instance.def);
     const outputSchema = buildOutputSchema(produced);
-    const definition = binding.definition({ prompt, config: req.config });
+    let definition: unknown;
+    try {
+      definition = binding.definition({ prompt, config: req.config });
+    } catch (e) {
+      // A binding that builds its definition through a strict pipeline (e.g. `llmCallBinding` →
+      // `resolveConfig`/`parseLlmConfig`) throws on a malformed config — a permanent operation failure.
+      return fail({ classification: "permanent", reason: `invalid ${req.provider} config: ${(e as Error).message}` });
+    }
     const spec: ExecutionSpec = {
       kind: binding.kind,
       definition,
-      definitionHash: hashCanonical(definition ?? null),
       inputs: {},
       outputSchema,
       limits: instance.def.limits?.timeout !== undefined ? { timeoutMs: instance.def.limits.timeout * 1000 } : undefined,
       abortSignal: instance.abort.signal,
-      repairTurns: this.config.repairTurns,
     };
 
     const services: ExecServices = {
       ...this.config.services,
       registry: this.config.registry,
       validator: this.validator,
+      // Run-scoped session store so states can share conversations by logical id (an app-provided store
+      // wins). Inert unless the llm executor is composed with `withSession`.
+      sessions: this.config.services?.sessions ?? this.sessionStore,
     };
 
     let outcome;
@@ -835,8 +850,11 @@ export class WorkflowEngine {
 
   /** `{{path.to.value}}` interpolation against the instance context. Artifact refs
    *  render as their content; arrays/objects as JSON. */
-  private renderTemplate(template: string, instance: Instance): string {
-    const ctx = this.exprContext(instance);
+  private renderTemplate(template: string, instance: Instance, extraParams?: Record<string, unknown>): string {
+    const base = this.exprContext(instance);
+    const ctx = extraParams
+      ? { ...base, params: { ...(base.params as Record<string, unknown>), ...extraParams } }
+      : base;
     return template.replace(TEMPLATE_REF, (_m, path: string) => {
       let v: unknown;
       try {

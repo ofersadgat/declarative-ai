@@ -1,5 +1,5 @@
 /**
- * Minimal structured logger for @ai-exec/llm — a drop-in for findmyprompt's
+ * Minimal structured logger for @declarative-ai/llm — a drop-in for findmyprompt's
  * `lib/logger` at the call sites this package uses (`createLogger(scope, opts?)` →
  * `{debug,info,warn,error}(message, fields?)`). No-ops unless `AI_EXEC_LOG` is set,
  * in which case records go to stderr as one JSON-ish line each.

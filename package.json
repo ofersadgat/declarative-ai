@@ -1,5 +1,5 @@
 {
-  "name": "ai-exec",
+  "name": "declarative-ai",
   "private": true,
   "version": "0.1.0",
   "description": "Shared AI execution library: uniform contract for executing AI units (LLM calls, hierarchical workflows, agents) with validation, retry, rate limiting, metering, and a normalized event stream.",

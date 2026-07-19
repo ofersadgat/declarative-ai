@@ -9,7 +9,7 @@
  * (that re-rolls a stochastic output until it passes and biases scores); callers opt in
  * to output re-rolls explicitly (`retryApiRetriable`).
  */
-import type { ExecFailure } from "@ai-exec/core";
+import type { ExecFailure } from "@declarative-ai/core";
 import { isDeadlineFloor } from "./deadline";
 
 /** The retry budget gate: every attempt spends real budget, so before each retry we

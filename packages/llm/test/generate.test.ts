@@ -1,15 +1,7 @@
-import { simulateReadableStream } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
-import { describe, expect, it } from "vitest";
-import { generateStructured } from "../src/generate";
-
-type Chunk = Record<string, unknown>;
-
-function streamingModel(chunks: Chunk[]): MockLanguageModelV3 {
-  return new MockLanguageModelV3({
-    doStream: async () => ({ stream: simulateReadableStream({ chunks: chunks as never }) }),
-  });
-}
+import { describe, expect, expectTypeOf, it } from "vitest";
+import { generateStructured, typedSchema } from "../src/generate";
+import { flatSchema, stream, streamingModel, usage } from "./fakes";
 
 function throwingModel(err: unknown): MockLanguageModelV3 {
   return new MockLanguageModelV3({
@@ -18,18 +10,6 @@ function throwingModel(err: unknown): MockLanguageModelV3 {
     },
   });
 }
-
-const flatSchema = {
-  type: "object",
-  properties: { answer: { type: "string" } },
-  required: ["answer"],
-};
-
-// AI SDK 6 LanguageModelV3Usage: token totals nest under `.total`.
-const usage = (input: number, output: number) => ({
-  inputTokens: { total: input },
-  outputTokens: { total: output },
-});
 
 // A usage object carrying the Anthropic cache split (noCache + cacheRead + cacheWrite) plus
 // the provider `raw` usage (ground truth, incl. cache-write TTL detail the split doesn't carry).
@@ -331,5 +311,114 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
     expect(out.thinking).toEqual([
       { type: "tool-call", text: '{"q":"hi"}', textOffset: 0, toolName: "search" },
     ]);
+  });
+});
+
+describe("generateStructured — call-capability passthrough", () => {
+  it("forwards presencePenalty / frequencyPenalty / seed to the underlying call", async () => {
+    let captured: Record<string, unknown> | undefined;
+    const model = new MockLanguageModelV3({
+      doStream: async (options) => {
+        captured = options as unknown as Record<string, unknown>;
+        return stream([
+          { type: "stream-start", warnings: [] },
+          { type: "text-start", id: "1" },
+          { type: "text-delta", id: "1", delta: '{"answer":"4"}' },
+          { type: "text-end", id: "1" },
+          { type: "finish", finishReason: "stop", usage: usage(1, 1) },
+        ]);
+      },
+    });
+
+    const out = await generateStructured({
+      model,
+      modelId: "claude-haiku-4-5",
+      prompt: "x",
+      schema: flatSchema,
+      presencePenalty: 0.5,
+      frequencyPenalty: 0.25,
+      seed: 42,
+    });
+
+    expect(out.error).toBeUndefined();
+    // The new decoding knobs from core's LlmConfiguration reach the SDK call unchanged.
+    expect(captured?.presencePenalty).toBe(0.5);
+    expect(captured?.frequencyPenalty).toBe(0.25);
+    expect(captured?.seed).toBe(42);
+  });
+
+  it("forwards a structured system + a multimodal message array (full Prompt expressiveness)", async () => {
+    let captured: Record<string, unknown> | undefined;
+    const model = new MockLanguageModelV3({
+      doStream: async (options) => {
+        captured = options as unknown as Record<string, unknown>;
+        return stream([
+          { type: "stream-start", warnings: [] },
+          { type: "text-start", id: "1" },
+          { type: "text-delta", id: "1", delta: '{"answer":"4"}' },
+          { type: "text-end", id: "1" },
+          { type: "finish", finishReason: "stop", usage: usage(1, 1) },
+        ]);
+      },
+    });
+
+    const out = await generateStructured({
+      model,
+      modelId: "claude-haiku-4-5",
+      system: [{ role: "system", content: "be terse" }],
+      messages: [{ role: "user", content: [{ type: "text", text: "what is 2+2?" }] }],
+      schema: flatSchema,
+    });
+
+    expect(out.error).toBeUndefined();
+    expect(out.value).toEqual({ answer: "4" });
+    // The SDK lowered our structured system + message array to the provider prompt without dropping either.
+    const wire = JSON.stringify(captured?.prompt);
+    expect(wire).toContain("be terse");
+    expect(wire).toContain("what is 2+2?");
+  });
+});
+
+describe("generateStructured — typed output", () => {
+  interface Answer {
+    answer: string;
+  }
+
+  it("threads the schema's output type through to CallOutcome.value (typedSchema infers T)", async () => {
+    const out = await generateStructured({
+      model: streamingModel([
+        { type: "stream-start", warnings: [] },
+        { type: "text-start", id: "1" },
+        { type: "text-delta", id: "1", delta: '{"answer":"4"}' },
+        { type: "text-end", id: "1" },
+        { type: "finish", finishReason: "stop", usage: usage(3, 2) },
+      ]),
+      modelId: "claude-haiku-4-5",
+      prompt: "what is 2+2?",
+      schema: typedSchema<Answer>(flatSchema),
+    });
+
+    // Compile-time: `T` flows from the branded schema to the value (enforced by `npm run typecheck`).
+    expectTypeOf(out.value).toEqualTypeOf<Answer | undefined>();
+    // Runtime: the value is still the parsed object.
+    expect(out.value?.answer).toBe("4");
+  });
+
+  it("stays backward compatible: a plain Record schema yields value: unknown", async () => {
+    const out = await generateStructured({
+      model: streamingModel([
+        { type: "stream-start", warnings: [] },
+        { type: "text-start", id: "1" },
+        { type: "text-delta", id: "1", delta: '{"answer":"4"}' },
+        { type: "text-end", id: "1" },
+        { type: "finish", finishReason: "stop", usage: usage(3, 2) },
+      ]),
+      modelId: "claude-haiku-4-5",
+      prompt: "what is 2+2?",
+      schema: flatSchema, // plain Record<string, unknown> — no brand
+    });
+
+    expectTypeOf(out.value).toEqualTypeOf<unknown>();
+    expect(out.value).toEqual({ answer: "4" });
   });
 });

@@ -1,53 +1,35 @@
 /**
- * The @ai-exec/core `Executor` for kind "llm-call" — one structured LLM call as a
- * uniform execution unit (DESIGN §3). Wraps the findmyprompt call pipeline
- * (`executeStructuredCall` → `generateStructured`) behind the contract seams:
- * spec/outcome mapping, injected rate limiting, deadline fail-fast, caller cancel,
- * and the opt-in bounded output-repair loop.
+ * The @declarative-ai/core `Executor` for kind "llm-call" — the MINIMAL core unit: ONE structured LLM
+ * call mapped onto the contract's `Outcome` (spec/outcome mapping + caller cancel), and nothing else.
+ * Cross-cutting concerns — repair, rate limiting, deadline fail-fast, memoization — are NOT here; they are
+ * composable `ExecutorWrapper`s (see ./wrappers) stacked around this core via `composeExecutors`. Keeping
+ * the unit small is the point: it delivers exactly its value and lets the wrappers deliver theirs.
  *
- * The actual call is an injectable `CallRunner` (params + deps → `CallOutcome`),
- * defaulting to `executeStructuredCall`. That seam is what makes the executor's
- * control flow (mapping, repair, cancel, deadline, rate-limiter pass-through)
- * testable against a fake runner with no provider or network in play.
+ * The actual call is an injectable `CallRunner` (params + deps → never-throwing `CallOutcome`), defaulting
+ * to `executeStructuredCall`. That seam makes the mapping/cancel control flow testable with no provider.
  */
 import type {
   ExecEvent,
   ExecHandle,
-  ExecMetrics,
   ExecServices,
   ExecutionSpec,
   Executor,
   ExecutorCapabilities,
   Outcome,
-  ReasoningSpec,
-} from "@ai-exec/core";
-import { deadlineDecision, estimateCallTokens, systemClock, DEADLINE_FLOOR_REASON } from "@ai-exec/services";
-import type { CallMetrics, CallOutcome } from "./generate";
-import { executeStructuredCall, type CallDeps, type StructuredCallParams } from "./llmStep";
+} from "@declarative-ai/core";
+import { systemClock } from "@declarative-ai/services";
+import type { CallOutcome } from "./generate";
+import { executeStructuredCall, type CallDeps, type LlmCallDefinition, type LlmCallEnvironment, type StructuredCallParams } from "./llmStep";
 import { createRouter, type ProviderRouter } from "./router";
 
-/**
- * The serializable definition of one LLM call (`spec.definition` for kind "llm-call"):
- * `StructuredCallParams` minus `schema`/`schemaId` — the output schema comes from
- * `spec.outputSchema`. `spec.inputs` are ignored in v1 (callers pre-render prompts).
- */
-export interface LlmCallDefinition {
-  modelId: string;
-  prompt: string;
-  system?: string;
-  temperature?: number;
-  topP?: number;
-  topK?: number;
-  maxOutputTokens?: number;
-  stopSequences?: string[];
-  /** Provider-neutral reasoning request (effort/budget), adapted at the call boundary. */
-  reasoning?: ReasoningSpec;
-  /** Per-call wall-clock budget (ms). Falls back to `spec.limits.timeoutMs`, then the default. */
-  timeoutMs?: number;
-}
+// The serializable `spec.definition` for kind "llm-call" is `@declarative-ai/llm`'s `LlmCallDefinition`
+// (defined with `StructuredCallParams` in ./llmStep). Re-exported here because this is the executor that
+// consumes it as `spec.definition`.
+export type { LlmCallDefinition } from "./llmStep";
 
-/** Runner deps: `CallDeps` with the router optional (a fake runner needs no provider). */
-export type CallRunnerDeps = Omit<CallDeps, "providers"> & { providers?: ProviderRouter };
+/** Runner deps: the call environment with the router optional (a fake runner needs no provider) — which
+ *  is exactly {@link LlmCallEnvironment} (`CallDeps` is the environment with `providers` required). */
+export type CallRunnerDeps = LlmCallEnvironment;
 
 /** The injectable call seam: one structured call, params → never-throwing `CallOutcome`. */
 export type CallRunner = (params: StructuredCallParams, deps: CallRunnerDeps) => Promise<CallOutcome>;
@@ -86,39 +68,9 @@ function asRouter(candidate: unknown): ProviderRouter | undefined {
   return undefined;
 }
 
-/** Numeric-summing accumulation of one attempt's metrics into the running total (repair loop). */
-function accumulateMetrics(total: ExecMetrics | undefined, m: CallMetrics): ExecMetrics {
-  if (!total) return { ...m };
-  const sum = (a: number | undefined, b: number | undefined): number | undefined =>
-    a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0);
-  return {
-    inputTokens: sum(total.inputTokens, m.inputTokens),
-    outputTokens: sum(total.outputTokens, m.outputTokens),
-    noCacheTokens: sum(total.noCacheTokens, m.noCacheTokens),
-    cacheReadTokens: sum(total.cacheReadTokens, m.cacheReadTokens),
-    cacheWriteTokens: sum(total.cacheWriteTokens, m.cacheWriteTokens),
-    cacheWrite1hTokens: sum(total.cacheWrite1hTokens, m.cacheWrite1hTokens),
-    reasoningTokens: sum(total.reasoningTokens, m.reasoningTokens),
-    totalTokens: sum(total.totalTokens, m.totalTokens),
-    cost: sum(total.cost, m.cost),
-    costSource: m.costSource ?? total.costSource,
-    rawUsage: m.rawUsage ?? total.rawUsage,
-    durationMs: (total.durationMs ?? 0) + m.durationMs,
-  };
-}
-
-/** A validation failure eligible for the repair loop: retriable AND validation-caused. */
-function isValidationFailure(outcome: CallOutcome): boolean {
-  return outcome.error !== undefined && outcome.error.classification === "api-retriable" && /validation/i.test(outcome.error.reason);
-}
-
-/** The repair suffix appended to the prompt after a validation failure. */
-function repairSuffix(errors: string): string {
-  return `\n\nYour previous output failed schema validation: ${errors}. Return ONLY corrected JSON matching the schema.`;
-}
-
-/** An empty, already-completed event stream (v1 emits no events; the seam stays for later). */
-function emptyEvents(): AsyncIterable<ExecEvent> {
+/** An empty, already-completed event stream (v1 emits no events; the seam stays for later). Shared with the
+ *  wrappers, which build handles too. */
+export function emptyEvents(): AsyncIterable<ExecEvent> {
   return {
     async *[Symbol.asyncIterator]() {
       /* no events in v1 */
@@ -170,111 +122,85 @@ export class LlmCallExecutor implements Executor {
     const startMs = (ctx.clock ?? systemClock).now();
     const def = spec.definition as LlmCallDefinition;
     const runner = this.options.runner ?? defaultRunner;
+    const refuse = (reason: string): Outcome => ({
+      rawText: "",
+      finishReason: "error",
+      metrics: { startMs, durationMs: 0 },
+      error: { classification: "permanent", reason },
+    });
 
-    // Deadline fail-fast (§time-vs-money): below the floor, don't start the call at all.
-    let deadlineRemainingMs: number | undefined;
-    if (ctx.deadline && ctx.stepStartMs !== undefined) {
-      const decision = deadlineDecision(ctx.stepStartMs, ctx.deadline, (ctx.clock ?? systemClock).now());
-      if (!decision.proceed) {
-        return {
-          rawText: "",
-          finishReason: "error",
-          metrics: { startMs, durationMs: 0 },
-          error: {
-            classification: "deadline",
-            reason: `${DEADLINE_FLOOR_REASON}: ${decision.remainingMs}ms remaining is below the start floor`,
-          },
-        };
-      }
-      deadlineRemainingMs = decision.remainingMs;
+    // LOUD-FAILURE contract: fields this bare core does NOT implement must never arrive silently. Each
+    // wrapper CONSUMES (and strips) its own field, so anything still present here means the caller relied
+    // on behavior that is not composed into the stack — refuse instead of silently degrading.
+    if (ctx.deadline !== undefined) {
+      return refuse(
+        "ctx.deadline is set, but the bare llm-call core does not implement deadline handling — compose withDeadline() around it (the wrapper consumes ctx.deadline/ctx.stepStartMs)",
+      );
+    }
+    if (def.sessionId !== undefined || def.providerSessionId !== undefined) {
+      return refuse(
+        "the declaration carries sessionId/providerSessionId, but no session layer consumed it — compose withSession(...) around the core (the wrapper resolves and strips the session fields)",
+      );
     }
 
-    // Per-call time budget: definition → spec.limits → default, clamped by the window deadline.
-    let timeoutMs = def.timeoutMs ?? spec.limits?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    if (deadlineRemainingMs !== undefined) timeoutMs = Math.min(timeoutMs, deadlineRemainingMs);
+    // Per-call time budget: the definition's own `timeoutMs`, else the spec limit (which may exceed the
+    // default — a caller-declared budget is honored, not clamped), else the default. A definition budget
+    // ABOVE the spec limit is a conflict the caller must resolve — refused, never silently clamped.
+    // (`withDeadline` lowers BOTH the limit and the definition budget to the remaining window, so a
+    // deadline clamp never manufactures this conflict.)
+    if (def.timeoutMs !== undefined && spec.limits?.timeoutMs !== undefined && def.timeoutMs > spec.limits.timeoutMs) {
+      return refuse(
+        `definition timeoutMs (${def.timeoutMs}ms) exceeds spec.limits.timeoutMs (${spec.limits.timeoutMs}ms) — lower the definition's budget or raise the limit`,
+      );
+    }
+    const timeoutMs = def.timeoutMs ?? spec.limits?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-    // Combined abort: internal cancel + the caller's signal (timeout is applied per-call in llmStep).
+    // Combined abort: internal cancel + the caller's signal (the per-call timeout is applied in llmStep).
     const abortSignal = spec.abortSignal ? AbortSignal.any([signal, spec.abortSignal]) : signal;
 
     const deps: CallRunnerDeps = {
       providers: this.resolveRouter(ctx),
       validator: ctx.validator,
       abortSignal,
+      blobs: ctx.blobs,
     };
 
-    const paramsFor = (prompt: string): StructuredCallParams => ({
-      modelId: def.modelId,
-      prompt,
-      system: def.system,
-      schema: spec.outputSchema,
-      temperature: def.temperature,
-      topP: def.topP,
-      topK: def.topK,
-      maxOutputTokens: def.maxOutputTokens,
-      stopSequences: def.stopSequences,
-      reasoning: def.reasoning,
-      timeoutMs,
-    });
+    // Spread the whole definition (sampling-XOR-reasoning config + prompt) so every serializable field
+    // carries through without re-listing; layer on the output schema (from spec, v1) + resolved timeout.
+    const params: StructuredCallParams = { ...def, schema: spec.outputSchema, timeoutMs };
 
-    const invoke = async (prompt: string): Promise<CallOutcome> => {
-      const params = paramsFor(prompt);
-      const call = (): Promise<CallOutcome> => runner(params, deps);
-      let result: CallOutcome;
-      if (ctx.rateLimiter) {
-        const est = estimateCallTokens(params.prompt, params.system, params.maxOutputTokens);
-        result = await ctx.rateLimiter.schedule({ ...est, modelId: def.modelId }, call);
-        ctx.rateLimiter.reportOutcome({ rateLimited: result.error?.rateLimited, modelId: def.modelId });
-      } else {
-        result = await call();
-      }
-      return result;
-    };
-
-    const repairTurns = spec.repairTurns ?? 0;
-    let metrics: ExecMetrics | undefined;
     let last: CallOutcome;
-    let prompt = def.prompt;
-    let turn = 0;
-    // Total calls = 1 + at most repairTurns repairs, each triggered only by a validation failure.
-    for (;;) {
-      try {
-        last = await invoke(prompt);
-      } catch (err) {
-        // The runner contract is never-throw; a throw here is an executor wiring error
-        // (missing router, rate-limiter fault). Normalize it into a permanent failure.
-        return {
-          rawText: "",
-          finishReason: "error",
-          metrics: { ...accumulateMetrics(metrics, { durationMs: 0 }), startMs },
-          error: { classification: "permanent", reason: err instanceof Error ? err.message : String(err) },
-        };
-      }
-      metrics = accumulateMetrics(metrics, last.metrics);
-      if (wasCanceled() || abortSignal.aborted) break;
-      if (!isValidationFailure(last) || turn >= repairTurns) break;
-      turn++;
-      prompt = def.prompt + repairSuffix(last.error!.reason);
+    try {
+      last = await runner(params, deps);
+    } catch (err) {
+      // The runner contract is never-throw; a throw here is a wiring error (missing router). Normalize it.
+      return {
+        rawText: "",
+        finishReason: "error",
+        metrics: { startMs, durationMs: 0 },
+        error: { classification: "permanent", reason: err instanceof Error ? err.message : String(err) },
+      };
     }
 
     const canceled = wasCanceled() || spec.abortSignal?.aborted === true;
-    const error = last.error
-      ? canceled
-        ? { ...last.error, classification: "canceled" as const }
-        : last.error
-      : undefined;
+    const error = last.error ? (canceled ? { ...last.error, classification: "canceled" as const } : last.error) : undefined;
 
     return {
       value: last.value,
       rawText: last.rawText,
       thinking: last.thinking,
+      toolCalls: last.toolCalls,
+      toolResults: last.toolResults,
+      artifacts: last.artifacts,
       finishReason: last.finishReason,
-      metrics: { ...metrics!, startMs },
+      metrics: { ...last.metrics, startMs },
       error,
     };
   }
 }
 
-/** Convenience factory mirroring the class constructor. */
+/** Convenience factory mirroring the class constructor — the BARE core (no wrappers). Compose the
+ *  cross-cutting behaviors you want with `composeExecutors(core, withRateLimit(...), withRepair(), ...)`. */
 export function createLlmCallExecutor(options: LlmCallExecutorOptions = {}): Executor {
   return new LlmCallExecutor(options);
 }

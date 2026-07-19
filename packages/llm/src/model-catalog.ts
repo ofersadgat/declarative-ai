@@ -232,6 +232,9 @@ export const SAMPLING_PARAM_NAMES = {
   topP: "top_p",
   topK: "top_k",
   stopSequences: "stop",
+  presencePenalty: "presence_penalty",
+  frequencyPenalty: "frequency_penalty",
+  seed: "seed",
 } as const;
 
 /** Fallback `supportedParameters` for a reasoning model with no recorded capabilities: everything a
@@ -330,6 +333,12 @@ export class ModelCatalog {
   /** The recorded (already-resolved) structured-output schema profile for a model, if any. */
   schemaProfileFor(modelId: string): ProviderSchemaProfile | undefined {
     return this.match(modelId)?.schemaProfile;
+  }
+
+  /** Input/output modalities a model accepts/produces (synced from `architecture.*_modalities`), if known.
+   *  Used to gate media inputs and validate output-modality requests. */
+  modalitiesFor(modelId: string): Modalities | undefined {
+    return this.match(modelId)?.modalities;
   }
 
   /**
@@ -486,7 +495,28 @@ export function supportedParametersFor(modelId: string): string[] | undefined {
   return defaultModelCatalog.supportedParametersFor(modelId);
 }
 
+/** The capability gate for one model's optional params — the SINGLE implementation shared by `plan` (fit
+ *  reporting) and `executeStructuredCall` (param filtering), so the dry-run can never drift from what
+ *  execution actually sends. An unknown model (no catalog row) accepts everything — the prior behavior. */
+export interface ParamAcceptance {
+  accepts(key: keyof typeof SAMPLING_PARAM_NAMES): boolean;
+  acceptsReasoning: boolean;
+}
+
+export function paramAcceptanceFor(modelId: string): ParamAcceptance {
+  const supported = defaultModelCatalog.supportedParametersFor(modelId);
+  return {
+    accepts: (key) => supported === undefined || supported.includes(SAMPLING_PARAM_NAMES[key]),
+    acceptsReasoning: supported === undefined || supported.includes("reasoning"),
+  };
+}
+
 /** Parameters a model MUST be sent (mandatory). */
 export function requiredParametersFor(modelId: string): string[] | undefined {
   return defaultModelCatalog.requiredParametersFor(modelId);
+}
+
+/** Input/output modalities a model accepts/produces, if known. See {@link ModelCatalog.modalitiesFor}. */
+export function modalitiesFor(modelId: string): Modalities | undefined {
+  return defaultModelCatalog.modalitiesFor(modelId);
 }
