@@ -22,7 +22,7 @@ import { computeCostUsd } from "./model-catalog";
 
 /** chars/4 input-token proxy over one or more prompt fragments (system + user + …). Inlined from
  *  findmyprompt `src/engine/search/cost.ts`; mirrors the input half of `estimateCallTokens`
- *  (@ai-exec/services concurrency.ts) — kept separate from output because the rates differ. */
+ *  (@declarative-ai/services concurrency.ts) — kept separate from output because the rates differ. */
 export function estimateInputTokens(...texts: (string | undefined)[]): number {
   let chars = 0;
   for (const t of texts) chars += t?.length ?? 0;

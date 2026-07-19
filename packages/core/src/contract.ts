@@ -1,4 +1,5 @@
 import type { ErrorClass } from "./classification";
+import type { BlobStore, SessionStore } from "./stores";
 
 /**
  * The ai-exec execution contract (DESIGN §3): one uniform way to execute an "AI unit" —
@@ -13,9 +14,9 @@ import type { ErrorClass } from "./classification";
 // --- Unit kinds --------------------------------------------------------------
 
 export type UnitKind =
-  | "llm-call" // one structured LLM call (@ai-exec/llm)
-  | "hierarchical-workflow" // a hierarchical state-machine run (@ai-exec/hw)
-  | "agent-sdk" // process units (@ai-exec/agents, deferred implementations)
+  | "llm-call" // one structured LLM call (@declarative-ai/llm)
+  | "hierarchical-workflow" // a hierarchical state-machine run (@declarative-ai/hw)
+  | "agent-sdk" // process units (@declarative-ai/agents, deferred implementations)
   | "claude-cli"
   | "generic-cli";
 
@@ -97,6 +98,22 @@ export interface ProducedArtifact {
   contentHash?: string;
 }
 
+/** A tool invocation the model requested. For a single-turn (unexecuted) tool op these ARE the primary
+ *  output the caller acts on; in an executed loop they are the intermediate calls. */
+export interface ToolCall {
+  toolCallId?: string;
+  toolName: string;
+  /** The parsed tool input the model produced (validated against the tool's input schema). */
+  input: unknown;
+}
+
+/** The result of an EXECUTED tool call, fed back to the model during a tool loop. */
+export interface ToolResult {
+  toolCallId?: string;
+  toolName?: string;
+  output: unknown;
+}
+
 /**
  * The result of one unit execution. NEVER thrown for a unit failure — always returned,
  * best-effort populated: on failure, `value`/`rawText`/`artifacts`/`thinking` carry
@@ -110,6 +127,11 @@ export interface Outcome {
   rawText?: string;
   artifacts?: ProducedArtifact[];
   thinking?: ReasoningSegment[];
+  /** Tool calls the model requested (the primary output for a single-turn tool op; intermediate calls
+   *  for an executed loop). */
+  toolCalls?: ToolCall[];
+  /** Results of tool calls executed during the run. */
+  toolResults?: ToolResult[];
   finishReason?: string;
   metrics: ExecMetrics;
   /** Continuation token for resume, when the executor supports `sessionResume`. */
@@ -154,10 +176,11 @@ export interface InteractionPort {
 export interface ExecutionSpec {
   kind: UnitKind;
   /** Unit definition. For `llm-call`: the call params. For composite/process units:
-   *  a content-addressed definition bundle. */
+   *  a content-addressed definition bundle. The definition's IDENTITY (its content hash) is a
+   *  MEMOIZATION concern, not a generic spec field: `withMemoize` derives it from `definition`
+   *  (default `hashCanonical(definition)`, or a unit-supplied `identify` — e.g. the hw snapshot
+   *  hash), so no caller has to compute a hash it may never use or keep in sync with `definition`. */
   definition: unknown;
-  /** Content hash of `definition` (for `hierarchical-workflow`: the snapshot hash). */
-  definitionHash: string;
   /** Named input values, resolved by the caller. Schemas live in the definition. */
   inputs: Record<string, unknown>;
   workspace?: WorkspaceRef;
@@ -175,13 +198,6 @@ export interface ExecutionSpec {
    *  interactive states. */
   interaction?: InteractionPort;
   abortSignal?: AbortSignal;
-  /**
-   * Opt-in bounded output-repair: on schema-validation failure the executor re-invokes
-   * the same session with the concrete validation errors, at most this many extra
-   * turns, then fails. Default 0 (off) — preserves findmyprompt's "bad-draw scores 0,
-   * never re-roll" statistical discipline; interactive apps typically set 2.
-   */
-  repairTurns?: number;
 }
 
 // --- Events ------------------------------------------------------------------
@@ -219,10 +235,17 @@ export interface ExecHandle {
   cancel(): Promise<void>;
 }
 
-export interface Executor {
+/**
+ * An executable unit. Generic in `R` — the environment it still REQUIRES at `start`. The bare core and
+ * registry-dispatched executors use the default `R = ExecServices` (every seam optional). Composition
+ * NARROWS `R`: a wrapper that reads a ctx seam (e.g. `withDeadline` → `deadline`/`stepStartMs`) ADDS it to
+ * `R`, so a stack's `start` demands exactly the fields its wrappers consume — a missing one is a compile
+ * error (see {@link compose}), not just the bare core's runtime refusal.
+ */
+export interface Executor<R = ExecServices> {
   readonly kind: UnitKind;
   readonly capabilities: ExecutorCapabilities;
-  start(spec: ExecutionSpec, ctx: ExecServices): ExecHandle;
+  start(spec: ExecutionSpec, ctx: R): ExecHandle;
 }
 
 export interface ExecutorRegistry {
@@ -239,6 +262,85 @@ export class MapExecutorRegistry implements ExecutorRegistry {
   get(kind: UnitKind): Executor | undefined {
     return this.map.get(kind);
   }
+}
+
+// --- Composition -------------------------------------------------------------
+
+/**
+ * A composable behavior wrapped around an executor — memoize / repair / rate-limit / deadline / budget /
+ * session. It maps an executor requiring `RIn` to one requiring `ROut`: a construction-injected wrapper
+ * leaves the requirement unchanged (`ExecutorWrapper<R, R>`); a ctx-reading one ADDS its seam
+ * (`withDeadline(): ExecutorWrapper<R, R & { deadline; stepStartMs }>`). The stacking ORDER encodes
+ * semantics — see the two forms below.
+ */
+export type ExecutorWrapper<RIn = ExecServices, ROut = RIn> = (inner: Executor<RIn>) => Executor<ROut>;
+
+/**
+ * There are TWO ways to stack wrappers; pick whichever reads clearer. Both nest identically — each wrapper
+ * becomes an OUTER layer around the previous — and the ORDER is meaningful: `memoize` outermost caches the
+ * final (post-repair) result; per-attempt concerns (`rateLimit`/`deadline`) sit inner so they apply to each
+ * attempt; `memoize` must not sit outside a `session` layer (it throws if it does).
+ *
+ * 1. Function application — `withMemoize(c)(withDeadline()(core))` — reads INNER→OUTER (core first).
+ * 2. Inside-out builder — {@link compose} — `compose(core).with(withDeadline()).with(withMemoize(c))` —
+ *    reads core-first then each added layer, and TYPE-ACCUMULATES the requirements each wrapper adds, so the
+ *    final `.start` demands exactly them.
+ *
+ * {@link composeExecutors} is the loose variadic convenience (flat list, no requirement tracking) — handy,
+ * but the two forms above are clearer about ordering and are compile-time-checked.
+ */
+export function composeExecutors(core: Executor, ...wrappers: ExecutorWrapper[]): Executor {
+  return wrappers.reduce<Executor>((inner, wrap) => wrap(inner), core);
+}
+
+/**
+ * The inside-out builder (form 2): `compose(core).with(a).with(b)` = `b(a(core))`, read core-first with each
+ * `.with` adding an OUTER layer. Unlike {@link composeExecutors} it tracks requirements in the type: each
+ * wrapper that adds a ctx seam narrows `R`, so the final {@link ComposableExecutor.start} requires exactly
+ * the union of what the stack consumes — forgetting one (e.g. `stepStartMs` after `withDeadline`) is a
+ * compile error, and it IS an {@link Executor} so it drops into a registry unchanged.
+ */
+export class ComposableExecutor<R = ExecServices> implements Executor<R> {
+  constructor(private readonly inner: Executor<R>) {}
+  get kind(): UnitKind {
+    return this.inner.kind;
+  }
+  get capabilities(): ExecutorCapabilities {
+    return this.inner.capabilities;
+  }
+  with<ROut>(wrap: ExecutorWrapper<R, ROut>): ComposableExecutor<ROut> {
+    return new ComposableExecutor(wrap(this.inner));
+  }
+  start(spec: ExecutionSpec, ctx: R): ExecHandle {
+    return this.inner.start(spec, ctx);
+  }
+}
+
+/** Start the inside-out builder around a core executor — see {@link ComposableExecutor}. */
+export function compose<R = ExecServices>(core: Executor<R>): ComposableExecutor<R> {
+  return new ComposableExecutor(core);
+}
+
+/**
+ * A memoization cache keyed by the §3.4 memo key (content hash of kind + the definition's content
+ * hash + inputs [+ workspaceTreeHash]). The definition hash is derived BY the `memoize` wrapper (it
+ * owns the memo key), not carried on the spec. Only SUCCESSFUL outcomes should be cached. Injected
+ * into a `memoize` wrapper; both methods may be sync or async so an in-memory map or a durable store fit.
+ */
+export interface MemoCache {
+  get(key: string): Promise<Outcome | undefined> | Outcome | undefined;
+  set(key: string, outcome: Outcome): Promise<void> | void;
+}
+
+/** Options for the `memoize` wrapper. */
+export interface MemoizeOptions {
+  /**
+   * Derive the definition's content hash (the memo key's identity component) from the spec. Defaults
+   * to `hashCanonical(spec.definition)`. A unit with a cheaper/canonical identity supplies its own —
+   * e.g. `hierarchical-workflow` passes its snapshot hash so `memoize` never brute-force-canonicalizes
+   * an opaque bundle. This is the seam that lets `definitionHash` stay OUT of the generic `ExecutionSpec`.
+   */
+  identify?(spec: ExecutionSpec): string;
 }
 
 // --- Injected services -------------------------------------------------------
@@ -296,9 +398,8 @@ export interface DeadlineConfig {
  * optional: an absent service is a no-op (unthrottled, unmetered, unvalidated).
  */
 export interface ExecServices {
-  rateLimiter?: RateLimiter;
   meter?: BudgetMeter;
-  /** Boundary schema validation (an `@ai-exec/services` SchemaValidator or compatible). */
+  /** Boundary schema validation (an `@declarative-ai/services` SchemaValidator or compatible). */
   validator?: OutputValidator;
   clock?: Clock;
   deadline?: DeadlineConfig;
@@ -306,11 +407,16 @@ export interface ExecServices {
   stepStartMs?: number;
   /** Composite units execute children through this. */
   registry?: ExecutorRegistry;
-  /** Optional provider router for llm-backed executors (typed in @ai-exec/llm). */
+  /** Optional provider router for llm-backed executors (typed in @declarative-ai/llm). */
   providers?: unknown;
+  /** Mutable, logical-id-keyed session store — e.g. a workflow run injects a RUN-SCOPED one so states
+   *  sharing a `sessionId` continue the same conversation. Absent ⇒ sessions unavailable. */
+  sessions?: SessionStore;
+  /** Content-addressed blob store for file/media I/O (Phase 5). Absent ⇒ blob refs can't be resolved. */
+  blobs?: BlobStore;
 }
 
-/** Minimal validation seam (implemented by `@ai-exec/services` SchemaValidator). */
+/** Minimal validation seam (implemented by `@declarative-ai/services` SchemaValidator). */
 export interface OutputValidator {
   validateValue(schema: Record<string, unknown>, value: unknown): { ok: boolean; errors?: string };
 }

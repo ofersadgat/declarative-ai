@@ -1,6 +1,6 @@
 /**
  * Bounded fan-out + provider rate limiting, extracted verbatim from findmyprompt
- * `src/engine/execution/concurrency.ts` (interface types now live in @ai-exec/core).
+ * `src/engine/execution/concurrency.ts` (interface types now live in @declarative-ai/core).
  *
  * Three cooperating pieces:
  *   - `ConcurrencyLimiter` — a counting semaphore with a MUTABLE limit (the AIMD knob).
@@ -13,7 +13,7 @@
  * Pure timing seams (`now`, `wait`) are injectable so the bucket/AIMD are deterministically
  * testable.
  */
-import type { CallEstimate, CallTokenEstimate, RateLimiter } from "@ai-exec/core";
+import type { CallEstimate, CallTokenEstimate, RateLimiter } from "@declarative-ai/core";
 
 export type { CallEstimate, CallTokenEstimate, RateLimiter };
 

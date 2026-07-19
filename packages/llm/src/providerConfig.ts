@@ -7,7 +7,7 @@
  * `providerConfigSeed`), which depended on findmyprompt's content-addressed artifact
  * model (`engine/artifacts` / `engine/model`) and its DB seed pipeline. The pure
  * schema documents and the family lookup are kept; callers that need content ids can
- * hash the schema with `@ai-exec/core` `hashCanonical`.
+ * hash the schema with `@declarative-ai/core` `hashCanonical`.
  */
 import type { ModelFamily } from "./router";
 
@@ -20,7 +20,7 @@ export type JsonSchemaDoc = Record<string, unknown>;
  * The PROVIDER-NEUTRAL reasoning request (effort level and/or token budget), shared by every family
  * schema — provider divergence (Anthropic thinking-budget vs OpenRouter effort) is resolved on the way
  * OUT by `adaptReasoning` (`./reasoning`), never in the stored config. Mirrors the runtime
- * `ReasoningSpec` (@ai-exec/core llmConfig).
+ * `ReasoningSpec` (@declarative-ai/core llmConfig).
  */
 const REASONING_PROPERTY: JsonSchemaDoc = {
   type: "object",

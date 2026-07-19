@@ -3,13 +3,13 @@
  * Two modes:
  *  - **Inline schemas** (`validateValue`) — hierarchical-workflow states and llm-call output
  *    contracts carry their schema documents inline; validators are compiled synchronously and
- *    cached by the schema's content hash. Implements @ai-exec/core `OutputValidator`.
+ *    cached by the schema's content hash. Implements @declarative-ai/core `OutputValidator`.
  *  - **Store-backed schemas** (`compile`/`validate`) — content-addressed schema artifacts whose
  *    `$ref`s are store ids (not URLs), registered in Ajv under `$id = content hash` and
  *    resolved lazily from an injected resolver — no network parser needed.
  */
 import { Ajv, type ValidateFunction } from "ajv";
-import { hashCanonical, type OutputValidator } from "@ai-exec/core";
+import { hashCanonical, type OutputValidator } from "@declarative-ai/core";
 
 export interface ValidationResult {
   ok: boolean;

@@ -1,7 +1,7 @@
 # Hierarchical Workflow Specification
 
 > **Provenance and scope.** This file is the canonical specification of the
-> hierarchical-workflow formalism implemented by `@ai-exec/hw`, migrated from
+> hierarchical-workflow formalism implemented by `@declarative-ai/hw`, migrated from
 > `JaiRA/SPEC.md` (which remains the product spec for the JaiRA app).
 > Normative for this library: §2.3–§2.4 (states, state IDs), §3 (state machine
 > semantics), §4 (inputs/outputs/params/artifacts/conversations), §5 (state
@@ -11,6 +11,12 @@
 > children), §12 (versioning → snapshot hashing). Sections about tasks,
 > boards, Git isolation, safety policy, and MVP scope describe the JaiRA
 > product and are context for the library, not requirements on it.
+>
+> **How the library realizes this formalism** — the executor, the `agent`-state
+> `llm-call` binding (config resolution per operation), session coordination by
+> logical id, snapshot hashing/memoization, and the `Persistence`/`InteractionPort`
+> ports — is documented in [DESIGN.md](DESIGN.md) §7 (with the settled declarative
+> model in §1). The precise `@declarative-ai/hw` API surface is in [API.md](API.md).
 
 ## 1. Purpose
 

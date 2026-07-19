@@ -1,5 +1,5 @@
 {
-  "name": "@ai-exec/core",
+  "name": "@declarative-ai/core",
   "version": "0.1.0",
   "type": "module",
   "exports": {

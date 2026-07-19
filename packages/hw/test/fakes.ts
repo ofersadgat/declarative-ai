@@ -1,6 +1,6 @@
 /**
  * Test doubles: an abort-aware fake executor scripted per model id, and a scripted
- * interaction port. The fake stands in for @ai-exec/llm's executor — the engine only
+ * interaction port. The fake stands in for @declarative-ai/llm's executor — the engine only
  * sees the core `Executor` contract.
  */
 import type {
@@ -12,7 +12,7 @@ import type {
   InteractionPort,
   Outcome,
   UnitKind,
-} from "@ai-exec/core";
+} from "@declarative-ai/core";
 
 const CAPS: ExecutorCapabilities = {
   structuredOutput: true,
@@ -50,10 +50,12 @@ export class FakeExecutor implements Executor {
   readonly kind: UnitKind = "llm-call";
   readonly capabilities = CAPS;
   readonly calls: ExecutionSpec[] = [];
+  readonly ctxs: ExecServices[] = [];
   constructor(private readonly script: Script) {}
 
-  start(spec: ExecutionSpec, _ctx: ExecServices): ExecHandle {
+  start(spec: ExecutionSpec, ctx: ExecServices): ExecHandle {
     this.calls.push(spec);
+    this.ctxs.push(ctx);
     const outcome = (async (): Promise<Outcome> => {
       const canceled = new Promise<Outcome>((resolve) => {
         const onAbort = (): void =>

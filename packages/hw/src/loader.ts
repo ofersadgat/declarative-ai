@@ -10,7 +10,7 @@
  * transitive closure of states reachable from the root. Two bundles with the same
  * files hash identically regardless of load order or extra unreachable files.
  */
-import { hashCanonical, sha256Hex, canonicalize } from "@ai-exec/core";
+import { hashCanonical, sha256Hex, canonicalize } from "@declarative-ai/core";
 import type { ChildDecl, StateDef, WorkflowBundle } from "./format";
 
 export class WorkflowLoadError extends Error {
@@ -70,9 +70,9 @@ export function loadBundle(files: Record<string, unknown>, rootId: string): Work
 }
 
 /**
- * The snapshot hash — the bundle's version identity (SPEC §12). This value is the
- * `definitionHash` of a `hierarchical-workflow` ExecutionSpec and the memo-key
- * component for workflow executions (DESIGN §3.4).
+ * The snapshot hash — the bundle's version identity (SPEC §12). This is the content-identity a
+ * `hierarchical-workflow` execution memoizes under: `workflowDefinitionHash` returns it and it becomes
+ * the memo-key's definition-hash component (DESIGN §3.4) via `withMemoize`'s `identify` seam.
  */
 export function snapshotHash(bundle: WorkflowBundle): string {
   const entries = Object.entries(bundle.states)

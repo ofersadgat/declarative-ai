@@ -589,5 +589,21 @@ export function adaptSchema(original: SchemaNode, profile: ProviderSchemaProfile
   return advisoryOf(blocking);
 }
 
+const adaptCache = new WeakMap<SchemaNode, Map<ProviderSchemaProfile, AdaptResult>>();
+
+/**
+ * Memoized {@link adaptSchema}, keyed by (schema object, profile) IDENTITY. The adaptation is pure and the
+ * hot paths re-adapt the SAME schema object repeatedly — every repair turn re-enters the call pipeline, and
+ * a `plan`-then-execute flow adapts twice — so the deep clone/strictify/fit transform runs once per
+ * (schema, profile) instead. Throwing profiles are not cached (they re-throw on each call).
+ */
+export function adaptSchemaCached(original: SchemaNode, profile: ProviderSchemaProfile): AdaptResult {
+  let byProfile = adaptCache.get(original);
+  if (!byProfile) adaptCache.set(original, (byProfile = new Map()));
+  let result = byProfile.get(profile);
+  if (!result) byProfile.set(profile, (result = adaptSchema(original, profile)));
+  return result;
+}
+
 // Exposed for focused unit tests; not part of the public adapter contract.
 export const __internal = { strictify, fitsStrict, reverse, collectStats, mergeUnionVariants, stripMetaDeep, isAnyNode, wrapRootArray, unwrapRootArray };

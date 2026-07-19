@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MapExecutorRegistry, type ExecutionSpec, type Outcome } from "@ai-exec/core";
+import { MapExecutorRegistry, type ExecutionSpec, type Outcome } from "@declarative-ai/core";
 import { WorkflowEngine, type EngineConfig } from "../src/engine";
 import { loadBundle } from "../src/loader";
 import { InMemoryPersistence, isArtifactRef, llmCallBinding, type ArtifactRef } from "../src/ports";
@@ -120,7 +120,7 @@ describe("SPEC §7.3 — critique state walk-through", () => {
     expect(result.outputs?.["outcome"]).toBe("needs_changes");
     expect(fake.calls.map(modelOf)).toEqual(["critic", "fixer"]);
     // The fixer received the weaknesses via input wiring from the critique's own outputs.
-    expect(fake.calls[1]!.definitionHash).toBeTruthy();
+    expect(fake.calls[1]!.definition).toBeTruthy();
   });
 
   it("blocked: collects a human decision, surfaced through human_decision", async () => {
@@ -183,6 +183,15 @@ describe("SPEC §9 — planning parent: sequence, re-plan loop, iteration limit"
     // Passthrough forwards the critique's whole output object.
     expect((result.outputs?.["critique"] as Record<string, unknown>)["outcome"]).toBe("clean");
     expect(fake.calls.map(modelOf)).toEqual(["planner", "planner", "critic"]);
+  });
+
+  it("exposes a run-scoped session store shared across all states (ctx.sessions)", async () => {
+    const { engine, fake } = makeEngine(specPlanningFiles(), PLAN_ID, planningScript());
+    await engine.run({ inputs: { issue: "the issue" } });
+    const stores = fake.ctxs.map((c) => c.sessions);
+    expect(stores.length).toBeGreaterThan(1);
+    expect(stores.every((s) => s !== undefined)).toBe(true);
+    expect(new Set(stores).size).toBe(1); // one run-scoped store, shared by every state
   });
 
   it("needs_changes triggers a re-plan with FRESH instances (sequence reset, SPEC §3.3)", async () => {
@@ -481,11 +490,15 @@ describe("skill operations", () => {
       },
     };
     const { engine, fake } = makeEngine(files, "s", (spec) => ok({ summary: `sum(${promptOf(spec)})` }), {
-      skills: { get: (name) => (name === "summarize" ? { provider: "reviewer", template: "Summarize {{inputs.topic}}." } : undefined) },
+      skills: {
+        get: (name) =>
+          name === "summarize" ? { provider: "reviewer", template: "Summarize {{inputs.topic}} ({{params.style}})." } : undefined,
+      },
     });
     const result = await engine.run({ inputs: { topic: "codebases" } });
     expect(result.outcome).toBe("success");
-    expect(result.outputs?.["summary"]).toBe("sum(Summarize codebases.)");
+    // Invocation params are TEMPLATE variables ({{params.*}}), not llm-config keys.
+    expect(result.outputs?.["summary"]).toBe("sum(Summarize codebases (terse).)");
     expect(fake.calls).toHaveLength(1);
   });
 

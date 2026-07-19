@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ExecFailure } from "@ai-exec/core";
+import type { ExecFailure } from "@declarative-ai/core";
 import { backoffDelayMs, retryLoop } from "../src/retry";
 
 const noWait = () => Promise.resolve();
