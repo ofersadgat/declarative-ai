@@ -49,6 +49,17 @@ describe("pricing (default catalog)", () => {
   it("treats null token counts as zero", () => {
     expect(catalog.computeCostUsd("anthropic/claude-haiku-4-5", null, null)).toBe(0);
   });
+
+  it("affordableOutputTokens: output tokens the remaining balance buys after the input cost", () => {
+    // $15/1M input, $75/1M output. Input 1M costs $15; each output token costs $75/1M.
+    const c = new ModelInfo([{ route: "anthropic", model: "m", inputPerMillion: 15, outputPerMillion: 75 }]);
+    // $90 available, $15 spent on input → $75 headroom → 1,000,000 output tokens.
+    expect(c.affordableOutputTokens("anthropic/m", 1_000_000, 90)).toBe(1_000_000);
+    // Balance below the input cost → nothing affordable.
+    expect(c.affordableOutputTokens("anthropic/m", 1_000_000, 10)).toBe(0);
+    // Un-priced model → no clamp basis.
+    expect(c.affordableOutputTokens("openrouter/unknown", 100, 5)).toBe(Number.POSITIVE_INFINITY);
+  });
 });
 
 describe("compile-time model keys (generic ModelInfo)", () => {
