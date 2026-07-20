@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { ModelCatalog } from "../src/model-catalog";
+import { keyForModel, ModelInfo } from "../src/model-catalog";
 import {
   anthropicRejectsSampling,
   claudeSupportedParameters,
@@ -25,20 +25,19 @@ const fixture = readFileSync(
 describe("parseAnthropicDocsPricing", () => {
   it("parses the docs table into rows with exact cache rates", () => {
     const rows = parseAnthropicDocsPricing(fixture);
-    const byId = Object.fromEntries(rows.map((r) => [r.modelPrefix, r]));
+    const byId = Object.fromEntries(rows.map((r) => [r.model, r]));
 
     expect(byId["claude-opus-4-8"]).toEqual({
-      modelPrefix: "claude-opus-4-8",
+      route: "anthropic",
+      model: "claude-opus-4-8",
       inputPerMillion: 5,
       outputPerMillion: 25,
       cacheReadPerMillion: 0.5,
       cacheWritePerMillion: 6.25,
       cacheWrite1hPerMillion: 10,
-      family: "anthropic",
       provider: "Anthropic",
       label: "claude-opus-4-8",
       canonicalId: "claude-opus-4-8",
-      servingProvider: "anthropic",
       // Stamped family defaults — the docs table has no modality/capability columns. Opus 4.8 supports
       // extended thinking (`reasoning`) but REJECTS the sampling knobs (temperature/top_p/top_k) — mirrors
       // the AI SDK's rejectsSamplingParameters, so the refresh can't re-introduce the ignored-param warning.
@@ -58,6 +57,29 @@ describe("parseAnthropicDocsPricing", () => {
     expect(byId["claude-haiku-3-5"]?.supportedParameters).toContain("temperature");
   });
 
+  it("collapses date-scheduled price rows onto the canonical model id (no bogus dated id)", () => {
+    const rows = parseAnthropicDocsPricing(fixture);
+    const byId = Object.fromEntries(rows.map((r) => [r.model, r]));
+    // The docs list a price change as two rows ("… through August 31, 2026" / "… starting September 1,
+    // 2026"); both must collapse to `claude-sonnet-5`, NOT become their own dated ids — else a caller
+    // declaring `anthropic/claude-sonnet-5` misses the catalog entirely.
+    expect(byId["claude-sonnet-5"]).toBeDefined();
+    expect(rows.some((r) => /starting|through|,|\d{4}/.test(r.model))).toBe(false);
+    // Exactly one row survives the collapse, and the first (currently-effective) price wins.
+    expect(rows.filter((r) => r.model === "claude-sonnet-5")).toHaveLength(1);
+    expect(byId["claude-sonnet-5"]?.inputPerMillion).toBe(3);
+    // A Claude-5 model supports extended thinking → reasoning stays in its supported params.
+    expect(byId["claude-sonnet-5"]?.supportedParameters).toContain("reasoning");
+  });
+
+  it("fills capabilities for a NEW family (fable) the family list didn't hardcode", () => {
+    const byId = Object.fromEntries(parseAnthropicDocsPricing(fixture).map((r) => [r.model, r]));
+    // `claudeSupportsThinking` gates on the MAJOR version, not the family word, so a Claude-5 model in a
+    // family beyond opus/sonnet/haiku still gets `reasoning` — the whole point of recording caps per row.
+    expect(byId["claude-fable-5"]).toMatchObject({ inputPerMillion: 10, outputPerMillion: 50 });
+    expect(byId["claude-fable-5"]?.supportedParameters).toContain("reasoning");
+  });
+
   it("parses an HTML <table> form too (production fetch may return HTML)", () => {
     const html = `
       <table>
@@ -67,7 +89,8 @@ describe("parseAnthropicDocsPricing", () => {
         <tr><td>Claude Opus 4.8</td><td>$5 / MTok</td><td>$6.25 / MTok</td><td>$10 / MTok</td><td>$0.50 / MTok</td><td>$25 / MTok</td></tr>
       </table>`;
     const rows = parseAnthropicDocsPricing(html);
-    expect(rows.find((r) => r.modelPrefix === "claude-haiku-4-5")).toMatchObject({
+    expect(rows.find((r) => r.model === "claude-haiku-4-5")).toMatchObject({
+      route: "anthropic",
       inputPerMillion: 1,
       outputPerMillion: 5,
       cacheReadPerMillion: 0.1,
@@ -92,19 +115,18 @@ describe("parseOpenRouterModels", () => {
 
   it("converts per-token string prices to per-million and keeps cache rates", () => {
     const rows = parseOpenRouterModels(json);
-    const byId = Object.fromEntries(rows.map((r) => [r.modelPrefix, r]));
+    const byId = Object.fromEntries(rows.map((r) => [r.model, r]));
     expect(byId["anthropic/claude-opus-4.8"]).toEqual({
-      modelPrefix: "anthropic/claude-opus-4.8",
+      route: "openrouter",
+      model: "anthropic/claude-opus-4.8",
       inputPerMillion: 5,
       outputPerMillion: 25,
       cacheReadPerMillion: 0.5,
       cacheWritePerMillion: 6.25,
       releasedAt: 1730000000, // captured from `created`
-      family: "openrouter",
       provider: "Anthropic", // vendor slug → display name
       label: "claude-opus-4.8", // vendor/ prefix dropped
       canonicalId: "claude-opus-4-8", // dots→hyphens: collapses onto the native `claude-opus-4-8` row
-      servingProvider: "openrouter", // served via OpenRouter, NOT the native Anthropic API
       source: "openrouter-models",
       // No supportedParameters/modalities stamped: the feed omitted them and OR rows are NOT given
       // native-Claude caps (the read-time fallback resolves them if needed).
@@ -130,9 +152,9 @@ describe("parseOpenRouterModels", () => {
     });
     const [row] = parseOpenRouterModels(withCaps);
     expect(row).toMatchObject({
-      modelPrefix: "openai/gpt-5-nano",
+      route: "openrouter",
+      model: "openai/gpt-5-nano",
       provider: "OpenAI",
-      family: "openrouter",
       supportedParameters: ["reasoning", "response_format", "structured_outputs", "max_tokens"],
       contextLength: 400000,
       maxOutputTokens: 128000,
@@ -152,12 +174,12 @@ describe("parseOpenRouterModels", () => {
 describe("sanitizePricingRows (lenient per-row drop)", () => {
   it("keeps the good rows and drops the bad ones", () => {
     const { rows, dropped } = sanitizePricingRows([
-      { modelPrefix: "ok", inputPerMillion: 1, outputPerMillion: 5 },
-      { modelPrefix: "bad-output", inputPerMillion: 10, outputPerMillion: 1 },
-      { modelPrefix: "ok", inputPerMillion: 1, outputPerMillion: 5 }, // duplicate
+      { route: "openrouter", model: "ok", inputPerMillion: 1, outputPerMillion: 5 },
+      { route: "openrouter", model: "bad-output", inputPerMillion: 10, outputPerMillion: 1 },
+      { route: "openrouter", model: "ok", inputPerMillion: 1, outputPerMillion: 5 }, // duplicate
     ]);
-    expect(rows.map((r) => r.modelPrefix)).toEqual(["ok"]);
-    expect(dropped.map((d) => d.modelPrefix).sort()).toEqual(["bad-output", "ok"]);
+    expect(rows.map(keyForModel)).toEqual(["openrouter/ok"]);
+    expect(dropped.map((d) => d.model).sort()).toEqual(["openrouter/bad-output", "openrouter/ok"]);
   });
 
   it("KEEPS a zero-output embedding model (input-only billing is legitimate, not a bad scrape)", () => {
@@ -165,18 +187,18 @@ describe("sanitizePricingRows (lenient per-row drop)", () => {
     // NOT be flagged by the output>0 or output<input heuristics, or a lenient feed would drop
     // every embedding model.
     const { rows, dropped } = sanitizePricingRows([
-      { modelPrefix: "text-embedding-3-small", inputPerMillion: 0.02, outputPerMillion: 0 },
+      { route: "openrouter", model: "openai/text-embedding-3-small", inputPerMillion: 0.02, outputPerMillion: 0 },
     ]);
-    expect(rows.map((r) => r.modelPrefix)).toEqual(["text-embedding-3-small"]);
+    expect(rows.map((r) => r.model)).toEqual(["openai/text-embedding-3-small"]);
     expect(dropped).toEqual([]);
   });
 
   it("still drops a NEGATIVE-output row (zero is fine, negative is a bad scrape)", () => {
     const { rows, dropped } = sanitizePricingRows([
-      { modelPrefix: "broken", inputPerMillion: 1, outputPerMillion: -1 },
+      { route: "openrouter", model: "broken", inputPerMillion: 1, outputPerMillion: -1 },
     ]);
     expect(rows).toEqual([]);
-    expect(dropped[0]?.modelPrefix).toBe("broken");
+    expect(dropped[0]?.model).toBe("openrouter/broken");
   });
 });
 
@@ -188,9 +210,9 @@ describe("validatePricingRows", () => {
   it("rejects a too-small / inconsistent batch", () => {
     expect(validatePricingRows([]).ok).toBe(false);
     const bad = validatePricingRows([
-      { modelPrefix: "x", inputPerMillion: 10, outputPerMillion: 1 }, // output < input
-      { modelPrefix: "y", inputPerMillion: -1, outputPerMillion: 5 }, // non-positive input
-      { modelPrefix: "z", inputPerMillion: 1, outputPerMillion: 2, cacheReadPerMillion: 5 }, // read ≥ input
+      { route: "openrouter", model: "x", inputPerMillion: 10, outputPerMillion: 1 }, // output < input
+      { route: "openrouter", model: "y", inputPerMillion: -1, outputPerMillion: 5 }, // non-positive input
+      { route: "openrouter", model: "z", inputPerMillion: 1, outputPerMillion: 2, cacheReadPerMillion: 5 }, // read ≥ input
     ]);
     expect(bad.ok).toBe(false);
     expect(bad.problems.length).toBeGreaterThanOrEqual(3);
@@ -202,20 +224,20 @@ describe("refreshModelCatalog", () => {
     makeAnthropicDocsSource(async () => text, "https://example/pricing");
 
   it("applies only changed rows and reports added/updated", async () => {
-    const table = new ModelCatalog([
-      { modelPrefix: "claude-haiku-4-5", inputPerMillion: 0.8, outputPerMillion: 4 }, // stale → updated
+    const table = new ModelInfo([
+      { route: "anthropic", model: "claude-haiku-4-5", inputPerMillion: 0.8, outputPerMillion: 4 }, // stale → updated
     ]);
     const report = await refreshModelCatalog({ sources: [sourceFrom(fixture)], table });
 
     expect(report.bySource[0]).toMatchObject({ name: "anthropic-docs", skipped: false });
-    expect(report.updated).toContain("claude-haiku-4-5");
-    expect(report.added).toContain("claude-opus-4-8");
+    expect(report.updated).toContain("anthropic/claude-haiku-4-5");
+    expect(report.added).toContain("anthropic/claude-opus-4-8");
     // The stale row was corrected to the scraped value.
-    expect(table.computeCostUsd("claude-haiku-4-5", 1_000_000, 0)).toBeCloseTo(1, 10);
+    expect(table.computeCostUsd("anthropic/claude-haiku-4-5", 1_000_000, 0)).toBeCloseTo(1, 10);
   });
 
   it("a second refresh with identical data applies nothing (idempotent diff)", async () => {
-    const table = new ModelCatalog();
+    const table = new ModelInfo([]);
     await refreshModelCatalog({ sources: [sourceFrom(fixture)], table });
     const second = await refreshModelCatalog({ sources: [sourceFrom(fixture)], table });
     expect(second.added).toEqual([]);
@@ -224,7 +246,7 @@ describe("refreshModelCatalog", () => {
   });
 
   it("NEVER overwrites good prices when a source fails to fetch", async () => {
-    const table = new ModelCatalog([{ modelPrefix: "claude-haiku-4-5", inputPerMillion: 1, outputPerMillion: 5 }]);
+    const table = new ModelInfo([{ route: "anthropic", model: "claude-haiku-4-5", inputPerMillion: 1, outputPerMillion: 5 }]);
     const failing: PricingSource = {
       name: "boom",
       fetchRows: async () => {
@@ -234,11 +256,11 @@ describe("refreshModelCatalog", () => {
     const report = await refreshModelCatalog({ sources: [failing], table });
     expect(report.bySource[0]).toMatchObject({ skipped: true, error: "network down" });
     // Existing price is untouched.
-    expect(table.computeCostUsd("claude-haiku-4-5", 1_000_000, 0)).toBeCloseTo(1, 10);
+    expect(table.computeCostUsd("anthropic/claude-haiku-4-5", 1_000_000, 0)).toBeCloseTo(1, 10);
   });
 
   it("a lenient source applies its good rows even when the batch has bad ones", async () => {
-    const table = new ModelCatalog();
+    const table = new ModelInfo([]);
     // 2 good rows + 1 unpriceable (-1, dropped) + 1 inconsistent (output<input, dropped).
     const json = JSON.stringify({
       data: [
@@ -254,16 +276,16 @@ describe("refreshModelCatalog", () => {
       minRows: 1,
     });
     expect(report.bySource[0]).toMatchObject({ name: "openrouter-models", skipped: false });
-    expect(report.added.sort()).toEqual(["a/good-1", "a/good-2"]); // weird + dyn dropped, not fatal
-    expect(table.hasPricing("a/weird")).toBe(false);
+    expect(report.added.sort()).toEqual(["openrouter/a/good-1", "openrouter/a/good-2"]); // weird + dyn dropped, not fatal
+    expect(table.hasPricing("openrouter/a/weird")).toBe(false);
   });
 
   it("NEVER overwrites good prices when a scrape fails validation", async () => {
-    const table = new ModelCatalog([{ modelPrefix: "claude-haiku-4-5", inputPerMillion: 1, outputPerMillion: 5 }]);
+    const table = new ModelInfo([{ route: "anthropic", model: "claude-haiku-4-5", inputPerMillion: 1, outputPerMillion: 5 }]);
     // A garbled page → parser yields nothing → validation fails → skip.
     const report = await refreshModelCatalog({ sources: [sourceFrom("garbled, no table")], table });
     expect(report.bySource[0]!.skipped).toBe(true);
-    expect(table.computeCostUsd("claude-haiku-4-5", 1_000_000, 0)).toBeCloseTo(1, 10);
+    expect(table.computeCostUsd("anthropic/claude-haiku-4-5", 1_000_000, 0)).toBeCloseTo(1, 10);
   });
 });
 
@@ -289,6 +311,13 @@ describe("claudeSupportedParameters — the ingestion path's Claude capability a
     }
   });
 
+  it("thinking gates on the MAJOR version, not the family word — a NEW Claude-5 family still gets it", () => {
+    for (const id of ["claude-fable-5", "claude-mythos-5", "claude-sonnet-5"]) {
+      expect(claudeSupportsThinking(id)).toBe(true);
+      expect(has(id, "reasoning")).toBe(true);
+    }
+  });
+
   it("pre-4 Claude (3.5 / 3) accept sampling but NOT thinking", () => {
     for (const id of ["claude-haiku-3-5", "claude-3-haiku"]) {
       expect(has(id, "temperature")).toBe(true);
@@ -300,9 +329,9 @@ describe("claudeSupportedParameters — the ingestion path's Claude capability a
 
 describe("completeSeedRow — identity always, Claude caps for native rows only", () => {
   it("stamps identity + correct Claude caps on a native price-only row", () => {
-    const row = completeSeedRow({ modelPrefix: "claude-opus-4-8", inputPerMillion: 5, outputPerMillion: 25 });
+    const row = completeSeedRow({ route: "anthropic", model: "claude-opus-4-8", inputPerMillion: 5, outputPerMillion: 25 });
     expect(row.canonicalId).toBe("claude-opus-4-8");
-    expect(row.servingProvider).toBe("anthropic");
+    expect(row.route).toBe("anthropic");
     expect(row.provider).toBe("Anthropic");
     expect(row.supportedParameters).not.toContain("temperature"); // opus-4-8 rejects sampling
     expect(row.supportedParameters).toContain("reasoning");
@@ -310,9 +339,9 @@ describe("completeSeedRow — identity always, Claude caps for native rows only"
   });
 
   it("stamps identity only (no caps) on a NON-Claude row — the feed/refresh owns those", () => {
-    const row = completeSeedRow({ modelPrefix: "gpt-4o", inputPerMillion: 2.5, outputPerMillion: 10 });
+    const row = completeSeedRow({ route: "openrouter", model: "openai/gpt-4o", inputPerMillion: 2.5, outputPerMillion: 10 });
     expect(row.canonicalId).toBe("gpt-4o");
-    expect(row.servingProvider).toBe("openrouter");
+    expect(row.route).toBe("openrouter");
     expect(row.supportedParameters).toBeUndefined();
     expect(row.modalities).toBeUndefined();
   });

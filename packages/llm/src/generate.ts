@@ -1,6 +1,6 @@
 import { Output, jsonSchema, streamText, type LanguageModel, type ModelMessage, type StopCondition, type SystemModelMessage, type ToolChoice, type ToolSet } from "ai";
 import { createLogger } from "./logger";
-import { computeCost } from "./model-catalog";
+import { ModelInfo } from "./model-catalog";
 import { classifyError, describeError, isRateLimit, retryAfterMs as retryAfterMsOf, sha256Hex, type ErrorClass, type FileInput, type ProducedArtifact, type SamplingConfiguration, type ToolCall, type ToolResult } from "@declarative-ai/core";
 
 /**
@@ -297,7 +297,7 @@ export async function generateStructured<T = unknown>(params: GenerateStructured
     // Enrich with the 1-hour cache-write slice (from raw) so the table prices TTL tiers exactly.
     const enriched: TokenCounts = { ...t, cacheWrite1hTokens: cacheWrite1hOf(rawUsage) ?? t.cacheWrite1hTokens };
     // Prefer the provider's ACTUAL charge (OpenRouter); fall back to the cache-aware table.
-    const tableCost = computeCost(params.modelId, enriched) ?? undefined;
+    const tableCost = ModelInfo.instance.computeCost(params.modelId, enriched) ?? undefined;
     const cost = providerCost ?? tableCost;
     return {
       ...enriched, // carry the full cache/reasoning breakdown through for §6.2 + persistence

@@ -1,7 +1,7 @@
 import type { BlobStore, FileInput, LlmCallConfig, OutputValidator, ProviderOptions, ToolDefinition } from "@declarative-ai/core";
 import { jsonSchema, stepCountIs, type FilePart, type ModelMessage, type StopCondition, type SystemModelMessage, type TextPart, type ToolCallOptions, type ToolChoice, type ToolSet } from "ai";
 import { generateStructured, promptAsMessages, promptText, type CallOutcome, type CallPromptInput, type JsonSchema } from "./generate";
-import { paramAcceptanceFor } from "./model-catalog";
+import { ModelInfo } from "./model-catalog";
 import { adaptReasoning } from "./reasoning";
 import { providerNativeId, type ProviderRouter } from "./router";
 import { adaptSchemaCached, profileForModelId } from "./schema";
@@ -107,12 +107,11 @@ export type StructuredCallExecutor = <T = unknown>(params: StructuredCallParams<
  * dependency-injected; it never imports the workflow runtime, so the engine stays substrate-agnostic.
  */
 export async function executeStructuredCall<T = unknown>(params: StructuredCallParams<T>, deps: CallDeps): Promise<CallOutcome<T>> {
-  // Model ids are route-prefixed `{route}/{model}`; the provider-native remainder is what the catalog /
-  // pricing / schema-profile layer keys on (`resolveModel` re-parses the full id to pick the client). A
-  // bare/unprefixed id is a permanent failure — surfaced via the never-throw outcome, not a raised error.
-  let nativeModelId: string;
+  // Model ids are route-prefixed `{route}/{model}` — the exact catalog / pricing / schema-profile key
+  // (`resolveModel` re-parses the full id to pick the client). Validate the prefix up front so a
+  // bare/unprefixed id is a permanent failure surfaced via the never-throw outcome, not a raised error.
   try {
-    nativeModelId = providerNativeId(params.model);
+    providerNativeId(params.model);
   } catch (e) {
     return failFast<T>(e instanceof Error ? e.message : String(e));
   }
@@ -131,7 +130,7 @@ export async function executeStructuredCall<T = unknown>(params: StructuredCallP
   // flag — so a schema that fits the constrained decoder gets `strict`, one that doesn't is sent as a
   // json_object hint, and a text-tier model gets no `response_format` at all. `outgoing` goes to the
   // model; `postProcess` reverses it back to the original shape.
-  const profile = params.schema ? profileForModelId(nativeModelId) : undefined;
+  const profile = params.schema ? profileForModelId(params.model) : undefined;
   const adapt = params.schema && profile ? adaptSchemaCached(params.schema, profile) : undefined;
   const model = deps.providers.resolveModel(params.model, { strictStructuredOutput: adapt?.enforce === "strict" });
 
@@ -162,10 +161,10 @@ export async function executeStructuredCall<T = unknown>(params: StructuredCallP
   // supports — e.g. `temperature`/`top_p`/`top_k` on an OpenAI reasoning model — would otherwise be
   // dragged into OpenRouter's `require_parameters` routing constraint (which we set whenever strict is
   // on) and make EVERY endpoint a non-match → HTTP 404 "No endpoints found that can handle the
-  // requested parameters". `supportedParametersFor` returns the recorded capability (refreshed from
-  // the provider), a reasoning-family fallback for a cold catalog, or `undefined` for an unknown model
-  // (⇒ send everything, the prior behavior). Cost/identity params (maxOutputTokens) are never filtered.
-  const { accepts, acceptsReasoning } = paramAcceptanceFor(nativeModelId);
+  // requested parameters". `paramAcceptance` reads the recorded capability (refreshed from the provider),
+  // a reasoning-family fallback for a cold catalog, or accepts-everything for an unknown model (⇒ send
+  // everything, the prior behavior). Cost/identity params (maxOutputTokens) are never filtered.
+  const { accepts, acceptsReasoning } = ModelInfo.instance.paramAcceptance(params.model);
 
   // Narrow the sampling-XOR-reasoning union ONCE (§config-as-dimensions): a reasoning config carries the
   // neutral `reasoning` spec and no sampling knobs; a sampling config the reverse. `reasoning` is the
@@ -199,7 +198,7 @@ export async function executeStructuredCall<T = unknown>(params: StructuredCallP
 
   return generateStructured<T>({
     model,
-    modelId: nativeModelId,
+    modelId: params.model,
     prompt: lowered.prompt,
     messages: lowered.messages,
     system,

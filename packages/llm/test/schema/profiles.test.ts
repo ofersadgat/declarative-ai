@@ -39,10 +39,11 @@ describe("profileForCaps — capability-derived structured-output profile", () =
 
 describe("profileForModelId — catalog-first, else capability fallback", () => {
   it("routes claude-* to the Anthropic SDK profile", () => {
-    expect(profileForModelId("claude-haiku-4-5-20251001").id).toBe(ANTHROPIC_AI_SDK.id);
+    // profileForModelId takes the full `{route}/{model}` id; it strips the route for the family heuristic.
+    expect(profileForModelId("anthropic/claude-haiku-4-5-20251001").id).toBe(ANTHROPIC_AI_SDK.id);
   });
 
   it("an unknown OpenRouter model with no catalog row falls back to the provider default (strict)", () => {
-    expect(profileForModelId("brand/unseen-model").id).toBe(OPENROUTER_STRICT.id);
+    expect(profileForModelId("openrouter/brand/unseen-model").id).toBe(OPENROUTER_STRICT.id);
   });
 });

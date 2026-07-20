@@ -12,8 +12,8 @@ import { estimateCallTokens } from "@declarative-ai/services";
 import type { FilePart, ModelMessage } from "ai";
 import { promptText } from "./generate";
 import type { LlmCallDefinition } from "./llmStep";
-import { computeCostUsd, modalitiesFor, paramAcceptanceFor, SAMPLING_PARAM_NAMES, type Modalities } from "./model-catalog";
-import { familyForModel, providerNativeId, type ModelFamily } from "./router";
+import { ModelInfo, SAMPLING_PARAM_NAMES, type Modalities } from "./model-catalog";
+import { familyForModel, type ModelFamily } from "./router";
 import { adaptSchemaCached, profileForModelId, type Enforcement } from "./schema";
 
 /** The result of planning a call — everything knowable before execution. */
@@ -60,11 +60,11 @@ function requiredInputModalities(def: LlmCallDefinition): Set<string> {
 /** Plan a resolved call declaration (config + prompt [+ schema]) — no execution, no network. */
 export function plan(def: LlmCallDefinition & { schema?: Record<string, unknown> }): CallPlan {
   const modelId = def.model;
-  // Route-prefixed `{route}/{model}`: strip the route for catalog / profile / cost lookups (keyed on the
-  // provider-native id); keep the full id for the `family` route + human-facing issue messages.
-  const nativeId = providerNativeId(modelId);
-  const gate = paramAcceptanceFor(nativeId);
-  const modalities = modalitiesFor(nativeId);
+  // Route-prefixed `{route}/{model}` — the exact catalog key (§5). The catalog / profile / cost lookups
+  // all key on this full id; `familyForModel` extracts the route for the `family` field + issue messages.
+  const catalog = ModelInfo.instance;
+  const gate = catalog.paramAcceptance(modelId);
+  const modalities = catalog.modalities(modelId);
   const issues: string[] = [];
 
   // Sampling params present in the declaration that the model would filter out — judged by the SAME
@@ -92,12 +92,12 @@ export function plan(def: LlmCallDefinition & { schema?: Record<string, unknown>
 
   let structuredOutput: Enforcement | undefined;
   if (def.schema) {
-    const profile = profileForModelId(nativeId);
+    const profile = profileForModelId(modelId);
     if (profile) structuredOutput = adaptSchemaCached(def.schema, profile).enforce;
   }
 
   const est = estimateCallTokens(promptText(def), undefined, def.maxOutputTokens);
-  const costUsd = computeCostUsd(nativeId, est.inputTokens, est.outputTokens) ?? undefined;
+  const costUsd = catalog.computeCostUsd(modelId, est.inputTokens, est.outputTokens) ?? undefined;
 
   return {
     provider: { family: familyForModel(modelId), modelId },

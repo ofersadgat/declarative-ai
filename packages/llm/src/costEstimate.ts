@@ -12,13 +12,10 @@
  *  2. FALLBACK — ~2.5× the input tokens (floored), for the cold start before any call has settled.
  *  3. Always CLAMPED by the call's configured `maxOutputTokens` when one is set (a real ceiling).
  *
- * When even that estimate doesn't fit the wallet/budget, the caller flips the relationship: it computes
- * the AFFORDABLE output tokens from the remaining headroom and sets that as the call's REAL
- * `maxOutputTokens` — the reserve stops being a guess and becomes provider-enforced
- * (`affordableOutputTokens`). Known under-count carried from `search/cost.ts`: reasoning models can bill
- * thinking beyond the output cap.
+ * This module estimates TOKENS only; USD cost comes from passing those token counts to
+ * `ModelInfo.instance.computeCostUsd` at the call site (no wrapper here). Known under-count carried from
+ * `search/cost.ts`: reasoning models can bill thinking beyond the output cap.
  */
-import { computeCostUsd } from "./model-catalog";
 
 /** chars/4 input-token proxy over one or more prompt fragments (system + user + …). Inlined from
  *  findmyprompt `src/engine/search/cost.ts`; mirrors the input half of `estimateCallTokens`
@@ -64,25 +61,6 @@ export function estimateOutputTokens(
       : Math.ceil(inputTokens * 2.5);
   const floored = Math.max(MIN_OUTPUT_TOKENS, guess);
   return configMaxOutputTokens != null ? Math.min(configMaxOutputTokens, floored) : floored;
-}
-
-/** One call's estimated USD cost for the wallet reserve. Un-priced models estimate $0 (they cost the
- *  platform nothing; the balance>0 admission floor still applies). */
-export function estimateCallCostUsd(modelId: string, inputTokens: number, outputTokens: number): number {
-  return computeCostUsd(modelId, inputTokens, outputTokens) ?? 0;
-}
-
-/**
- * The AFFORDABLE output-token ceiling for a tight wallet: how many output tokens `availableUsd` buys
- * after the input's cost, at the model's output rate. Returns `Infinity` for an un-priced model (nothing
- * to clamp against) and 0 when even the input doesn't fit.
- */
-export function affordableOutputTokens(modelId: string, inputTokens: number, availableUsd: number): number {
-  const inputUsd = computeCostUsd(modelId, inputTokens, 0);
-  const perOutputToken = (computeCostUsd(modelId, 0, 1_000_000) ?? 0) / 1_000_000;
-  if (inputUsd == null || perOutputToken <= 0) return Number.POSITIVE_INFINITY; // un-priced — no clamp basis
-  const headroom = availableUsd - inputUsd;
-  return headroom <= 0 ? 0 : Math.floor(headroom / perOutputToken);
 }
 
 /** Fold one settled call's observed output tokens into the run's per-model stats (a running mean). */

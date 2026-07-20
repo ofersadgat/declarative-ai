@@ -1,12 +1,12 @@
 /**
  * Keeping the §5 model catalog current. Providers re-price models, launch new ones, and change
  * capabilities, so a scheduled refresh (the app wires this to a daily Vercel Cron, §0) pulls
- * authoritative data from each provider's published source into the `models` table, which hydrates
- * `defaultModelCatalog` at startup.
+ * authoritative data from each provider's published source and applies it to the catalog
+ * (`ModelInfo.instance`, or an injected `table`) at startup.
  *
  * Two providers, two realities (see also the OpenRouter usage-accounting path in generate.ts):
  *  - **Anthropic** has NO pricing API — prices live in its docs table. `parseAnthropicDocsPricing`
- *    reads that table (markdown OR HTML) into `ModelInfo`s, INCLUDING the exact cache rates.
+ *    reads that table (markdown OR HTML) into `ModelInfoInterface`s, INCLUDING the exact cache rates.
  *  - **OpenRouter** exposes `/api/v1/models` with machine-readable prices AND capabilities
  *    (supported_parameters, context length, modalities), captured by `parseOpenRouterModels`.
  *
@@ -15,7 +15,7 @@
  * source that fails to fetch, parse, or VALIDATE is skipped, and existing prices stand.
  */
 import { createLogger } from "./logger";
-import { defaultModelCatalog, deriveIdentity, displayProviderFor, type ModelInfo, type ModelCatalog } from "./model-catalog";
+import { deriveIdentity, displayProviderFor, keyForModel, ModelInfo, type ModelInfoInterface } from "./model-catalog";
 
 const log = createLogger("engine.providers.model-catalog-source");
 
@@ -23,8 +23,8 @@ const log = createLogger("engine.providers.model-catalog-source");
 // The Anthropic docs table (and the in-code price seed) carry NO capability columns, and the native
 // `claude-*` ids aren't on OpenRouter, so THIS module is the ONE place that knows Claude's default
 // parameter support. What it synthesizes is written to the `models` TABLE — by the §5 refresh below and
-// by the seed generator (`db/genModelsSeedSql.ts`, which imports these) — and the table is the runtime
-// source of truth. Nothing reads this at call time; `ModelCatalog.supportedParametersFor` reads the row.
+// by the seed generator (which imports these) — and the loaded row is the runtime source of truth.
+// Nothing reads this at call time; `ModelInfo.supportedParameters` reads the row.
 
 /** Drop any `vendor/` routing prefix (e.g. OpenRouter ids). */
 function bareId(modelId: string): string {
@@ -48,7 +48,10 @@ export function anthropicRejectsSampling(modelId: string): boolean {
 export function claudeSupportsThinking(modelId: string): boolean {
   const p = bareId(modelId).toLowerCase();
   if (/^claude-3-7-sonnet/.test(p)) return true; // old naming: claude-3-7-sonnet
-  const m = p.match(/^claude-(?:opus|sonnet|haiku)-(\d+)/); // new naming: claude-{family}-{major}-…
+  // New naming `claude-{family}-{major}-…`: gate on the MAJOR version, not the family word, so a new
+  // family (fable/mythos/…) is covered the moment it appears — `[a-z]+` matches any family, and the
+  // `claude-{digit}-…` old form (3/3.5 haiku) has no letter here, so it correctly returns false.
+  const m = p.match(/^claude-[a-z]+-(\d+)/);
   return m ? Number(m[1]) >= 4 : false;
 }
 
@@ -83,10 +86,10 @@ export function claudeSupportedParameters(modelId: string): string[] {
  * scrape rows) and the models-seed generator (`db/genModelsSeedSql.ts`). OpenRouter rows use
  * {@link deriveIdentity} directly (their capabilities come from the feed).
  */
-export function completeSeedRow(row: ModelInfo): ModelInfo {
+export function completeSeedRow(row: ModelInfoInterface): ModelInfoInterface {
   const out = deriveIdentity(row);
-  if (isClaudeModel(row.modelPrefix)) {
-    if (out.supportedParameters === undefined) out.supportedParameters = claudeSupportedParameters(row.modelPrefix);
+  if (isClaudeModel(row.model)) {
+    if (out.supportedParameters === undefined) out.supportedParameters = claudeSupportedParameters(row.model);
     if (out.modalities === undefined) out.modalities = { input: [...CLAUDE_MODALITIES.input], output: [...CLAUDE_MODALITIES.output] };
   }
   return out;
@@ -99,7 +102,7 @@ export type FetchText = (url: string) => Promise<string>;
 export interface PricingSource {
   readonly name: string;
   /** Fetch + parse to rows. Throws on fetch/parse failure (the orchestrator isolates it). */
-  fetchRows(): Promise<ModelInfo[]>;
+  fetchRows(): Promise<ModelInfoInterface[]>;
   /**
    * `false`/unset (Anthropic scrape): a SMALL curated set — any bad row fails the whole batch
    * (a mis-scrape must not poison billing data). `true` (OpenRouter API): a LARGE heterogeneous
@@ -157,11 +160,25 @@ function extractRows(text: string): string[][] {
     .filter((cells) => cells.length > 1);
 }
 
-/** `"Claude Opus 4.8 ([deprecated]...)"` → `"claude-opus-4-8"` (a longest-prefix match key). */
-function modelNameToPrefix(name: string): string | undefined {
+/**
+ * `"Claude Opus 4.8 ([deprecated]...)"` → `{ id: "claude-opus-4-8" }`. Normalizes a docs display name to
+ * the canonical catalog id by dropping (a) parenthetical notes and (b) trailing TEMPORAL qualifiers —
+ * the docs list a price CHANGE as a separate "Claude Sonnet 5 starting September 1, 2026" /
+ * "…through August 31, 2026" row, which must NOT become its own bogus model id
+ * (`claude-sonnet-5-starting-september-1,-2026`) or the real `claude-sonnet-5` id would be absent from
+ * the catalog. Those are price-schedule rows for ONE model; the catalog has no temporal price dimension,
+ * so they collapse to the same id. `dateScoped` reports whether such a qualifier was stripped, so the
+ * caller can prefer an unqualified row over a date-scoped one when both map to the same id.
+ */
+function modelNameToPrefix(name: string): { id: string; dateScoped: boolean } | undefined {
   const base = stripHtml(name).split("(")[0]!.trim(); // drop "([deprecated]...)" notes
   if (!/^claude\b/i.test(base)) return undefined;
-  return base.toLowerCase().replace(/[.\s]+/g, "-").replace(/-+$/g, "");
+  // Cut at a temporal qualifier ("… starting/through/until <date>") — everything after it is a price
+  // schedule, not part of the model name. (A date like "September 1, 2026" also carries a comma; the
+  // qualifier keyword is the reliable delimiter, so we key off it rather than the comma.)
+  const cut = base.replace(/\s*\b(?:starting|through|until|before|after|effective|beginning)\b.*$/i, "").trim();
+  const id = cut.toLowerCase().replace(/[.,\s]+/g, "-").replace(/-+$/g, "");
+  return id ? { id, dateScoped: cut.length < base.length } : undefined;
 }
 
 /**
@@ -172,11 +189,11 @@ function modelNameToPrefix(name: string): string | undefined {
  * an empty/short result as a failed scrape and keeps existing prices).
  *
  * The docs table carries NO capability/modality columns, and the native `claude-*` ids aren't on
- * OpenRouter, so nothing else fills them — {@link completeModelIdentity} stamps the correct
- * per-model `supportedParameters` (via `claudeSupportedParameters`, so opus-4-7/4-8 reject the
- * sampling knobs) + modalities + canonical id / serving provider, the SAME way the seed does.
+ * OpenRouter, so nothing else fills them — {@link completeSeedRow} stamps the correct per-model
+ * `supportedParameters` (via `claudeSupportedParameters`, so opus-4-7/4-8 reject the sampling knobs) +
+ * modalities + canonical id / provider, the SAME way the seed does.
  */
-export function parseAnthropicDocsPricing(text: string): ModelInfo[] {
+export function parseAnthropicDocsPricing(text: string): ModelInfoInterface[] {
   const rows = extractRows(text);
 
   // Find the header row: cells naming the base-input and output columns.
@@ -196,20 +213,25 @@ export function parseAnthropicDocsPricing(text: string): ModelInfo[] {
   };
   if (idx.input === -1 || idx.output === -1) return [];
 
-  const out: ModelInfo[] = [];
+  // Keyed by canonical id so date-schedule rows for one model collapse to a single entry (see
+  // {@link modelNameToPrefix}). First row for an id wins — but an UNqualified row replaces a
+  // previously-stored date-scoped one, so a plain "Claude Sonnet 5" always beats a "…starting …" row.
+  const byId = new Map<string, { row: ModelInfoInterface; dateScoped: boolean }>();
   for (const cells of rows.slice(headerIdx + 1)) {
-    const prefix = modelNameToPrefix(cells[0] ?? "");
-    if (!prefix) continue; // not a model row (notes, blank, next section)
+    const parsed = modelNameToPrefix(cells[0] ?? "");
+    if (!parsed) continue; // not a model row (notes, blank, next section)
+    const existing = byId.get(parsed.id);
+    if (existing && !(existing.dateScoped && !parsed.dateScoped)) continue; // keep the stronger row
     const input = parseMoney(cells[idx.input] ?? "");
     const output = parseMoney(cells[idx.output] ?? "");
     if (input === undefined || output === undefined) continue;
-    const row: ModelInfo = {
-      modelPrefix: prefix,
+    const row: ModelInfoInterface = {
+      route: "anthropic",
+      model: parsed.id,
       inputPerMillion: input,
       outputPerMillion: output,
-      family: "anthropic",
       provider: "Anthropic",
-      label: prefix,
+      label: parsed.id,
       source: "anthropic-docs",
     };
     const read = idx.read !== -1 ? parseMoney(cells[idx.read] ?? "") : undefined;
@@ -220,9 +242,9 @@ export function parseAnthropicDocsPricing(text: string): ModelInfo[] {
     if (w1 !== undefined) row.cacheWrite1hPerMillion = w1;
     // Stamp the derived identity + Claude capabilities/modalities (the docs table has none) — the SAME
     // completion the seed generator applies, so the refresh and the seed produce byte-identical rows.
-    out.push(completeSeedRow(row));
+    byId.set(parsed.id, { row: completeSeedRow(row), dateScoped: parsed.dateScoped });
   }
-  return out;
+  return [...byId.values()].map((e) => e.row);
 }
 
 /** The Anthropic-docs pricing source (the user's chosen authority). Strict batch validation. */
@@ -259,7 +281,7 @@ function perMillion(v: unknown): number | undefined {
  * and `architecture.{input,output}_modalities` — so the catalog drives routing/structured-output
  * decisions from data instead of hardcoded family heuristics.
  */
-export function parseOpenRouterModels(json: string): ModelInfo[] {
+export function parseOpenRouterModels(json: string): ModelInfoInterface[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
@@ -268,7 +290,7 @@ export function parseOpenRouterModels(json: string): ModelInfo[] {
   }
   const data = (parsed as { data?: unknown }).data;
   if (!Array.isArray(data)) return [];
-  const out: ModelInfo[] = [];
+  const out: ModelInfoInterface[] = [];
   for (const m of data) {
     const model = m as {
       id?: unknown;
@@ -285,13 +307,13 @@ export function parseOpenRouterModels(json: string): ModelInfo[] {
     const input = perMillion(pricing.prompt);
     const output = perMillion(pricing.completion);
     if (input === undefined || output === undefined) continue;
-    const row: ModelInfo = {
-      modelPrefix: id,
+    const row: ModelInfoInterface = {
+      // OpenRouter ids are always `vendor/model`, and they always route through OpenRouter (never the
+      // native Anthropic provider — a claude-via-OR id is reached as `openrouter/anthropic/claude-…`).
+      route: "openrouter",
+      model: id,
       inputPerMillion: input,
       outputPerMillion: output,
-      // OpenRouter ids are always `vendor/model`, so they route through OpenRouter (never the native
-      // Anthropic provider — a claude-via-OR id is non-`claude-` prefixed → openrouter family).
-      family: "openrouter",
       provider: displayProviderFor(id),
       label: id.includes("/") ? id.slice(id.indexOf("/") + 1) : id,
       source: "openrouter-models",
@@ -319,8 +341,8 @@ export function parseOpenRouterModels(json: string): ModelInfo[] {
     if (Array.isArray(inMods) && inMods.every((x) => typeof x === "string")) modalities.input = inMods as string[];
     if (Array.isArray(outMods) && outMods.every((x) => typeof x === "string")) modalities.output = outMods as string[];
     if (modalities.input || modalities.output) row.modalities = modalities;
-    // Add ONLY the derived identity (canonical id + serving provider = "openrouter" for these `vendor/model`
-    // ids) — the feed is authoritative for capabilities, so we never stamp native-Claude caps here.
+    // Add ONLY the derived identity (canonical id + display fields) — the feed is authoritative for
+    // capabilities, so we never stamp native-Claude caps here.
     out.push(deriveIdentity(row));
   }
   return out;
@@ -345,9 +367,9 @@ export interface PricingValidation {
 }
 
 /** Internal-consistency problems with a SINGLE row's rates (empty array = sane). */
-function rowProblems(r: ModelInfo): string[] {
+function rowProblems(r: ModelInfoInterface): string[] {
   const p: string[] = [];
-  if (!r.modelPrefix) p.push("empty modelPrefix");
+  if (!r.model) p.push("empty model");
   if (!(r.inputPerMillion > 0)) p.push(`non-positive input ${r.inputPerMillion}`);
   // An output rate of EXACTLY 0 is legitimate, not a bad scrape: embedding / classifier /
   // input-only models bill no completion tokens (`text-embedding-3-small` is $0 output). So
@@ -374,14 +396,15 @@ function rowProblems(r: ModelInfo): string[] {
  * Requires a plausible row count and internally-consistent, non-duplicate rates. Any violation
  * fails the WHOLE batch (keep the old prices rather than apply a partially-garbled one).
  */
-export function validatePricingRows(rows: ModelInfo[], minRows = 3): PricingValidation {
+export function validatePricingRows(rows: ModelInfoInterface[], minRows = 3): PricingValidation {
   const problems: string[] = [];
   if (rows.length < minRows) problems.push(`too few rows: ${rows.length} < ${minRows}`);
   const seen = new Set<string>();
   for (const r of rows) {
-    if (seen.has(r.modelPrefix)) problems.push(`[${r.modelPrefix}] duplicate modelPrefix`);
-    seen.add(r.modelPrefix);
-    for (const p of rowProblems(r)) problems.push(`[${r.modelPrefix}] ${p}`);
+    const key = keyForModel(r);
+    if (seen.has(key)) problems.push(`[${key}] duplicate model`);
+    seen.add(key);
+    for (const p of rowProblems(r)) problems.push(`[${key}] ${p}`);
   }
   return { ok: problems.length === 0, problems };
 }
@@ -391,21 +414,22 @@ export function validatePricingRows(rows: ModelInfo[], minRows = 3): PricingVali
  * dropped. Used for large heterogeneous feeds (OpenRouter) where one odd row must not sink the
  * whole refresh.
  */
-export function sanitizePricingRows(rows: ModelInfo[]): {
-  rows: ModelInfo[];
-  dropped: { modelPrefix: string; problems: string[] }[];
+export function sanitizePricingRows(rows: ModelInfoInterface[]): {
+  rows: ModelInfoInterface[];
+  dropped: { model: string; problems: string[] }[];
 } {
   const seen = new Set<string>();
-  const kept: ModelInfo[] = [];
-  const dropped: { modelPrefix: string; problems: string[] }[] = [];
+  const kept: ModelInfoInterface[] = [];
+  const dropped: { model: string; problems: string[] }[] = [];
   for (const r of rows) {
+    const key = keyForModel(r);
     const problems = rowProblems(r);
-    if (seen.has(r.modelPrefix)) problems.push("duplicate modelPrefix");
+    if (seen.has(key)) problems.push("duplicate model");
     if (problems.length > 0) {
-      dropped.push({ modelPrefix: r.modelPrefix, problems });
+      dropped.push({ model: key, problems });
       continue;
     }
-    seen.add(r.modelPrefix);
+    seen.add(key);
     kept.push(r);
   }
   return { rows: kept, dropped };
@@ -429,34 +453,34 @@ export interface RefreshReport {
   added: string[];
   updated: string[];
   /** The full row set after refresh — what the caller persists to the `models` table. */
-  rows: ModelInfo[];
+  rows: ModelInfoInterface[];
 }
 
 /** Value-equality on the rate-bearing fields (ignores nothing pricing-relevant). */
-function rowsEqual(a: ModelInfo | undefined, b: ModelInfo): boolean {
+function rowsEqual(a: ModelInfoInterface | undefined, b: ModelInfoInterface): boolean {
   return a !== undefined && JSON.stringify(a) === JSON.stringify(b);
 }
 
 /**
  * Fetch every source, validate, and apply only the CHANGED rows to `table` (default: the
- * process-wide `defaultModelCatalog`). A source that throws or fails validation is isolated and
+ * process-wide `ModelInfo.instance`). A source that throws or fails validation is isolated and
  * skipped — its failure never drops or corrupts existing prices. Returns a report (and the full
- * row set) so the caller can persist to the `models` table and log/alert on skips.
+ * row set) so the caller can persist the catalog and log/alert on skips.
  */
 export async function refreshModelCatalog(opts: {
   sources: PricingSource[];
-  table?: ModelCatalog;
+  table?: ModelInfo;
   /** Min rows a source must yield to be trusted (validation). */
   minRows?: number;
 }): Promise<RefreshReport> {
-  const table = opts.table ?? defaultModelCatalog;
+  const table = opts.table ?? ModelInfo.instance;
   const bySource: SourceOutcome[] = [];
   const added: string[] = [];
   const updated: string[] = [];
 
   const minRows = opts.minRows ?? 3;
   for (const source of opts.sources) {
-    let fetched: ModelInfo[];
+    let fetched: ModelInfoInterface[];
     try {
       fetched = await source.fetchRows();
     } catch (err) {
@@ -467,7 +491,7 @@ export async function refreshModelCatalog(opts: {
     }
 
     // Decide the trusted row set: STRICT = all-or-nothing; LENIENT = drop bad rows individually.
-    let toApply: ModelInfo[];
+    let toApply: ModelInfoInterface[];
     if (source.lenient) {
       const { rows: clean, dropped } = sanitizePricingRows(fetched);
       if (dropped.length > 0) log.debug("pricing source dropped rows", { source: source.name, dropped: dropped.length });
@@ -496,11 +520,12 @@ export async function refreshModelCatalog(opts: {
     }
 
     // Apply only the CHANGED rows (snapshot the current table once for an O(n) diff).
-    const current = new Map(table.list().map((r) => [r.modelPrefix, r]));
+    const current = new Map(table.list().map((r) => [keyForModel(r), r]));
     let applied = 0;
     for (const row of toApply) {
-      if (rowsEqual(current.get(row.modelPrefix), row)) continue;
-      (current.has(row.modelPrefix) ? updated : added).push(row.modelPrefix);
+      const key = keyForModel(row);
+      if (rowsEqual(current.get(key), row)) continue;
+      (current.has(key) ? updated : added).push(key);
       table.upsert(row);
       applied++;
     }
