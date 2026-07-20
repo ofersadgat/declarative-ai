@@ -12,9 +12,10 @@
  *  2. FALLBACK — ~2.5× the input tokens (floored), for the cold start before any call has settled.
  *  3. Always CLAMPED by the call's configured `maxOutputTokens` when one is set (a real ceiling).
  *
- * This module estimates TOKENS only; USD cost comes from passing those token counts to
- * `ModelInfo.instance.computeCostUsd` at the call site (no wrapper here). Known under-count carried from
- * `search/cost.ts`: reasoning models can bill thinking beyond the output cap.
+ * This module estimates TOKENS only; USD pricing lives on the catalog (`ModelInfo.computeCostUsd` /
+ * `ModelInfo.affordableOutputTokens`), which the `withBudget` reserve/clamp lifecycle calls directly.
+ * Known under-count carried from findmyprompt `search/cost.ts`: reasoning models can bill thinking beyond
+ * the output cap.
  */
 
 /** chars/4 input-token proxy over one or more prompt fragments (system + user + …). Inlined from

@@ -17,6 +17,7 @@
  * `outcome` promise.
  */
 import type {
+  BudgetMeter,
   DeadlineConfig,
   ExecHandle,
   ExecMetrics,
@@ -37,6 +38,15 @@ import type { ModelMessage } from "ai";
 import { emptyEvents } from "./executor";
 import { promptAsMessages, promptText } from "./generate";
 import type { LlmCallDefinition, StructuredCallParams } from "./llmStep";
+import {
+  estimateInputTokens,
+  estimateOutputTokens,
+  noteOutputTokens,
+  DEFAULT_HOLD_OUTPUT_MULTIPLIER,
+  MIN_USEFUL_OUTPUT_TOKENS,
+  type OutputTokenStats,
+} from "./costEstimate";
+import { ModelInfo } from "./model-catalog";
 
 /** The prompt-carrying fields of a call, threaded through the repair loop (string OR message prompt). */
 type PromptFields = Pick<StructuredCallParams, "system" | "prompt" | "messages">;
@@ -394,6 +404,108 @@ export function withSession<R = ExecServices>(
           await sessions.put(key, { ...priorState, messages: [...prior, ...current, ...foldOutcomeToAssistant(result)] });
         }
         return { ...result, session: { id: key } };
+      });
+    },
+  })) as unknown as ExecutorWrapper<R, R>;
+  return curryOrApply(wrap, inner);
+}
+
+/** Options for {@link withBudget}. All optional — with no `meter` (here or on `ctx.meter`) the wrapper is a
+ *  pure passthrough (an absent service is a no-op, like the rest of the stack). */
+export interface BudgetOptions {
+  /** The metered wallet. Defaults to `ctx.meter`; supplied here it drops the ctx dependency. */
+  meter?: BudgetMeter;
+  /** Runtime-tunable output-token headroom for the pre-call reserve estimate (default 2×; settle usually
+   *  corrects DOWNWARD and an over-reserve lives only for the call's duration). */
+  headroomMultiplier?: number;
+  /** Per-model observed output-token stats (RUN-scoped, mutable): read to price the reserve, and folded on
+   *  settle so later reserves in the same run are better estimated. */
+  stats?: Map<string, OutputTokenStats>;
+  /** Cost-model override (test / consumer seam). Defaults to catalog pricing (`ModelInfo.instance`). */
+  pricing?: {
+    estimateCostUsd(modelId: string, inputTokens: number, outputTokens: number): number;
+    affordableOutputTokens(modelId: string, inputTokens: number, availableUsd: number): number;
+  };
+}
+
+/**
+ * Per-call budget RESERVATION (the reserve→debit wallet lifecycle): before the call, hold its ESTIMATED
+ * cost against the injected {@link BudgetMeter} (`ctx.meter` or `config.meter`); after it returns, settle
+ * the reserve to the ACTUAL cost. When the estimate doesn't fit the balance, FLIP the relationship —
+ * compute the AFFORDABLE output ceiling from the remaining headroom and rewrite the call's
+ * `maxOutputTokens` to it (the same definition-rewrite pattern {@link withDeadline} uses for `timeoutMs`),
+ * so the reserve becomes provider-ENFORCED instead of a guess; still short ⇒ an `out-of-credits` outcome,
+ * no call made. A failed call still settles (its cost, usually $0, is real spend and the hold must not
+ * linger). With no meter available the wrapper runs the inner call untouched.
+ *
+ * The wrapper owns only the generic lifecycle; the concrete metered wallet (ledger / Stripe / credits) is
+ * the consumer's `BudgetMeter` implementation, and cross-call accounting (reuse billing, round-boundary
+ * reconciliation) stays in the consumer — this is one call's reserve and settle.
+ */
+export function withBudget<R = ExecServices>(config?: BudgetOptions): ExecutorWrapper<R, R>;
+export function withBudget<R = ExecServices>(config: BudgetOptions, inner: Executor<R>): Executor<R>;
+export function withBudget<R = ExecServices>(inner: Executor<R>): Executor<R>;
+export function withBudget<R = ExecServices>(
+  configOrInner?: BudgetOptions | Executor<R>,
+  maybeInner?: Executor<R>,
+): ExecutorWrapper<R, R> | Executor<R> {
+  const config = (isExecutor(configOrInner) ? undefined : configOrInner) as BudgetOptions | undefined;
+  const inner = (isExecutor(configOrInner) ? configOrInner : maybeInner) as Executor<R> | undefined;
+  // Default pricing = the catalog. Un-priced models estimate $0 (they cost the platform nothing; a
+  // meter's balance>0 admission floor still applies). `affordableOutputTokens` is catalog math too.
+  const estCost = config?.pricing?.estimateCostUsd ?? ((m: string, i: number, o: number) => ModelInfo.instance.computeCostUsd(m, i, o) ?? 0);
+  const affordOutput = config?.pricing?.affordableOutputTokens ?? ((m: string, i: number, avail: number) => ModelInfo.instance.affordableOutputTokens(m, i, avail));
+  const headroom = config?.headroomMultiplier ?? DEFAULT_HOLD_OUTPUT_MULTIPLIER;
+  const wrap = ((innerExec: Executor): Executor => ({
+    kind: innerExec.kind,
+    capabilities: innerExec.capabilities,
+    start(spec: ExecutionSpec, ctx: ExecServices): ExecHandle {
+      const meter = config?.meter ?? ctx.meter;
+      const def = spec.definition as LlmCallDefinition | undefined;
+      // Unmetered, or a definition with no model to price → run untouched.
+      if (!meter || !def || typeof def.model !== "string") return innerExec.start(spec, ctx);
+      const model = def.model;
+      const stats = config?.stats;
+      return wrapHandle(async (ctl) => {
+        const inputTokens = estimateInputTokens(promptText(def));
+        const estOut = estimateOutputTokens(model, inputTokens, def.maxOutputTokens, stats, headroom);
+        let hold = await meter.reserve(estCost(model, inputTokens, estOut));
+        let sentSpec = spec;
+        if (!hold) {
+          // Tight wallet: clamp the output ceiling to what the remaining balance buys, then retry the
+          // reserve ONCE with that cap made real — a truncated answer is preferable to no answer, and the
+          // wallet can no longer be overshot.
+          const afford = affordOutput(model, inputTokens, await meter.availableCostUsd());
+          const clamped = Math.min(afford, def.maxOutputTokens ?? Number.POSITIVE_INFINITY);
+          if (clamped >= MIN_USEFUL_OUTPUT_TOKENS && Number.isFinite(clamped)) {
+            hold = await meter.reserve(estCost(model, inputTokens, clamped));
+            if (hold) sentSpec = { ...spec, definition: { ...def, maxOutputTokens: clamped } };
+          }
+        }
+        if (!hold) {
+          return {
+            rawText: "",
+            finishReason: "error",
+            metrics: { durationMs: 0 },
+            error: { classification: "out-of-credits", reason: "the wallet cannot cover this call's estimated cost" },
+          };
+        }
+        if (ctl.canceled()) {
+          await hold.settle(0);
+          return canceledOutcome("canceled before the call started");
+        }
+        let result: Outcome;
+        try {
+          result = await ctl.started(innerExec.start(sentSpec, ctx)).outcome;
+        } catch (err) {
+          await hold.settle(0).catch(() => undefined); // no result → no real spend; free the reserve
+          throw err;
+        }
+        // reserve → debit: correct the hold to the ACTUAL cost (a failed call still settles), and feed the
+        // observed output tokens back so the next reserve in this run is better priced.
+        await hold.settle(result.metrics.cost ?? 0);
+        if (stats) noteOutputTokens(stats, model, result.metrics.outputTokens);
+        return hold.ledgerId ? { ...result, metrics: { ...result.metrics, ledgerId: hold.ledgerId } } : result;
       });
     },
   })) as unknown as ExecutorWrapper<R, R>;

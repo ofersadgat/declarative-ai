@@ -435,6 +435,19 @@ export class ModelInfo<const Rows extends readonly ModelInfoInterface[] = readon
   computeCostUsd(model: ModelKeyOf<Rows>, inputTokens: number | null, outputTokens: number | null): number | null {
     return this.computeCost(model, { inputTokens, outputTokens });
   }
+
+  /**
+   * The AFFORDABLE output-token ceiling for a tight budget: how many output tokens `availableUsd` buys
+   * after the input's cost, at the model's output rate. `Infinity` for an un-priced model (no clamp
+   * basis) and 0 when even the input doesn't fit. Used by the `withBudget` reserve/clamp lifecycle.
+   */
+  affordableOutputTokens(model: ModelKeyOf<Rows>, inputTokens: number, availableUsd: number): number {
+    const inputUsd = this.computeCostUsd(model, inputTokens, 0);
+    const perOutputToken = (this.computeCostUsd(model, 0, 1_000_000) ?? 0) / 1_000_000;
+    if (inputUsd == null || perOutputToken <= 0) return Number.POSITIVE_INFINITY; // un-priced — no clamp basis
+    const headroom = availableUsd - inputUsd;
+    return headroom <= 0 ? 0 : Math.floor(headroom / perOutputToken);
+  }
 }
 
 /**

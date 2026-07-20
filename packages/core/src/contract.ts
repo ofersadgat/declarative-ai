@@ -62,6 +62,9 @@ export interface ExecMetrics extends TokenCounts {
    */
   childCalls?: number;
   childCost?: number;
+  /** Audit link to the wallet ledger row a budget reservation opened for this call — stamped by the
+   *  `withBudget` wrapper from `BudgetReservation.ledgerId`, for GR→ledger reconciliation. */
+  ledgerId?: string;
 }
 
 // --- Outcome -----------------------------------------------------------------
