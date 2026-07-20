@@ -52,7 +52,8 @@ describe("pricing (default catalog)", () => {
 
   it("affordableOutputTokens: output tokens the remaining balance buys after the input cost", () => {
     // $15/1M input, $75/1M output. Input 1M costs $15; each output token costs $75/1M.
-    const c = new ModelInfo([{ route: "anthropic", model: "m", inputPerMillion: 15, outputPerMillion: 75 }]);
+    // Weakly typed (`: ModelInfo`) so the "un-priced model" probe below can pass a string key.
+    const c: ModelInfo = new ModelInfo([{ route: "anthropic", model: "m", inputPerMillion: 15, outputPerMillion: 75 }]);
     // $90 available, $15 spent on input → $75 headroom → 1,000,000 output tokens.
     expect(c.affordableOutputTokens("anthropic/m", 1_000_000, 90)).toBe(1_000_000);
     // Balance below the input cost → nothing affordable.
