@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { plan } from "../src/plan";
 import type { LlmCallDefinition } from "../src/llmStep";
-import { defaultModelCatalog, type ModelInfo } from "../src/model-catalog";
+import { ModelInfo } from "../src/model-catalog";
 import { flatSchema } from "./fakes";
 
 const baseDef: LlmCallDefinition & { schema?: Record<string, unknown> } = {
@@ -47,8 +47,8 @@ describe("plan — declarative dry run (no execution)", () => {
 
 describe("plan — per-mediaType modality gating", () => {
   it("gates each attachment by its REQUIRED modality, not a generic media check", () => {
-    defaultModelCatalog.upsert({ modelPrefix: "test/audio-only", modalities: { input: ["text", "audio"], output: ["text"] } } as ModelInfo);
-    defaultModelCatalog.upsert({ modelPrefix: "test/image-only", modalities: { input: ["text", "image"], output: ["text"] } } as ModelInfo);
+    ModelInfo.instance.upsert({ route: "openrouter", model: "test/audio-only", inputPerMillion: 0, outputPerMillion: 0, modalities: { input: ["text", "audio"], output: ["text"] } });
+    ModelInfo.instance.upsert({ route: "openrouter", model: "test/image-only", inputPerMillion: 0, outputPerMillion: 0, modalities: { input: ["text", "image"], output: ["text"] } });
     const withAtt = (model: string, mediaType: string): LlmCallDefinition => ({
       model,
       prompt: "listen",
@@ -65,7 +65,7 @@ describe("plan — per-mediaType modality gating", () => {
   });
 
   it("gates media parts inside messages by their mediaType too", () => {
-    defaultModelCatalog.upsert({ modelPrefix: "test/image-only", modalities: { input: ["text", "image"], output: ["text"] } } as ModelInfo);
+    ModelInfo.instance.upsert({ route: "openrouter", model: "test/image-only", inputPerMillion: 0, outputPerMillion: 0, modalities: { input: ["text", "image"], output: ["text"] } });
     const p = plan({
       model: "openrouter/test/image-only",
       messages: [{ role: "user", content: [{ type: "file", mediaType: "video/mp4", data: "x" }] }],

@@ -1,7 +1,18 @@
 import { MockLanguageModelV3 } from "ai/test";
-import { describe, expect, expectTypeOf, it } from "vitest";
+import { beforeAll, describe, expect, expectTypeOf, it } from "vitest";
 import { generateStructured, typedSchema } from "../src/generate";
+import { ModelInfo } from "../src/model-catalog";
 import { flatSchema, stream, streamingModel, usage } from "./fakes";
+
+// Pin the process-wide catalog to fixed rates so the cost assertions below are deterministic and
+// decoupled from the live snapshot (`DEFAULT_MODELS`), which `npm run update:model-info` can re-price.
+// (Vitest isolates module state per test file, so this override doesn't leak to other suites.)
+beforeAll(() => {
+  ModelInfo.instance = new ModelInfo([
+    { route: "anthropic", model: "claude-haiku-4-5", inputPerMillion: 1, outputPerMillion: 5 },
+    { route: "openrouter", model: "openai/gpt-4.1-mini", inputPerMillion: 0.4, outputPerMillion: 1.6 },
+  ]);
+});
 
 function throwingModel(err: unknown): MockLanguageModelV3 {
   return new MockLanguageModelV3({
@@ -40,7 +51,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
         { type: "text-end", id: "1" },
         { type: "finish", finishReason: "stop", usage: usage(10, 5) },
       ]),
-      modelId: "claude-haiku-4-5",
+      modelId: "anthropic/claude-haiku-4-5",
       prompt: "what is 2+2?",
       schema: flatSchema,
     });
@@ -63,7 +74,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
         // 1M fresh + 1M cache-read input, 0 output.
         { type: "finish", finishReason: "stop", usage: cachedUsage(1_000_000, 1_000_000, 0, 0) },
       ]),
-      modelId: "claude-haiku-4-5",
+      modelId: "anthropic/claude-haiku-4-5",
       prompt: "x",
       schema: flatSchema,
     });
@@ -103,7 +114,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
           },
         },
       ]),
-      modelId: "claude-haiku-4-5",
+      modelId: "anthropic/claude-haiku-4-5",
       prompt: "x",
       schema: flatSchema,
     });
@@ -131,7 +142,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
           providerMetadata: { openrouter: { usage: { cost: 0.0123, completionTokens: 1000 } } },
         },
       ]),
-      modelId: "openai/gpt-4.1-mini",
+      modelId: "openrouter/openai/gpt-4.1-mini",
       prompt: "x",
       schema: flatSchema,
     });
@@ -150,7 +161,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
         { type: "text-end", id: "1" },
         { type: "finish", finishReason: "stop", usage: usage(10, 5) },
       ]),
-      modelId: "claude-haiku-4-5",
+      modelId: "anthropic/claude-haiku-4-5",
       prompt: "x",
       schema: flatSchema,
     });
@@ -168,7 +179,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
         { type: "text-end", id: "1" },
         { type: "finish", finishReason: "length", usage: usage(7, 99) },
       ]),
-      modelId: "claude-haiku-4-5",
+      modelId: "anthropic/claude-haiku-4-5",
       prompt: "ramble",
       schema: flatSchema,
     });
@@ -182,7 +193,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
   it("classifies a thrown 429 as transient", async () => {
     const out = await generateStructured({
       model: throwingModel(Object.assign(new Error("rate limited"), { status: 429 })),
-      modelId: "claude-haiku-4-5",
+      modelId: "anthropic/claude-haiku-4-5",
       prompt: "x",
       schema: flatSchema,
     });
@@ -198,7 +209,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
         { type: "text-end", id: "1" },
         { type: "finish", finishReason: "stop", usage: usage(1, 1) },
       ]),
-      modelId: "claude-haiku-4-5",
+      modelId: "anthropic/claude-haiku-4-5",
       prompt: "x",
       schema: flatSchema,
       validate: () => {
@@ -225,7 +236,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
         { type: "tool-call", toolCallId: "t1", toolName: "json", input: '{"answer":"4"}' },
         { type: "finish", finishReason: "tool-calls", usage: usage(8, 6) },
       ]),
-      modelId: "openai/gpt-4.1-mini",
+      modelId: "openrouter/openai/gpt-4.1-mini",
       prompt: "what is 2+2?",
       schema: flatSchema,
     });
@@ -248,7 +259,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
         { type: "text-end", id: "1" },
         { type: "finish", finishReason: "stop", usage: usage(3, 2) },
       ]),
-      modelId: "claude-haiku-4-5",
+      modelId: "anthropic/claude-haiku-4-5",
       prompt: "what is 2+2?",
       schema: flatSchema,
     });
@@ -274,7 +285,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
         { type: "text-end", id: "1" },
         { type: "finish", finishReason: "stop", usage: usage(12, 7) },
       ]),
-      modelId: "claude-haiku-4-5",
+      modelId: "anthropic/claude-haiku-4-5",
       prompt: "what is 2+2? use the calculator.",
       schema: flatSchema,
     });
@@ -302,7 +313,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
         { type: "text-end", id: "1" },
         { type: "finish", finishReason: "stop", usage: usage(5, 5) },
       ]),
-      modelId: "claude-haiku-4-5",
+      modelId: "anthropic/claude-haiku-4-5",
       prompt: "x",
       schema: flatSchema,
     });
@@ -332,7 +343,7 @@ describe("generateStructured — call-capability passthrough", () => {
 
     const out = await generateStructured({
       model,
-      modelId: "claude-haiku-4-5",
+      modelId: "anthropic/claude-haiku-4-5",
       prompt: "x",
       schema: flatSchema,
       presencePenalty: 0.5,
@@ -364,7 +375,7 @@ describe("generateStructured — call-capability passthrough", () => {
 
     const out = await generateStructured({
       model,
-      modelId: "claude-haiku-4-5",
+      modelId: "anthropic/claude-haiku-4-5",
       system: [{ role: "system", content: "be terse" }],
       messages: [{ role: "user", content: [{ type: "text", text: "what is 2+2?" }] }],
       schema: flatSchema,
@@ -393,7 +404,7 @@ describe("generateStructured — typed output", () => {
         { type: "text-end", id: "1" },
         { type: "finish", finishReason: "stop", usage: usage(3, 2) },
       ]),
-      modelId: "claude-haiku-4-5",
+      modelId: "anthropic/claude-haiku-4-5",
       prompt: "what is 2+2?",
       schema: typedSchema<Answer>(flatSchema),
     });
@@ -413,7 +424,7 @@ describe("generateStructured — typed output", () => {
         { type: "text-end", id: "1" },
         { type: "finish", finishReason: "stop", usage: usage(3, 2) },
       ]),
-      modelId: "claude-haiku-4-5",
+      modelId: "anthropic/claude-haiku-4-5",
       prompt: "what is 2+2?",
       schema: flatSchema, // plain Record<string, unknown> — no brand
     });

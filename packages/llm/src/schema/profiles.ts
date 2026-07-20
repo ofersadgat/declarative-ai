@@ -1,5 +1,5 @@
-import { defaultModelCatalog } from "../model-catalog";
-import { isAnthropicModel } from "../router";
+import { ModelInfo } from "../model-catalog";
+import { isAnthropicModel, providerNativeId } from "../router";
 import type { ProviderSchemaProfile } from "./profile";
 
 /**
@@ -232,7 +232,7 @@ export const PROVIDER_DEFAULT_PROFILE_ID: Record<string, string> = {
  * `response_format`→json_object, a KNOWN list with neither→the text floor, and an UNKNOWN/absent list→
  * the provider default (so a not-yet-refreshed row degrades gracefully, not to the text floor).
  */
-export function profileForCaps(modelId: string, supportedParameters: string[] | undefined): ProviderSchemaProfile {
+export function profileForCaps(modelId: string, supportedParameters: readonly string[] | undefined): ProviderSchemaProfile {
   if (isAnthropicModel(modelId)) return ANTHROPIC_AI_SDK;
   if (supportedParameters === undefined) {
     const defaultId = PROVIDER_DEFAULT_PROFILE_ID.openrouter;
@@ -245,7 +245,7 @@ export function profileForCaps(modelId: string, supportedParameters: string[] | 
 
 /** The profile id {@link profileForCaps} resolves to — what import/seed write into
  *  `models.schema_profile_id`. */
-export function profileIdForCaps(modelId: string, supportedParameters: string[] | undefined): string {
+export function profileIdForCaps(modelId: string, supportedParameters: readonly string[] | undefined): string {
   return profileForCaps(modelId, supportedParameters).id;
 }
 
@@ -259,7 +259,10 @@ export function profileIdForCaps(modelId: string, supportedParameters: string[] 
  * its caps, so it correctly resolves to the OpenRouter strict dialect, not the native SDK profile.
  */
 export function profileForModelId(modelId: string): ProviderSchemaProfile {
-  const recorded = defaultModelCatalog.schemaProfileFor(modelId);
+  const catalog = ModelInfo.instance;
+  const recorded = catalog.schemaProfile(modelId);
   if (recorded) return recorded;
-  return profileForCaps(modelId, defaultModelCatalog.supportedParametersFor(modelId));
+  // Catalog lookups key on the full `{route}/{model}` id; the family heuristic in `profileForCaps` wants
+  // the provider-native id (its `isAnthropicModel` check is on the bare `claude-…`), so strip the route.
+  return profileForCaps(providerNativeId(modelId), catalog.supportedParameters(modelId));
 }

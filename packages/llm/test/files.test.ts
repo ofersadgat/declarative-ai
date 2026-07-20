@@ -3,7 +3,7 @@ import type { BlobStore } from "@declarative-ai/core";
 import { describe, expect, it } from "vitest";
 import { generateStructured } from "../src/generate";
 import { executeStructuredCall } from "../src/llmStep";
-import { defaultModelCatalog, type ModelInfo } from "../src/model-catalog";
+import { ModelInfo } from "../src/model-catalog";
 import { plan } from "../src/plan";
 import { fakeRouter, stream, usage } from "./fakes";
 
@@ -83,8 +83,8 @@ describe("file INPUT lowering (attachments)", () => {
 
 describe("plan — modality gating", () => {
   it("flags media inputs to a text-only model, and passes for a vision model", () => {
-    defaultModelCatalog.upsert({ modelPrefix: "test/text-only", modalities: { input: ["text"], output: ["text"] } } as ModelInfo);
-    defaultModelCatalog.upsert({ modelPrefix: "test/vision", modalities: { input: ["text", "image"], output: ["text"] } } as ModelInfo);
+    ModelInfo.instance.upsert({ route: "openrouter", model: "test/text-only", inputPerMillion: 0, outputPerMillion: 0, modalities: { input: ["text"], output: ["text"] } });
+    ModelInfo.instance.upsert({ route: "openrouter", model: "test/vision", inputPerMillion: 0, outputPerMillion: 0, modalities: { input: ["text", "image"], output: ["text"] } });
     const withImg = (model: string) => ({ model, prompt: "look", attachments: [{ mediaType: "image/png", data: { base64: "x" } }], timeoutMs: 1000 });
 
     expect(plan(withImg("openrouter/test/text-only")).issues.some((i) => /does not accept image inputs/.test(i))).toBe(true);
@@ -92,7 +92,7 @@ describe("plan — modality gating", () => {
   });
 
   it("flags a requested output modality the model cannot produce", () => {
-    defaultModelCatalog.upsert({ modelPrefix: "test/text-only", modalities: { input: ["text"], output: ["text"] } } as ModelInfo);
+    ModelInfo.instance.upsert({ route: "openrouter", model: "test/text-only", inputPerMillion: 0, outputPerMillion: 0, modalities: { input: ["text"], output: ["text"] } });
     const p = plan({ model: "openrouter/test/text-only", prompt: "draw", outputModalities: ["image"], timeoutMs: 1000 });
     expect(p.issues.some((i) => /cannot produce output modalities: image/.test(i))).toBe(true);
   });

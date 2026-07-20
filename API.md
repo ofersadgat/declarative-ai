@@ -742,7 +742,7 @@ Route parsing helpers:
 | --- | --- |
 | `type ModelFamily = "anthropic" \| "openrouter"` / `ModelRoute` | the two serving routes. |
 | `parseModelRoute(modelId): { route; providerId }` | parse `{route}/{model}`; **throws** on a bare id. |
-| `providerNativeId(modelId): string` | the route-stripped provider id (the catalog/pricing key). |
+| `providerNativeId(modelId): string` | the route-stripped provider id (the schema-profile family key). |
 | `familyForModel(modelId): ModelFamily` | the serving route. |
 | `isAnthropicModel(nativeId): boolean` | true for a bare `claude-*` **native** id (native-id space only). |
 | `installLongTimeoutDispatcher(opts?)` | node-only undici dispatcher for long-running calls (auto-installed by `createRouter` unless `skipDispatcher`). |
@@ -751,42 +751,74 @@ Route parsing helpers:
 
 Local pricing, capability, and modality data. Source: `model-catalog.ts`, `model-catalog-source.ts`.
 
+Catalog behavior lives on the **`ModelInfo` class**; the process-wide catalog is the lazily-built
+`ModelInfo.instance` (get/set to hydrate/override at startup). Rows are keyed on the full
+`{route}/{model}` id and matched **exactly** — there is no longest-prefix fallback, so a dated/variant id
+must be present as its own row.
+
 ```ts
-function computeCostUsd(modelId: string, inputTokens: number, outputTokens: number): number | null;
-function computeCost(modelId: string, usage: UsageForCost): number | null;   // cache-aware
-function hasPricing(modelId: string): boolean;
-function modalitiesFor(modelId: string): Modalities | undefined;
-function paramAcceptanceFor(modelId: string): ParamAcceptance;   // { accepts(key); acceptsReasoning }
-function supportedParametersFor(modelId: string): string[] | undefined;
-function requiredParametersFor(modelId: string): string[] | undefined;
-function isReasoningModel(modelId: string): boolean;
+class ModelInfo<const Rows extends readonly ModelInfoInterface[] = readonly ModelInfoInterface[]> {
+  static get instance(): ModelInfo;                          // lazily built from DEFAULT_MODELS
+  static set instance(inst: ModelInfo): void;                // hydrate/override the process-wide catalog
+  constructor(seed: Rows, opts?: PricingOptions);
+
+  computeCost(model, usage: UsageForCost): number | null;    // cache-aware
+  computeCostUsd(model, inputTokens, outputTokens): number | null;
+  hasPricing(model): boolean;
+  modalities(model): Modalities | undefined;
+  paramAcceptance(model): ParamAcceptance;                   // { accepts(key); acceptsReasoning }
+  supportedParameters(model): string[] | undefined;
+  requiredParameters(model): string[] | undefined;
+  schemaProfile(model): ProviderSchemaProfile | undefined;
+  lookup(model): ModelInfoInterface | undefined;
+  upsert(row): void; remove(model): void; load(rows): void; list(): ModelInfoInterface[];
+}
 ```
+
+`ModelInfo` is **generic over its seed rows**: construct with a literal array and the `model` param of every
+method is typed to that seed's exact `${route}/${model}` keys — passing an unseeded model **fails to
+compile**. Construct with a plain `ModelInfoInterface[]` (or use the runtime-hydrated `ModelInfo.instance`)
+and the methods accept any `string`. So callers holding a compile-time-known model get checked; runtime
+string ids (config-driven) still work.
 
 | Export | Purpose |
 | --- | --- |
-| `ModelCatalog` | the catalog class (lookup + refresh); `defaultModelCatalog` is the shared instance backing the free functions. |
-| `DEFAULT_MODELS` / `modelsSeed()` | the seeded `ModelInfo[]`. |
-| `ModelInfo` / `RateSet` / `Modalities` | a catalog row: pricing rates + `modalities` (`{ input?; output? }`) + capability. |
+| `ModelInfo` | the catalog class (behavior + static `instance` singleton); generic over the seed keys. |
+| `DEFAULT_MODELS` | the committed snapshot (`GENERATED_MODELS`, an `as const` tuple) the runtime uses by default. |
+| `KnownModelKey` | `ModelKeyOf<typeof GENERATED_MODELS>` — the union of every `${route}/${model}` in the snapshot. |
+| `CORE_SEED_MODELS` / `modelsSeed()` | the hand-maintained core seed (generator fallback) / a fresh copy of `DEFAULT_MODELS`. |
+| `ModelInfoInterface` / `RateSet` / `Modalities` | a catalog row (`route` + `model` + pricing rates + `modalities` + capability). |
+| `ModelKeyOf<Rows>` | the `${route}/${model}` key union a catalog's methods are typed to. |
+| `keyForModel(row): string` | the `${route}/${model}` key for a row. |
 | `UsageForCost` / `PricingOptions` | cache-split usage input to `computeCost`. |
 | `ParamAcceptance` | `{ accepts(key): boolean; acceptsReasoning: boolean }` — the single gate `plan` and execute share. |
 | `SAMPLING_PARAM_NAMES` | map of config-knob → provider param name. |
-| `deriveIdentity` / `canonicalIdFor` / `servingProviderFor` / `displayProviderFor` | id-normalization helpers. |
+| `isReasoningModel(modelId): boolean` | OpenAI reasoning-family heuristic (cold-start capability fallback). |
+| `deriveIdentity` / `canonicalIdFor` / `displayProviderFor` | id-normalization helpers. |
 
 The **catalog-source** module (`model-catalog-source.ts`) refreshes pricing/capabilities from the network
 (node-only): `makeAnthropicDocsSource`, `makeOpenRouterSource`, `parseAnthropicDocsPricing`,
 `parseOpenRouterModels`, `validatePricingRows`, `sanitizePricingRows`, plus the `PricingSource`/`FetchText`
 seams and the `*_URL` constants. Only needed if you refresh the catalog yourself.
 
+**Refreshing the snapshot.** `DEFAULT_MODELS` is a committed, strongly-typed snapshot in
+`src/model-catalog-data.generated.ts`. Regenerate it with **`npm run update:model-info`**
+(`scripts/updateModelInfo.ts`): it seeds a catalog with `CORE_SEED_MODELS`, runs the live refresh
+(Anthropic docs + OpenRouter — needs network), and writes the sorted rows back as
+`export const GENERATED_MODELS = [ … ] as const satisfies readonly ModelInfoInterface[]`. The `as const`
+is what preserves the literal keys so `KnownModelKey` and the strong constructor typing work — a plain
+`.json` import would widen them to `string`. A source that fails to fetch/validate is skipped (the core
+seed stands). Add `--seed-only` to regenerate offline from just the core seed.
+
 ### Cost estimation
 
-Pre-call token/cost estimates. Source: `costEstimate.ts`.
+Pre-call TOKEN estimates. Source: `costEstimate.ts`. For USD cost, pass the token counts to
+`ModelInfo.instance.computeCostUsd(...)` directly (there is no cost wrapper here).
 
 | Export | Purpose |
 | --- | --- |
 | `estimateInputTokens(...texts): number` | chars/4 proxy over prompt texts. |
 | `estimateOutputTokens(...)` / `OutputTokenStats` / `noteOutputTokens(...)` | rolling output-size estimate from observed history. |
-| `estimateCallCostUsd(modelId, inputTokens, outputTokens): number` | table-price a call. |
-| `affordableOutputTokens(modelId, inputTokens, availableUsd): number` | max output tokens a budget affords. |
 | `DEFAULT_HOLD_OUTPUT_MULTIPLIER`, `MIN_USEFUL_OUTPUT_TOKENS` | tuning constants. |
 
 ### Schema & provider adaptation

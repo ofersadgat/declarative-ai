@@ -1,62 +1,80 @@
 import { describe, expect, it } from "vitest";
 import {
   canonicalIdFor,
-  computeCost,
-  computeCostUsd,
   deriveIdentity,
-  hasPricing,
   isReasoningModel,
-  ModelCatalog,
+  ModelInfo,
   SAMPLING_PARAM_NAMES,
-  servingProviderFor,
 } from "../src/model-catalog";
 import type { ProviderSchemaProfile } from "../src/schema";
 
-describe("pricing (default table)", () => {
-  it("prices a known model by tokens", () => {
-    // claude-haiku-4-5 seed: $1/M in, $5/M out (verified against the Anthropic docs table).
-    expect(computeCostUsd("claude-haiku-4-5", 1_000_000, 1_000_000)).toBeCloseTo(6, 10);
-    expect(computeCostUsd("claude-haiku-4-5", 10, 5)).toBeCloseTo((10 * 1 + 5 * 5) / 1e6, 12);
+describe("pricing (default catalog)", () => {
+  const catalog = ModelInfo.instance;
+
+  it("prices a known model by tokens (keyed on the full {route}/{model} id)", () => {
+    // Read the rates off the row so this stays correct across snapshot refreshes — it verifies the default
+    // catalog is WIRED + computes, not a specific price (the arithmetic is pinned in the local-table blocks).
+    const id = "anthropic/claude-haiku-4-5";
+    const { inputPerMillion: i, outputPerMillion: o } = catalog.lookup(id)!;
+    expect(catalog.computeCostUsd(id, 1_000_000, 1_000_000)).toBeCloseTo(i + o, 10);
+    expect(catalog.computeCostUsd(id, 10, 5)).toBeCloseTo((10 * i + 5 * o) / 1e6, 12);
   });
 
-  it("matches dated variants via prefix", () => {
-    expect(computeCostUsd("claude-opus-4-8-20260115", 0, 0)).toBe(0);
-    expect(hasPricing("claude-opus-4-8-20260115")).toBe(true);
+  it("matches EXACTLY — a dated/variant id is unknown unless seeded (no prefix fallback)", () => {
+    expect(catalog.hasPricing("anthropic/claude-opus-4-8")).toBe(true);
+    expect(catalog.hasPricing("anthropic/claude-opus-4-8-20260115")).toBe(false);
+    expect(catalog.computeCostUsd("anthropic/claude-opus-4-8-20260115", 1_000_000, 0)).toBeNull();
   });
 
-  it("falls back to the bare id (direct-provider price) for a vendor-prefixed id", () => {
-    expect(computeCostUsd("openai/gpt-4.1-mini", 1_000_000, 0)).toBeCloseTo(0.4, 10);
+  it("prices an OpenAI model on its OpenRouter route id", () => {
+    const id = "openrouter/openai/gpt-4.1-mini";
+    const { inputPerMillion: i } = catalog.lookup(id)!;
+    expect(catalog.computeCostUsd(id, 1_000_000, 0)).toBeCloseTo(i, 10);
   });
 
-  it("prefers a vendor-specific row (full id) over the bare-id fallback", () => {
-    const table = new ModelCatalog([
-      { modelPrefix: "claude-opus-4-8", inputPerMillion: 15, outputPerMillion: 75 }, // direct
-      { modelPrefix: "anthropic/claude-opus-4-8", inputPerMillion: 18, outputPerMillion: 90 }, // OpenRouter markup
+  it("keeps native and OpenRouter routes as DISTINCT keys (different prices)", () => {
+    const table = new ModelInfo([
+      { route: "anthropic", model: "claude-opus-4-8", inputPerMillion: 15, outputPerMillion: 75 }, // native
+      { route: "openrouter", model: "anthropic/claude-opus-4.8", inputPerMillion: 18, outputPerMillion: 90 }, // OR markup
     ]);
-    // Direct id -> direct price; OpenRouter-routed id -> the vendor-specific (full-id) row.
-    expect(table.computeCostUsd("claude-opus-4-8", 1_000_000, 0)).toBeCloseTo(15, 10);
-    expect(table.computeCostUsd("anthropic/claude-opus-4-8", 1_000_000, 0)).toBeCloseTo(18, 10);
+    expect(table.computeCostUsd("anthropic/claude-opus-4-8", 1_000_000, 0)).toBeCloseTo(15, 10);
+    expect(table.computeCostUsd("openrouter/anthropic/claude-opus-4.8", 1_000_000, 0)).toBeCloseTo(18, 10);
   });
 
   it("returns null for an unknown model rather than guessing", () => {
-    expect(computeCostUsd("some-unknown-model", 100, 100)).toBeNull();
-    expect(hasPricing("some-unknown-model")).toBe(false);
+    expect(catalog.computeCostUsd("openrouter/some-unknown-model", 100, 100)).toBeNull();
+    expect(catalog.hasPricing("openrouter/some-unknown-model")).toBe(false);
   });
 
   it("treats null token counts as zero", () => {
-    expect(computeCostUsd("claude-haiku-4-5", null, null)).toBe(0);
+    expect(catalog.computeCostUsd("anthropic/claude-haiku-4-5", null, null)).toBe(0);
+  });
+});
+
+describe("compile-time model keys (generic ModelInfo)", () => {
+  it("a literal seed types the methods to its exact keys (unknown model fails to COMPILE)", () => {
+    // Constructed with a literal array (the `const` type param preserves the keys), so the method params
+    // are the exact `${route}/${model}` union — the @ts-expect-error below is verified by `tsc`.
+    const c = new ModelInfo([
+      { route: "anthropic", model: "claude-opus-4-8", inputPerMillion: 5, outputPerMillion: 25 },
+      { route: "openrouter", model: "openai/gpt-5", inputPerMillion: 3.75, outputPerMillion: 15 },
+    ]);
+    expect(c.computeCostUsd("anthropic/claude-opus-4-8", 1_000_000, 0)).toBeCloseTo(5, 10);
+    expect(c.hasPricing("openrouter/openai/gpt-5")).toBe(true);
+    // @ts-expect-error — "anthropic/nope" is not one of the seeded `${route}/${model}` keys.
+    expect(c.computeCost("anthropic/nope", { inputTokens: 1 })).toBeNull();
   });
 });
 
 describe("computeCost (cache-aware, §5/§10.2)", () => {
-  // A fixed local table so the arithmetic is decoupled from seed drift (the cron updates seeds).
+  // A fixed local catalog so the arithmetic is decoupled from seed drift (the cron updates seeds).
   // $0.8/M in, $4/M out; default multipliers: read 0.1x, write-5m 1.25x, write-1h 2x.
   const inRate = 0.8;
-  const t = new ModelCatalog([{ modelPrefix: "hk", inputPerMillion: 0.8, outputPerMillion: 4 }]);
+  const t = new ModelInfo([{ route: "openrouter", model: "hk", inputPerMillion: 0.8, outputPerMillion: 4 }]);
 
   it("prices cache reads at the discounted rate, not the full input rate", () => {
     // 1M fresh input + 1M cache-read + 0 output. The cache read should cost 0.1x.
-    const cost = t.computeCost("hk", {
+    const cost = t.computeCost("openrouter/hk", {
       inputTokens: 2_000_000, // cache-inclusive total (ignored when the split is present)
       outputTokens: 0,
       noCacheTokens: 1_000_000,
@@ -66,7 +84,7 @@ describe("computeCost (cache-aware, §5/§10.2)", () => {
   });
 
   it("prices cache writes at the write rate", () => {
-    const cost = t.computeCost("hk", {
+    const cost = t.computeCost("openrouter/hk", {
       inputTokens: 1_000_000,
       outputTokens: 0,
       noCacheTokens: 0,
@@ -77,35 +95,35 @@ describe("computeCost (cache-aware, §5/§10.2)", () => {
 
   it("over-counts vs flat pricing exactly by the cache discount (regression guard)", () => {
     const usage = { noCacheTokens: 0, cacheReadTokens: 1_000_000, outputTokens: 0 };
-    const accurate = t.computeCost("hk", usage)!;
-    const flatWrong = t.computeCostUsd("hk", 1_000_000, 0)!; // old behavior: full input rate
+    const accurate = t.computeCost("openrouter/hk", usage)!;
+    const flatWrong = t.computeCostUsd("openrouter/hk", 1_000_000, 0)!; // old behavior: full input rate
     expect(accurate).toBeCloseTo(0.08, 10);
     expect(flatWrong).toBeCloseTo(0.8, 10);
     expect(flatWrong / accurate).toBeCloseTo(10, 6); // a 10x over-charge on a pure cache hit
   });
 
   it("falls back to flat input pricing when no cache split is reported", () => {
-    expect(t.computeCost("hk", { inputTokens: 10, outputTokens: 5 })).toBeCloseTo(
+    expect(t.computeCost("openrouter/hk", { inputTokens: 10, outputTokens: 5 })).toBeCloseTo(
       (10 * 0.8 + 5 * 4) / 1e6,
       12,
     );
   });
 
   it("honors explicit per-row cache rates and custom multipliers", () => {
-    const explicit = new ModelCatalog([
-      { modelPrefix: "m", inputPerMillion: 10, outputPerMillion: 30, cacheReadPerMillion: 0.5 },
+    const explicit = new ModelInfo([
+      { route: "openrouter", model: "m", inputPerMillion: 10, outputPerMillion: 30, cacheReadPerMillion: 0.5 },
     ]);
-    expect(explicit.computeCost("m", { cacheReadTokens: 1_000_000 })).toBeCloseTo(0.5, 10);
+    expect(explicit.computeCost("openrouter/m", { cacheReadTokens: 1_000_000 })).toBeCloseTo(0.5, 10);
 
-    const custom = new ModelCatalog([{ modelPrefix: "m", inputPerMillion: 10, outputPerMillion: 30 }], {
+    const custom = new ModelInfo([{ route: "openrouter", model: "m", inputPerMillion: 10, outputPerMillion: 30 }], {
       cacheReadMultiplier: 0.2,
     });
-    expect(custom.computeCost("m", { cacheReadTokens: 1_000_000 })).toBeCloseTo(2, 10); // 10 * 0.2
+    expect(custom.computeCost("openrouter/m", { cacheReadTokens: 1_000_000 })).toBeCloseTo(2, 10); // 10 * 0.2
   });
 
   it("prices 1-hour cache writes at 2x and 5-min writes at 1.25x", () => {
     // 1M writes, of which 400k are 1-hour TTL. 5-min slice = 600k.
-    const cost = t.computeCost("hk", {
+    const cost = t.computeCost("openrouter/hk", {
       noCacheTokens: 0,
       cacheWriteTokens: 1_000_000,
       cacheWrite1hTokens: 400_000,
@@ -117,12 +135,12 @@ describe("computeCost (cache-aware, §5/§10.2)", () => {
 
   it("treats all writes as 5-min when no 1-hour slice is reported", () => {
     expect(
-      t.computeCost("hk", { noCacheTokens: 0, cacheWriteTokens: 1_000_000, outputTokens: 0 }),
+      t.computeCost("openrouter/hk", { noCacheTokens: 0, cacheWriteTokens: 1_000_000, outputTokens: 0 }),
     ).toBeCloseTo(0.8 * 1.25, 10); // 1.0
   });
 
   it("clamps a 1-hour slice that exceeds total writes", () => {
-    const cost = t.computeCost("hk", {
+    const cost = t.computeCost("openrouter/hk", {
       cacheWriteTokens: 100,
       cacheWrite1hTokens: 999_999, // nonsense; must clamp to 100
       outputTokens: 0,
@@ -132,30 +150,32 @@ describe("computeCost (cache-aware, §5/§10.2)", () => {
 });
 
 describe("long-context tier (mechanism)", () => {
-  // Local table: current Anthropic models price 1M context at STANDARD rates (no premium seeded),
+  // Local catalog: current Anthropic models price 1M context at STANDARD rates (no premium seeded),
   // so the tier mechanism is tested against a synthetic row, not a live seed.
-  const t = new ModelCatalog([
+  // Weakly typed (`: ModelInfo`) so the "unknown model → null" probe below can pass a string key.
+  const t: ModelInfo = new ModelInfo([
     {
-      modelPrefix: "lc",
+      route: "anthropic",
+      model: "lc",
       inputPerMillion: 3,
       outputPerMillion: 15,
       longContext: { thresholdTokens: 200_000, inputPerMillion: 6, outputPerMillion: 22.5 },
     },
-    { modelPrefix: "flat", inputPerMillion: 3, outputPerMillion: 15 },
+    { route: "anthropic", model: "flat", inputPerMillion: 3, outputPerMillion: 15 },
   ]);
 
   it("uses base rates below the threshold and premium rates above it", () => {
-    const below = t.computeCost("lc", { inputTokens: 100_000, outputTokens: 0, noCacheTokens: 100_000 });
+    const below = t.computeCost("anthropic/lc", { inputTokens: 100_000, outputTokens: 0, noCacheTokens: 100_000 });
     expect(below).toBeCloseTo((100_000 * 3) / 1e6, 10);
 
-    const above = t.computeCost("lc", { inputTokens: 300_000, outputTokens: 10_000, noCacheTokens: 300_000 });
+    const above = t.computeCost("anthropic/lc", { inputTokens: 300_000, outputTokens: 10_000, noCacheTokens: 300_000 });
     // ALL tokens repriced at the premium set: 300k input @ $6, 10k output @ $22.50.
     expect(above).toBeCloseTo((300_000 * 6 + 10_000 * 22.5) / 1e6, 10);
   });
 
   it("scales cache rates with the premium input rate above the threshold", () => {
     // Above 200K: input $6 → cache read 0.6. 250k read + 250k input.
-    const cost = t.computeCost("lc", {
+    const cost = t.computeCost("anthropic/lc", {
       inputTokens: 500_000,
       noCacheTokens: 250_000,
       cacheReadTokens: 250_000,
@@ -165,46 +185,48 @@ describe("long-context tier (mechanism)", () => {
   });
 
   it("a row without a long-context tier keeps base rates at any size", () => {
-    const cost = t.computeCost("flat", { inputTokens: 1_000_000, outputTokens: 0, noCacheTokens: 1_000_000 });
+    const cost = t.computeCost("anthropic/flat", { inputTokens: 1_000_000, outputTokens: 0, noCacheTokens: 1_000_000 });
     expect(cost).toBeCloseTo((1_000_000 * 3) / 1e6, 10);
   });
 
   it("returns null for an unknown model", () => {
-    expect(computeCost("nope", { inputTokens: 100, cacheReadTokens: 50 })).toBeNull();
+    expect(t.computeCost("anthropic/nope", { inputTokens: 100, cacheReadTokens: 50 })).toBeNull();
   });
 });
 
-describe("ModelCatalog (updatable)", () => {
+describe("ModelInfo (updatable)", () => {
   it("supports upsert / remove at runtime", () => {
-    const table = new ModelCatalog();
-    expect(table.hasPricing("new-model-1")).toBe(false);
+    const table = new ModelInfo([]);
+    expect(table.hasPricing("openrouter/new-model-1")).toBe(false);
 
-    table.upsert({ modelPrefix: "new-model-1", inputPerMillion: 2, outputPerMillion: 6 });
-    expect(table.computeCostUsd("new-model-1-v2", 1_000_000, 1_000_000)).toBeCloseTo(8, 10);
+    table.upsert({ route: "openrouter", model: "new-model-1", inputPerMillion: 2, outputPerMillion: 6 });
+    expect(table.computeCostUsd("openrouter/new-model-1", 1_000_000, 1_000_000)).toBeCloseTo(8, 10);
 
     // re-price (prices change)
-    table.upsert({ modelPrefix: "new-model-1", inputPerMillion: 1, outputPerMillion: 1 });
-    expect(table.computeCostUsd("new-model-1", 1_000_000, 0)).toBeCloseTo(1, 10);
+    table.upsert({ route: "openrouter", model: "new-model-1", inputPerMillion: 1, outputPerMillion: 1 });
+    expect(table.computeCostUsd("openrouter/new-model-1", 1_000_000, 0)).toBeCloseTo(1, 10);
 
-    table.remove("new-model-1");
-    expect(table.hasPricing("new-model-1")).toBe(false);
+    table.remove("openrouter/new-model-1");
+    expect(table.hasPricing("openrouter/new-model-1")).toBe(false);
   });
 
-  it("matches longest prefix wins, regardless of insertion order", () => {
-    const table = new ModelCatalog([
-      { modelPrefix: "foo", inputPerMillion: 1, outputPerMillion: 1 },
-      { modelPrefix: "foo-pro", inputPerMillion: 10, outputPerMillion: 10 },
+  it("matches on the EXACT {route}/{model} key (no prefix matching)", () => {
+    // Weakly typed so the "extends a key but isn't it → null" probe below can pass a string key.
+    const table: ModelInfo = new ModelInfo([
+      { route: "openrouter", model: "foo", inputPerMillion: 1, outputPerMillion: 1 },
+      { route: "openrouter", model: "foo-pro", inputPerMillion: 10, outputPerMillion: 10 },
     ]);
-    // "foo-pro-x" matches both "foo" and "foo-pro"; the longer prefix wins.
-    expect(table.computeCostUsd("foo-pro-x", 1_000_000, 0)).toBeCloseTo(10, 10);
-    expect(table.computeCostUsd("foo-lite", 1_000_000, 0)).toBeCloseTo(1, 10);
+    expect(table.computeCostUsd("openrouter/foo", 1_000_000, 0)).toBeCloseTo(1, 10);
+    expect(table.computeCostUsd("openrouter/foo-pro", 1_000_000, 0)).toBeCloseTo(10, 10);
+    // A longer id that merely EXTENDS a key no longer resolves — it's a different model.
+    expect(table.computeCostUsd("openrouter/foo-pro-x", 1_000_000, 0)).toBeNull();
   });
 
-  it("bulk-loads rows (DB hydration path)", () => {
-    const table = new ModelCatalog();
+  it("bulk-loads rows (hydration path)", () => {
+    const table = new ModelInfo([]);
     table.load([
-      { modelPrefix: "a", inputPerMillion: 1, outputPerMillion: 2 },
-      { modelPrefix: "b", inputPerMillion: 3, outputPerMillion: 4 },
+      { route: "openrouter", model: "a", inputPerMillion: 1, outputPerMillion: 2 },
+      { route: "openrouter", model: "b", inputPerMillion: 3, outputPerMillion: 4 },
     ]);
     expect(table.list()).toHaveLength(2);
   });
@@ -221,20 +243,21 @@ describe("capabilities (param filtering substrate, §5.1)", () => {
   });
 
   it("returns the RECORDED supportedParameters when present (data wins over heuristic)", () => {
-    const c = new ModelCatalog([
+    const c = new ModelInfo([
       {
-        modelPrefix: "openai/gpt-5-nano",
+        route: "openrouter",
+        model: "openai/gpt-5-nano",
         inputPerMillion: 0.25,
         outputPerMillion: 1,
         supportedParameters: ["temperature", "response_format"], // pretend it DID accept temperature
       },
     ]);
-    expect(c.supportedParametersFor("openai/gpt-5-nano")).toContain("temperature");
+    expect(c.supportedParameters("openrouter/openai/gpt-5-nano")).toContain("temperature");
   });
 
   it("falls back to a temperature-LESS set for a reasoning model with no recorded capabilities", () => {
-    const c = new ModelCatalog(); // empty — cold catalog
-    const supported = c.supportedParametersFor("openai/gpt-5-nano");
+    const c = new ModelInfo([]); // empty — cold catalog
+    const supported = c.supportedParameters("openrouter/openai/gpt-5-nano");
     expect(supported).toBeDefined();
     expect(supported).not.toContain(SAMPLING_PARAM_NAMES.temperature);
     expect(supported).not.toContain(SAMPLING_PARAM_NAMES.topP);
@@ -245,57 +268,57 @@ describe("capabilities (param filtering substrate, §5.1)", () => {
   });
 
   it("returns undefined for an unknown non-reasoning model (⇒ caller sends everything)", () => {
-    const c = new ModelCatalog();
-    expect(c.supportedParametersFor("some/unknown-chat-model")).toBeUndefined();
-    expect(c.supportedParametersFor("gpt-4.1-mini")).toBeUndefined();
+    const c = new ModelInfo([]);
+    expect(c.supportedParameters("openrouter/some/unknown-chat-model")).toBeUndefined();
+    expect(c.supportedParameters("openrouter/openai/gpt-4.1-mini")).toBeUndefined();
   });
 
-  it("native Claude capabilities are NOT computed by the catalog — they come from the recorded row (table)", () => {
-    const c = new ModelCatalog(); // cold catalog: no `claude-opus-4-8` row
+  it("native Claude capabilities are NOT computed by the catalog — they come from the recorded row", () => {
+    const c = new ModelInfo([]); // cold catalog: no claude-opus-4-8 row
     // The catalog no longer synthesizes Claude caps; an un-seeded model just returns undefined (send all).
-    expect(c.supportedParametersFor("claude-opus-4-8")).toBeUndefined();
-    // With the row present (as migration 0011 seeds it), the recorded sampling-less set is returned.
-    const seeded = new ModelCatalog([
-      { modelPrefix: "claude-opus-4-8", inputPerMillion: 5, outputPerMillion: 25, supportedParameters: ["max_tokens", "stop", "tools", "tool_choice", "reasoning"] },
+    expect(c.supportedParameters("anthropic/claude-opus-4-8")).toBeUndefined();
+    // With the row present (as the ingestion path seeds it), the recorded sampling-less set is returned.
+    const seeded = new ModelInfo([
+      {
+        route: "anthropic",
+        model: "claude-opus-4-8",
+        inputPerMillion: 5,
+        outputPerMillion: 25,
+        supportedParameters: ["max_tokens", "stop", "tools", "tool_choice", "reasoning"],
+      },
     ]);
-    const supported = seeded.supportedParametersFor("claude-opus-4-8");
+    const supported = seeded.supportedParameters("anthropic/claude-opus-4-8");
     expect(supported).not.toContain(SAMPLING_PARAM_NAMES.temperature);
     expect(supported).toContain(SAMPLING_PARAM_NAMES.stopSequences);
   });
 
-  it("exposes the recorded (resolved) schema profile, longest-prefix matched", () => {
+  it("exposes the recorded (resolved) schema profile, exact-key matched", () => {
     const profile = { id: "openrouter:strict", supportsStructuredOutput: "schema" } as unknown as ProviderSchemaProfile;
-    const c = new ModelCatalog([
-      { modelPrefix: "openai/gpt-5", inputPerMillion: 1, outputPerMillion: 4, schemaProfile: profile },
+    // Weakly typed so the exact-only probes (dated variant, other route) can pass string keys.
+    const c: ModelInfo = new ModelInfo([
+      { route: "openrouter", model: "openai/gpt-5", inputPerMillion: 1, outputPerMillion: 4, schemaProfile: profile },
     ]);
-    expect(c.schemaProfileFor("openai/gpt-5-2026-01-01")?.id).toBe("openrouter:strict");
-    expect(c.schemaProfileFor("anthropic/claude-opus-4-8")).toBeUndefined();
+    expect(c.schemaProfile("openrouter/openai/gpt-5")?.id).toBe("openrouter:strict");
+    expect(c.schemaProfile("openrouter/openai/gpt-5-2026-01-01")).toBeUndefined(); // exact only
+    expect(c.schemaProfile("anthropic/claude-opus-4-8")).toBeUndefined();
   });
 });
 
-describe("model identity derivation (canonical id / serving provider)", () => {
+describe("model identity derivation (canonical id / display)", () => {
   it("canonicalIdFor collapses native + OpenRouter routes onto one id (drop vendor, dots→hyphens)", () => {
     expect(canonicalIdFor("claude-opus-4-8")).toBe("claude-opus-4-8");
     expect(canonicalIdFor("anthropic/claude-opus-4.8")).toBe("claude-opus-4-8");
     expect(canonicalIdFor("openai/gpt-4.1")).toBe("gpt-4-1");
   });
 
-  it("servingProviderFor distinguishes native Anthropic from OpenRouter by the id shape", () => {
-    expect(servingProviderFor("claude-opus-4-8")).toBe("anthropic"); // bare claude- → native API
-    expect(servingProviderFor("anthropic/claude-opus-4.8")).toBe("openrouter"); // vendor/ → OpenRouter
-    expect(servingProviderFor("openai/gpt-4.1")).toBe("openrouter");
-    expect(servingProviderFor("gpt-4o")).toBe("openrouter"); // bare non-claude routes via openai/ on OR
-  });
-
-  it("deriveIdentity fills generic identity but NEVER capabilities (that's the table/ingestion path's job)", () => {
-    const row = deriveIdentity({ modelPrefix: "anthropic/claude-opus-4.8", inputPerMillion: 5, outputPerMillion: 25 });
+  it("deriveIdentity fills generic identity but NEVER capabilities (that's the ingestion path's job)", () => {
+    const row = deriveIdentity({ route: "openrouter", model: "anthropic/claude-opus-4.8", inputPerMillion: 5, outputPerMillion: 25 });
     expect(row.canonicalId).toBe("claude-opus-4-8");
-    expect(row.servingProvider).toBe("openrouter");
-    expect(row.family).toBe("openrouter");
     expect(row.provider).toBe("Anthropic");
+    expect(row.label).toBe("claude-opus-4.8");
     expect(row.supportedParameters).toBeUndefined(); // identity only — no capability synthesis here
     // Fill-only: an explicit value is kept.
-    const fed = deriveIdentity({ modelPrefix: "x/y", inputPerMillion: 1, outputPerMillion: 1, supportedParameters: ["temperature"] });
+    const fed = deriveIdentity({ route: "openrouter", model: "x/y", inputPerMillion: 1, outputPerMillion: 1, supportedParameters: ["temperature"] });
     expect(fed.supportedParameters).toEqual(["temperature"]);
   });
 });
