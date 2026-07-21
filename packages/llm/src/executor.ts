@@ -16,11 +16,12 @@ import type {
   Executor,
   ExecutorCapabilities,
   Outcome,
+  Tool,
 } from "@declarative-ai/core";
 import { systemClock } from "@declarative-ai/services";
 import type { CallOutcome } from "./generate";
-import { executeStructuredCall, type CallDeps, type LlmCallDefinition, type LlmCallEnvironment, type StructuredCallParams } from "./llmStep";
-import { createRouter, type ProviderRouter } from "./router";
+import { executeStructuredCall, type CallDeps, type LlmCallDefinition, type LlmCallEnvironment, type StructuredCallParams, type ToolExecutor } from "./llmStep";
+import { createModelRouter, type ModelRouter } from "./router";
 
 // The serializable `spec.definition` for kind "llm-call" is `@declarative-ai/llm`'s `LlmCallDefinition`
 // (defined with `StructuredCallParams` in ./llmStep). Re-exported here because this is the executor that
@@ -28,14 +29,14 @@ import { createRouter, type ProviderRouter } from "./router";
 export type { LlmCallDefinition } from "./llmStep";
 
 /** Runner deps: the call environment with the router optional (a fake runner needs no provider) — which
- *  is exactly {@link LlmCallEnvironment} (`CallDeps` is the environment with `providers` required). */
+ *  is exactly {@link LlmCallEnvironment} (`CallDeps` is the environment with `modelRouter` required). */
 export type CallRunnerDeps = LlmCallEnvironment;
 
 /** The injectable call seam: one structured call, params → never-throwing `CallOutcome`. */
 export type CallRunner = (params: StructuredCallParams, deps: CallRunnerDeps) => Promise<CallOutcome>;
 
 const defaultRunner: CallRunner = (params, deps) => {
-  if (!deps.providers) throw new Error("llm-call executor: no ProviderRouter available (ctx.providers or options.router)");
+  if (!deps.modelRouter) throw new Error("llm-call executor: no ModelRouter available (ctx.modelRouter or options.router)");
   return executeStructuredCall(params, deps as CallDeps);
 };
 
@@ -43,8 +44,8 @@ const defaultRunner: CallRunner = (params, deps) => {
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 
 export interface LlmCallExecutorOptions {
-  /** Explicit router; else `ctx.providers` (when it looks like a router), else a lazy env-key router. */
-  router?: ProviderRouter;
+  /** Explicit router; else `ctx.modelRouter` (when it looks like a router), else a lazy env-key router. */
+  router?: ModelRouter;
   /** The call seam; defaults to the real `executeStructuredCall` pipeline. */
   runner?: CallRunner;
 }
@@ -60,12 +61,24 @@ const CAPABILITIES: ExecutorCapabilities = {
   runtime: "edge-safe",
 };
 
-/** Duck-type check that `ctx.providers` (typed `unknown` in core) is a `ProviderRouter`. */
-function asRouter(candidate: unknown): ProviderRouter | undefined {
-  if (candidate && typeof candidate === "object" && typeof (candidate as ProviderRouter).resolveModel === "function") {
-    return candidate as ProviderRouter;
+/** Duck-type check that `ctx.modelRouter` (typed `unknown` in core) is a `ModelRouter`. */
+function asRouter(candidate: unknown): ModelRouter | undefined {
+  if (candidate && typeof candidate === "object" && typeof (candidate as ModelRouter).resolveModel === "function") {
+    return candidate as ModelRouter;
   }
   return undefined;
+}
+
+/** Adapt core {@link Tool}s (`run(input, ctx)`) into AI-SDK {@link ToolExecutor}s (`(input, options)`),
+ *  closing over the call ctx. The tool's `run` IS its `execute`; the SDK's per-call `options` are dropped
+ *  (a v1 tool needs only its input + the shared services). Undefined/empty ⇒ no executors. */
+function adaptTools(tools: Record<string, Tool> | undefined, ctx: ExecServices): Record<string, ToolExecutor> | undefined {
+  if (!tools) return undefined;
+  const entries = Object.entries(tools);
+  if (entries.length === 0) return undefined;
+  const out: Record<string, ToolExecutor> = {};
+  for (const [name, tool] of entries) out[name] = (input) => tool.run(input as Record<string, unknown>, ctx);
+  return out;
 }
 
 /** An empty, already-completed event stream (v1 emits no events; the seam stays for later). Shared with the
@@ -82,7 +95,7 @@ export class LlmCallExecutor implements Executor {
   readonly kind = "llm-call" as const;
   readonly capabilities = CAPABILITIES;
 
-  private envRouter: ProviderRouter | undefined;
+  private envRouter: ModelRouter | undefined;
 
   constructor(private readonly options: LlmCallExecutorOptions = {}) {}
 
@@ -103,13 +116,13 @@ export class LlmCallExecutor implements Executor {
     };
   }
 
-  private resolveRouter(ctx: ExecServices): ProviderRouter | undefined {
+  private resolveRouter(ctx: ExecServices): ModelRouter | undefined {
     if (this.options.router) return this.options.router;
-    const injected = asRouter(ctx.providers);
+    const injected = asRouter(ctx.modelRouter);
     if (injected) return injected;
     // A custom runner needs no router at all — never force env keys on it.
     if (this.options.runner) return undefined;
-    this.envRouter ??= createRouter();
+    this.envRouter ??= createModelRouter();
     return this.envRouter;
   }
 
@@ -159,10 +172,11 @@ export class LlmCallExecutor implements Executor {
     const abortSignal = spec.abortSignal ? AbortSignal.any([signal, spec.abortSignal]) : signal;
 
     const deps: CallRunnerDeps = {
-      providers: this.resolveRouter(ctx),
+      modelRouter: this.resolveRouter(ctx),
       validator: ctx.validator,
       abortSignal,
       blobs: ctx.blobs,
+      toolExecutors: adaptTools(ctx.tools, ctx),
     };
 
     // Spread the whole definition (sampling-XOR-reasoning config + prompt) so every serializable field

@@ -8,6 +8,7 @@
  */
 import {
   memoKey,
+  type CapabilityRegistry,
   type ExecEvent,
   type ExecFailure,
   type ExecHandle,
@@ -23,7 +24,7 @@ import {
 import { WorkflowEngine } from "./engine";
 import type { StateDef } from "./format";
 import { loadBundle, snapshotHash } from "./loader";
-import type { Persistence, ProviderBinding, SkillResolver } from "./ports";
+import type { Persistence } from "./ports";
 import { validateBundle } from "./validate";
 
 /** The unit definition: raw state files + the root id (as stored/authored). */
@@ -33,25 +34,17 @@ export interface HierarchicalWorkflowDefinition {
 }
 
 export interface HwExecutorOptions {
-  /** `agent.provider` name → executor binding (DESIGN §7). */
-  providers: Record<string, ProviderBinding>;
-  skills?: SkillResolver;
+  /** The typed capability registry — `runtimes` (agent ops), `functions` (host code / interactive UI),
+   *  `skills` (named prompt templates). A state's `runtime.name`/`function.name` selects an entry. */
+  registry: CapabilityRegistry;
   persistence?: Persistence;
-  /**
-   * When a definition contains interactive (ui) states and no `spec.interaction`
-   * port is supplied: `"lazy"` (default) fails only if such a state is actually
-   * reached — right for interactive apps where e.g. a review state may never fire;
-   * `"eager"` fails before spending anything — right for search/batch contexts
-   * (DESIGN §3.3), where an unreachable-in-practice guarantee isn't worth money.
-   */
-  interactionPolicy?: "eager" | "lazy";
 }
 
 const CAPABILITIES: ExecutorCapabilities = {
   structuredOutput: true,
   sessionResume: false, // v1: a canceled workflow is re-run (DESIGN §7)
   streaming: true,
-  interactive: true, // UI states supported when spec.interaction is supplied
+  interactive: true, // supported via interactive `function` states (registry.functions)
   mutatesWorkspace: false, // becomes true per-definition once process units exist
   policyEnforcement: "none",
   memoizable: true,
@@ -163,22 +156,10 @@ export class HierarchicalWorkflowExecutor implements Executor {
       return fail("permanent", `workflow validation failed (${report.errors.length} errors): ${first}`);
     }
 
-    // Interactive definitions: eager contexts (search) refuse before any money is
-    // spent; lazy contexts fail only if a ui state is actually reached (the engine
-    // produces that failure).
-    if (this.options.interactionPolicy === "eager" && spec.interaction === undefined) {
-      const interactiveStates = interactiveStatesOf(bundle.states);
-      if (interactiveStates.length > 0) {
-        return fail(
-          "permanent",
-          `definition contains interactive states (${interactiveStates.join(", ")}) but no interaction port was supplied`,
-        );
-      }
-    }
-
-    if (!ctx.registry) {
-      return fail("permanent", "hierarchical-workflow execution requires ctx.registry for child operations");
-    }
+    // How human interaction flows (block, auto-approve, reject in a search context) is the workflow
+    // designer's composition, expressed through the registered `function`s themselves — not an executor
+    // policy. A caller that wants to refuse a human-gated definition up front does so by what it registers
+    // (e.g. a rejecting function) or its own static scan before calling `start()`.
 
     // --- Abort / timeout wiring ------------------------------------------------
     let timedOutByLimit = false;
@@ -196,11 +177,8 @@ export class HierarchicalWorkflowExecutor implements Executor {
     // --- Engine run ------------------------------------------------------------
     const engine = new WorkflowEngine({
       bundle,
-      providers: this.options.providers,
-      registry: ctx.registry,
+      registry: this.options.registry,
       validator: ctx.validator,
-      interaction: spec.interaction,
-      skills: this.options.skills,
       persistence: this.options.persistence,
       services: ctx,
       clock: ctx.clock,
@@ -280,11 +258,4 @@ export class HierarchicalWorkflowExecutor implements Executor {
 
 export function createHierarchicalWorkflowExecutor(options: HwExecutorOptions): HierarchicalWorkflowExecutor {
   return new HierarchicalWorkflowExecutor(options);
-}
-
-/** State IDs of interactive (ui) states in a bundle's state map. */
-export function interactiveStatesOf(states: Record<string, StateDef>): string[] {
-  return Object.entries(states)
-    .filter(([, s]) => s.ui !== undefined)
-    .map(([id]) => id);
 }

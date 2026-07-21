@@ -1,5 +1,6 @@
 import type { ErrorClass } from "./classification";
-import type { BlobStore, SessionStore } from "./stores";
+import type { Approver } from "./permissions";
+import type { BlobStore, SessionStore, Workspace } from "./stores";
 
 /**
  * The ai-exec execution contract (DESIGN §3): one uniform way to execute an "AI unit" —
@@ -165,17 +166,6 @@ export interface ExecLimits {
   maxCostUsd?: number;
 }
 
-/**
- * The human-in-the-loop seam (DESIGN §3.3). Callers with a real user supply a UI-backed
- * port; search/batch callers supply a fixture-scripted port or one that rejects
- * (making interactive states a `permanent` failure). The port is caller-supplied and
- * never readable by code running inside the unit, which is what makes approval gates
- * user-controlled by construction.
- */
-export interface InteractionPort {
-  request(req: { stateId: string; component: string; inputs: unknown }): Promise<unknown>;
-}
-
 export interface ExecutionSpec {
   kind: UnitKind;
   /** Unit definition. For `llm-call`: the call params. For composite/process units:
@@ -197,9 +187,6 @@ export interface ExecutionSpec {
   limits?: ExecLimits;
   /** Compiled safety policy — opaque here; enforced per executor capability. */
   policy?: unknown;
-  /** Required iff the executor is `interactive` and the definition contains
-   *  interactive states. */
-  interaction?: InteractionPort;
   abortSignal?: AbortSignal;
 }
 
@@ -211,7 +198,6 @@ export type ExecEvent =
   | { type: "child_outcome"; ref: { kind: UnitKind; label?: string }; metrics: ExecMetrics }
   | { type: "command_request"; command: string; parsed?: unknown } // process units
   | { type: "command_result"; decision: "allowed" | "blocked" | "approved" | "denied" }
-  | { type: "interaction_request"; stateId: string; component: string; payload: unknown }
   | { type: "output_partial"; text: string };
 
 // --- Executor ----------------------------------------------------------------
@@ -221,7 +207,8 @@ export interface ExecutorCapabilities {
   structuredOutput: boolean;
   sessionResume: boolean;
   streaming: boolean;
-  /** May emit `interaction_request` events; needs `spec.interaction` for interactive definitions. */
+  /** Supports interactive states — those whose `function` operation needs a human/renderer
+   *  (a registered `HostFunction` with `capabilities.interactive`). */
   interactive: boolean;
   /** Requires `spec.workspace`; memo keys must include the workspace tree hash. */
   mutatesWorkspace: boolean;
@@ -265,6 +252,121 @@ export class MapExecutorRegistry implements ExecutorRegistry {
   get(kind: UnitKind): Executor | undefined {
     return this.map.get(kind);
   }
+}
+
+// --- Capability registry (typed facets) --------------------------------------
+
+/**
+ * The named things a state operation can reference, split into TYPED facets so each facet's native
+ * interface matches how it is invoked (no `definition: unknown` impedance-mismatch, no per-name binding
+ * table). Behavior facets — `runtimes` (agent operations) and `functions` (host code, incl. interactive
+ * UI). Content facet — `skills` (named prompt templates a runtime op's prompt reads from). Agent-tool
+ * facet — `tools` (functions + call-metadata a runtime may invoke mid-loop, referenced by logical name;
+ * see RUNTIMES-AND-PERMISSIONS.md §2–3). See HW-REDESIGN.md. In-bundle nested states are NOT registry
+ * entries; cross-bundle sub-workflow composition is deferred (a black-box sub-workflow is itself a
+ * `HostFunction`).
+ */
+export interface CapabilityRegistry {
+  runtimes: Registry<Runtime>;
+  functions: Registry<HostFunction>;
+  skills: Registry<SkillTemplate>;
+  tools: Registry<Tool>;
+}
+
+/** A name-keyed lookup facet. `register` returns `this` for chaining. */
+export interface Registry<T> {
+  get(name: string): T | undefined;
+  register(name: string, value: T): this;
+}
+
+/**
+ * The normalized operation a {@link Runtime} runs — hw renders this from a `runtime` state operation:
+ * the prompt (inline template OR a named skill, with any conversation preamble prepended), the merged
+ * config surface (binding defaults ← `configRef` preset ← inline), and the produced output schema. The
+ * Runtime resolves `config` into its own definition shape (e.g. the llm runtime → an `LlmCallDefinition`).
+ */
+export interface RuntimeOp {
+  prompt: string;
+  system?: string;
+  config: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  /** Executable tools the runtime (agent) may call mid-loop, keyed by logical name — the engine resolved
+   *  the state's `runtime.tools` names through `registry.tools`. A composed runtime (llm) runs these
+   *  in-loop; a delegated runtime declares them to its agent. Absent/empty ⇒ a plain single call. */
+  tools?: Record<string, Tool>;
+  timeoutMs?: number;
+  abortSignal?: AbortSignal;
+}
+
+/**
+ * A runtime adapter — executes an agent operation (llm, claude-code, codex, …). Keyed by name in
+ * `registry.runtimes`; a state's `runtime.name` selects it. `llm` is simply the simplest runtime
+ * (uniform interface, capabilities distinguish it from a file-editing agent).
+ */
+export interface Runtime {
+  readonly capabilities: ExecutorCapabilities;
+  run(op: RuntimeOp, ctx: ExecServices): ExecHandle;
+}
+
+/**
+ * A registered host function — inputs → structured output, sync or async. A UI component is just an
+ * interactive function (it renders and awaits human input); an async function's promise is treated like
+ * any other async value in the dataflow (its outputs are PENDING until it resolves). Interactive
+ * functions close over their renderer at host-registration time.
+ */
+export interface HostFunction {
+  /** `interactive`: needs a human/renderer (was a `ui` op) — refused up-front by search callers.
+   *  `pure`: deterministic and memoizable. `readOnly` (tools): does not mutate the workspace/world — the
+   *  distinction the `read-only`/`plan` permission profiles gate on (RUNTIMES-AND-PERMISSIONS.md §4). */
+  readonly capabilities?: { interactive?: boolean; pure?: boolean; readOnly?: boolean };
+  run(inputs: Record<string, unknown>, ctx: ExecServices): unknown | Promise<unknown>;
+}
+
+/** A named prompt template a runtime op's prompt can reference (a skill = name → prompt, `{{...}}` slots). */
+export type SkillTemplate = string;
+
+/**
+ * A tool a runtime (agent) may invoke mid-loop. A tool IS a {@link HostFunction} (`run(input, ctx)`) PLUS
+ * the call-metadata a model needs to decide to call it — a `description` and an `inputSchema`. So
+ * `Tool ⊂ HostFunction`: the same impl can be surfaced as a graph `function` op or an agent tool. A tool's
+ * body may itself invoke another runtime/sub-workflow — tools can be anything, like functions. See
+ * RUNTIMES-AND-PERMISSIONS.md §2.
+ */
+export interface Tool extends HostFunction {
+  /** What the tool does — shown to the model. */
+  readonly description?: string;
+  /** JSON Schema for the input the model must produce for a call. */
+  readonly inputSchema: Record<string, unknown>;
+}
+
+/**
+ * A per-runtime redirect to a DELEGATED agent's built-in tool of the given native name (RUNTIMES-AND-
+ * PERMISSIONS.md §3). Unlike a {@link Tool} we cannot execute it ourselves — it names the black-box agent's
+ * own tool, handed to the adapter as an alias/allowlist entry. A tool rename binding is therefore
+ * `Tool | NativeToolRef`; `native` is a delegated-runtime concern (the `llm` runtime is always our-impl).
+ */
+export interface NativeToolRef {
+  readonly native: string;
+}
+
+/** A plain-map facet. */
+class MapRegistry<T> implements Registry<T> {
+  private readonly map = new Map<string, T>();
+  get(name: string): T | undefined {
+    return this.map.get(name);
+  }
+  register(name: string, value: T): this {
+    this.map.set(name, value);
+    return this;
+  }
+}
+
+/** A plain-map {@link CapabilityRegistry} — sufficient for both consumers. */
+export class MapCapabilityRegistry implements CapabilityRegistry {
+  readonly runtimes: Registry<Runtime> = new MapRegistry<Runtime>();
+  readonly functions: Registry<HostFunction> = new MapRegistry<HostFunction>();
+  readonly skills: Registry<SkillTemplate> = new MapRegistry<SkillTemplate>();
+  readonly tools: Registry<Tool> = new MapRegistry<Tool>();
 }
 
 // --- Composition -------------------------------------------------------------
@@ -410,13 +512,24 @@ export interface ExecServices {
   stepStartMs?: number;
   /** Composite units execute children through this. */
   registry?: ExecutorRegistry;
-  /** Optional provider router for llm-backed executors (typed in @declarative-ai/llm). */
-  providers?: unknown;
+  /** Optional model router for llm-backed executors (typed as ModelRouter in @declarative-ai/llm). */
+  modelRouter?: unknown;
+  /** Executable tools the current agent operation may call mid-loop, keyed by name (RUNTIMES-AND-
+   *  PERMISSIONS.md §2). A runtime forwards these here; an llm-backed executor adapts each into its tool
+   *  loop. Absent ⇒ no host tools available for this call. */
+  tools?: Record<string, Tool>;
   /** Mutable, logical-id-keyed session store — e.g. a workflow run injects a RUN-SCOPED one so states
    *  sharing a `sessionId` continue the same conversation. Absent ⇒ sessions unavailable. */
   sessions?: SessionStore;
   /** Content-addressed blob store for file/media I/O (Phase 5). Absent ⇒ blob refs can't be resolved. */
   blobs?: BlobStore;
+  /** The working directory the current operation's workspace tools act within — a Session-owned resource
+   *  (RUNTIMES-AND-PERMISSIONS.md §3). Absent ⇒ workspace-backed tools error. */
+  workspace?: Workspace;
+  /** The human tool-call approver (RUNTIMES-AND-PERMISSIONS.md §4). The engine wraps a COMPOSED runtime's
+   *  tools itself, but a DELEGATED runtime (claude-code/opencode) that drives its own loop reads this to
+   *  route its native permission callback back through our approval UI. Absent ⇒ no interactive gate. */
+  approve?: Approver;
 }
 
 /** Minimal validation seam (implemented by `@declarative-ai/services` SchemaValidator). */

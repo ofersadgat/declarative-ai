@@ -4,3 +4,4 @@ export * from "./encodedError";
 export * from "./hashing";
 export * from "./llmConfig";
 export * from "./stores";
+export * from "./permissions";

@@ -39,6 +39,17 @@ export class MapSessionStore implements SessionStore {
   }
 }
 
+/**
+ * A working directory an agent's tools operate within (RUNTIMES-AND-PERMISSIONS.md §3). A Session-owned
+ * resource threaded via `ExecServices.workspace`: states sharing a session share it; a fan-out may isolate
+ * each branch in its own. `root` is an absolute path — workspace tools resolve their inputs relative to it
+ * and refuse to escape it (SPEC §7.2). Kept a pure interface here (no `node:fs`) so core stays edge-safe;
+ * the fs-backed tools that read it live in `@declarative-ai/tools`.
+ */
+export interface Workspace {
+  root: string;
+}
+
 /** A reference to a blob: by content hash (immutable, memo-sound), URL, or workspace path. */
 export interface BlobRef {
   contentHash?: string;

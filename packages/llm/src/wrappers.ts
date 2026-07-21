@@ -33,7 +33,15 @@ import type {
   CallEstimate,
 } from "@declarative-ai/core";
 import { hashCanonical, memoKey } from "@declarative-ai/core";
-import { deadlineDecision, estimateCallTokens, systemClock, DEADLINE_FLOOR_REASON } from "@declarative-ai/services";
+import {
+  deadlineDecision,
+  estimateCallTokens,
+  systemClock,
+  DEADLINE_FLOOR_REASON,
+  backoffDelayMs,
+  DEFAULT_BASE_BACKOFF_MS,
+  DEFAULT_MAX_BACKOFF_MS,
+} from "@declarative-ai/services";
 import type { ModelMessage } from "ai";
 import { emptyEvents } from "./executor";
 import { promptAsMessages, promptText } from "./generate";
@@ -295,16 +303,40 @@ export function withRateLimit<R = ExecServices>(config: { limiter: RateLimiter }
 }
 
 /**
- * The opt-in bounded output-repair loop: on a schema-VALIDATION failure, re-invoke the inner executor with
- * the concrete errors appended to the prompt, up to `turns` extra turns (policy fixed at construction),
- * accumulating metrics across attempts. Any non-validation failure (or a success) stops immediately. The
- * augmented definition itself carries the repair hint, so an inner memoize (which derives its key by
- * hashing the definition) keys on exactly what is sent — no separate hash for this wrapper to keep in sync.
+ * The unified opt-in re-attempt policy. One concept, two independent axes:
+ *
+ * - `transient` — re-attempt a `network-retriable` failure (rate limit / 5xx) with full-jitter exponential
+ *   backoff, up to this many EXTRA attempts (a number is the cap; the object form tunes backoff and injects
+ *   a test sleep). Re-sends the same request.
+ * - `validation` — re-attempt a schema-VALIDATION failure (`api-retriable`) up to `turns` extra attempts.
+ *   `feedback: true` appends the concrete Ajv errors to the prompt before retrying (a targeted fix — the
+ *   former `withRepair`); `feedback: false` is a blind re-roll of the same prompt. Off by default because a
+ *   silent re-roll biases stochastic output until it passes.
+ *
+ * Metrics accumulate across attempts. Both axes compose: after a feedback repair, a subsequent transient
+ * failure re-sends the ALREADY-augmented request. A non-retriable failure (or success) stops immediately.
+ * The augmented definition itself carries the repair hint, so an inner memoize (keyed on the definition
+ * hash) keys on exactly what is sent — no separate hash to keep in sync.
  */
-export function withRepair<R = ExecServices>(config: { turns: number }): ExecutorWrapper<R, R>;
-export function withRepair<R = ExecServices>(config: { turns: number }, inner: Executor<R>): Executor<R>;
-export function withRepair<R = ExecServices>(config: { turns: number }, inner?: Executor<R>): ExecutorWrapper<R, R> | Executor<R> {
-  const { turns } = config;
+export interface RetryConfig {
+  transient?:
+    | number
+    | { cap: number; baseBackoffMs?: number; maxBackoffMs?: number; waitMs?: (ms: number) => Promise<void>; random?: () => number };
+  validation?: { turns: number; feedback?: boolean };
+}
+
+export function withRetry<R = ExecServices>(config: RetryConfig): ExecutorWrapper<R, R>;
+export function withRetry<R = ExecServices>(config: RetryConfig, inner: Executor<R>): Executor<R>;
+export function withRetry<R = ExecServices>(config: RetryConfig, inner?: Executor<R>): ExecutorWrapper<R, R> | Executor<R> {
+  const transientCap = typeof config.transient === "number" ? config.transient : (config.transient?.cap ?? 0);
+  const b = typeof config.transient === "object" ? config.transient : undefined;
+  const baseBackoffMs = b?.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS;
+  const maxBackoffMs = b?.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
+  const waitMs = b?.waitMs ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const random = b?.random ?? Math.random;
+  const validationTurns = config.validation?.turns ?? 0;
+  const feedback = config.validation?.feedback ?? false;
+
   const wrap = ((innerExec: Executor): Executor => ({
     kind: innerExec.kind,
     capabilities: innerExec.capabilities,
@@ -315,14 +347,24 @@ export function withRepair<R = ExecServices>(config: { turns: number }, inner?: 
         let accumulated: ExecMetrics | undefined;
         let last: Outcome | undefined;
         let currentSpec = spec;
-        let turn = 0;
+        let transientUsed = 0;
+        let validationUsed = 0;
         while (!ctl.canceled()) {
           last = await ctl.started(innerExec.start(currentSpec, ctx)).outcome;
           accumulated = accumulateMetrics(accumulated, last.metrics);
-          if (ctl.canceled() || !isValidationFailure(last) || turn >= turns) break;
-          turn++;
-          const augmented: LlmCallDefinition = { ...def, ...withRepairHint(base, last.error!.reason) };
-          currentSpec = { ...spec, definition: augmented };
+          if (ctl.canceled() || !last.error) break;
+          if (last.error.classification === "network-retriable" && transientUsed < transientCap) {
+            const delay = backoffDelayMs(transientUsed, last.error.retryAfterMs, { baseBackoffMs, maxBackoffMs }, random);
+            transientUsed++;
+            if (delay > 0) await waitMs(delay);
+            continue; // re-send `currentSpec` (possibly already repair-augmented)
+          }
+          if (isValidationFailure(last) && validationUsed < validationTurns) {
+            validationUsed++;
+            if (feedback) currentSpec = { ...spec, definition: { ...def, ...withRepairHint(base, last.error.reason) } };
+            continue;
+          }
+          break;
         }
         if (!last) return canceledOutcome("canceled before the call started");
         return { ...last, metrics: accumulated! };
@@ -330,6 +372,14 @@ export function withRepair<R = ExecServices>(config: { turns: number }, inner?: 
     },
   })) as unknown as ExecutorWrapper<R, R>;
   return curryOrApply(wrap, inner);
+}
+
+/** @deprecated Use `withRetry({ validation: { turns, feedback: true } })` — repair is the validation-with-feedback
+ *  axis of the unified re-attempt policy. */
+export function withRepair<R = ExecServices>(config: { turns: number }): ExecutorWrapper<R, R>;
+export function withRepair<R = ExecServices>(config: { turns: number }, inner: Executor<R>): Executor<R>;
+export function withRepair<R = ExecServices>(config: { turns: number }, inner?: Executor<R>): ExecutorWrapper<R, R> | Executor<R> {
+  return withRetry<R>({ validation: { turns: config.turns, feedback: true } }, inner as Executor<R>);
 }
 
 /** Fold a successful outcome into an assistant turn for the transcript. Phase 4 handles text + structured

@@ -44,7 +44,7 @@ describe("file INPUT lowering (attachments)", () => {
     });
     const out = await executeStructuredCall(
       { model: "openrouter/m", prompt: "describe", attachments: [{ mediaType: "image/png", data: { base64: "aGVsbG8=" } }], timeoutMs: 30_000 },
-      { providers: fakeRouter(model) },
+      { modelRouter: fakeRouter(model) },
     );
     expect(out.error).toBeUndefined();
     const wire = JSON.stringify(captured?.prompt);
@@ -64,7 +64,7 @@ describe("file INPUT lowering (attachments)", () => {
     const model = new MockLanguageModelV3({ doStream: async () => stream(TEXT) });
     const out = await executeStructuredCall(
       { model: "openrouter/m", prompt: "x", attachments: [{ mediaType: "application/pdf", data: { contentHash: "abc" } }], timeoutMs: 30_000 },
-      { providers: fakeRouter(model), blobs },
+      { modelRouter: fakeRouter(model), blobs },
     );
     expect(out.error).toBeUndefined();
     expect(loadedRef).toEqual({ contentHash: "abc" });
@@ -74,7 +74,7 @@ describe("file INPUT lowering (attachments)", () => {
     const model = new MockLanguageModelV3({ doStream: async () => stream(TEXT) });
     const out = await executeStructuredCall(
       { model: "openrouter/m", prompt: "x", attachments: [{ mediaType: "application/pdf", data: { contentHash: "abc" } }], timeoutMs: 30_000 },
-      { providers: fakeRouter(model) },
+      { modelRouter: fakeRouter(model) },
     );
     expect(out.error?.classification).toBe("permanent");
     expect(out.error?.reason).toMatch(/blob store/);

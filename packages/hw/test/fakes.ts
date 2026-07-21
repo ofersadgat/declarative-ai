@@ -1,17 +1,17 @@
 /**
- * Test doubles: an abort-aware fake executor scripted per model id, and a scripted
- * interaction port. The fake stands in for @declarative-ai/llm's executor — the engine only
- * sees the core `Executor` contract.
+ * Test doubles for the new capability-registry model: a scripted `Runtime` set (one script dispatched by
+ * runtime name), and scripted `HostFunction`s (was the InteractionPort). The fakes stand in for
+ * @declarative-ai/llm's `createLlmRuntime` and host UI functions — the engine only sees the core contracts.
  */
-import type {
-  ExecHandle,
-  ExecutionSpec,
-  Executor,
-  ExecutorCapabilities,
-  ExecServices,
-  InteractionPort,
-  Outcome,
-  UnitKind,
+import {
+  MapCapabilityRegistry,
+  type ExecHandle,
+  type ExecServices,
+  type ExecutorCapabilities,
+  type HostFunction,
+  type Outcome,
+  type Runtime,
+  type RuntimeOp,
 } from "@declarative-ai/core";
 
 const CAPS: ExecutorCapabilities = {
@@ -27,7 +27,10 @@ const CAPS: ExecutorCapabilities = {
 
 async function* empty(): AsyncGenerator<never> {}
 
-export type Script = (spec: ExecutionSpec) => Outcome | Promise<Outcome>;
+/** A recorded runtime invocation: the normalized op plus the runtime NAME it was dispatched to. */
+export type FakeCall = RuntimeOp & { name: string };
+
+export type Script = (call: FakeCall) => Outcome | Promise<Outcome>;
 
 export const ok = (value: unknown, cost = 0.01): Outcome => ({
   value,
@@ -46,68 +49,85 @@ export function deferred<T>(): Deferred<T> {
   return { promise, resolve };
 }
 
-export class FakeExecutor implements Executor {
-  readonly kind: UnitKind = "llm-call";
-  readonly capabilities = CAPS;
-  readonly calls: ExecutionSpec[] = [];
+/** A set of fake runtimes backed by ONE script (dispatched on the runtime name), sharing a call log. */
+export class FakeRuntimes {
+  readonly calls: FakeCall[] = [];
   readonly ctxs: ExecServices[] = [];
   constructor(private readonly script: Script) {}
 
-  start(spec: ExecutionSpec, ctx: ExecServices): ExecHandle {
-    this.calls.push(spec);
-    this.ctxs.push(ctx);
-    const outcome = (async (): Promise<Outcome> => {
-      const canceled = new Promise<Outcome>((resolve) => {
-        const onAbort = (): void =>
-          resolve({ metrics: { durationMs: 0 }, error: { classification: "canceled", reason: "aborted" } });
-        if (spec.abortSignal?.aborted) onAbort();
-        else spec.abortSignal?.addEventListener("abort", onAbort, { once: true });
-      });
-      try {
-        return await Promise.race([Promise.resolve(this.script(spec)), canceled]);
-      } catch (e) {
-        return { metrics: { durationMs: 0 }, error: { classification: "permanent", reason: (e as Error).message } };
-      }
-    })();
-    return { events: empty(), outcome, cancel: async () => {} };
+  runtime(name: string): Runtime {
+    return {
+      capabilities: CAPS,
+      run: (op: RuntimeOp, ctx: ExecServices): ExecHandle => {
+        const call: FakeCall = { ...op, name };
+        this.calls.push(call);
+        this.ctxs.push(ctx);
+        const outcome = (async (): Promise<Outcome> => {
+          const canceled = new Promise<Outcome>((resolve) => {
+            const onAbort = (): void =>
+              resolve({ metrics: { durationMs: 0 }, error: { classification: "canceled", reason: "aborted" } });
+            if (op.abortSignal?.aborted) onAbort();
+            else op.abortSignal?.addEventListener("abort", onAbort, { once: true });
+          });
+          try {
+            return await Promise.race([Promise.resolve(this.script(call)), canceled]);
+          } catch (e) {
+            return { metrics: { durationMs: 0 }, error: { classification: "permanent", reason: (e as Error).message } };
+          }
+        })();
+        return { events: empty(), outcome, cancel: async () => {} };
+      },
+    };
+  }
+
+  /** Register the given runtime names into a registry, all backed by this script. */
+  register(registry: MapCapabilityRegistry, names: string[]): MapCapabilityRegistry {
+    for (const name of names) registry.runtimes.register(name, this.runtime(name));
+    return registry;
   }
 }
 
-/** Model id of an llm-call spec built by `llmCallBinding` (the fixture bindings put it in config). */
-export function modelOf(spec: ExecutionSpec): string {
-  return String((spec.definition as { model?: unknown }).model ?? "");
+/** The runtime name a recorded call dispatched to (was the fixture's model id). */
+export function modelOf(call: FakeCall): string {
+  return call.name;
 }
 
-export function promptOf(spec: ExecutionSpec): string {
-  return String((spec.definition as { prompt?: unknown }).prompt ?? "");
+export function promptOf(call: FakeCall): string {
+  return call.prompt ?? "";
 }
 
 /** The rendered template tail — the prompt with any conversation-history preamble
  *  stripped, so scripts can dispatch on content without matching history echoes. */
-export function promptTail(spec: ExecutionSpec): string {
-  const p = promptOf(spec);
+export function promptTail(call: FakeCall): string {
+  const p = promptOf(call);
   const marker = "</conversation-history>";
   const at = p.lastIndexOf(marker);
   return at < 0 ? p.trim() : p.slice(at + marker.length).trim();
 }
 
-/** Scripted interaction port: responses per stateId (fifo when array). */
-export class ScriptedPort implements InteractionPort {
-  readonly requests: Array<{ stateId: string; component: string; inputs: unknown }> = [];
-  constructor(private readonly responses: Record<string, unknown[] | ((req: { stateId: string; component: string; inputs: unknown }) => unknown)>) {}
-  async request(req: { stateId: string; component: string; inputs: unknown }): Promise<unknown> {
-    this.requests.push(req);
-    const r = this.responses[req.stateId];
-    if (r === undefined) throw new Error(`no scripted response for ${req.stateId}`);
-    if (typeof r === "function") return r(req);
-    const next = r.shift();
-    if (next === undefined) throw new Error(`scripted responses for ${req.stateId} exhausted`);
+/** A scripted host function (was ScriptedPort): returns queued responses FIFO; records its invocations.
+ *  Interactive by default (stands in for a UI component). */
+export class ScriptedFunction implements HostFunction {
+  readonly capabilities: { interactive?: boolean; pure?: boolean };
+  readonly calls: Array<{ config: unknown; inputs: unknown }> = [];
+  constructor(
+    private readonly queue: unknown[],
+    capabilities: { interactive?: boolean; pure?: boolean } = { interactive: true },
+  ) {
+    this.capabilities = capabilities;
+  }
+  run(args: Record<string, unknown>): unknown {
+    this.calls.push(args as { config: unknown; inputs: unknown });
+    const next = this.queue.shift();
+    if (next === undefined) throw new Error("scripted function responses exhausted");
     return next;
   }
 }
 
-export const rejectingPort: InteractionPort = {
-  request: async (req) => {
-    throw new Error(`interactive state '${req.stateId}' not allowed in this context`);
+/** A function that always rejects — the search-context stand-in for a human gate. */
+export const rejectingFunction: HostFunction = {
+  capabilities: { interactive: true },
+  run: (args) => {
+    throw new Error(`interactive function '${(args as { config?: { name?: string } }).config?.name}' not allowed in this context`);
   },
 };

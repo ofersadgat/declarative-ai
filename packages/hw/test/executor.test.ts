@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MapExecutorRegistry, memoKey, type ExecEvent, type ExecutionSpec, type ExecServices } from "@declarative-ai/core";
+import { MapCapabilityRegistry, memoKey, type ExecEvent, type ExecServices, type ExecutionSpec, type HostFunction } from "@declarative-ai/core";
 import { SchemaValidator } from "@declarative-ai/services";
 import {
   createHierarchicalWorkflowExecutor,
@@ -7,26 +7,20 @@ import {
   type HierarchicalWorkflowDefinition,
 } from "../src/executor";
 import { loadBundle, snapshotHash } from "../src/loader";
-import { llmCallBinding } from "../src/ports";
-import { FakeExecutor, modelOf, ok, promptTail, ScriptedPort, type Script } from "./fakes";
+import { FakeRuntimes, modelOf, ok, promptTail, ScriptedFunction, type Script } from "./fakes";
 import { PLAN_ID, specPlanningFiles } from "./fixtures";
 
-const PROVIDERS = {
-  planner: llmCallBinding({ model: "planner" }),
-  critic: llmCallBinding({ model: "critic" }),
-  fixer: llmCallBinding({ model: "fixer" }),
-};
+const RUNTIME_NAMES = ["planner", "critic", "fixer"];
+const CTX: ExecServices = { validator: new SchemaValidator() };
 
-function planningDefinition(): { definition: HierarchicalWorkflowDefinition } {
-  const states = specPlanningFiles();
-  const definition = { rootId: PLAN_ID, states };
-  return { definition };
+function planningDefinition(): HierarchicalWorkflowDefinition {
+  return { rootId: PLAN_ID, states: specPlanningFiles() };
 }
 
-const happyScript: Script = (spec) => {
-  switch (modelOf(spec)) {
+const happyScript: Script = (call) => {
+  switch (modelOf(call)) {
     case "planner":
-      return promptTail(spec).startsWith("Write the plan") ? ok({ plan_doc: "# The Plan" }) : ok({ goals: ["g1"] });
+      return promptTail(call).startsWith("Write the plan") ? ok({ plan_doc: "# The Plan" }) : ok({ goals: ["g1"] });
     case "critic":
       return ok({ outcome: "clean", weaknesses: [], critique_report: "no issues" });
     default:
@@ -34,24 +28,23 @@ const happyScript: Script = (spec) => {
   }
 };
 
-function makeCtx(script: Script): { ctx: ExecServices; fake: FakeExecutor } {
-  const fake = new FakeExecutor(script);
-  return {
-    ctx: { registry: new MapExecutorRegistry().register(fake), validator: new SchemaValidator() },
-    fake,
-  };
+/** Build a capability registry (runtimes + any interactive/host functions) for the executor options. */
+function makeRegistry(script: Script, functions: Record<string, HostFunction> = {}): { registry: MapCapabilityRegistry; fake: FakeRuntimes } {
+  const fake = new FakeRuntimes(script);
+  const registry = fake.register(new MapCapabilityRegistry(), RUNTIME_NAMES);
+  for (const [name, fn] of Object.entries(functions)) registry.functions.register(name, fn);
+  return { registry, fake };
 }
 
 function specFor(inputs: Record<string, unknown>, overrides?: Partial<ExecutionSpec>): ExecutionSpec {
-  const { definition } = planningDefinition();
-  return { kind: "hierarchical-workflow", definition, inputs, ...overrides };
+  return { kind: "hierarchical-workflow", definition: planningDefinition(), inputs, ...overrides };
 }
 
 describe("hierarchical-workflow executor", () => {
   it("runs the SPEC §9 planning workflow end-to-end and rolls up metrics", async () => {
-    const executor = createHierarchicalWorkflowExecutor({ providers: PROVIDERS });
-    const { ctx, fake } = makeCtx(happyScript);
-    const handle = executor.start(specFor({ issue: "the issue" }), ctx);
+    const { registry, fake } = makeRegistry(happyScript);
+    const executor = createHierarchicalWorkflowExecutor({ registry });
+    const handle = executor.start(specFor({ issue: "the issue" }), CTX);
 
     const seen: ExecEvent[] = [];
     const consume = (async () => {
@@ -74,53 +67,42 @@ describe("hierarchical-workflow executor", () => {
   });
 
   it("rejects an invalid bundle with the validation report", async () => {
-    const { definition } = planningDefinition();
-    const states = definition.states as ReturnType<typeof specPlanningFiles>;
-    states[PLAN_ID]!.transitions!.push({ to: "nowhere" });
-    const executor = createHierarchicalWorkflowExecutor({ providers: PROVIDERS });
-    const { ctx, fake } = makeCtx(happyScript);
-    const outcome = await executor
-      .start({ kind: "hierarchical-workflow", definition, inputs: { issue: "i" } }, ctx)
-      .outcome;
+    const definition = planningDefinition();
+    (definition.states as ReturnType<typeof specPlanningFiles>)[PLAN_ID]!.transitions!.push({ to: "nowhere" });
+    const { registry, fake } = makeRegistry(happyScript);
+    const executor = createHierarchicalWorkflowExecutor({ registry });
+    const outcome = await executor.start({ kind: "hierarchical-workflow", definition, inputs: { issue: "i" } }, CTX).outcome;
     expect(outcome.error?.classification).toBe("permanent");
     expect(outcome.error?.reason).toMatch(/validation failed/);
     expect(outcome.error?.reason).toMatch(/nowhere/);
     expect(fake.calls).toHaveLength(0);
   });
 
-  it("interaction policy: eager refuses interactive definitions up front; lazy runs until a ui state is reached", async () => {
-    // Eager (search context): the planning bundle contains human_review → refuse before spending.
-    const eager = createHierarchicalWorkflowExecutor({ providers: PROVIDERS, interactionPolicy: "eager" });
-    const { ctx: eagerCtx, fake: eagerFake } = makeCtx(happyScript);
-    const eagerOutcome = await eager.start(specFor({ issue: "i" }), eagerCtx).outcome;
-    expect(eagerOutcome.error?.classification).toBe("permanent");
-    expect(eagerOutcome.error?.reason).toMatch(/interactive states/);
-    expect(eagerFake.calls).toHaveLength(0);
+  it("no interaction policy: an interactive definition runs when the gate isn't reached, fails when it is reached unregistered", async () => {
+    // The clean path never reaches human_review → succeeds even with no interactive function registered.
+    // Whether/how interaction flows is the designer's composition, not an executor mode.
+    const { registry: unreachedReg } = makeRegistry(happyScript);
+    const unreached = createHierarchicalWorkflowExecutor({ registry: unreachedReg });
+    const unreachedOutcome = await unreached.start(specFor({ issue: "i" }), CTX).outcome;
+    expect(unreachedOutcome.error).toBeUndefined();
 
-    // Lazy (default): the clean path never reaches human_review → succeeds without a port.
-    const lazy = createHierarchicalWorkflowExecutor({ providers: PROVIDERS });
-    const { ctx: lazyCtx } = makeCtx(happyScript);
-    const lazyOutcome = await lazy.start(specFor({ issue: "i" }), lazyCtx).outcome;
-    expect(lazyOutcome.error).toBeUndefined();
-
-    // Lazy + a run that DOES reach the ui state → permanent failure at that state.
-    const blockedScript: Script = (spec) =>
-      modelOf(spec) === "critic" ? ok({ outcome: "blocked", weaknesses: [], critique_report: "stuck" }) : happyScript(spec);
-    const { ctx: reachedCtx } = makeCtx(blockedScript);
-    const reachedOutcome = await lazy.start(specFor({ issue: "i" }), reachedCtx).outcome;
+    // A run that DOES reach the function state with the function unregistered → permanent failure at that
+    // state (how a search context refuses a human gate: by not registering it — no policy knob needed).
+    const blockedScript: Script = (call) =>
+      modelOf(call) === "critic" ? ok({ outcome: "blocked", weaknesses: [], critique_report: "stuck" }) : happyScript(call);
+    const { registry: reachedReg } = makeRegistry(blockedScript);
+    const reached = createHierarchicalWorkflowExecutor({ registry: reachedReg });
+    const reachedOutcome = await reached.start(specFor({ issue: "i" }), CTX).outcome;
     expect(reachedOutcome.error?.classification).toBe("permanent");
-    expect(reachedOutcome.error?.reason).toMatch(/InteractionPort/);
+    expect(reachedOutcome.error?.reason).toMatch(/function 'choose_option'/);
   });
 
-  it("interactive path works when a port is supplied (blocked critique → human decision)", async () => {
-    const executor = createHierarchicalWorkflowExecutor({ providers: PROVIDERS });
-    const script: Script = (spec) =>
-      modelOf(spec) === "critic"
-        ? ok({ outcome: "blocked", weaknesses: [], critique_report: "stuck" })
-        : happyScript(spec);
-    const { ctx } = makeCtx(script);
-    const port = new ScriptedPort({ "feature/plan/critique/human_review": [{ decision: "block" }] });
-    const outcome = await executor.start(specFor({ issue: "i" }, { interaction: port }), ctx).outcome;
+  it("interactive path works when the function is registered (blocked critique → human decision)", async () => {
+    const script: Script = (call) =>
+      modelOf(call) === "critic" ? ok({ outcome: "blocked", weaknesses: [], critique_report: "stuck" }) : happyScript(call);
+    const { registry } = makeRegistry(script, { choose_option: new ScriptedFunction([{ decision: "block" }]) });
+    const executor = createHierarchicalWorkflowExecutor({ registry });
+    const outcome = await executor.start(specFor({ issue: "i" }), CTX).outcome;
     expect(outcome.error).toBeUndefined();
     const value = outcome.value as Record<string, unknown>;
     expect(value["outcome"]).toBe("blocked");
@@ -128,38 +110,32 @@ describe("hierarchical-workflow executor", () => {
   });
 
   it("cancel() yields a canceled outcome; spec timeout yields deadline", async () => {
-    const executor = createHierarchicalWorkflowExecutor({ providers: PROVIDERS });
     const hanging: Script = () => new Promise(() => {});
     {
-      const { ctx } = makeCtx(hanging);
-      const port = new ScriptedPort({});
-      const handle = executor.start(specFor({ issue: "i" }, { interaction: port }), ctx);
+      const { registry } = makeRegistry(hanging);
+      const executor = createHierarchicalWorkflowExecutor({ registry });
+      const handle = executor.start(specFor({ issue: "i" }), CTX);
       setTimeout(() => void handle.cancel(), 20);
       const outcome = await handle.outcome;
       expect(outcome.error?.classification).toBe("canceled");
     }
     {
-      const { ctx } = makeCtx(hanging);
-      const port = new ScriptedPort({});
-      const handle = executor.start(
-        specFor({ issue: "i" }, { interaction: port, limits: { timeoutMs: 40 } }),
-        ctx,
-      );
+      const { registry } = makeRegistry(hanging);
+      const executor = createHierarchicalWorkflowExecutor({ registry });
+      const handle = executor.start(specFor({ issue: "i" }, { limits: { timeoutMs: 40 } }), CTX);
       const outcome = await handle.outcome;
       expect(outcome.error?.classification).toBe("deadline");
     }
   });
 
   it("enforces a spec-level output contract on top of per-state validation", async () => {
-    const executor = createHierarchicalWorkflowExecutor({ providers: PROVIDERS });
-    const { ctx } = makeCtx(happyScript);
-    const port = new ScriptedPort({});
+    const { registry } = makeRegistry(happyScript);
+    const executor = createHierarchicalWorkflowExecutor({ registry });
     const outcome = await executor
       .start(
         specFor(
           { issue: "i" },
           {
-            interaction: port,
             outputSchema: {
               type: "object",
               properties: { outcome: { type: "string", enum: ["blocked"] } }, // demands blocked; run yields complete
@@ -167,7 +143,7 @@ describe("hierarchical-workflow executor", () => {
             },
           },
         ),
-        ctx,
+        CTX,
       )
       .outcome;
     expect(outcome.error?.classification).toBe("api-retriable");
@@ -178,21 +154,9 @@ describe("hierarchical-workflow executor", () => {
   it("workflowMemoKey matches core memoKey over (kind, snapshot hash, inputs)", () => {
     const spec = specFor({ issue: "i" });
     const definitionHash = snapshotHash(loadBundle(specPlanningFiles(), PLAN_ID));
-    expect(workflowMemoKey(spec)).toBe(
-      memoKey({ kind: "hierarchical-workflow", definitionHash, inputs: spec.inputs }),
-    );
+    expect(workflowMemoKey(spec)).toBe(memoKey({ kind: "hierarchical-workflow", definitionHash, inputs: spec.inputs }));
     // Same workflow version + same inputs ⇒ same key; any change ⇒ new key.
     expect(workflowMemoKey(specFor({ issue: "i" }))).toBe(workflowMemoKey(spec));
     expect(workflowMemoKey(specFor({ issue: "j" }))).not.toBe(workflowMemoKey(spec));
-  });
-
-  it("requires ctx.registry", async () => {
-    const executor = createHierarchicalWorkflowExecutor({ providers: PROVIDERS });
-    const port = new ScriptedPort({});
-    const outcome = await executor
-      .start(specFor({ issue: "i" }, { interaction: port }), { validator: new SchemaValidator() })
-      .outcome;
-    expect(outcome.error?.classification).toBe("permanent");
-    expect(outcome.error?.reason).toMatch(/ctx.registry/);
   });
 });

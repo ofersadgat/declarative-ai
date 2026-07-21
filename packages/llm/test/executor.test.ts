@@ -5,7 +5,7 @@ import { DEFAULT_FLOOR_MS, DEFAULT_SAFETY_MARGIN_MS } from "@declarative-ai/serv
 import type { CallOutcome } from "../src/generate";
 import type { CallRunner, LlmCallDefinition } from "../src/executor";
 import { createLlmCallExecutor, LlmCallExecutor } from "../src/executor";
-import { withDeadline, withMemoize, withRateLimit, withRepair, withSession } from "../src/wrappers";
+import { withDeadline, withMemoize, withRateLimit, withRepair, withRetry, withSession } from "../src/wrappers";
 import { DEF, fakeRunner, memoCache, okOutcome, specOf, validationFailure } from "./fakes";
 
 describe("LlmCallExecutor (core) — outcome mapping", () => {
@@ -236,6 +236,61 @@ describe("withRepair", () => {
     // definition differs from the original — what an inner memoize would (correctly) re-key on.
     expect(seen[0]!.prompt).not.toContain("failed schema validation");
     expect(seen[1]!.prompt).toContain("failed schema validation");
+  });
+});
+
+describe("withRetry — unified re-attempt policy", () => {
+  const NO_WAIT = (_ms: number) => Promise.resolve(); // inject a no-op sleep so backoff never really waits
+  const transientFailure = (): CallOutcome => ({
+    rawText: "",
+    finishReason: "error",
+    metrics: { durationMs: 3, cost: 0.001 },
+    error: { classification: "network-retriable", reason: "429 rate limited" },
+  });
+
+  it("retries a transient (network-retriable) failure up to the cap, then succeeds (metrics accumulate)", async () => {
+    const { runner, calls } = fakeRunner([transientFailure(), transientFailure(), okOutcome()]);
+    const exec = composeExecutors(new LlmCallExecutor({ runner }), withRetry({ transient: { cap: 3, waitMs: NO_WAIT } }));
+    const outcome = await exec.start(specOf(), {}).outcome;
+    expect(calls).toHaveLength(3);
+    expect(calls.every((c) => c.params.prompt === "What is 2+2?")).toBe(true); // same request re-sent
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.metrics.durationMs).toBe(3 + 3 + 20); // folded across all attempts
+  });
+
+  it("stops at the transient cap and returns the last failure", async () => {
+    const { runner, calls } = fakeRunner([transientFailure(), transientFailure(), transientFailure()]);
+    const exec = composeExecutors(new LlmCallExecutor({ runner }), withRetry({ transient: { cap: 1, waitMs: NO_WAIT } }));
+    const outcome = await exec.start(specOf(), {}).outcome;
+    expect(calls).toHaveLength(2); // initial + 1 retry
+    expect(outcome.error?.classification).toBe("network-retriable");
+  });
+
+  it("validation.feedback:true reshapes the former withRepair (errors appended to the prompt)", async () => {
+    const { runner, calls } = fakeRunner([validationFailure(), okOutcome()]);
+    const exec = composeExecutors(new LlmCallExecutor({ runner }), withRetry({ validation: { turns: 1, feedback: true } }));
+    const outcome = await exec.start(specOf(), {}).outcome;
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.params.prompt).toContain("failed schema validation");
+    expect(outcome.error).toBeUndefined();
+  });
+
+  it("validation.feedback:false is a blind re-roll (same prompt, no error hint)", async () => {
+    const { runner, calls } = fakeRunner([validationFailure(), okOutcome()]);
+    const exec = composeExecutors(new LlmCallExecutor({ runner }), withRetry({ validation: { turns: 1, feedback: false } }));
+    const outcome = await exec.start(specOf(), {}).outcome;
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.params.prompt).toBe("What is 2+2?"); // unchanged — no feedback appended
+    expect(outcome.error).toBeUndefined();
+  });
+
+  it("does not retry a permanent failure on either axis", async () => {
+    const permanent: CallOutcome = { rawText: "", finishReason: "error", metrics: { durationMs: 1 }, error: { classification: "permanent", reason: "bad request" } };
+    const { runner, calls } = fakeRunner([permanent, okOutcome()]);
+    const exec = composeExecutors(new LlmCallExecutor({ runner }), withRetry({ transient: 3, validation: { turns: 3, feedback: true } }));
+    const outcome = await exec.start(specOf(), {}).outcome;
+    expect(calls).toHaveLength(1);
+    expect(outcome.error?.reason).toBe("bad request");
   });
 });
 

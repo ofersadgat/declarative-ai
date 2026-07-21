@@ -93,7 +93,7 @@ describe("executeStructuredCall — tool declarations + injected executors", () 
       doStream: async () => stream(step++ === 0 ? TOOL_CALL_STEP : TEXT_STEP),
     });
     const deps: CallDeps = {
-      providers: fakeRouter(model),
+      modelRouter: fakeRouter(model),
       toolExecutors: {
         get_weather: async () => {
           executed = true;
@@ -130,7 +130,7 @@ describe("executeStructuredCall — tool declarations + injected executors", () 
         tools: [{ name: "get_weather", inputSchema: weatherSchema }],
         timeoutMs: 30_000,
       },
-      { providers: fakeRouter(model) }, // no toolExecutors
+      { modelRouter: fakeRouter(model) }, // no toolExecutors
     );
 
     expect(out.error).toBeUndefined();

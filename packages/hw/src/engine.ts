@@ -29,51 +29,70 @@
  * any transition in the following evaluation round does the same.
  */
 import {
+  type Approver,
+  type CapabilityRegistry,
   type ExecFailure,
   type ExecMetrics,
   type ExecServices,
-  type ExecutionSpec,
-  type ExecutorRegistry,
-  type InteractionPort,
   type OutputValidator,
+  type PermissionBaseline,
+  type PermissionMode,
+  type ProfilePredicate,
+  type RuntimeOp,
+  type SessionStore,
+  type SmartApprover,
+  type Tool,
+  type Workspace,
   type Clock,
   MapSessionStore,
+  PermissionLedger,
+  planExitTool,
+  withPermission,
 } from "@declarative-ai/core";
 import { SchemaValidator } from "@declarative-ai/services";
 import { evaluate, isPending, parseExpression, PENDING, type Expr } from "./expr";
 import type {
-  AgentConfig,
   ChildDecl,
   ConversationMode,
   FieldSchema,
+  FunctionConfig,
   OutputFieldSchema,
+  RuntimeConfig,
   StateDef,
   TerminationOutcome,
   WorkflowBundle,
 } from "./format";
-import {
-  isArtifactRef,
-  type ArtifactRef,
-  type EngineEvent,
-  type Persistence,
-  type ProviderBinding,
-  type SkillResolver,
-} from "./ports";
+import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, type Persistence } from "./ports";
 
 export interface EngineConfig {
   bundle: WorkflowBundle;
-  /** `agent.provider` name → executor binding. */
-  providers: Record<string, ProviderBinding>;
-  registry: ExecutorRegistry;
+  /** The typed capability registry: `runtimes` (agent ops), `functions` (host code / UI), `skills`
+   *  (named prompt templates). Replaces the old `providers` binding table + flat executor registry. */
+  registry: CapabilityRegistry;
   validator?: OutputValidator;
-  interaction?: InteractionPort;
-  skills?: SkillResolver;
   persistence?: Persistence;
-  /** Forwarded to child executors (rate limiter, meter, ...). `registry`/`validator`
-   *  are supplied by the engine. */
+  /** Forwarded to runtimes/functions (rate limiter, meter, ...) as their `services`. `validator`/session
+   *  store are supplied by the engine. */
   services?: ExecServices;
   clock?: Clock;
   onEvent?: (event: EngineEvent) => void;
+  /** Tool-call permissions (RUNTIMES-AND-PERMISSIONS.md §4). `approve` collects a human decision on `ask`
+   *  (the interactive gate); absent ⇒ a state's tools run UNGUARDED. `baseline` is the workflow-wide default
+   *  policy; `process` is the host-owned overlay carrying `always` decisions across runs in one process;
+   *  `smart` maps a tool name to its `smart`-mode policy (arg-inspecting; escalates to `ask` when uncertain). */
+  permissions?: {
+    approve?: Approver;
+    baseline?: PermissionBaseline;
+    process?: Map<string, PermissionMode>;
+    smart?: Record<string, SmartApprover>;
+    /** Custom profile predicates by name (RUNTIMES-AND-PERMISSIONS.md §4) — a `runtime.permissions.profile`
+     *  naming one of these gates tools by its predicate instead of the built-in read-only/plan/full. */
+    profiles?: Record<string, ProfilePredicate>;
+  };
+  /** Per-session workspace resolver (RUNTIMES-AND-PERMISSIONS.md §3): maps a `runtime.session` id to the
+   *  workspace that session's tools act within, so fan-out branches can isolate (e.g. per-worktree). Returns
+   *  `undefined` ⇒ fall back to the single run-level `services.workspace`. Absent ⇒ always the run-level one. */
+  workspaceFor?: (sessionId: string) => Workspace | undefined;
 }
 
 export interface WorkflowRunOptions {
@@ -115,10 +134,10 @@ interface Instance {
   params: Record<string, unknown>;
   /** Operation-produced outputs accumulated so far. */
   outputs: Record<string, unknown>;
-  /** Raw ui component results (`ui.*` namespace, SPEC §6.1). */
-  uiResults: Record<string, unknown>;
+  /** Raw function-operation results (`function.*` namespace, SPEC §6.1). */
+  functionResults: Record<string, unknown>;
   iteration: number;
-  opsRun: { ui: boolean; agent: boolean; skill: boolean };
+  opsRun: { runtime: boolean; function: boolean };
   /** Live child records by child key; `undefined`/absent = never ran or superseded. */
   children: Map<string, ChildRecord>;
   /** Child keys whose error/timeout termination has not yet been handled by a transition. */
@@ -142,27 +161,41 @@ class Notifier {
 
 const TEMPLATE_REF = /\{\{\s*([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)\s*\}\}/g;
 
+/** The logical session a runtime op falls back to when its state declares no `runtime.session` — so a plain
+ *  workflow behaves as ONE shared session (transcript, workspace, permissions) across all its states. */
+const DEFAULT_SESSION = "default";
+
+/** One conversation turn — a `ModelMessage`-compatible shape, so the built-in `conversationMode` transcript
+ *  and the llm `withSession` path share ONE representation in `SessionState.messages`. */
+type Turn = { role: "user" | "assistant"; content: string };
+
 export class WorkflowEngine {
   private readonly validator: OutputValidator;
   private readonly clock: Clock;
   private nextInstanceId = 1;
-  /** A run-level configuration failure (e.g. no InteractionPort configured at all):
+  /** A run-level configuration failure (e.g. a required `function` is not registered):
    *  aborts the whole run rather than looping as a state-level outcome a transition
    *  might keep re-entering. */
   private fatal?: ExecFailure;
   private rootAbort?: AbortController;
   private readonly artifacts: ArtifactRef[] = [];
-  private readonly conversation: Array<{ role: "user" | "assistant"; content: string }> = [];
   /** RUN-SCOPED session store: states sharing a logical `sessionId` continue the same conversation when the
    *  llm executor is composed with `withSession` (opt-in; orthogonal to the built-in `conversationMode`
    *  preamble). Exposed to child executors via `ctx.sessions`; an app-provided store takes precedence. */
   private readonly sessionStore = new MapSessionStore();
+  /** RUN-SCOPED permission ledger (RUNTIMES-AND-PERMISSIONS.md §4): owns the session/run overlays and the
+   *  authored baseline; the host-owned `process` overlay is injected so `always` decisions cross runs. */
+  private readonly permissions: PermissionLedger;
   private childCalls = 0;
   private childCost = 0;
 
   constructor(private readonly config: EngineConfig) {
     this.validator = config.validator ?? new SchemaValidator();
     this.clock = config.clock ?? { now: () => Date.now() };
+    this.permissions = new PermissionLedger({
+      baseline: config.permissions?.baseline,
+      process: config.permissions?.process,
+    });
   }
 
   async run(options: WorkflowRunOptions): Promise<WorkflowRunResult> {
@@ -220,9 +253,9 @@ export class WorkflowEngine {
       inputs,
       params: defaultsOf(def.params),
       outputs: {},
-      uiResults: {},
+      functionResults: {},
       iteration: 0,
-      opsRun: { ui: false, agent: false, skill: false },
+      opsRun: { runtime: false, function: false },
       children: new Map(),
       unhandledFailures: new Set(),
       abort,
@@ -294,24 +327,17 @@ export class WorkflowEngine {
         }
       }
 
-      // (2)/(5) Highest-priority unrun operation: ui, agent, skill, sequence children.
-      if (def.ui && !instance.opsRun.ui) {
-        instance.opsRun.ui = true;
-        const failure = await this.runUiOperation(instance);
+      // (2)/(5) Highest-priority unrun operation: function, runtime, sequence children.
+      if (def.function && !instance.opsRun.function) {
+        instance.opsRun.function = true;
+        const failure = await this.runFunctionOperation(instance, def.function);
         if (failure) return this.finish(instance, failureOutcome(instance), failure);
         evaluationDue = true;
         continue;
       }
-      if (def.agent && !instance.opsRun.agent) {
-        instance.opsRun.agent = true;
-        const failure = await this.runAgentOperation(instance, def.agent);
-        if (failure) return this.finish(instance, failureOutcome(instance), failure);
-        evaluationDue = true;
-        continue;
-      }
-      if (def.skill && !instance.opsRun.skill) {
-        instance.opsRun.skill = true;
-        const failure = await this.runSkillOperation(instance);
+      if (def.runtime && !instance.opsRun.runtime) {
+        instance.opsRun.runtime = true;
+        const failure = await this.runRuntimeOperation(instance, def.runtime);
         if (failure) return this.finish(instance, failureOutcome(instance), failure);
         evaluationDue = true;
         continue;
@@ -554,7 +580,7 @@ export class WorkflowEngine {
       inputs: instance.inputs,
       outputs: instance.outputs,
       params: instance.params,
-      ui: instance.uiResults,
+      function: instance.functionResults,
       children,
       run: { iteration: instance.iteration },
       limits: { ...(instance.def.limits ?? {}) },
@@ -646,145 +672,147 @@ export class WorkflowEngine {
 
   // --- operations -----------------------------------------------------------
 
-  private async runUiOperation(instance: Instance): Promise<ExecFailure | undefined> {
-    const ui = instance.def.ui!;
-    this.emit({ type: "operation.started", instanceId: instance.id, stateId: instance.stateId, op: "ui" });
-    const port = this.config.interaction;
-    if (!port) {
-      // Run-fatal, not a state outcome: a transition could otherwise keep re-entering
-      // the ui state (e.g. §7.3's blocked → human_review) and loop forever.
+  private async runFunctionOperation(instance: Instance, fn: FunctionConfig): Promise<ExecFailure | undefined> {
+    this.emit({ type: "operation.started", instanceId: instance.id, stateId: instance.stateId, op: "function" });
+    const func = this.config.registry.functions.get(fn.name);
+    if (!func) {
+      // Run-fatal, not a state outcome: a transition could otherwise keep re-entering the state (e.g.
+      // §7.3's blocked → human_review) and loop forever.
       const failure: ExecFailure = {
         classification: "permanent",
-        reason: `state '${instance.stateId}' requires user interaction but no InteractionPort was supplied`,
+        reason: `state '${instance.stateId}' requires function '${fn.name}' but no such function is registered`,
       };
-      this.emit({ type: "operation.failed", instanceId: instance.id, stateId: instance.stateId, op: "ui", failure });
+      this.emit({ type: "operation.failed", instanceId: instance.id, stateId: instance.stateId, op: "function", failure });
       this.fatal = failure;
       this.rootAbort?.abort();
       return failure;
     }
     let result: unknown;
     try {
-      result = await port.request({
-        stateId: instance.stateId,
-        component: ui.component,
-        inputs: { config: ui, inputs: shallowRedactArtifacts(instance.inputs, true) },
-      });
+      // An async function's promise is awaited here (the state's operation); an interactive function
+      // (e.g. a human-approval gate) drives its renderer internally and resolves once input arrives.
+      result = await func.run({ config: fn, inputs: shallowRedactArtifacts(instance.inputs, true) }, this.childServices());
     } catch (e) {
-      const failure: ExecFailure = { classification: "permanent", reason: `interaction rejected: ${(e as Error).message}` };
-      this.emit({ type: "operation.failed", instanceId: instance.id, stateId: instance.stateId, op: "ui", failure });
+      const failure: ExecFailure = { classification: "permanent", reason: `function rejected: ${(e as Error).message}` };
+      this.emit({ type: "operation.failed", instanceId: instance.id, stateId: instance.stateId, op: "function", failure });
       return failure;
     }
     if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
-    const failure = this.acceptOpOutputs(instance, "ui", result);
+    const failure = this.acceptOpOutputs(instance, "function", result);
     if (failure) return failure;
-    if (result !== null && typeof result === "object") Object.assign(instance.uiResults, result);
-    this.emit({ type: "operation.completed", instanceId: instance.id, stateId: instance.stateId, op: "ui" });
+    if (result !== null && typeof result === "object") Object.assign(instance.functionResults, result);
+    this.emit({ type: "operation.completed", instanceId: instance.id, stateId: instance.stateId, op: "function" });
     return undefined;
   }
 
-  private async runAgentOperation(instance: Instance, agent: AgentConfig): Promise<ExecFailure | undefined> {
-    return this.runExecutorOperation(instance, "agent", {
-      provider: agent.provider,
-      template: agent.prompt?.template ?? "",
-      config: agent.config ?? {},
-      conversationMode: agent.conversation?.mode ?? "full_history",
-      conversationArtifacts: agent.conversation?.artifacts,
-    });
-  }
-
-  private async runSkillOperation(instance: Instance): Promise<ExecFailure | undefined> {
-    const skillCfg = instance.def.skill!;
-    const skill = this.config.skills?.get(skillCfg.name);
-    if (!skill) {
-      const failure: ExecFailure = {
-        classification: "permanent",
-        reason: `skill '${skillCfg.name}' is not registered`,
-      };
-      this.emit({ type: "operation.failed", instanceId: instance.id, stateId: instance.stateId, op: "skill", failure });
-      return failure;
-    }
-    return this.runExecutorOperation(instance, "skill", {
-      provider: skill.provider,
-      template: skill.template,
-      // The SkillDef's own `config` is the config surface; the invocation's `params` are TEMPLATE
-      // variables (`{{params.x}}`, format.ts) — never silently folded into the llm config.
-      config: { ...skill.config },
-      templateParams: skillCfg.params,
-      conversationMode: "fresh",
-    });
-  }
-
-  private async runExecutorOperation(
-    instance: Instance,
-    op: "agent" | "skill",
-    req: {
-      provider: string;
-      template: string;
-      config: Record<string, unknown>;
-      /** Extra `{{params.*}}` values for THIS render (skill invocation params), over the instance's own. */
-      templateParams?: Record<string, unknown>;
-      conversationMode: ConversationMode;
-      conversationArtifacts?: string[];
-    },
-  ): Promise<ExecFailure | undefined> {
+  private async runRuntimeOperation(instance: Instance, rt: RuntimeConfig): Promise<ExecFailure | undefined> {
+    const op: OperationKind = "runtime";
     this.emit({ type: "operation.started", instanceId: instance.id, stateId: instance.stateId, op });
     const fail = (failure: ExecFailure): ExecFailure => {
       this.emit({ type: "operation.failed", instanceId: instance.id, stateId: instance.stateId, op, failure });
       return failure;
     };
 
-    const binding = this.config.providers[req.provider];
-    if (!binding) return fail({ classification: "permanent", reason: `no provider binding for '${req.provider}'` });
-    const executor = this.config.registry.get(binding.kind);
-    if (!executor) return fail({ classification: "permanent", reason: `no executor registered for kind '${binding.kind}'` });
+    const runtime = this.config.registry.runtimes.get(rt.name);
+    if (!runtime) return fail({ classification: "permanent", reason: `no runtime '${rt.name}' registered` });
 
-    const rendered = this.renderTemplate(req.template, instance, req.templateParams);
-    const preamble = this.conversationPreamble(req.conversationMode, req.conversationArtifacts);
+    // The logical SESSION this operation runs under (RUNTIMES-AND-PERMISSIONS.md §3): the sharing key for
+    // its owned resources — conversation transcript, workspace, permissions. Absent ⇒ the run's default
+    // session, so a plain workflow is ONE shared session (SPEC §4.7 full_history threads across states);
+    // set a distinct `runtime.session` to isolate a subtree (e.g. a fan-out branch).
+    const sessionId = rt.session ?? DEFAULT_SESSION;
+
+    // Prompt source: a named skill (a template from registry.skills) OR the inline template.
+    let template: string;
+    if (rt.prompt?.skill !== undefined) {
+      const skillTemplate = this.config.registry.skills.get(rt.prompt.skill);
+      if (skillTemplate === undefined) return fail({ classification: "permanent", reason: `skill '${rt.prompt.skill}' is not registered` });
+      template = skillTemplate;
+    } else {
+      template = rt.prompt?.template ?? "";
+    }
+
+    const rendered = this.renderTemplate(template, instance, rt.params);
+    const transcript = await this.readTranscript(sessionId);
+    const preamble = this.conversationPreamble(rt.conversation?.mode ?? "full_history", transcript, rt.conversation?.artifacts);
     const prompt = preamble ? `${preamble}\n\n${rendered}` : rendered;
 
-    const produced = this.producedOutputFields(instance.def);
-    const outputSchema = buildOutputSchema(produced);
-    let definition: unknown;
-    try {
-      definition = binding.definition({ prompt, config: req.config });
-    } catch (e) {
-      // A binding that builds its definition through a strict pipeline (e.g. `llmCallBinding` →
-      // `resolveConfig`/`parseLlmConfig`) throws on a malformed config — a permanent operation failure.
-      return fail({ classification: "permanent", reason: `invalid ${req.provider} config: ${(e as Error).message}` });
+    // Resolve the state's declared tool NAMES through `registry.tools` into executables for the runtime.
+    // An unregistered tool is a permanent operation failure (the same contract as an unregistered skill).
+    let tools: Record<string, Tool> | undefined;
+    if (rt.tools !== undefined && rt.tools.length > 0) {
+      tools = {};
+      for (const name of rt.tools) {
+        const tool = this.config.registry.tools.get(name);
+        if (!tool) return fail({ classification: "permanent", reason: `tool '${name}' is not registered` });
+        tools[name] = tool;
+      }
+      // Permission gate (RUNTIMES-AND-PERMISSIONS.md §4): with an approver configured, wrap every tool so a
+      // call is authorized by profile × mode; seed this state's authored profile once; inject the plan-exit
+      // gate while the session is in `plan`. Without an approver, tools run unguarded.
+      //
+      // A DELEGATED runtime (`policyEnforcement: "callback"`) authorizes its OWN loop's tool calls by routing
+      // its native callback through `ctx.approve` — wrapping here too would double-gate, so it gets RAW tools.
+      const approve = this.config.permissions?.approve;
+      const delegatesPermissions = runtime.capabilities.policyEnforcement === "callback";
+      if (approve && !delegatesPermissions) {
+        if (rt.permissions?.profile) this.permissions.seedProfile(sessionId, rt.permissions.profile);
+        const authoredMode = (name: string): PermissionMode | undefined => rt.permissions?.tools?.[name] ?? rt.permissions?.default;
+        const smartFor = this.config.permissions?.smart;
+        const profiles = this.config.permissions?.profiles;
+        const guarded: Record<string, Tool> = {};
+        for (const [name, tool] of Object.entries(tools)) {
+          guarded[name] = withPermission(tool, {
+            ledger: this.permissions,
+            sessionId,
+            toolName: name,
+            approve,
+            authoredMode: authoredMode(name),
+            smart: smartFor?.[name],
+            profiles,
+          });
+        }
+        if (this.permissions.resolveProfile(sessionId) === "plan") {
+          guarded["exit_plan"] = planExitTool({ ledger: this.permissions, sessionId, approve });
+        }
+        tools = guarded;
+      }
     }
-    const spec: ExecutionSpec = {
-      kind: binding.kind,
-      definition,
-      inputs: {},
+
+    const outputSchema = buildOutputSchema(this.producedOutputFields(instance.def));
+    const runtimeOp: RuntimeOp = {
+      prompt,
+      config: rt.config ?? {},
       outputSchema,
-      limits: instance.def.limits?.timeout !== undefined ? { timeoutMs: instance.def.limits.timeout * 1000 } : undefined,
+      tools,
+      timeoutMs: instance.def.limits?.timeout !== undefined ? instance.def.limits.timeout * 1000 : undefined,
       abortSignal: instance.abort.signal,
     };
 
-    const services: ExecServices = {
-      ...this.config.services,
-      registry: this.config.registry,
-      validator: this.validator,
-      // Run-scoped session store so states can share conversations by logical id (an app-provided store
-      // wins). Inert unless the llm executor is composed with `withSession`.
-      sessions: this.config.services?.sessions ?? this.sessionStore,
-    };
+    // Per-session workspace (RUNTIMES-AND-PERMISSIONS.md §3): states sharing a `sessionId` share one; a
+    // fan-out can isolate each branch (e.g. its own worktree) via `workspaceFor`. Falls back to the single
+    // run-level `services.workspace` when the host provides no per-session resolver / entry for this id.
+    const services = this.childServices();
+    const workspace = this.config.workspaceFor?.(sessionId) ?? services.workspace;
+    if (workspace !== services.workspace) services.workspace = workspace;
 
     let outcome;
     try {
-      outcome = await executor.start(spec, services).outcome;
+      outcome = await runtime.run(runtimeOp, services).outcome;
     } catch (e) {
-      // Executors must not reject for unit failures; a rejection is an executor bug —
+      // Runtimes must not reject for unit failures; a rejection is a runtime bug —
       // normalized here so the workflow still degrades per SPEC §3.3.
-      return fail({ classification: "permanent", reason: `executor rejected: ${(e as Error).message}` });
+      return fail({ classification: "permanent", reason: `runtime rejected: ${(e as Error).message}` });
     }
     this.childCalls += 1 + (outcome.metrics.childCalls ?? 0);
     this.childCost += outcome.metrics.cost ?? 0;
     if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
 
-    // Conversation artifact (SPEC §4.7): every agent operation appends its exchange.
-    this.conversation.push({ role: "user", content: prompt });
-    this.conversation.push({ role: "assistant", content: outcome.rawText ?? JSON.stringify(outcome.value ?? null) });
+    // Conversation artifact (SPEC §4.7): every runtime operation appends its exchange to the session store.
+    await this.appendTranscript(sessionId, [
+      { role: "user", content: prompt },
+      { role: "assistant", content: outcome.rawText ?? JSON.stringify(outcome.value ?? null) },
+    ]);
 
     if (outcome.error) {
       return fail(outcome.error);
@@ -795,6 +823,20 @@ export class WorkflowEngine {
     return undefined;
   }
 
+  /** The `ExecServices` runtimes/functions run with: caller services + engine validator + the run's session
+   *  store — the SAME store the built-in transcript uses, so `withSession` and the preamble share one source
+   *  (states sharing a logical `sessionId` continue one conversation; an app store wins). */
+  private childServices(): ExecServices {
+    return {
+      ...this.config.services,
+      validator: this.validator,
+      sessions: this.sessions(),
+      // A delegated runtime reads this to route its native permission callback through our approval UI;
+      // the engine wraps a composed runtime's tools directly, so this is inert for the llm runtime.
+      approve: this.config.permissions?.approve ?? this.config.services?.approve,
+    };
+  }
+
   /**
    * Merge an operation's structured result into the instance outputs (SPEC §3.3 step 3:
    * "its outputs are validated"). Provided fields are type-checked; artifact-typed
@@ -802,7 +844,7 @@ export class WorkflowEngine {
    * output-producing operation of the state has run, required produced fields must all
    * be present.
    */
-  private acceptOpOutputs(instance: Instance, op: "ui" | "agent" | "skill", value: unknown): ExecFailure | undefined {
+  private acceptOpOutputs(instance: Instance, op: OperationKind, value: unknown): ExecFailure | undefined {
     const produced = this.producedOutputFields(instance.def);
     const record = value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
     for (const [name, schema] of Object.entries(produced)) {
@@ -824,9 +866,8 @@ export class WorkflowEngine {
       instance.outputs[name] = v;
     }
     const remaining =
-      (instance.def.ui && !instance.opsRun.ui) ||
-      (instance.def.agent && !instance.opsRun.agent) ||
-      (instance.def.skill && !instance.opsRun.skill);
+      (instance.def.function && !instance.opsRun.function) ||
+      (instance.def.runtime && !instance.opsRun.runtime);
     if (!remaining) {
       for (const [name, schema] of Object.entries(produced)) {
         if (!schema.optional && instance.outputs[name] === undefined) {
@@ -869,7 +910,27 @@ export class WorkflowEngine {
     });
   }
 
-  private conversationPreamble(mode: ConversationMode, artifactNames?: string[]): string {
+  /** The run's session store — the SINGLE transcript home (an app-provided `services.sessions` wins), shared
+   *  with the llm `withSession` path via `ctx.sessions` (childServices). */
+  private sessions(): SessionStore {
+    return this.config.services?.sessions ?? this.sessionStore;
+  }
+
+  /** Read `sessionId`'s transcript from the session store (`SessionState.messages`). */
+  private async readTranscript(sessionId: string): Promise<Turn[]> {
+    const state = await this.sessions().get(sessionId);
+    return Array.isArray(state?.messages) ? (state.messages as Turn[]) : [];
+  }
+
+  /** Append turns to `sessionId`'s transcript in the session store, preserving any other `SessionState`. */
+  private async appendTranscript(sessionId: string, turns: Turn[]): Promise<void> {
+    const store = this.sessions();
+    const state = (await store.get(sessionId)) ?? {};
+    const messages = [...(Array.isArray(state.messages) ? state.messages : []), ...turns];
+    await store.put(sessionId, { ...state, messages });
+  }
+
+  private conversationPreamble(mode: ConversationMode, transcript: Turn[], artifactNames?: string[]): string {
     switch (mode) {
       case "fresh":
         return "";
@@ -884,8 +945,9 @@ export class WorkflowEngine {
       // v1: no summarizer wired — degrade to full history (documented in DESIGN §7).
       // eslint-disable-next-line no-fallthrough
       case "full_history": {
-        if (this.conversation.length === 0) return "";
-        const lines = this.conversation.map((m) => `${m.role}: ${m.content}`);
+        if (transcript.length === 0) return "";
+        // `content` is a string for engine-recorded turns; be defensive if a `withSession` writer stored parts.
+        const lines = transcript.map((m) => `${m.role}: ${typeof m.content === "string" ? m.content : JSON.stringify(m.content)}`);
         return `<conversation-history>\n${lines.join("\n")}\n</conversation-history>`;
       }
     }
