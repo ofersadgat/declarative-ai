@@ -3,7 +3,7 @@ import { jsonSchema, stepCountIs, type FilePart, type ModelMessage, type StopCon
 import { generateStructured, promptAsMessages, promptText, type CallOutcome, type CallPromptInput, type JsonSchema } from "./generate";
 import { ModelInfo } from "./model-catalog";
 import { adaptReasoning } from "./reasoning";
-import { providerNativeId, type ProviderRouter } from "./router";
+import { providerNativeId, type ModelRouter } from "./router";
 import { adaptSchemaCached, profileForModelId } from "./schema";
 
 /** A runtime tool implementation — the `execute` for a declared FUNCTION tool, looked up by tool name.
@@ -57,12 +57,12 @@ export type StructuredCallParams<T = unknown> = LlmCallDefinition & {
  * The injected runtime ENVIRONMENT a call executes against (declarative-ai's "provider block" + creds):
  * everything that ISN'T the serializable declaration — provider resolution, boundary validation, tool
  * implementations, and (later phases) blob/session stores + observers. Every seam is OPTIONAL; the floor is
- * a `providers` router (a call that actually reaches a model errors at execution if it's absent).
+ * a `modelRouter` (a call that actually reaches a model errors at execution if it's absent).
  * Non-serializable by design — this never enters the content hash or the durable declaration.
  */
 export interface LlmCallEnvironment {
-  /** Provider resolution (keys/endpoints/strict flags). Required to actually reach a model. */
-  providers?: ProviderRouter;
+  /** Model resolution (keys/endpoints/strict flags). Required to actually reach a model. */
+  modelRouter?: ModelRouter;
   /** Boundary validator (an `@declarative-ai/services` SchemaValidator or any `OutputValidator`). */
   validator?: OutputValidator;
   /** `execute` implementations for declared FUNCTION tools, keyed by tool name. A declared tool with no
@@ -76,8 +76,8 @@ export interface LlmCallEnvironment {
 }
 
 /** Runtime dependencies `executeStructuredCall` reconstructs the call from — an {@link LlmCallEnvironment}
- *  with `providers` REQUIRED (the base call can't resolve a model without it). */
-export type CallDeps = LlmCallEnvironment & { providers: ProviderRouter };
+ *  with `modelRouter` REQUIRED (the base call can't resolve a model without it). */
+export type CallDeps = LlmCallEnvironment & { modelRouter: ModelRouter };
 
 /**
  * The ergonomic bundle for a one-shot call: a full serializable declaration ({@link StructuredCallParams})
@@ -92,8 +92,8 @@ export type LlmCallRequest<T = unknown> = StructuredCallParams<T> & { env: LlmCa
 export async function executeRequest<T = unknown>(req: LlmCallRequest<T>): Promise<CallOutcome<T>> {
   const { env, ...rest } = req;
   const config = rest as StructuredCallParams<T>;
-  if (!env.providers) throw new Error("executeRequest: env.providers is required to execute a call");
-  return executeStructuredCall(config, { ...env, providers: env.providers });
+  if (!env.modelRouter) throw new Error("executeRequest: env.modelRouter is required to execute a call");
+  return executeStructuredCall(config, { ...env, modelRouter: env.modelRouter });
 }
 
 /** A pluggable executor for one structured call — the seam the WDK step swaps in (§6/§10.3).
@@ -132,7 +132,7 @@ export async function executeStructuredCall<T = unknown>(params: StructuredCallP
   // model; `postProcess` reverses it back to the original shape.
   const profile = params.schema ? profileForModelId(params.model) : undefined;
   const adapt = params.schema && profile ? adaptSchemaCached(params.schema, profile) : undefined;
-  const model = deps.providers.resolveModel(params.model, { strictStructuredOutput: adapt?.enforce === "strict" });
+  const model = deps.modelRouter.resolveModel(params.model, { strictStructuredOutput: adapt?.enforce === "strict" });
 
   // §5.1 wire-mode shaping of the system prompt (the ONLY place the candidate prompt is touched, and only
   // for non-strict tiers):
@@ -178,7 +178,7 @@ export async function executeStructuredCall<T = unknown>(params: StructuredCallP
   // model rejects reasoning or none was requested → the call is byte-identical to a no-reasoning call. The
   // adapted reasoning is MERGED over the config's raw `providerOptions` passthrough (adapted reasoning wins
   // per provider key, since it's the first-class neutral request; the raw bag is the escape hatch).
-  const adaptedReasoning = acceptsReasoning ? adaptReasoning(reasoning, { anthropic: deps.providers.isAnthropic(params.model) }) : undefined;
+  const adaptedReasoning = acceptsReasoning ? adaptReasoning(reasoning, { anthropic: deps.modelRouter.isAnthropic(params.model) }) : undefined;
   const providerOptions = mergeProviderOptions(params.providerOptions, adaptedReasoning);
 
   // Build the runtime tool set from the serializable declarations + injected `execute` impls, and bound

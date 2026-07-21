@@ -14,7 +14,7 @@ const log = createLogger("engine.providers.router");
  * (`openrouter/anthropic/claude-opus-4.8`) with no ambiguity. The remainder after the first "/" is the
  * provider-native id — what the catalog / pricing / schema-profile layer keys on.
  *
- * `ProviderRouter` is the seam §6.1's `RunCtx` depends on — a swappable interface, not a hardcoded call.
+ * `ModelRouter` is the seam §6.1's `RunCtx` depends on — a swappable interface, not a hardcoded call.
  */
 export type ModelFamily = "anthropic" | "openrouter";
 /** The two serving ROUTES a model id may name in its `{route}/…` prefix (same set as {@link ModelFamily}). */
@@ -75,12 +75,12 @@ export interface ResolveModelOptions {
   strictStructuredOutput?: boolean;
 }
 
-export interface ProviderRouter {
+export interface ModelRouter {
   resolveModel(modelId: string, opts?: ResolveModelOptions): LanguageModel;
   isAnthropic(modelId: string): boolean;
 }
 
-export interface RouterOptions {
+export interface ModelRouterOptions {
   anthropicApiKey?: string;
   openRouterApiKey?: string;
   /** Skip installing the long-timeout undici dispatcher (tests with mock models). */
@@ -116,7 +116,7 @@ export interface RouterOptions {
  * that only ever calls Anthropic never needs an OpenRouter key (and vice versa), and
  * so importing this module never requires any key.
  */
-export function createRouter(options: RouterOptions = {}): ProviderRouter {
+export function createModelRouter(options: ModelRouterOptions = {}): ModelRouter {
   if (!options.skipDispatcher) installLongTimeoutDispatcher();
 
   let anthropic: ReturnType<typeof createAnthropic> | undefined;

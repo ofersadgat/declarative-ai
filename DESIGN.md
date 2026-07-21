@@ -13,10 +13,11 @@ Status: implemented, declarative model landed — 2026-07-19 (canonical; superse
 > `@declarative-ai/agents` is not started (deferred per §4.4). Notes: the hw engine
 > executes runs in-process and emits a full `EngineEvent` stream through the
 > `Persistence` port — step-level durable resume is future work
-> (`sessionResume: false`); a ui state reached with no `InteractionPort`
-> configured is run-fatal (a rejecting port stays a state-level failure), and
-> the executor's `interactionPolicy: "eager"` refuses interactive definitions
-> up front for search contexts; conversation mode `summary` currently degrades
+> (`sessionResume: false`); a `function` state reached with no matching function
+> registered is run-fatal (a rejecting function stays a state-level failure), while
+> how interaction flows — block, auto-approve, refuse in a search context — is the
+> workflow designer's composition through the registered `function`s, not an executor
+> policy; conversation mode `summary` currently degrades
 > to `full_history`. Neither consumer has migrated yet: JaiRA's app build is
 > next (JaiRA `DESIGN.md` §14), then findmyprompt's registry-seam swap (§8.1).
 Consumers: **findmyprompt** (`C:\UbuntuCode\findmyprompt`) and **JaiRA** (`C:\UbuntuCode\JaiRA`).
@@ -69,7 +70,7 @@ and swappable per deployment:
   prompt/messages, decoding knobs, reasoning, tool **declarations**, schema, output modalities, session
   ids). No functions, no secrets, no live handles — so it is content-hashable, and **its content hash is its
   identity** (§1.5, §3.4).
-- **Environment** — the injected *"how/where"*: a provider router (keys/endpoints), a validator, a blob
+- **Environment** — the injected *"how/where"*: a model router (keys/endpoints), a validator, a blob
   store, a session store, tool **executors**, a configuration registry, observers (logging/verification), a
   clock. Secret-bearing, non-serializable, swappable per deployment. **Every seam is optional**; the floor
   is one provider (a call that actually reaches a model errors at execution if none is present). Concretely
@@ -217,7 +218,7 @@ interface ExecutionSpec {
   session?: { id?: string; transcript?: unknown };
   /** Output contract: JSON Schema for the data payload; artifact targets for
    *  file outputs (engine-assigned paths). Validation executor-performed,
-   *  caller-observable (repair via the opt-in `withRepair` wrapper, §5.1). */
+   *  caller-observable (repair via the opt-in `withRetry({ validation: { feedback: true } })` wrapper, §5.1). */
   outputSchema?: Record<string, unknown>;
   artifactTargets?: { name: string; path: string; format?: string }[];
   limits?: { timeoutMs?: number; maxCostUsd?: number };
@@ -312,7 +313,7 @@ interface ExecServices {
   meter?: BudgetMeter;              // reserve/settle/available (WalletMeter shape)
   validator?: SchemaValidator;      // extracted ajv.ts
   clock?: Clock; deadline?: DeadlineConfig;   // deadline consumed by the withDeadline wrapper
-  providers?: ProviderRouter;       // for llm-backed executors
+  modelRouter?: ModelRouter;        // for llm-backed executors
   registry?: ExecutorRegistry;      // composite units execute children through this
   sessions?: SessionStore; blobs?: BlobStore; // store seams (Phase 4/5)
 }
@@ -482,7 +483,7 @@ The declarative model of §1 lands entirely here:
   the result onto `Outcome`, honor caller cancel, and *refuse* any unconsumed wrapper field. Repair, rate
   limiting, deadline fail-fast, sessions, and memoization are the composable wrappers of §3.2 (source:
   `wrappers.ts`), not core behavior.
-- **The environment is `LlmCallEnvironment`** (§1.2): `providers` (the one near-floor seam), `validator`,
+- **The environment is `LlmCallEnvironment`** (§1.2): `modelRouter` (the one near-floor seam), `validator`,
   `toolExecutors`, `blobs`, plus an `abortSignal`. `executeRequest(req)` is the convenience over the whole
   thing — a full declaration with `env` attached, split back apart before execution.
 - **`resolveConfig(layers)` composes the declaration** (§1.5): merge `[engineDefault, workflowDefault,
@@ -495,9 +496,9 @@ The declarative model of §1 lands entirely here:
   network, no spend. It uses the *same* acceptance gate `executeStructuredCall` filters with, so plan and
   execute cannot drift.
 - **Routing is explicit.** Model ids are route-prefixed `{route}/{model}` (`anthropic` = native Anthropic,
-  `openrouter` = everything else); a bare id is a fail-fast error, never guessed. The `ProviderRouter`
-  (`createRouter`) creates provider clients lazily, so a process that only calls one route never needs the
-  other's key.
+  `openrouter` = everything else); a bare id is a fail-fast error, never guessed. The `ModelRouter`
+  (`createModelRouter`) creates provider clients lazily, so a process that only calls one route never needs
+  the other's key.
 
 ### 4.2 `hierarchical-workflow` (`@declarative-ai/hw`)
 
@@ -547,7 +548,7 @@ Extracted with minimal edits; all already interface-coupled:
 | From (findmyprompt) | To | Notes |
 | --- | --- | --- |
 | `providers/generate.ts` | llm | the one LLM call site |
-| `providers/router.ts`, `dispatcher.ts` | llm | `ProviderRouter`, lazy clients, undici dispatcher |
+| `providers/router.ts`, `dispatcher.ts` | llm | `ModelRouter`, lazy clients, undici dispatcher |
 | `providers/structured.ts`, `reasoning.ts`, `providers/schema/*` | llm | provider divergence adapters + capability profiles |
 | `providers/model-catalog.ts`, `model-catalog-source.ts`, `registry/providerConfig.ts` | llm | catalog; refresh-from-network part node-only |
 | `execution/llmStep.ts` | llm | becomes the `llm-call` executor |
@@ -601,18 +602,28 @@ arguments, and exactly what JaiRA's app supplies in its richer form.
   `llm-call`-backed or pure-data, and either non-interactive or
   fixture-scripted. The validator checks this statically before execution.
 
-- **States declare their call through the same declarative pipeline.** A state whose `agent.provider` is
-  llm-backed builds its call via `llmCallBinding` (`ports.ts`), which runs the §1.5 `resolveConfig` pipeline
-  per operation: `defaults ← registry.get(config.configRef) ← the state's inline config`, merged
+- **States declare their call through the same declarative pipeline.** A state whose `runtime.name` resolves
+  to an llm-backed runtime (`registry.runtimes`) builds its call via `@declarative-ai/llm`'s
+  `createLlmRuntime`, which runs the §1.5 `resolveConfig` pipeline per operation:
+  `defaults ← configs.get(config.configRef) ← the state's inline config`, merged
   family-aware and strict-parsed. Each layer may carry definition-layer fields (a shared `system` prompt, a
   per-state `timeoutMs`) alongside the config knobs; the rendered template becomes the operation prompt (a
   config-layer `prompt` is an error — there's nothing to do with two). So a workflow state's call is an
   `LlmConfiguration` declaration like any other, not a parallel config surface.
 
-- **Sessions coordinate by logical id.** The engine holds a run-scoped `SessionStore` (§3.6) exposed to child
-  executors as `ctx.sessions`; states sharing a logical `sessionId` continue one conversation when the
-  registered llm executor is composed with `withSession`. This is orthogonal to the state file's built-in
-  `conversationMode` preamble (reconciling the two is a deferred follow-up, §10.1).
+- **Sessions coordinate by logical id.** A state's `runtime.session` is the sharing key for its owned
+  resources — conversation transcript, workspace, and permissions (RUNTIMES-AND-PERMISSIONS.md §3); absent ⇒
+  the run's default session (so a plain workflow is one shared session). The engine now keys the built-in
+  `conversationMode` preamble per session, aligning it with the run-scoped `SessionStore` (§3.6, exposed as
+  `ctx.sessions` for the llm `withSession` path) — both key on `sessionId`.
+
+- **Runtimes, tools, and permissions.** A `runtime` may be given **tools** (`registry.tools`, referenced by
+  logical name in `runtime.tools`) it calls mid-loop — the composed `llm` runtime runs them in its
+  `llmStep` loop; a delegated agent gets the allow-list. Each call is gated by a **profile × mode**
+  permission system (`read-only`/`plan`/`full` × `allow`/`deny`/`ask`) whose human decisions persist across
+  an in-memory scope chain (session → workflow-run → process) over the workflow-authored baseline. The full
+  model — composed-vs-delegated runtimes, `Tool ⊂ HostFunction`, the session-keyed environment overlay, and
+  the permission granularities — is specified in [RUNTIMES-AND-PERMISSIONS.md](RUNTIMES-AND-PERMISSIONS.md).
 
 ## 8. Consumer Migration Plans
 
@@ -696,8 +707,10 @@ The declarative refactor landed complete; these are known, non-blocking extensio
   identity (§1.5, §3.4).
 - **Fold tool-call / file outputs into the `withSession` transcript** (today it folds text + structured
   value only).
-- **Reconcile HW's built-in `conversationMode` preamble with the session-store path** (§7 — an app currently
-  picks one).
+- ~~**Reconcile HW's built-in `conversationMode` preamble with the session-store path**~~ (§7). **Done:** the
+  built-in transcript now lives in the run's `SessionStore` as `SessionState.messages`, keyed per `sessionId`
+  — the SAME store exposed to runtimes as `ctx.sessions`, so the preamble and the llm `withSession` path
+  share one source of truth (an app-provided `services.sessions` backs both).
 - **Forward `outputModalities` per-provider** (declarative + `plan` surfaces exist; the per-provider request
   wiring, like reasoning adaptation, does not).
 - **Store output files by content hash** (`blobs.put`) rather than inline base64 in `artifacts`.

@@ -16,7 +16,7 @@ function okModel(): MockLanguageModelV3 {
 
 describe("executeRequest — declaration + env convenience", () => {
   it("splits the request and delegates to the base call", async () => {
-    const env: LlmCallEnvironment = { providers: fakeRouter(okModel()) };
+    const env: LlmCallEnvironment = { modelRouter: fakeRouter(okModel()) };
     const out = await executeRequest({
       model: "anthropic/claude-haiku-4-5",
       prompt: "what is 2+2?",
@@ -31,7 +31,7 @@ describe("executeRequest — declaration + env convenience", () => {
   it("throws when the environment has no provider router", async () => {
     await expect(
       executeRequest({ model: "m", prompt: "x", timeoutMs: 1000, env: {} }),
-    ).rejects.toThrow(/env.providers is required/);
+    ).rejects.toThrow(/env.modelRouter is required/);
   });
 
   it("threads a typed schema through to a typed outcome (no explicit <T> at the call site)", () => {

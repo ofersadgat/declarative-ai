@@ -1,0 +1,19 @@
+{
+  "name": "@declarative-ai/claude-code",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@declarative-ai/core": "*"
+  },
+  "peerDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "*"
+  },
+  "peerDependenciesMeta": {
+    "@anthropic-ai/claude-agent-sdk": {
+      "optional": true
+    }
+  }
+}

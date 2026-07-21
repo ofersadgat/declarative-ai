@@ -142,25 +142,38 @@ function validateState(
   }
 
   // --- operations -------------------------------------------------------------
-  if (def.agent) {
-    if (typeof def.agent.provider !== "string" || def.agent.provider.length === 0) {
-      err("agent.provider", "agent.provider is required");
+  if (def.runtime) {
+    if (typeof def.runtime.name !== "string" || def.runtime.name.length === 0) {
+      err("runtime.name", "runtime.name is required");
     }
-    const mode = def.agent.conversation?.mode;
+    if (def.runtime.prompt?.template !== undefined && def.runtime.prompt?.skill !== undefined) {
+      err("runtime.prompt", "a runtime prompt is EITHER an inline `template` OR a named `skill`, not both");
+    }
+    const mode = def.runtime.conversation?.mode;
     if (mode !== undefined && !["full_history", "summary", "fresh", "selected_artifacts"].includes(mode)) {
-      err("agent.conversation.mode", `unknown conversation mode '${String(mode)}'`);
+      err("runtime.conversation.mode", `unknown conversation mode '${String(mode)}'`);
+    }
+    if (def.runtime.tools !== undefined) {
+      if (!Array.isArray(def.runtime.tools)) {
+        err("runtime.tools", "runtime.tools must be an array of tool names");
+      } else if (def.runtime.tools.some((t) => typeof t !== "string" || t.length === 0)) {
+        err("runtime.tools", "every runtime.tools entry must be a non-empty string");
+      }
+    }
+    const profile = def.runtime.permissions?.profile;
+    // Built-ins (read-only/plan/full) or a host-registered CUSTOM profile name — the latter can't be checked
+    // statically (the predicate map lives on the engine), so only the type is validated here.
+    if (profile !== undefined && (typeof profile !== "string" || profile.length === 0)) {
+      err("runtime.permissions.profile", "runtime.permissions.profile must be a non-empty string");
     }
   }
-  if (def.skill && (typeof def.skill.name !== "string" || def.skill.name.length === 0)) {
-    err("skill.name", "skill.name is required");
-  }
-  if (def.ui && (typeof def.ui.component !== "string" || def.ui.component.length === 0)) {
-    err("ui.component", "ui.component is required");
+  if (def.function && (typeof def.function.name !== "string" || def.function.name.length === 0)) {
+    err("function.name", "function.name is required");
   }
   const hasOperation =
-    def.ui !== undefined || def.agent !== undefined || def.skill !== undefined || Object.keys(children).length > 0;
+    def.runtime !== undefined || def.function !== undefined || Object.keys(children).length > 0;
   if (!hasOperation) {
-    warn("", "state declares no operations (no ui/agent/skill/children); it will terminate immediately");
+    warn("", "state declares no operations (no runtime/function/children); it will terminate immediately");
   }
 }
 

@@ -6,16 +6,16 @@
 > Normative for this library: §2.3–§2.4 (states, state IDs), §3 (state machine
 > semantics), §4 (inputs/outputs/params/artifacts/conversations), §5 (state
 > file format), §6 (transition expressions), §7.3 and §9 (worked examples,
-> used as golden tests), §8 (UI states, realized here via the
-> `InteractionPort`), §10.1–§10.4 (statuses, run records, durability, async
+> used as golden tests), §8 (function states / interactive UI, realized here as
+> interactive `HostFunction`s in `registry.functions`), §10.1–§10.4 (statuses, run records, durability, async
 > children), §12 (versioning → snapshot hashing). Sections about tasks,
 > boards, Git isolation, safety policy, and MVP scope describe the JaiRA
 > product and are context for the library, not requirements on it.
 >
-> **How the library realizes this formalism** — the executor, the `agent`-state
-> `llm-call` binding (config resolution per operation), session coordination by
-> logical id, snapshot hashing/memoization, and the `Persistence`/`InteractionPort`
-> ports — is documented in [DESIGN.md](DESIGN.md) §7 (with the settled declarative
+> **How the library realizes this formalism** — the executor, the `runtime`-operation
+> `llm` runtime (`createLlmRuntime`, config resolution per operation), session coordination by
+> logical id, snapshot hashing/memoization, the typed `CapabilityRegistry`, and the `Persistence`
+> port — is documented in [DESIGN.md](DESIGN.md) §7 (with the settled declarative
 > model in §1). The precise `@declarative-ai/hw` API surface is in [API.md](API.md).
 
 ## 1. Purpose
@@ -144,13 +144,15 @@ then decides what to do.
 
 A state does its work by running operations. Operation kinds:
 
-- `ui`: a built-in UI component that collects structured data from the user.
-- `agent`: a local agent run driven by the state's prompt.
-- `skill`: a named reusable skill invoked through the agent runtime.
+- `function`: a registered host function invoked by name (`registry.functions`) that returns structured
+  data — including an interactive UI component that collects input from the user.
+- `runtime`: a named runtime adapter (`registry.runtimes`; e.g. `llm`, `claude_code`) driven by the
+  state's prompt. The prompt comes from an inline `template` or a named `skill` (a reusable prompt
+  template from `registry.skills`).
 - Child states, entered by sequence order or by explicit transition.
 
 A state may declare any combination of these. Operations run one at a time in a
-fixed priority order: `ui`, then `agent`, then `skill`, then child states in
+fixed priority order: `function`, then `runtime`, then child states in
 `sequence` order. Async child states are the only exception to one-at-a-time
 execution.
 
@@ -405,6 +407,11 @@ selected_artifacts
 The initial default is `full_history`, but the schema must support all modes so
 projects can move toward more controlled context selection over time.
 
+Transcripts are scoped per **session** (`runtime.session`, RUNTIMES-AND-PERMISSIONS.md §3): `full_history`
+threads the prior exchanges of the *same* session. States that declare no session share the run's default
+session (so a plain workflow threads history across all its states); a distinct `runtime.session` isolates a
+subtree's conversation.
+
 ## 5. State File Format
 
 State files are declarative JSON for the MVP.
@@ -421,9 +428,8 @@ description
 params
 inputs
 outputs
-agent
-skill
-ui
+runtime
+function
 children
 sequence
 transitions
@@ -450,14 +456,13 @@ limits
 `outputs`
 : Schema for values the state emits.
 
-`agent`
-: Local AI agent execution configuration.
+`runtime`
+: Runtime-adapter execution configuration (`name`, `config`, `conversation`, and a `prompt` from an
+  inline `template` or a named `skill`).
 
-`skill`
-: Named reusable skill invocation, executed through the agent runtime.
-
-`ui`
-: Built-in user interface component configuration.
+`function`
+: Registered host-function invocation (`name` + function params), including built-in interactive UI
+  components.
 
 `children`
 : Declared child states, their input wiring, and async flags.
@@ -539,7 +544,7 @@ Suggested namespaces:
 inputs.*
 outputs.*
 params.*
-ui.*
+function.*
 children.<id>.outputs.*
 children.<id>.outcome
 run.*
@@ -548,25 +553,33 @@ artifacts.*
 conversations.*
 ```
 
-## 7. Agent Execution
+## 7. Runtime Execution
 
-### 7.1 Local Agents
+### 7.1 Local Runtimes
 
-The MVP supports local code agents only.
+The MVP supports local code-agent runtimes only. A `runtime` operation names a runtime adapter registered
+in `registry.runtimes`.
 
-Example providers:
+Example runtimes:
 
+- `llm` (a bare structured model call — the simplest runtime)
 - `claude_code`
 - `codex`
 - `opencode`
 - Project-specific local command adapters.
 
-Agent providers should be modeled as runtime adapters with capabilities, not as
-interchangeable strings.
+Runtimes are adapters with capabilities, not interchangeable strings: they share one interface but differ
+in what they can do (a bare `llm` call vs a file-editing agent). See
+[RUNTIMES-AND-PERMISSIONS.md](RUNTIMES-AND-PERMISSIONS.md) for the composed-vs-delegated distinction.
 
-### 7.2 Agent Responsibilities
+A runtime operation may declare **tools** it is allowed to call mid-loop (`runtime.tools`: logical names
+resolved through `registry.tools`) and a **session** id it runs under (`runtime.session`, sharing
+conversation + permissions across states). The composed `llm` runtime runs its tools in a bounded loop; a
+delegated agent is handed the allow-list.
 
-Agents may:
+### 7.2 Runtime Responsibilities
+
+A runtime (e.g. a local code agent) may:
 
 - Inspect the project.
 - Modify files within the project directory.
@@ -575,7 +588,7 @@ Agents may:
 - Produce structured outputs matching the state schema.
 - Propose transitions when allowed by the state.
 
-Agents may not:
+A runtime may not:
 
 - Bypass human approval gates.
 - Mutate workflow state directly.
@@ -583,7 +596,7 @@ Agents may not:
 - Access files outside the project directory.
 - Execute blocked commands.
 
-### 7.3 Agent State Example
+### 7.3 Runtime State Example
 
 ```json
 {
@@ -623,8 +636,8 @@ Agents may not:
       "from": "children.human_review.outputs.decision"
     }
   },
-  "agent": {
-    "provider": "claude_code",
+  "runtime": {
+    "name": "claude_code",
     "conversation": {
       "mode": "full_history"
     },
@@ -674,7 +687,7 @@ Agents may not:
 }
 ```
 
-Execution walk-through: the agent operation runs first. `clean` terminates
+Execution walk-through: the runtime operation runs first. `clean` terminates
 immediately, before any child runs. `needs_changes` runs one fix pass and then
 terminates so the parent can decide whether to re-plan. `blocked` collects a
 human decision, surfaced through the `human_decision` output. The
@@ -683,16 +696,32 @@ after a child completes does not re-enter it. The retry loop lives in the
 parent (Section 9), which re-runs the whole planning pass and gets a fresh
 critique instance each time.
 
-## 8. UI States
+### 7.4 Tool-Call Permissions
 
-Human interaction is modeled as UI output, not as a special human runtime.
+When a runtime is given tools, each tool call is authorized by a **profile × mode** (full detail in
+[RUNTIMES-AND-PERMISSIONS.md](RUNTIMES-AND-PERMISSIONS.md) §4):
 
-A state may declare a built-in UI component. The component displays state inputs
-and returns structured data. Transition logic remains in the state file.
+- **profile** — which effects are in scope: `read-only`, `plan`, or `full`. A `read-only`/`plan` profile
+  admits only tools that declare themselves read-only; `plan` stays read-only until a human approves an
+  exit that rebinds the session to `full`.
+- **mode** — how an in-scope call is authorized: `allow`, `deny`, or `ask`. An `ask` invokes a human
+  approval gate whose decision persists at a chosen scope — `once`, `always this session`, `always this
+  workflow run`, or `always` (the host process) — all in-memory; durable policy is authored, not decided.
+
+A state authors its starting policy via `runtime.permissions` (`profile` / `default` / per-tool modes),
+overriding a workflow-wide default; live human decisions overlay on top, most-specific scope winning. The
+gate is only active when the host supplies an approver; otherwise tools run unguarded.
+
+## 8. Function States (Interactive UI)
+
+Human interaction is modeled as a `function` operation whose registered function is interactive — not as a
+special human runtime. An interactive function displays state inputs and returns structured data;
+transition logic remains in the state file. (Non-interactive functions — pure transforms, data fetches,
+validators — use the same operation; a UI component is just the interactive case.)
 
 ### 8.1 MVP Built-In Components
 
-Suggested MVP components:
+Suggested MVP interactive functions:
 
 - `choose_option`
 - `review_artifact`
@@ -700,7 +729,7 @@ Suggested MVP components:
 - `fill_form`
 - `confirm_action`
 
-### 8.2 UI State Example
+### 8.2 Function State Example
 
 ```json
 {
@@ -727,15 +756,15 @@ Suggested MVP components:
       "optional": true
     }
   },
-  "ui": {
-    "component": "choose_option",
+  "function": {
+    "name": "choose_option",
     "prompt": "Review the critique result.",
     "options": ["approve", "request_changes", "block"]
   }
 }
 ```
 
-This state declares no transitions: once the component completes, no
+This state declares no transitions: once the function completes, no
 operations remain, so the state terminates with `terminate.success` and its
 validated outputs. The parent branches on `outputs.decision`.
 
@@ -848,11 +877,11 @@ Each state run records:
 - Input artifact references.
 - Output artifact references.
 - Conversation references.
-- Agent provider and configuration.
+- Runtime name and configuration.
 - Commands requested.
 - Commands executed.
 - Commands blocked.
-- UI data returned.
+- Function data returned.
 - Transition decisions.
 - Validation errors.
 - Start time.
@@ -867,7 +896,7 @@ At minimum, the persisted data must answer:
 
 - Which task was active?
 - Which state path was active?
-- Was an agent running?
+- Was a runtime operation running?
 - Was user input pending?
 - Which artifacts had been produced?
 - Did a transition already occur?
@@ -987,10 +1016,10 @@ The MVP should require explicit user approval for:
 
 ### 11.4 Approval Gates
 
-Approval gates are ordinary UI states; there is no separate policy mechanism.
-The engine guarantees that a UI component's outputs can only be produced by a
-real user interaction in the app, and agents have no channel to write another
-state's outputs. A transition guarded on a UI state's outputs is therefore
+Approval gates are ordinary interactive-`function` states; there is no separate policy mechanism.
+The engine guarantees that an interactive function's outputs can only be produced by a
+real user interaction in the app, and runtimes have no channel to write another
+state's outputs. A transition guarded on such a state's outputs is therefore
 user-controlled by construction.
 
 An agent may include a recommendation in its artifacts or outputs, but a
@@ -1083,8 +1112,9 @@ resolved before expanding beyond the MVP:
    storage?
 9. How should subtasks relate to parent task completion?
 10. Should spawned subtasks block parent completion by default?
-11. How are skills defined and registered (project-level skill library
-    format), and what parameters does a skill invocation take?
+11. How are skills (named prompt templates) authored and registered into
+    `registry.skills` (project-level library format), and what params does a
+    skill-sourced prompt render take?
 12. How does a task get bound to a branch: at creation, by a state, or by the
     user?
 
@@ -1104,7 +1134,7 @@ resolved before expanding beyond the MVP:
 12. Agent filesystem access is scoped to the task's worktree.
 13. Destructive Git operations are blocked; constructive Git use is allowed.
 14. Execution history is stored by default and can be pruned safely.
-15. Operations run in fixed priority order: UI, agent, skill, children.
+15. Operations run in fixed priority order: function, runtime, children.
 16. Entering a state creates a fresh instance; results never leak across
     instances.
 17. Workflow definitions are engine-owned; agents cannot read or modify them.

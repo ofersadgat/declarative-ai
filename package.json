@@ -8,7 +8,7 @@
     "packages/*"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit -p packages/core && tsc --noEmit -p packages/services && tsc --noEmit -p packages/llm && tsc --noEmit -p packages/hw",
+    "typecheck": "tsc --noEmit -p packages/core && tsc --noEmit -p packages/services && tsc --noEmit -p packages/llm && tsc --noEmit -p packages/hw && tsc --noEmit -p packages/tools && tsc --noEmit -p packages/claude-code",
     "test": "vitest run",
     "test:watch": "vitest",
     "update:model-info": "tsx packages/llm/scripts/updateModelInfo.ts"

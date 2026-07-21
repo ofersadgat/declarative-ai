@@ -50,7 +50,7 @@ export function specPlanningFiles(): Record<string, StateDef> {
       label: "Goals",
       inputs: { issue: { type: "artifact", format: "markdown" } },
       outputs: { goals: { type: "array", items: { type: "string" } } },
-      agent: { provider: "planner", prompt: { template: "Extract goals from {{inputs.issue}}." } },
+      runtime: { name: "planner", prompt: { template: "Extract goals from {{inputs.issue}}." } },
     },
     "feature/plan/context": {
       label: "Context",
@@ -59,7 +59,7 @@ export function specPlanningFiles(): Record<string, StateDef> {
         goals: { type: "array", items: { type: "string" } },
       },
       outputs: { plan_doc: { type: "artifact", format: "markdown" } },
-      agent: { provider: "planner", prompt: { template: "Write the plan for {{inputs.issue}}." } },
+      runtime: { name: "planner", prompt: { template: "Write the plan for {{inputs.issue}}." } },
     },
     "feature/plan/critique": {
       label: "Critique Plan",
@@ -83,8 +83,8 @@ export function specPlanningFiles(): Record<string, StateDef> {
           from: "children.human_review.outputs.decision",
         },
       },
-      agent: {
-        provider: "critic",
+      runtime: {
+        name: "critic",
         conversation: { mode: "full_history" },
         prompt: {
           template:
@@ -121,7 +121,7 @@ export function specPlanningFiles(): Record<string, StateDef> {
         critique_report: { type: "artifact", format: "markdown" },
       },
       outputs: { resolution: { type: "string" } },
-      agent: { provider: "fixer", prompt: { template: "Fix the listed weaknesses." } },
+      runtime: { name: "fixer", prompt: { template: "Fix the listed weaknesses." } },
     },
     "feature/plan/critique/human_review": {
       label: "Human Review",
@@ -133,8 +133,8 @@ export function specPlanningFiles(): Record<string, StateDef> {
         decision: { type: "string", enum: ["approve", "request_changes", "block"] },
         comments: { type: "string", format: "markdown", optional: true },
       },
-      ui: {
-        component: "choose_option",
+      function: {
+        name: "choose_option",
         prompt: "Review the critique result.",
         options: ["approve", "request_changes", "block"],
       },
@@ -176,13 +176,13 @@ export function specFanoutFiles(): Record<string, StateDef> {
       label: "Agent Review",
       inputs: { change: { type: "string" } },
       outputs: { report: { type: "string" } },
-      agent: { provider: "reviewer", prompt: { template: "Review {{inputs.change}}." } },
+      runtime: { name: "reviewer", prompt: { template: "Review {{inputs.change}}." } },
     },
     "review/synthesize": {
       label: "Synthesize",
       inputs: { review_a: { type: "string" }, review_b: { type: "string" } },
       outputs: { summary: { type: "string" } },
-      agent: { provider: "synthesizer", prompt: { template: "Combine {{inputs.review_a}} and {{inputs.review_b}}." } },
+      runtime: { name: "synthesizer", prompt: { template: "Combine {{inputs.review_a}} and {{inputs.review_b}}." } },
     },
   };
 }

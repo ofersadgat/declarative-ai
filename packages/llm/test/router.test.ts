@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  createRouter,
+  createModelRouter,
   familyForModel,
   isAnthropicModel,
   parseModelRoute,
@@ -34,7 +34,7 @@ describe("provider router (§5)", () => {
   });
 
   it("resolves a model object without needing a live key (key is used at call time)", () => {
-    const router = createRouter({
+    const router = createModelRouter({
       anthropicApiKey: "test",
       openRouterApiKey: "test",
       skipDispatcher: true,
@@ -46,7 +46,7 @@ describe("provider router (§5)", () => {
   });
 
   it("sets the OpenRouter strict flag + require_parameters routing per the enforce decision (§5.1)", () => {
-    const router = createRouter({ openRouterApiKey: "test", skipDispatcher: true });
+    const router = createModelRouter({ openRouterApiKey: "test", skipDispatcher: true });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- reach into the provider's settings.
     const settingsOf = (m: unknown): any => (m as { settings?: unknown }).settings;
 

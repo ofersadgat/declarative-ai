@@ -1,46 +1,61 @@
 import { describe, expect, it } from "vitest";
-import { MapExecutorRegistry, type ExecutionSpec, type Outcome } from "@declarative-ai/core";
+import {
+  MapCapabilityRegistry,
+  MapSessionStore,
+  isPermissionDenied,
+  type Approver,
+  type ExecutorCapabilities,
+  type HostFunction,
+  type Outcome,
+  type Runtime,
+  type Tool,
+} from "@declarative-ai/core";
 import { WorkflowEngine, type EngineConfig } from "../src/engine";
 import { loadBundle } from "../src/loader";
-import { InMemoryPersistence, isArtifactRef, llmCallBinding, type ArtifactRef } from "../src/ports";
+import { InMemoryPersistence, isArtifactRef, type ArtifactRef } from "../src/ports";
 import type { StateDef } from "../src/format";
-import { deferred, FakeExecutor, modelOf, ok, promptOf, promptTail, rejectingPort, ScriptedPort, type Script } from "./fakes";
+import { deferred, FakeRuntimes, modelOf, ok, promptOf, promptTail, rejectingFunction, ScriptedFunction, type FakeCall, type Script } from "./fakes";
 import { FANOUT_ID, PLAN_ID, specFanoutFiles, specPlanningFiles } from "./fixtures";
 
-const PROVIDERS = {
-  planner: llmCallBinding({ model: "planner" }),
-  critic: llmCallBinding({ model: "critic" }),
-  fixer: llmCallBinding({ model: "fixer" }),
-  reviewer: llmCallBinding({ model: "reviewer" }),
-  synthesizer: llmCallBinding({ model: "synthesizer" }),
-};
+const RUNTIME_NAMES = ["planner", "critic", "fixer", "reviewer", "synthesizer"];
 
-function makeEngine(files: Record<string, StateDef>, rootId: string, script: Script, extra?: Partial<EngineConfig>) {
-  const fake = new FakeExecutor(script);
-  const registry = new MapExecutorRegistry().register(fake);
+interface MakeEngineOpts {
+  functions?: Record<string, HostFunction>;
+  skills?: Record<string, string>;
+  tools?: Record<string, Tool>;
+  runtimes?: Record<string, Runtime>;
+  extra?: Partial<EngineConfig>;
+}
+
+function makeEngine(files: Record<string, StateDef>, rootId: string, script: Script, opts: MakeEngineOpts = {}) {
+  const fake = new FakeRuntimes(script);
+  const registry = fake.register(new MapCapabilityRegistry(), RUNTIME_NAMES);
+  for (const [name, fn] of Object.entries(opts.functions ?? {})) registry.functions.register(name, fn);
+  for (const [name, template] of Object.entries(opts.skills ?? {})) registry.skills.register(name, template);
+  for (const [name, t] of Object.entries(opts.tools ?? {})) registry.tools.register(name, t);
+  for (const [name, r] of Object.entries(opts.runtimes ?? {})) registry.runtimes.register(name, r);
   const persistence = new InMemoryPersistence();
   const engine = new WorkflowEngine({
     bundle: loadBundle(files, rootId),
-    providers: PROVIDERS,
     registry,
     persistence,
-    ...extra,
+    ...opts.extra,
   });
   return { engine, fake, persistence };
 }
 
-/** Default happy-path script for the planning fixture; override per-model as needed. */
-function planningScript(overrides: Partial<Record<string, (spec: ExecutionSpec) => Outcome>> = {}): Script {
-  return (spec) => {
-    const model = modelOf(spec);
+/** Default happy-path script for the planning fixture; override per-runtime as needed. */
+function planningScript(overrides: Partial<Record<string, (call: FakeCall) => Outcome>> = {}): Script {
+  return (call) => {
+    const model = modelOf(call);
     const override = overrides[model];
-    if (override) return override(spec);
+    if (override) return override(call);
     switch (model) {
       case "planner":
         // Dispatch on the rendered template TAIL — the default conversation mode is
         // full_history (SPEC §4.7), so prompts CONTAIN earlier exchanges in their
         // history preamble.
-        return promptTail(spec).startsWith("Write the plan")
+        return promptTail(call).startsWith("Write the plan")
           ? ok({ plan_doc: "# The Plan" })
           : ok({ goals: ["goal-1", "goal-2"] });
       case "critic":
@@ -48,43 +63,43 @@ function planningScript(overrides: Partial<Record<string, (spec: ExecutionSpec) 
       case "fixer":
         return ok({ resolution: "fixed" });
       default:
-        throw new Error(`unscripted model ${model}`);
+        throw new Error(`unscripted runtime ${model}`);
     }
   };
 }
 
-describe("SPEC §8.2 — UI state terminates with validated outputs", () => {
+describe("SPEC §8.2 — function state terminates with validated outputs", () => {
   const files = specPlanningFiles();
   const HR = "feature/plan/critique/human_review";
 
-  it("runs the component, validates, and terminates success with its outputs", async () => {
-    const port = new ScriptedPort({ [HR]: [{ decision: "approve", comments: "lgtm" }] });
+  it("runs the function, validates, and terminates success with its outputs", async () => {
+    const fn = new ScriptedFunction([{ decision: "approve", comments: "lgtm" }]);
     const { engine } = makeEngine(files, HR, () => {
-      throw new Error("no agent should run");
-    }, { interaction: port });
+      throw new Error("no runtime should run");
+    }, { functions: { choose_option: fn } });
     const result = await engine.run({ inputs: { plan_doc: "plan", critique_report: "report" } });
     expect(result.outcome).toBe("success");
     expect(result.outputs).toEqual({ decision: "approve", comments: "lgtm" });
-    expect(port.requests[0]).toMatchObject({ stateId: HR, component: "choose_option" });
+    expect(fn.calls[0]!.config).toMatchObject({ name: "choose_option" });
   });
 
-  it("rejects an out-of-enum component payload (engine-side validation)", async () => {
-    const port = new ScriptedPort({ [HR]: [{ decision: "yolo" }] });
-    const { engine } = makeEngine(files, HR, () => ok({}), { interaction: port });
+  it("rejects an out-of-enum function payload (engine-side validation)", async () => {
+    const fn = new ScriptedFunction([{ decision: "yolo" }]);
+    const { engine } = makeEngine(files, HR, () => ok({}), { functions: { choose_option: fn } });
     const result = await engine.run({ inputs: { plan_doc: "p", critique_report: "r" } });
     expect(result.outcome).toBe("error");
     expect(result.failure?.reason).toMatch(/decision/);
   });
 
-  it("fails permanently when no InteractionPort is supplied", async () => {
+  it("fails permanently when the function is not registered", async () => {
     const { engine } = makeEngine(files, HR, () => ok({}));
     const result = await engine.run({ inputs: { plan_doc: "p", critique_report: "r" } });
     expect(result.outcome).toBe("error");
-    expect(result.failure?.reason).toMatch(/InteractionPort/);
+    expect(result.failure?.reason).toMatch(/function 'choose_option'/);
   });
 
-  it("a rejecting port (search context) turns interactive states into permanent failures", async () => {
-    const { engine } = makeEngine(files, HR, () => ok({}), { interaction: rejectingPort });
+  it("a rejecting function (search context) turns interactive states into permanent failures", async () => {
+    const { engine } = makeEngine(files, HR, () => ok({}), { functions: { choose_option: rejectingFunction } });
     const result = await engine.run({ inputs: { plan_doc: "p", critique_report: "r" } });
     expect(result.outcome).toBe("error");
     expect(result.failure?.reason).toMatch(/not allowed/);
@@ -120,18 +135,18 @@ describe("SPEC §7.3 — critique state walk-through", () => {
     expect(result.outputs?.["outcome"]).toBe("needs_changes");
     expect(fake.calls.map(modelOf)).toEqual(["critic", "fixer"]);
     // The fixer received the weaknesses via input wiring from the critique's own outputs.
-    expect(fake.calls[1]!.definition).toBeTruthy();
+    expect(fake.calls[1]!.prompt).toBeTruthy();
   });
 
   it("blocked: collects a human decision, surfaced through human_decision", async () => {
-    const port = new ScriptedPort({ "feature/plan/critique/human_review": [{ decision: "block" }] });
+    const fn = new ScriptedFunction([{ decision: "block" }]);
     const { engine, fake } = makeEngine(
       specPlanningFiles(),
       CRIT,
       planningScript({
         critic: () => ok({ outcome: "blocked", weaknesses: [], critique_report: "cannot proceed" }),
       }),
-      { interaction: port },
+      { functions: { choose_option: fn } },
     );
     const result = await engine.run(critiqueInputs);
     expect(result.outcome).toBe("success");
@@ -292,12 +307,12 @@ describe("SPEC §10.4 — async children and the dataflow join", () => {
       "parent/slow": {
         inputs: {},
         outputs: { val: { type: "string" } },
-        agent: { provider: "reviewer", prompt: { template: "slow" } },
+        runtime: { name: "reviewer", prompt: { template: "slow" } },
       },
       "parent/quick": {
         inputs: {},
         outputs: { q: { type: "string" } },
-        agent: { provider: "synthesizer", prompt: { template: "quick" } },
+        runtime: { name: "synthesizer", prompt: { template: "quick" } },
       },
     };
     const { engine } = makeEngine(files, "parent", async (spec) => {
@@ -331,12 +346,12 @@ describe("SPEC §10.4 — async children and the dataflow join", () => {
       "parent/never": {
         inputs: {},
         outputs: { v: { type: "string" } },
-        agent: { provider: "reviewer", prompt: { template: "never" } },
+        runtime: { name: "reviewer", prompt: { template: "never" } },
       },
       "parent/waiting": {
         inputs: { x: { type: "string" } },
         outputs: {},
-        agent: { provider: "reviewer", prompt: { template: "waiting" } },
+        runtime: { name: "reviewer", prompt: { template: "waiting" } },
       },
     };
     // The async child completes but produces the WRONG field, so the wiring expression
@@ -364,7 +379,7 @@ describe("timeout, cancellation, and unhandled child failures", () => {
       slowroot: {
         inputs: {},
         outputs: { x: { type: "string", optional: true } },
-        agent: { provider: "reviewer", prompt: { template: "forever" } },
+        runtime: { name: "reviewer", prompt: { template: "forever" } },
         limits: { timeout: 0.05 },
       },
     };
@@ -384,7 +399,7 @@ describe("timeout, cancellation, and unhandled child failures", () => {
       "parent/slow": {
         inputs: {},
         outputs: { x: { type: "string", optional: true } },
-        agent: { provider: "reviewer", prompt: { template: "forever" } },
+        runtime: { name: "reviewer", prompt: { template: "forever" } },
         limits: { timeout: 0.05 },
       },
     };
@@ -408,7 +423,7 @@ describe("timeout, cancellation, and unhandled child failures", () => {
       "parent/slow": {
         inputs: {},
         outputs: { x: { type: "string", optional: true } },
-        agent: { provider: "reviewer", prompt: { template: "forever" } },
+        runtime: { name: "reviewer", prompt: { template: "forever" } },
         limits: { timeout: 0.05 },
       },
     };
@@ -454,10 +469,32 @@ describe("conversation modes (SPEC §4.7)", () => {
 
   it("fresh mode gets no history preamble", async () => {
     const files = specPlanningFiles();
-    files["feature/plan/critique"]!.agent!.conversation = { mode: "fresh" };
+    files["feature/plan/critique"]!.runtime!.conversation = { mode: "fresh" };
     const { engine, fake } = makeEngine(files, PLAN_ID, planningScript());
     await engine.run({ inputs: { issue: "the issue" } });
     expect(promptOf(fake.calls[2]!)).not.toContain("<conversation-history>");
+  });
+
+  it("a distinct runtime.session isolates the transcript (full_history sees an empty per-session history)", async () => {
+    const files = specPlanningFiles();
+    // The planners run in the default session; move the critic to its own session — its full_history now
+    // reads an EMPTY transcript, so the planners' exchanges do NOT leak across the session boundary.
+    files["feature/plan/critique"]!.runtime!.session = "isolated";
+    const { engine, fake } = makeEngine(files, PLAN_ID, planningScript());
+    await engine.run({ inputs: { issue: "the issue" } });
+    expect(promptOf(fake.calls[2]!)).not.toContain("<conversation-history>");
+    expect(promptOf(fake.calls[2]!)).not.toContain("Extract goals");
+  });
+
+  it("records the transcript into the shared session store (unified with the withSession path)", async () => {
+    const store = new MapSessionStore();
+    const { engine } = makeEngine(specPlanningFiles(), PLAN_ID, planningScript(), { extra: { services: { sessions: store } } });
+    await engine.run({ inputs: { issue: "the issue" } });
+    // The built-in transcript lives in the SAME store a runtime's withSession reads — one source of truth.
+    const messages = (await store.get("default"))?.messages as Array<{ role: string; content: string }> | undefined;
+    expect(messages?.length).toBeGreaterThan(0);
+    expect(messages!.some((m) => m.role === "assistant")).toBe(true);
+    expect(messages!.some((m) => m.role === "user" && m.content.includes("Extract goals"))).toBe(true);
   });
 });
 
@@ -480,35 +517,224 @@ describe("run records (SPEC §10.2)", () => {
   });
 });
 
-describe("skill operations", () => {
-  it("executes a registered skill through the agent runtime", async () => {
+describe("skill as a runtime prompt source", () => {
+  it("renders a named skill template as the runtime's prompt", async () => {
     const files: Record<string, StateDef> = {
       s: {
         inputs: { topic: { type: "string" } },
         outputs: { summary: { type: "string" } },
-        skill: { name: "summarize", params: { style: "terse" } },
+        runtime: { name: "reviewer", prompt: { skill: "summarize" }, params: { style: "terse" } },
       },
     };
-    const { engine, fake } = makeEngine(files, "s", (spec) => ok({ summary: `sum(${promptOf(spec)})` }), {
-      skills: {
-        get: (name) =>
-          name === "summarize" ? { provider: "reviewer", template: "Summarize {{inputs.topic}} ({{params.style}})." } : undefined,
-      },
+    const { engine, fake } = makeEngine(files, "s", (call) => ok({ summary: `sum(${promptOf(call)})` }), {
+      skills: { summarize: "Summarize {{inputs.topic}} ({{params.style}})." },
     });
     const result = await engine.run({ inputs: { topic: "codebases" } });
     expect(result.outcome).toBe("success");
-    // Invocation params are TEMPLATE variables ({{params.*}}), not llm-config keys.
+    // params are TEMPLATE variables ({{params.*}}), rendered into the skill-sourced prompt.
     expect(result.outputs?.["summary"]).toBe("sum(Summarize codebases (terse).)");
     expect(fake.calls).toHaveLength(1);
   });
 
   it("an unregistered skill is a permanent failure", async () => {
     const files: Record<string, StateDef> = {
-      s: { inputs: {}, outputs: {}, skill: { name: "ghost" } },
+      s: { inputs: {}, outputs: {}, runtime: { name: "reviewer", prompt: { skill: "ghost" } } },
     };
     const { engine } = makeEngine(files, "s", () => ok({}));
     const result = await engine.run({ inputs: {} });
     expect(result.outcome).toBe("error");
     expect(result.failure?.reason).toMatch(/skill 'ghost'/);
+  });
+});
+
+describe("runtime tools (RUNTIMES-AND-PERMISSIONS.md §2)", () => {
+  const echoTool: Tool = { description: "echo", inputSchema: { type: "object" }, run: (input) => input };
+
+  it("resolves declared tool names through registry.tools and hands them to the runtime", async () => {
+    const files: Record<string, StateDef> = {
+      s: {
+        inputs: {},
+        outputs: { r: { type: "string" } },
+        runtime: { name: "reviewer", prompt: { template: "go" }, tools: ["echo"] },
+      },
+    };
+    const { engine, fake } = makeEngine(files, "s", () => ok({ r: "done" }), { tools: { echo: echoTool } });
+    const result = await engine.run({ inputs: {} });
+    expect(result.outcome).toBe("success");
+    // The resolved executable reached the runtime op, keyed by its logical name.
+    expect(Object.keys(fake.calls[0]!.tools ?? {})).toEqual(["echo"]);
+    expect(fake.calls[0]!.tools?.["echo"]).toBe(echoTool);
+  });
+
+  it("an unregistered tool is a permanent failure", async () => {
+    const files: Record<string, StateDef> = {
+      s: { inputs: {}, outputs: {}, runtime: { name: "reviewer", prompt: { template: "go" }, tools: ["ghost"] } },
+    };
+    const { engine, fake } = makeEngine(files, "s", () => ok({}));
+    const result = await engine.run({ inputs: {} });
+    expect(result.outcome).toBe("error");
+    expect(result.failure?.reason).toMatch(/tool 'ghost' is not registered/);
+    expect(fake.calls).toHaveLength(0); // failed before dispatching to the runtime
+  });
+
+  it("threads the host-provided workspace to the runtime's ctx (where fs tools read it)", async () => {
+    const files: Record<string, StateDef> = {
+      s: { inputs: {}, outputs: { r: { type: "string" } }, runtime: { name: "reviewer", prompt: { template: "go" } } },
+    };
+    const { engine, fake } = makeEngine(files, "s", () => ok({ r: "done" }), {
+      extra: { services: { workspace: { root: "/work/space" } } },
+    });
+    await engine.run({ inputs: {} });
+    expect(fake.ctxs[0]!.workspace?.root).toBe("/work/space");
+  });
+});
+
+describe("runtime tool permissions (RUNTIMES-AND-PERMISSIONS.md §4)", () => {
+  const writeTool: Tool = { description: "write", inputSchema: { type: "object" }, capabilities: { readOnly: false }, run: () => ({ wrote: true }) };
+  const allowSession: Approver = () => ({ decision: "allow", scope: "session" });
+
+  /** A state whose runtime invokes its (engine-supplied, possibly permission-wrapped) `write` tool. */
+  const invokeWriteFiles = (permissions?: Record<string, unknown>): Record<string, StateDef> => ({
+    s: {
+      inputs: {},
+      outputs: { r: { type: "string" } },
+      runtime: { name: "reviewer", prompt: { template: "go" }, tools: ["write"], ...(permissions ? { permissions } : {}) },
+    },
+  });
+
+  it("read-only profile denies a mutating tool when the runtime invokes it", async () => {
+    let toolResult: unknown;
+    const script: Script = async (call) => {
+      toolResult = await call.tools!["write"]!.run({}, {});
+      return ok({ r: "done" });
+    };
+    const { engine } = makeEngine(invokeWriteFiles({ profile: "read-only" }), "s", script, {
+      tools: { write: writeTool },
+      extra: { permissions: { approve: allowSession } },
+    });
+    const result = await engine.run({ inputs: {} });
+    expect(result.outcome).toBe("success");
+    expect(isPermissionDenied(toolResult)).toBe(true); // out of the read-only profile
+  });
+
+  it("full profile + an approving human: the wrapped tool executes", async () => {
+    let toolResult: unknown;
+    const script: Script = async (call) => {
+      toolResult = await call.tools!["write"]!.run({}, {});
+      return ok({ r: "done" });
+    };
+    const { engine } = makeEngine(invokeWriteFiles({ profile: "full", default: "ask" }), "s", script, {
+      tools: { write: writeTool },
+      extra: { permissions: { approve: allowSession } },
+    });
+    const result = await engine.run({ inputs: {} });
+    expect(result.outcome).toBe("success");
+    expect(toolResult).toEqual({ wrote: true });
+  });
+
+  it("without an approver, tools are handed over unguarded (run directly)", async () => {
+    let toolResult: unknown;
+    const script: Script = async (call) => {
+      toolResult = await call.tools!["write"]!.run({}, {});
+      return ok({ r: "done" });
+    };
+    const { engine } = makeEngine(invokeWriteFiles({ profile: "read-only" }), "s", script, { tools: { write: writeTool } });
+    await engine.run({ inputs: {} });
+    expect(toolResult).toEqual({ wrote: true }); // no wrapper ⇒ profile not enforced
+  });
+
+  it("hands a delegated runtime (policyEnforcement: callback) RAW tools — no double-gating", async () => {
+    const delegatedCaps: ExecutorCapabilities = {
+      structuredOutput: false,
+      sessionResume: false,
+      streaming: true,
+      interactive: true,
+      mutatesWorkspace: true,
+      policyEnforcement: "callback",
+      memoizable: false,
+      runtime: "node",
+    };
+    let received: Tool | undefined;
+    const delegated: Runtime = {
+      capabilities: delegatedCaps,
+      run: (o) => {
+        received = o.tools?.["write"];
+        return { events: (async function* () {})(), outcome: Promise.resolve(ok({ r: "done" })), cancel: async () => {} };
+      },
+    };
+    const files: Record<string, StateDef> = {
+      s: {
+        inputs: {},
+        outputs: { r: { type: "string" } },
+        runtime: { name: "agent", prompt: { template: "go" }, tools: ["write"], permissions: { profile: "read-only" } },
+      },
+    };
+    const { engine } = makeEngine(files, "s", () => ok({}), {
+      tools: { write: writeTool },
+      runtimes: { agent: delegated },
+      extra: { permissions: { approve: allowSession } },
+    });
+    const result = await engine.run({ inputs: {} });
+    expect(result.outcome).toBe("success");
+    // Raw tool: runs even under a read-only profile, because the engine did NOT wrap it — a delegated
+    // runtime gates its own loop's calls (canUseTool → ctx.approve), so wrapping too would double-gate.
+    expect(await received!.run({}, {})).toEqual({ wrote: true });
+  });
+
+  it("routes a smart-mode tool through the engine-supplied smart policy (decides before the human)", async () => {
+    let toolResult: unknown;
+    const script: Script = async (call) => {
+      toolResult = await call.tools!["write"]!.run({}, {});
+      return ok({ r: "done" });
+    };
+    const { engine } = makeEngine(invokeWriteFiles({ profile: "full", default: "smart" }), "s", script, {
+      tools: { write: writeTool },
+      extra: { permissions: { approve: allowSession, smart: { write: () => "deny" } } },
+    });
+    await engine.run({ inputs: {} });
+    expect(isPermissionDenied(toolResult)).toBe(true); // smart denied directly; the human approver was never consulted
+  });
+
+  it("enforces a custom profile supplied via EngineConfig.permissions.profiles", async () => {
+    let toolResult: unknown;
+    const script: Script = async (call) => {
+      toolResult = await call.tools!["write"]!.run({}, {});
+      return ok({ r: "done" });
+    };
+    const { engine } = makeEngine(invokeWriteFiles({ profile: "search", default: "allow" }), "s", script, {
+      tools: { write: writeTool },
+      extra: { permissions: { approve: allowSession, profiles: { search: (t) => t.name === "grep" } } },
+    });
+    await engine.run({ inputs: {} });
+    expect(isPermissionDenied(toolResult)).toBe(true); // "write" is out of the custom "search" profile
+  });
+});
+
+describe("per-session workspace overlay (RUNTIMES-AND-PERMISSIONS.md §3)", () => {
+  const files = (session?: string): Record<string, StateDef> => ({
+    s: {
+      inputs: {},
+      outputs: { r: { type: "string" } },
+      runtime: { name: "reviewer", prompt: { template: "go" }, ...(session ? { session } : {}) },
+    },
+  });
+
+  it("resolves the session's workspace via workspaceFor (overriding the run-level default)", async () => {
+    const { engine, fake } = makeEngine(files("sess-x"), "s", () => ok({ r: "done" }), {
+      extra: {
+        services: { workspace: { root: "/default" } },
+        workspaceFor: (id) => (id === "sess-x" ? { root: "/ws/x" } : undefined),
+      },
+    });
+    await engine.run({ inputs: {} });
+    expect(fake.ctxs[0]!.workspace?.root).toBe("/ws/x");
+  });
+
+  it("falls back to the run-level workspace when workspaceFor has no entry for the session", async () => {
+    const { engine, fake } = makeEngine(files("other"), "s", () => ok({ r: "done" }), {
+      extra: { services: { workspace: { root: "/default" } }, workspaceFor: () => undefined },
+    });
+    await engine.run({ inputs: {} });
+    expect(fake.ctxs[0]!.workspace?.root).toBe("/default");
   });
 });

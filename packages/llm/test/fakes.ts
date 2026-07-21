@@ -1,7 +1,7 @@
 /**
  * Shared fakes for the @declarative-ai/llm test suites — the mock stream plumbing, a fake provider
  * router, scripted `CallRunner`s, and `ExecutionSpec` builders — so a change to the mock stream shape,
- * the `ProviderRouter` interface, or the spec/outcome shapes lands in ONE place instead of five files.
+ * the `ModelRouter` interface, or the spec/outcome shapes lands in ONE place instead of five files.
  */
 import { simulateReadableStream, type LanguageModel } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
@@ -9,7 +9,7 @@ import type { ExecutionSpec, Outcome } from "@declarative-ai/core";
 import type { CallOutcome } from "../src/generate";
 import type { CallRunner, CallRunnerDeps, LlmCallDefinition } from "../src/executor";
 import type { StructuredCallParams } from "../src/llmStep";
-import type { ProviderRouter } from "../src/router";
+import type { ModelRouter } from "../src/router";
 
 /** AI SDK 6 `LanguageModelV3Usage`: token totals nest under `.total`. */
 export const usage = (input: number, output: number): Record<string, unknown> => ({
@@ -31,7 +31,7 @@ export function streamingModel(chunks: Record<string, unknown>[]): MockLanguageM
 export const flatSchema = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] };
 
 /** A router that always resolves to the given mock model. */
-export const fakeRouter = (model: MockLanguageModelV3): ProviderRouter => ({
+export const fakeRouter = (model: MockLanguageModelV3): ModelRouter => ({
   resolveModel: () => model as unknown as LanguageModel,
   isAnthropic: () => false,
 });

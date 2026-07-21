@@ -28,8 +28,10 @@ agent-orchestration app; runs units with humans in the loop).
 | --- | --- |
 | `@declarative-ai/core` | Edge-safe contract (`Executor<R>`/`ExecutionSpec`/`Outcome`/events), the `LlmConfiguration` declaration + strict parsing + resolution, error classification, RFC 8785 content hashing + memo keys, session/blob store seams, composition (`compose(...).with(...)` builder + loose `composeExecutors`) |
 | `@declarative-ai/services` | Ajv schema validation, budget-gated retry with full-jitter backoff, AIMD rate limiting + token buckets, deadline arithmetic, token estimation |
-| `@declarative-ai/llm` | The `llm-call` core: provider router (Anthropic/OpenRouter), structured streaming generation with cache-split cost accounting, schema/reasoning adaptation, tools, file I/O, model catalog, `plan`, and the composable wrappers (`withRepair`/`withDeadline`/`withRateLimit`/`withSession`/`withMemoize`) |
+| `@declarative-ai/llm` | The `llm-call` core: model router (Anthropic/OpenRouter), structured streaming generation with cache-split cost accounting, schema/reasoning adaptation, tools, file I/O, model catalog, `plan`, and the composable wrappers (`withRetry`/`withDeadline`/`withRateLimit`/`withSession`/`withMemoize`) |
 | `@declarative-ai/hw` | The `hierarchical-workflow` formalism: expression language, state-file loader/validator, snapshot hashing, evaluator engine, and its executor |
+| `@declarative-ai/tools` | Workspace-backed agent tools (`read_file`/`write_file`/`edit_file`/`list_dir`/`grep`/`glob`/`run_command`) that operate on `ctx.workspace` with a path-escape guard — the impls that make the composed `llm` runtime a coding agent |
+| `@declarative-ai/claude-code` | The delegated `claude-code` runtime (`createClaudeCodeRuntime`): drives the Claude Agent SDK behind an injectable seam, mapping `runtime.tools`→allow-list, `ctx.workspace`→cwd, and routing the agent's tool approvals through `ctx.approve` |
 
 Packages are consumed as TypeScript source (`exports` → `src/index.ts`); consumers bundle (Next:
 `transpilePackages`; Electron: esbuild/vite).
@@ -104,7 +106,7 @@ It is the *only* place declaration and environment co-exist — it strips `env` 
 serializes the declaration. `typedSchema<T>` threads the output type through to `outcome.value`.
 
 ```ts
-import { executeRequest, createRouter, typedSchema } from "@declarative-ai/llm";
+import { executeRequest, createModelRouter, typedSchema } from "@declarative-ai/llm";
 import { SchemaValidator } from "@declarative-ai/services";
 
 interface Answer { answer: string; confidence: number }
@@ -124,7 +126,7 @@ const outcome = await executeRequest<Answer>({
   timeoutMs: 30_000,
   // --- environment ---
   env: {
-    providers: createRouter(),        // reads ANTHROPIC_API_KEY / OPENROUTER_API_KEY lazily
+    modelRouter: createModelRouter(),        // reads ANTHROPIC_API_KEY / OPENROUTER_API_KEY lazily
     validator: new SchemaValidator(), // Ajv boundary check on the way out
   },
 });
@@ -155,7 +157,7 @@ await executeRequest({
   prompt: "Prove there are infinitely many primes.",
   reasoning: { effort: "high" },
   timeoutMs: 120_000,
-  env: { providers: createRouter() },
+  env: { modelRouter: createModelRouter() },
 });
 ```
 
@@ -195,8 +197,8 @@ stack), start from the bare core and compose the behaviors you want. Order matte
 import { compose, composeExecutors, type Outcome } from "@declarative-ai/core";
 import { SchemaValidator, AdaptiveRateController } from "@declarative-ai/services";
 import {
-  createLlmCallExecutor, createRouter,
-  withRateLimit, withDeadline, withRepair, withMemoize,
+  createLlmCallExecutor, createModelRouter,
+  withRateLimit, withDeadline, withRetry, withMemoize,
   type LlmCallDefinition,
 } from "@declarative-ai/llm";
 
@@ -204,28 +206,28 @@ import {
 const store = new Map<string, Outcome>();
 const memo = { get: (k: string) => store.get(k), set: (k: string, o: Outcome) => void store.set(k, o) };
 
-const core = createLlmCallExecutor({ router: createRouter() });
+const core = createLlmCallExecutor({ router: createModelRouter() });
 const limiter = new AdaptiveRateController({ maxConcurrency: 8 });
 
 // Wrappers nest so the INNERMOST applies per attempt and the OUTERMOST wraps the whole call:
-//   withMemoize outermost  → caches the FINAL (post-repair) result
-//   withRepair              → retries schema-validation failures with the errors appended
+//   withMemoize outermost  → caches the FINAL (post-retry) result
+//   withRetry               → one re-attempt policy: transient (backoff) + validation (feedback repair)
 //   withDeadline / withRateLimit innermost → apply per attempt
 // Pick whichever form reads clearer — they nest identically.
 
 // Every wrapper takes a `config` object mirroring the ctx seams it reads, then an optional inner executor.
 // Form 1 — direct nesting (inner as the last arg), reads inside-out:
-const e1 = withMemoize({ cache: memo }, withRepair({ turns: 2 }, withDeadline(withRateLimit({ limiter }, core))));
+const e1 = withMemoize({ cache: memo }, withRetry({ transient: 3, validation: { turns: 2, feedback: true } }, withDeadline(withRateLimit({ limiter }, core))));
 
 // Form 2 — inside-out builder (core first, each `.with` adds an OUTER layer). TYPE-TRACKS requirements:
 const exec = compose(core)
   .with(withRateLimit({ limiter }))
   .with(withDeadline())   // ADDS { deadline, stepStartMs } to what `.start` requires
-  .with(withRepair({ turns: 2 }))
+  .with(withRetry({ validation: { turns: 2, feedback: true } }))
   .with(withMemoize({ cache: memo }));
 
 // Loose variadic convenience (flat list, no requirement tracking):
-//   composeExecutors(core, withRateLimit({ limiter }), withDeadline(), withRepair({ turns: 2 }), withMemoize({ cache: memo }));
+//   composeExecutors(core, withRateLimit({ limiter }), withDeadline(), withRetry({ transient: 3 }), withMemoize({ cache: memo }));
 // Provide a seam at CONSTRUCTION and it drops out of `.start` — e.g. withDeadline({ deadline: { maxDurationMs: 60_000 } })
 // supplies the deadline, so `.start` then requires only `stepStartMs` (still per-execution).
 void [e1, composeExecutors];
@@ -273,10 +275,10 @@ continuation token.
 
 ```ts
 import { composeExecutors, MapSessionStore } from "@declarative-ai/core";
-import { createLlmCallExecutor, createRouter, withSession, type LlmCallDefinition } from "@declarative-ai/llm";
+import { createLlmCallExecutor, createModelRouter, withSession, type LlmCallDefinition } from "@declarative-ai/llm";
 
 const store = new MapSessionStore();
-const exec = composeExecutors(createLlmCallExecutor({ router: createRouter() }), withSession({ sessions: store }));
+const exec = composeExecutors(createLlmCallExecutor({ router: createModelRouter() }), withSession({ sessions: store }));
 
 const ask = (prompt: string): LlmCallDefinition => ({ model: "anthropic/claude-sonnet-5", prompt, sessionId: "chat-1" });
 const run = (def: LlmCallDefinition) =>
@@ -317,7 +319,7 @@ const outcome = await executeRequest({
   maxSteps: 4,
   timeoutMs: 30_000,
   env: {
-    providers: createRouter(),
+    modelRouter: createModelRouter(),
     toolExecutors: {
       get_weather: async (input) => {
         const { city } = input as { city: string };
@@ -349,7 +351,7 @@ const described = await executeRequest({
   prompt: "Describe this image.",
   attachments: [{ mediaType: "image/png", data: { base64: "<...>" } }],
   timeoutMs: 30_000,
-  env: { providers: createRouter() },
+  env: { modelRouter: createModelRouter() },
 });
 
 // Large media by reference (needs env.blobs: BlobStore):
@@ -404,42 +406,45 @@ irreconcilable sampling+reasoning bag throws loudly at the boundary rather than 
 
 ### 8. Hierarchical workflows
 
-`@declarative-ai/hw` runs a declarative state-machine (see [SPEC.md](SPEC.md)) as an execution unit. States
-whose `agent.provider` is llm-backed dispatch through the same `llm-call` core; a state's call is declared
-through the very same `resolveConfig` pipeline (binding defaults ← `config.configRef` preset ← the state's
-inline `config`).
+`@declarative-ai/hw` runs a declarative state-machine (see [SPEC.md](SPEC.md)) as an execution unit. A
+state's operation is a `runtime` (dispatched through `registry.runtimes` — the `llm` runtime runs through
+the same `llm-call` core) or a `function` (`registry.functions` — host code, incl. interactive UI). A
+runtime's prompt comes from an inline `template` or a named `skill` (`registry.skills`). A runtime may also
+be given **tools** (`registry.tools`, referenced by logical name in `runtime.tools`) that it calls
+mid-loop, gated by a **profile × mode** permission system — see
+[RUNTIMES-AND-PERMISSIONS.md](RUNTIMES-AND-PERMISSIONS.md).
 
 ```ts
-import { MapExecutorRegistry, composeExecutors } from "@declarative-ai/core";
+import { MapCapabilityRegistry } from "@declarative-ai/core";
 import { SchemaValidator } from "@declarative-ai/services";
-import { createLlmCallExecutor, createRouter, withRepair } from "@declarative-ai/llm";
-import {
-  createHierarchicalWorkflowExecutor, loadBundle, workflowDefinitionHash, llmCallBinding,
-} from "@declarative-ai/hw";
+import { createLlmRuntime, createLlmCallExecutor, withRetry } from "@declarative-ai/llm";
+import { createHierarchicalWorkflowExecutor, loadBundle, snapshotHash } from "@declarative-ai/hw";
 
-// Child states execute through a shared registry; here the llm-call core with repair composed on.
-const registry = new MapExecutorRegistry().register(
-  composeExecutors(createLlmCallExecutor({ router: createRouter() }), withRepair({ turns: 2 })),
+// One typed registry: the named things a state can reference. No modelRouter passed → env-key default;
+// per-state defaults + configRef presets live on the runtime, not in a separate binding table.
+const registry = new MapCapabilityRegistry();
+registry.runtimes.register(
+  "llm",
+  createLlmRuntime({
+    defaults: { model: "anthropic/claude-sonnet-5", temperature: 0.3 },
+    // The composed llm-call executor stack the runtime delegates to (retry transient + repair validation):
+    executor: withRetry({ transient: 3, validation: { turns: 2, feedback: true } }, createLlmCallExecutor()),
+  }),
 );
+// registry.functions.register("choose_option", …)  // host UI / functions
+// registry.skills.register("critique", "Review …")   // named prompt templates
 
-const hw = createHierarchicalWorkflowExecutor({
-  // Map each state's provider name to an llm-call binding + its default config.
-  providers: { planner: llmCallBinding({ model: "anthropic/claude-sonnet-5", temperature: 0.3 }) },
-});
+const hw = createHierarchicalWorkflowExecutor({ registry });
 
 const states = /* state-file JSON map, see SPEC.md */ {};
-const bundle = loadBundle(states, "feature/plan");
+const bundle = loadBundle(states, "feature/plan"); // { rootId, states } — validated, hashable
 
 const handle = hw.start(
-  {
-    kind: "hierarchical-workflow",
-    definition: { rootId: bundle.rootId, states },
-    inputs: { issue: "…" },
-  },
-  { registry, validator: new SchemaValidator() },
+  { kind: "hierarchical-workflow", definition: bundle, inputs: { issue: "…" } },
+  { validator: new SchemaValidator() },
 );
 // To memoize a workflow run, supply its snapshot identity to the memoize wrapper:
-//   withMemoize({ cache, identify: workflowDefinitionHash })   // = snapshotHash(bundle)
+//   withMemoize({ cache, identify: () => snapshotHash(bundle) })
 
 const outcome = await handle.outcome; // never throws for unit failure; metrics fold child cost/calls
 ```

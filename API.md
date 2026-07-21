@@ -33,14 +33,14 @@ the README, this doc links to it instead.
   - [The contract-path executor](#the-contract-path-executor)
   - [Wrappers](#wrappers)
   - [`plan` — the dry run](#plan--the-dry-run)
-  - [Provider router](#provider-router)
+  - [Model router](#model-router)
   - [Model catalog](#model-catalog)
   - [Cost estimation](#cost-estimation)
   - [Schema & provider adaptation](#schema--provider-adaptation)
 - [`@declarative-ai/hw`](#declarative-aihw)
   - [The workflow executor](#the-workflow-executor)
   - [Bundles & identity](#bundles--identity)
-  - [Provider bindings & ports](#provider-bindings--ports)
+  - [The capability registry & ports](#the-capability-registry--ports)
   - [The engine (lower level)](#the-engine-lower-level)
   - [State-file format types](#state-file-format-types)
   - [Expression language](#expression-language)
@@ -58,7 +58,7 @@ provider packages. Consumed as TypeScript source (`exports` → `src/index.ts`);
 - a **declaration** — pure serializable data (`LlmConfiguration`/`LlmCallDefinition`, tool *declarations*,
   schema), content-hashable, its hash is its identity;
 - an **environment** — injected, secret-bearing, non-serializable seams (`LlmCallEnvironment` /
-  `ExecServices`): provider router, validator, stores, tool *executors*, clock. Every seam optional;
+  `ExecServices`): model router, validator, stores, tool *executors*, clock. Every seam optional;
 - **resolved transport** — internal only, never exported for use.
 
 **Two ways to run a call.** The ergonomic direct path (`executeRequest`, returns a `CallOutcome<T>`), and
@@ -207,8 +207,9 @@ interface ExecutorRegistry { get(kind: UnitKind): Executor | undefined; }
 class MapExecutorRegistry { register(executor: Executor): this; get(kind): Executor | undefined; }
 ```
 
-How composite units (hw) dispatch child states. Register the executors you support; `.get(kind)` looks one
-up.
+Register executors by `kind`; `.get(kind)` looks one up. Used for standalone/embedded composition. (hw
+dispatches child *operations* through the typed `CapabilityRegistry` — runtimes/functions/skills — not this
+kind-keyed registry; see the hw section.)
 
 #### `InteractionPort`
 
@@ -288,7 +289,7 @@ interface ExecServices {
   deadline?: DeadlineConfig;
   stepStartMs?: number;            // step-start origin for deadline arithmetic
   registry?: ExecutorRegistry;     // composite units execute children through this
-  providers?: unknown;             // the ProviderRouter (typed in @declarative-ai/llm)
+  modelRouter?: unknown;           // the ModelRouter (typed in @declarative-ai/llm)
   sessions?: SessionStore;         // run-scoped, logical-id-keyed
   blobs?: BlobStore;
 }
@@ -601,13 +602,13 @@ type LlmCallDefinition = LlmCallConfig & CallPromptInput & { timeoutMs?: number 
 type StructuredCallParams<T = unknown> = LlmCallDefinition & { schema?: JsonSchema<T>; schemaId?; timeoutMs: number };
 
 interface LlmCallEnvironment {
-  providers?: ProviderRouter;                          // required to actually reach a model
+  modelRouter?: ModelRouter;                           // required to actually reach a model
   validator?: OutputValidator;
   toolExecutors?: Record<string, ToolExecutor>;        // function-tool impls, keyed by name
   abortSignal?: AbortSignal;
   blobs?: BlobStore;
 }
-type CallDeps = LlmCallEnvironment & { providers: ProviderRouter };   // providers required
+type CallDeps = LlmCallEnvironment & { modelRouter: ModelRouter };   // modelRouter required
 type ToolExecutor = (input: unknown, options: ToolCallOptions) => unknown | Promise<unknown>;
 ```
 
@@ -651,7 +652,7 @@ The bare core for the full contract path (event stream, cancel, composition). So
 function createLlmCallExecutor(options?: LlmCallExecutorOptions): Executor;
 class LlmCallExecutor implements Executor { constructor(options?: LlmCallExecutorOptions); }
 interface LlmCallExecutorOptions {
-  router?: ProviderRouter;    // else ctx.providers, else a lazy env-key router
+  router?: ModelRouter;       // else ctx.modelRouter, else a lazy env-key router
   runner?: CallRunner;        // the injectable call seam (tests); defaults to executeStructuredCall
 }
 type CallRunner = (params: StructuredCallParams, deps: CallRunnerDeps) => Promise<CallOutcome>;
@@ -671,7 +672,8 @@ called with a `config` object it returns the curried wrapper (for `compose(...).
 
 | Wrapper | Signature (config form) | What it does |
 | --- | --- | --- |
-| `withRepair` | `withRepair({ turns }): ExecutorWrapper` | On a schema-**validation** failure, re-invoke the inner executor with the concrete errors appended to the prompt, up to `turns` extra turns, accumulating metrics. Any non-validation failure (or success) stops immediately. |
+| `withRetry` | `withRetry({ transient?, validation? }): ExecutorWrapper` | The unified re-attempt policy. `transient` (a cap, or `{ cap, baseBackoffMs?, maxBackoffMs?, waitMs?, random? }`) re-attempts a **network-retriable** failure with full-jitter backoff. `validation: { turns, feedback? }` re-attempts a **validation** (`api-retriable`) failure; `feedback: true` appends the concrete errors to the prompt (targeted repair), `false` is a blind re-roll (default). Metrics accumulate; a non-retriable failure/success stops. Both axes compose. |
+| `withRepair` *(deprecated)* | `withRepair({ turns }): ExecutorWrapper` | Alias for `withRetry({ validation: { turns, feedback: true } })`. |
 | `withRateLimit` | `withRateLimit({ limiter }): ExecutorWrapper` | Admit the call through the injected `RateLimiter` (concurrency slot + rate headroom) and feed the outcome back (drives AIMD). A cancel while queued prevents it from ever starting. |
 | `withDeadline` | `withDeadline(config?): ExecutorWrapper` | Reads `{ deadline, stepStartMs }` from config **or** ctx. Below the start floor it short-circuits with a `deadline` failure and never starts the call; otherwise clamps `timeoutMs` to the remaining window. |
 | `withSession` | `withSession(config?): ExecutorWrapper` | Resolves the declaration's logical `sessionId` against a `SessionStore` (from config or `ctx.sessions`): prepend the stored transcript, run, fold the reply back on success, stamp `outcome.session.id`. Refuses `providerSessionId` (agent-sdk only). |
@@ -715,17 +717,17 @@ dry-run can never drift from what execution sends. It gates media inputs per med
 `modalities.input` and requested `outputModalities` against `modalities.output`. See
 [README example 2](README.md#2-plan--the-dry-run-no-network-no-spend).
 
-### Provider router
+### Model router
 
 Explicit `{route}/{model}` routing over native Anthropic + OpenRouter. Source: `router.ts`.
 
 ```ts
-function createRouter(options?: RouterOptions): ProviderRouter;
-interface ProviderRouter {
+function createModelRouter(options?: ModelRouterOptions): ModelRouter;
+interface ModelRouter {
   resolveModel(modelId: string, opts?: ResolveModelOptions): LanguageModel;
   isAnthropic(modelId: string): boolean;
 }
-interface RouterOptions {
+interface ModelRouterOptions {
   anthropicApiKey?; openRouterApiKey?; skipDispatcher?;
   openRouterUsageAccounting?;             // real charged cost per response (default ON)
   openRouterStrictStructuredOutputs?;     // send strict json_schema (default OFF; Ajv is the gate)
@@ -733,8 +735,9 @@ interface RouterOptions {
 interface ResolveModelOptions { strictStructuredOutput?: boolean; }
 ```
 
-`createRouter` creates provider clients **lazily** — a process that only calls Anthropic never needs an
-OpenRouter key. Reads `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY` from the environment by default.
+`createModelRouter` creates provider clients **lazily** — a process that only calls Anthropic never needs
+an OpenRouter key. Reads `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY` from the environment by default, so it
+is **optional** at every seam (`options.router` → `ctx.modelRouter` → this env-key default).
 
 Route parsing helpers:
 
@@ -745,7 +748,7 @@ Route parsing helpers:
 | `providerNativeId(modelId): string` | the route-stripped provider id (the schema-profile family key). |
 | `familyForModel(modelId): ModelFamily` | the serving route. |
 | `isAnthropicModel(nativeId): boolean` | true for a bare `claude-*` **native** id (native-id space only). |
-| `installLongTimeoutDispatcher(opts?)` | node-only undici dispatcher for long-running calls (auto-installed by `createRouter` unless `skipDispatcher`). |
+| `installLongTimeoutDispatcher(opts?)` | node-only undici dispatcher for long-running calls (auto-installed by `createModelRouter` unless `skipDispatcher`). |
 
 ### Model catalog
 
@@ -853,18 +856,17 @@ Run a state-file bundle as a `hierarchical-workflow` unit. Source: `executor.ts`
 ```ts
 function createHierarchicalWorkflowExecutor(options: HwExecutorOptions): HierarchicalWorkflowExecutor;
 interface HwExecutorOptions {
-  providers: Record<string, ProviderBinding>;   // agent.provider name → executor binding
-  skills?: SkillResolver;
+  registry: CapabilityRegistry;                  // runtimes / functions / skills (@declarative-ai/core)
   persistence?: Persistence;
-  interactionPolicy?: "eager" | "lazy";          // "eager": refuse interactive defs up front (search)
 }
 interface HierarchicalWorkflowDefinition { rootId: string; states: Record<string, StateDef | Record<string, unknown>>; }
 ```
 
 The executor loads + validates the bundle, wires abort/timeout, runs the engine, folds child cost/calls into
 its metrics, and maps termination to an `Outcome` (`deadline`/`canceled`/`permanent` classifications for the
-failure cases). Child states execute through `ctx.registry` (required); `spec.interaction` supplies the UI
-port. Capabilities: `interactive: true, memoizable: true, sessionResume: false, runtime: edge-safe`. See
+failure cases). Child operations dispatch through `options.registry` (the typed `CapabilityRegistry`); the
+`definition` is a `WorkflowBundle` (`= { rootId, states }`, so `loadBundle(...)` output passes straight
+through). Capabilities: `interactive: true, memoizable: true, sessionResume: false, runtime: edge-safe`. See
 [README example 8](README.md#8-hierarchical-workflows).
 
 Identity helpers:
@@ -872,7 +874,6 @@ Identity helpers:
 ```ts
 function workflowDefinitionHash(spec: ExecutionSpec): string;   // the snapshot hash (SPEC §12) — pass as withMemoize identify
 function workflowMemoKey(spec: ExecutionSpec): string;          // the full §3.4 memo key for a run
-function interactiveStatesOf(states: Record<string, StateDef>): string[];
 ```
 
 To memoize a workflow run: `withMemoize({ cache, identify: workflowDefinitionHash })`.
@@ -895,23 +896,51 @@ interface ValidationIssue { stateId: string; path: string; message: string; }
 `loadBundle` parses raw state files into a `WorkflowBundle`; `validateBundle` statically checks it (wiring,
 transitions, references) before any execution.
 
-### Provider bindings & ports
+### The capability registry & ports
 
-How states bind to executors, and the engine's outward-facing ports. Source: `ports.ts`.
+Child operations dispatch through the typed `CapabilityRegistry` (`@declarative-ai/core`) — no per-state
+binding table. A state's `runtime.name` selects a `registry.runtimes` entry, `function.name` a
+`registry.functions` entry, and `runtime.prompt.skill` a `registry.skills` template.
 
 ```ts
-function llmCallBinding(defaults: Record<string, unknown>, opts?: LlmCallBindingOptions): ProviderBinding;
-interface LlmCallBindingOptions { registry?: ConfigurationRegistry; }
-interface ProviderBinding {
-  kind: UnitKind;
-  definition(req: { prompt: string; system?: string; config: Record<string, unknown>; timeoutMs? }): unknown;
-}
+// @declarative-ai/core
+interface CapabilityRegistry { runtimes: Registry<Runtime>; functions: Registry<HostFunction>; skills: Registry<SkillTemplate>; tools: Registry<Tool>; }
+interface Registry<T> { get(name: string): T | undefined; register(name: string, value: T): this; }
+class MapCapabilityRegistry implements CapabilityRegistry { /* … */ }
+interface Runtime { capabilities: ExecutorCapabilities; run(op: RuntimeOp, ctx: ExecServices): ExecHandle; }
+interface HostFunction { capabilities?: { interactive?; pure?; readOnly? }; run(inputs, ctx: ExecServices): unknown | Promise<unknown>; }
+interface Tool extends HostFunction { description?: string; inputSchema: Record<string, unknown>; }  // Tool ⊂ HostFunction
+interface NativeToolRef { native: string; }   // a delegated runtime's built-in, referenced by name
+type SkillTemplate = string;   // name → prompt template
 ```
 
-`llmCallBinding` declares each state's call through the same `resolveConfig` pipeline (DESIGN §1.5, §7):
-`defaults ← registry.get(config.configRef) ← the state's inline config`, family-aware and strict-parsed. The
-rendered template is the operation prompt; a config-layer `prompt` is an error. Map it under
-`HwExecutorOptions.providers` keyed by the state file's `agent.provider` name.
+A **`tool`** is a `HostFunction` plus the call-metadata a model needs to invoke it (`description`,
+`inputSchema`) — so the same impl can be a graph `function` op or an agent tool. A state declares
+`runtime.tools: string[]` (logical names); the engine resolves them through `registry.tools` and hands the
+executables to the runtime (unregistered ⇒ permanent failure). The `llm` runtime feeds them into its bounded
+`llmStep` tool loop; see [RUNTIMES-AND-PERMISSIONS.md](RUNTIMES-AND-PERMISSIONS.md) §2.
+
+Ready-made workspace tools ship in **`@declarative-ai/tools`** — `read_file` / `list_dir` / `grep` / `glob`
+(read-only), `write_file` / `edit_file` (mutating), and `run_command` (shell), operating on `ctx.workspace`
+(a core `Workspace { root }` threaded via `ExecServices`) with a path-escape guard; `allTools` is the full
+set keyed by logical name. Register them into `registry.tools` and reference by name from `runtime.tools`.
+
+The `llm` runtime is `@declarative-ai/llm`'s `createLlmRuntime({ defaults?, configs?, executor? })` — it
+absorbs the former `llmCallBinding`, resolving each call through the same `resolveConfig` pipeline
+(`defaults ← configs.get(config.configRef) preset ← inline config`, family-aware, strict-parsed) and
+delegating to a composed `llm-call` executor stack. A config-layer `prompt` is an error. This is a
+**composed** runtime (we drive the tool loop).
+
+A **delegated** runtime runs its own loop: `@declarative-ai/claude-code`'s
+`createClaudeCodeRuntime({ query?, capabilities?, injectTools?, nativeTools? })` maps a `RuntimeOp` + ctx
+onto an injectable `AgentQuery` seam (prompt, `cwd` from `ctx.workspace`, `permissionMode` from the op
+config), routes the agent's native tool-approval callback through `ctx.approve`, and by default **injects
+`runtime.tools` into the agent over MCP** (our impls, ctx-bound) so a `bash`/`read_file` behaves identically
+to the composed runtime. `nativeTools` (a `Record<logicalName, NativeToolRef>`) instead resolves selected
+tools to the agent's own built-ins (aliased). The engine hands a delegated runtime (capability
+`policyEnforcement: "callback"`) **raw** tools — no `withPermission` wrap — so injected tools aren't
+double-gated. The default `query` lazily loads the optional `@anthropic-ai/claude-agent-sdk`; inject a
+`query` to test or swap the backend.
 
 The ports (apps implement these):
 
@@ -920,10 +949,43 @@ The ports (apps implement these):
 | `Persistence` | `record(event: EngineEvent, atMs: number): void` — the durable run-record sink (SPEC §10.2). |
 | `InMemoryPersistence` | the bundled buffering implementation (embedding & tests). |
 | `EngineEvent` | the run-record event union (`instance.entered`, `operation.completed`, `transition.taken`, `instance.terminated`, …). |
-| `SkillResolver` / `SkillDef` | project skill-library lookup (`get(name): SkillDef`). |
+| `OperationKind` | `"runtime" \| "function"` — the two operation types (event `op` field). |
 | `ArtifactRef` / `isArtifactRef` | an artifact value flowing through workflow inputs/outputs. |
 
-The `InteractionPort` is `@declarative-ai/core`'s (supplied via `spec.interaction`).
+Interactive UI is a `HostFunction` with `capabilities.interactive` — it drives its renderer internally, so
+there is no separate `InteractionPort` seam on the engine.
+
+### Tool-call permissions
+
+An agent's tool call is authorized by a **profile × mode** (`@declarative-ai/core` `permissions.ts`;
+[RUNTIMES-AND-PERMISSIONS.md](RUNTIMES-AND-PERMISSIONS.md) §4). Tools are permission-wrapped by the engine
+only when `EngineConfig.permissions.approve` is supplied.
+
+```ts
+// @declarative-ai/core
+type PermissionMode = "allow" | "deny" | "ask" | "smart";   // smart → a bound arg-inspecting policy
+type PermissionProfile = "read-only" | "plan" | "full" | (string & {});   // read-only/plan admit only readOnly tools; other = custom
+type ProfilePredicate = (tool: { name: string; readOnly: boolean }) => boolean;   // a custom profile's in-scope test
+type PermissionScope = "once" | "session" | "workflow-run" | "always";   // in-memory lifetimes, widening
+interface PermissionDecision { decision: "allow" | "deny"; scope: PermissionScope; }
+type Approver = (req: { tool: string; input: unknown; sessionId: string }) => PermissionDecision | Promise<PermissionDecision>;
+type SmartApprover = (req: { tool; input; sessionId }) => "allow" | "deny" | "ask";   // "ask" escalates to the human
+interface PermissionBaseline { default?: PermissionMode; tools?: Record<string, PermissionMode>; profile?: PermissionProfile; }
+
+class PermissionLedger {                    // the scope chain: session → workflow-run → process → baseline → ask
+  constructor(opts?: { baseline?: PermissionBaseline; process?: Map<string, PermissionMode> });
+  resolve(tool, sessionId, fallback?): PermissionMode;   // fallback = the per-state authored mode
+  apply(tool, decision: PermissionDecision, sessionId): void;   // writes at the decision's scope
+  resolveProfile(sessionId): PermissionProfile; setProfile(sessionId, p): void; seedProfile(sessionId, p): void;
+}
+function withPermission(tool: Tool, opts: { ledger; sessionId; toolName; approve: Approver; authoredMode? }): Tool;
+function planExitTool(opts: { ledger; sessionId; approve: Approver }): Tool;   // plan → full on approval
+interface PermissionDenied { denied: true; tool: string; reason: string; }   // isPermissionDenied(v)
+```
+
+A state authors its baseline via `runtime.permissions { profile?, default?, tools? }` (overriding the
+engine's workflow-wide `baseline`) and its sharing key via `runtime.session` (absent ⇒ the state id).
+`plan` mode blocks mutating tools until the agent calls the injected `exit_plan` tool and a human approves.
 
 ### The engine (lower level)
 
@@ -937,10 +999,17 @@ class WorkflowEngine {
 }
 interface EngineConfig {
   bundle: WorkflowBundle;
-  providers: Record<string, ProviderBinding>;
-  registry: ExecutorRegistry; validator?: OutputValidator; interaction?: InteractionPort;
-  skills?: SkillResolver; persistence?: Persistence; services?: ExecServices; clock?: Clock;
+  registry: CapabilityRegistry;    // runtimes / functions / skills / tools
+  validator?: OutputValidator; persistence?: Persistence; services?: ExecServices; clock?: Clock;
   onEvent?: (event: EngineEvent) => void;
+  // Tool-call permissions (RUNTIMES-AND-PERMISSIONS.md §4). `approve` collects a human decision on `ask`;
+  // absent ⇒ a state's tools run UNGUARDED. `baseline` is the workflow-wide default; `process` is the
+  // host-owned overlay carrying `always` decisions across runs.
+  permissions?: { approve?: Approver; baseline?: PermissionBaseline; process?: Map<string, PermissionMode>;
+                  smart?: Record<string, SmartApprover>; profiles?: Record<string, ProfilePredicate> };
+  // Per-session workspace resolver (RUNTIMES-AND-PERMISSIONS.md §3): a state's `runtime.session` → its
+  // workspace, for fan-out isolation. undefined ⇒ the run-level `services.workspace`.
+  workspaceFor?: (sessionId: string) => Workspace | undefined;
 }
 interface WorkflowRunOptions { inputs: Record<string, unknown>; abortSignal?: AbortSignal; }
 interface WorkflowRunResult {
@@ -955,9 +1024,9 @@ The typed shape of a state file (see [SPEC.md](SPEC.md) §5 for authoring semant
 
 | Export | Purpose |
 | --- | --- |
-| `StateDef` | one state file: `id`, `label`, `inputs`/`outputs`/`params`, `agent`/`skill`/`ui`, `children`, `sequence`, `transitions`, `limits`. |
+| `StateDef` | one state file: `id`, `label`, `inputs`/`outputs`/`params`, `runtime`/`function`, `children`, `sequence`, `transitions`, `limits`. |
 | `WorkflowBundle` | `{ rootId; states: Record<string, StateDef> }`. |
-| `AgentConfig` / `SkillConfig` / `UiConfig` | the three operation configs. |
+| `RuntimeConfig` / `FunctionConfig` | the two operation configs. A `runtime`'s prompt is an inline `template` or a named `skill`; it may also declare `tools` (logical names), a `session` sharing key, and authored `permissions` (`profile` / `default` / per-tool modes). |
 | `ChildDecl` / `TransitionDecl` / `LimitsDecl` | child wiring, transitions, iteration/timeout limits. |
 | `FieldSchema` / `OutputFieldSchema` | input/output field schemas (the latter adds `from`). |
 | `WiringValue` | `string \| { value: unknown }` — a reference expression or a wrapped literal. |
