@@ -200,17 +200,17 @@ function cacheHitMetrics(metrics: ExecMetrics, nowMs: number): ExecMetrics {
  * instead — sound, because that layer recomputes the sent op from the full transcript, so the memo key
  * inside sees the real content identity.
  */
-export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>>(
+export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>, Out = ResolvedValue>(
   config: { cache: MemoCache } & MemoizeOptions<Op>,
-): ExecutorWrapper<R, R, ExecMetrics, Op>;
-export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>>(
+): ExecutorWrapper<R, R, ExecMetrics, Op, Out>;
+export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>, Out = ResolvedValue>(
   config: { cache: MemoCache } & MemoizeOptions<Op>,
-  inner: Executor<R, ExecMetrics, Op>,
-): Executor<R, ExecMetrics, Op>;
-export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>>(
+  inner: Executor<R, ExecMetrics, Op, Out>,
+): Executor<R, ExecMetrics, Op, Out>;
+export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>, Out = ResolvedValue>(
   config: { cache: MemoCache } & MemoizeOptions<Op>,
-  inner?: Executor<R, ExecMetrics, Op>,
-): ExecutorWrapper<R, R, ExecMetrics, Op> | Executor<R, ExecMetrics, Op> {
+  inner?: Executor<R, ExecMetrics, Op, Out>,
+): ExecutorWrapper<R, R, ExecMetrics, Op, Out> | Executor<R, ExecMetrics, Op, Out> {
   const { cache, identify } = config;
   const strictCacheWrites = config.strictCacheWrites ?? false;
   const wrap = ((innerExec: Executor<ExecServices, ExecMetrics, Op>): Executor<ExecServices, ExecMetrics, Op> => {
@@ -313,7 +313,7 @@ export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>>(
         );
       },
     };
-  }) as unknown as ExecutorWrapper<R, R, ExecMetrics, Op>;
+  }) as unknown as ExecutorWrapper<R, R, ExecMetrics, Op, Out>;
   return inner ? wrap(inner) : wrap;
 }
 

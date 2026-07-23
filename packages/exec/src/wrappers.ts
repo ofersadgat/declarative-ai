@@ -29,10 +29,10 @@ export function isExecutor(x: unknown): x is Executor {
 /** Dual-mode dispatch: a wrapper called WITHOUT an inner executor returns the curried
  *  `ExecutorWrapper` (for the `compose(...).with(...)` builder); called WITH one it applies
  *  immediately, so direct nesting reads inside-out. */
-export function curryOrApply<RIn, ROut, M extends ExecMetrics = ExecMetrics>(
-  wrap: ExecutorWrapper<RIn, ROut, M>,
-  inner?: Executor<RIn, M>,
-): ExecutorWrapper<RIn, ROut, M> | Executor<ROut, M> {
+export function curryOrApply<RIn, ROut, M extends ExecMetrics = ExecMetrics, Op = Operation<InlineFamily>, Out = ResolvedValue>(
+  wrap: ExecutorWrapper<RIn, ROut, M, Op, Out>,
+  inner?: Executor<RIn, M, Op, Out>,
+): ExecutorWrapper<RIn, ROut, M, Op, Out> | Executor<ROut, M, Op, Out> {
   return inner ? wrap(inner) : wrap;
 }
 
@@ -56,14 +56,14 @@ type DeadlineSeams = { deadline: DeadlineConfig; stepStartMs: number };
  * than on a spec AND on a definition, there is no longer a "definition budget above the spec limit"
  * conflict for the core to refuse — one field, one clamp.
  */
-export function withDeadline<R = ExecServices>(inner: Executor<R>): Executor<R & DeadlineSeams>;
-export function withDeadline<R = ExecServices, P extends Partial<DeadlineSeams> = {}>(
+export function withDeadline<R = ExecServices, Out = ResolvedValue>(inner: Executor<R, ExecMetrics, Operation<InlineFamily>, Out>): Executor<R & DeadlineSeams, ExecMetrics, Operation<InlineFamily>, Out>;
+export function withDeadline<R = ExecServices, P extends Partial<DeadlineSeams> = {}, Out = ResolvedValue>(
   config?: P,
-): ExecutorWrapper<R, R & Omit<DeadlineSeams, keyof P>>;
-export function withDeadline<R = ExecServices, P extends Partial<DeadlineSeams> = {}>(
+): ExecutorWrapper<R, R & Omit<DeadlineSeams, keyof P>, ExecMetrics, Operation<InlineFamily>, Out>;
+export function withDeadline<R = ExecServices, P extends Partial<DeadlineSeams> = {}, Out = ResolvedValue>(
   config: P,
-  inner: Executor<R>,
-): Executor<R & Omit<DeadlineSeams, keyof P>>;
+  inner: Executor<R, ExecMetrics, Operation<InlineFamily>, Out>,
+): Executor<R & Omit<DeadlineSeams, keyof P>, ExecMetrics, Operation<InlineFamily>, Out>;
 export function withDeadline<R = ExecServices>(
   configOrInner?: Partial<DeadlineSeams> | Executor<R>,
   maybeInner?: Executor<R>,
@@ -196,8 +196,11 @@ function withRepairHint(op: Operation<InlineFamily>, errors: string): Operation<
   return prompt;
 }
 
-export function withRetry<R = ExecServices, M extends ExecMetrics = ExecMetrics>(config: RetryConfig): ExecutorWrapper<R, R, M>;
-export function withRetry<R = ExecServices, M extends ExecMetrics = ExecMetrics>(config: RetryConfig, inner: Executor<R, M>): Executor<R, M>;
+export function withRetry<R = ExecServices, M extends ExecMetrics = ExecMetrics, Out = ResolvedValue>(config: RetryConfig): ExecutorWrapper<R, R, M, Operation<InlineFamily>, Out>;
+export function withRetry<R = ExecServices, M extends ExecMetrics = ExecMetrics, Out = ResolvedValue>(
+  config: RetryConfig,
+  inner: Executor<R, M, Operation<InlineFamily>, Out>,
+): Executor<R, M, Operation<InlineFamily>, Out>;
 export function withRetry<R = ExecServices>(config: RetryConfig, inner?: Executor<R>): ExecutorWrapper<R, R> | Executor<R> {
   const transientCap = typeof config.transient === "number" ? config.transient : (config.transient?.cap ?? 0);
   const b = typeof config.transient === "object" ? config.transient : undefined;

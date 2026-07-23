@@ -137,7 +137,7 @@ export interface ExecHandle<O, M extends ExecMetrics = ExecMetrics> {
  * which take the latest, and which are the first observation; every consumer of a merge calls it
  * without learning what the fields mean.
  */
-export interface Executor<R = ExecServices, M extends ExecMetrics = ExecMetrics, Op = Operation<InlineFamily>> {
+export interface Executor<R = ExecServices, M extends ExecMetrics = ExecMetrics, Op = Operation<InlineFamily>, Out = ResolvedValue> {
   readonly capabilities: Capabilities;
   readonly metrics: MetricsAlgebra<M>;
   /**
@@ -156,7 +156,7 @@ export interface Executor<R = ExecServices, M extends ExecMetrics = ExecMetrics,
    * silently degrades to the static record.
    */
   capabilitiesFor?(op: Op): Capabilities;
-  start(op: Op, ctx: R): ExecHandle<ResolvedValue, M>;
+  start(op: Op, ctx: R): ExecHandle<Out, M>;
 }
 
 // --- The named facets a workflow's operations reference ------------------------
@@ -342,9 +342,9 @@ export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
  * (`withDeadline(): ExecutorWrapper<R, R & { deadline; stepStartMs }>`). The stacking ORDER encodes
  * semantics — see the two forms below.
  */
-export type ExecutorWrapper<RIn = ExecServices, ROut = RIn, M extends ExecMetrics = ExecMetrics, Op = Operation<InlineFamily>> = (
-  inner: Executor<RIn, M, Op>,
-) => Executor<ROut, M, Op>;
+export type ExecutorWrapper<RIn = ExecServices, ROut = RIn, M extends ExecMetrics = ExecMetrics, Op = Operation<InlineFamily>, Out = ResolvedValue> = (
+  inner: Executor<RIn, M, Op, Out>,
+) => Executor<ROut, M, Op, Out>;
 
 /**
  * Forward a dispatcher's per-op capability lookup through a wrapper — spread into the wrapper's executor
@@ -389,12 +389,12 @@ export function composeExecutors<M extends ExecMetrics = ExecMetrics>(
  * `withDeadline`) is a compile error, and it IS an {@link Executor} so it drops into a registry
  * unchanged.
  */
-export class ComposableExecutor<R = ExecServices, M extends ExecMetrics = ExecMetrics, Op = Operation<InlineFamily>> implements Executor<R, M, Op> {
+export class ComposableExecutor<R = ExecServices, M extends ExecMetrics = ExecMetrics, Op = Operation<InlineFamily>, Out = ResolvedValue> implements Executor<R, M, Op, Out> {
   /** Forwarded so the per-op capability lookup survives the builder — and forwarded CONDITIONALLY, so
    *  that "this executor has no per-op record" (which `withMemoize` reads as "the static record IS the
    *  whole truth") survives too. See {@link Executor.capabilitiesFor}. */
   readonly capabilitiesFor?: (op: Op) => Capabilities;
-  constructor(private readonly inner: Executor<R, M, Op>) {
+  constructor(private readonly inner: Executor<R, M, Op, Out>) {
     const perOp = inner.capabilitiesFor;
     if (perOp) this.capabilitiesFor = (op): Capabilities => perOp.call(inner, op);
   }
@@ -410,17 +410,17 @@ export class ComposableExecutor<R = ExecServices, M extends ExecMetrics = ExecMe
    * above it accepts: `compose(leaf).with(withBudget(...)).with(withHydration(resolve)).with(withMemoize(...))`
    * prices inline ops below the transition and memoizes id ops above it.
    */
-  with<ROut, OpOut = Op>(wrap: (inner: Executor<R, M, Op>) => Executor<ROut, M, OpOut>): ComposableExecutor<ROut, M, OpOut> {
+  with<ROut, OpOut = Op>(wrap: (inner: Executor<R, M, Op, Out>) => Executor<ROut, M, OpOut, Out>): ComposableExecutor<ROut, M, OpOut, Out> {
     return new ComposableExecutor(wrap(this.inner));
   }
-  start(op: Op, ctx: R): ExecHandle<ResolvedValue, M> {
+  start(op: Op, ctx: R): ExecHandle<Out, M> {
     return this.inner.start(op, ctx);
   }
 }
 
 /** Start the inside-out builder around a core executor — see {@link ComposableExecutor}. */
-export function compose<R = ExecServices, M extends ExecMetrics = ExecMetrics, Op = Operation<InlineFamily>>(
-  core: Executor<R, M, Op>,
-): ComposableExecutor<R, M, Op> {
+export function compose<R = ExecServices, M extends ExecMetrics = ExecMetrics, Op = Operation<InlineFamily>, Out = ResolvedValue>(
+  core: Executor<R, M, Op, Out>,
+): ComposableExecutor<R, M, Op, Out> {
   return new ComposableExecutor(core);
 }

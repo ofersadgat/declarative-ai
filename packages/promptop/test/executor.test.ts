@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import type { ExecServices, InlineFamily, Operation, Tool } from "@declarative-ai/exec";
+import { describe, expect, expectTypeOf, it } from "vitest";
+import type { ExecResult, ExecServices, InlineFamily, Operation, Tool } from "@declarative-ai/exec";
+import type { LlmMetrics, LlmOutput } from "@declarative-ai/llm";
 import { PromptExecutor, createPromptExecutor } from "../src/executor";
 import { fakeRunner, okOutcome, promptOp, errorOf } from "./fakes";
 
@@ -206,5 +207,33 @@ describe("executePromptOp — the op-level call (no projection)", () => {
     expect(calls).toHaveLength(0);
     expect(errorOf(out)?.classification).toBe("permanent");
     expect(errorOf(out)?.reason).toMatch(/config supplies `prompt`/);
+  });
+});
+
+describe("record mode — the projection as a TYPE-LEVEL mode (Out = LlmOutput)", () => {
+  it("a record-mode core returns the FULL payload as the execution value, through a wrapper stack", async () => {
+    const { runner } = fakeRunner([okOutcome({ thinking: [{ type: "reasoning", text: "hmm", textOffset: 0 }] })]);
+    const { compose } = await import("@declarative-ai/exec");
+    const { withBudget, withRateLimit } = await import("../src/wrappers");
+    const { PassthroughRateLimiter } = await import("@declarative-ai/exec");
+    const core = createPromptExecutor({ runner, record: true });
+    const stack = compose(core)
+      .with(withRateLimit({ limiter: new PassthroughRateLimiter() }))
+      .with(withBudget({}));
+    const result = await stack.start(promptOp(), {}).result;
+    // The outward result IS an LlmCallResult: ExecResult<LlmOutput, LlmMetrics> — no smuggling, no
+    // side channel; the wrapping executors' result type carries the payload.
+    expectTypeOf(result).toEqualTypeOf<ExecResult<LlmOutput, LlmMetrics>>();
+    expect("error" in result ? result.error : undefined).toBeUndefined();
+    expect(result.value?.value).toEqual({ answer: "4" });
+    expect(result.value?.thinking?.[0]?.text).toBe("hmm");
+    expect(result.value?.finishReason).toBe("stop");
+    expect(result.metrics.costUsd).toBe(0.001);
+  });
+
+  it("value mode (the default) still projects — the two modes are the same pipeline", async () => {
+    const { runner } = fakeRunner([okOutcome({ thinking: [{ type: "reasoning", text: "hmm", textOffset: 0 }] })]);
+    const out = await createPromptExecutor({ runner }).start(promptOp(), {}).result;
+    expect(out.value).toEqual({ answer: "4" }); // the op's output value, payload projected away
   });
 });
