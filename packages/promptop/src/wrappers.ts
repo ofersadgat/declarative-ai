@@ -146,9 +146,17 @@ export type RateLimitOptions = { limiter: RateLimiter } & ResolutionOptions;
  * drives AIMD). A cancel that lands while the call is still QUEUED prevents it from ever starting
  * (returns a `canceled` outcome); a limiter fault is normalized into a permanent failure.
  */
-export function withRateLimit<R = ExecServices, M extends ExecMetrics = ExecMetrics>(config: RateLimitOptions): ExecutorWrapper<R, R, M>;
-export function withRateLimit<R = ExecServices, M extends ExecMetrics = ExecMetrics>(config: RateLimitOptions, inner: Executor<R, M>): Executor<R, M>;
-export function withRateLimit<R = ExecServices, M extends ExecMetrics = ExecMetrics>(config: RateLimitOptions, inner?: Executor<R, M>): ExecutorWrapper<R, R, M> | Executor<R, M> {
+export function withRateLimit<R = ExecServices, M extends ExecMetrics = ExecMetrics, Out = ResolvedValue>(
+  config: RateLimitOptions,
+): ExecutorWrapper<R, R, M, Operation<InlineFamily>, Out>;
+export function withRateLimit<R = ExecServices, M extends ExecMetrics = ExecMetrics, Out = ResolvedValue>(
+  config: RateLimitOptions,
+  inner: Executor<R, M, Operation<InlineFamily>, Out>,
+): Executor<R, M, Operation<InlineFamily>, Out>;
+export function withRateLimit<R = ExecServices, M extends ExecMetrics = ExecMetrics, Out = ResolvedValue>(
+  config: RateLimitOptions,
+  inner?: Executor<R, M, Operation<InlineFamily>, Out>,
+): ExecutorWrapper<R, R, M, Operation<InlineFamily>, Out> | Executor<R, M, Operation<InlineFamily>, Out> {
   const { limiter } = config;
   /** Per-op token-estimate cache: the estimate is derived from the full prompt text (potentially a long
    *  transcript), and the SAME op object is re-submitted per repair attempt / retry. Scoped to THIS
@@ -184,7 +192,7 @@ export function withRateLimit<R = ExecServices, M extends ExecMetrics = ExecMetr
         return result;
       });
     },
-  })) as unknown as ExecutorWrapper<R, R, M>;
+  })) as unknown as ExecutorWrapper<R, R, M, Operation<InlineFamily>, Out>;
   return curryOrApply(wrap, inner);
 }
 
@@ -244,22 +252,22 @@ export interface BudgetOptions extends ResolutionOptions {
  *
  * With no meter available the wrapper runs the inner call untouched, in either mode.
  */
-export function withBudget<R = ExecServices, M extends BudgetReadable = BudgetReadable>(
+export function withBudget<R = ExecServices, M extends BudgetReadable = BudgetReadable, Out = ResolvedValue>(
   config?: BudgetOptions,
-): ExecutorWrapper<R, R, M>;
-export function withBudget<R = ExecServices, M extends BudgetReadable = BudgetReadable>(
+): ExecutorWrapper<R, R, M, Operation<InlineFamily>, Out>;
+export function withBudget<R = ExecServices, M extends BudgetReadable = BudgetReadable, Out = ResolvedValue>(
   config: BudgetOptions,
-  inner: Executor<R, M>,
-): Executor<R, M>;
-export function withBudget<R = ExecServices, M extends BudgetReadable = BudgetReadable>(
-  inner: Executor<R, M>,
-): Executor<R, M>;
-export function withBudget<R = ExecServices, M extends BudgetReadable = BudgetReadable>(
-  configOrInner?: BudgetOptions | Executor<R, M>,
-  maybeInner?: Executor<R, M>,
-): ExecutorWrapper<R, R, M> | Executor<R, M> {
+  inner: Executor<R, M, Operation<InlineFamily>, Out>,
+): Executor<R, M, Operation<InlineFamily>, Out>;
+export function withBudget<R = ExecServices, M extends BudgetReadable = BudgetReadable, Out = ResolvedValue>(
+  inner: Executor<R, M, Operation<InlineFamily>, Out>,
+): Executor<R, M, Operation<InlineFamily>, Out>;
+export function withBudget<R = ExecServices, M extends BudgetReadable = BudgetReadable, Out = ResolvedValue>(
+  configOrInner?: BudgetOptions | Executor<R, M, Operation<InlineFamily>, Out>,
+  maybeInner?: Executor<R, M, Operation<InlineFamily>, Out>,
+): ExecutorWrapper<R, R, M, Operation<InlineFamily>, Out> | Executor<R, M, Operation<InlineFamily>, Out> {
   const config = (isExecutor(configOrInner) ? undefined : configOrInner) as BudgetOptions | undefined;
-  const inner = (isExecutor(configOrInner) ? configOrInner : maybeInner) as Executor<R, M> | undefined;
+  const inner = (isExecutor(configOrInner) ? configOrInner : maybeInner) as Executor<R, M, Operation<InlineFamily>, Out> | undefined;
   // Default pricing = the catalog. Un-priced models estimate $0 (they cost the platform nothing; a
   // meter's balance>0 admission floor still applies).
   const estCost = config?.pricing?.estimateCostUsd ?? ((m: string, i: number, o: number) => ModelInfo.instance.computeCostUsd(m, i, o) ?? 0);
@@ -344,7 +352,7 @@ export function withBudget<R = ExecServices, M extends BudgetReadable = BudgetRe
         return result;
       });
     },
-  })) as unknown as ExecutorWrapper<R, R, M>;
+  })) as unknown as ExecutorWrapper<R, R, M, Operation<InlineFamily>, Out>;
   return curryOrApply(wrap, inner);
 }
 

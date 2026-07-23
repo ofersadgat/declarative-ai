@@ -2017,7 +2017,13 @@ class PromptExecutor implements Executor {}
 interface PromptExecutorOptions extends LoweringOptions {
   router?: ModelRouter;       // else the typed ctx.modelRouter, else a lazy env-key router
   runner?: CallRunner;        // the injectable call seam; defaults to the real executeLlmCall pipeline
+  record?: boolean;           // RECORD mode: the execution value is the FULL LlmOutput payload instead
+                              // of the projection to the op's output value — a TYPE-LEVEL fact on the
+                              // executor's Out, so a wrapper stack around a record-mode core yields
+                              // LlmCallResult-shaped results outward. For consumers that PERSIST what
+                              // the model produced. (withSession composes over value mode only.)
 }
+// createPromptExecutor({ record: true }) : Executor<ExecServices, LlmMetrics, Operation<InlineFamily>, LlmOutput>
 type CallRunner = (def: LlmCallDefinition, env: CallDeps, timeoutMs?: number) => Promise<LlmCallResult>;
 
 // This package declares llm's seam on ExecServices — `exec` never names an opaque ModelHandle it

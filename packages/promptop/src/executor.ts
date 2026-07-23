@@ -32,6 +32,7 @@ import {
   type CallDeps,
   type LlmCallResult,
   type LlmMetrics,
+  type LlmOutput,
   type LlmCallDefinition,
   type LlmCallEnvironment,
   type ModelRouter,
@@ -89,6 +90,18 @@ export interface PromptExecutorOptions extends LoweringOptions {
   router?: ModelRouter;
   /** The call seam; defaults to the real `executeLlmCall` pipeline. */
   runner?: CallRunner;
+  /**
+   * RECORD mode: the execution value is the FULL `LlmOutput` payload — value, `thinking`,
+   * `finishReason`, tool trace — instead of the projection down to the op's output value. The mode is
+   * a TYPE-LEVEL fact carried on the executor's `Out` parameter, so a wrapper stack composed around a
+   * record-mode core yields `LlmCallResult`-shaped results outward (`ExecResult<LlmOutput, LlmMetrics>`
+   * ≡ `LlmCallResult`) — the interface and the pipeline are unchanged; only what the value IS differs.
+   *
+   * For consumers that PERSIST what the model produced (an `OperationRecord`'s `R` is the payload).
+   * NB `withSession` composes over VALUE-mode executors only — its transcript fold reads the op's
+   * output value, which in record mode is buried inside the payload.
+   */
+  record?: boolean;
 }
 
 const CAPABILITIES: Capabilities = {
@@ -115,7 +128,7 @@ function adaptTools(tools: Record<string, Tool> | undefined, ctx: ExecServices):
   return out;
 }
 
-export class PromptExecutor implements Executor<ExecServices, LlmMetrics> {
+export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecServices, LlmMetrics, Operation<InlineFamily>, Out> {
   readonly capabilities = CAPABILITIES;
   /** How two of THIS executor's measurements combine — tokens and money add, the start is the first
    *  observation. exec calls this to fold retry attempts without knowing what a token is. */
@@ -125,16 +138,18 @@ export class PromptExecutor implements Executor<ExecServices, LlmMetrics> {
 
   constructor(private readonly options: PromptExecutorOptions = {}) {}
 
-  start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue, LlmMetrics> {
+  start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<Out, LlmMetrics> {
     if (op.kind !== "prompt") {
-      return finishedHandle<ResolvedValue, LlmMetrics>({
+      return finishedHandle<Out, LlmMetrics>({
         error: { classification: "permanent", reason: `the prompt executor was handed a ${op.kind} operation` },
         metrics: { durationMs: 0, costUsd: 0, costSource: "unknown" },
       });
     }
     const internal = new AbortController();
     let cancelRequested = false;
-    const result = this.run(op, ctx, internal.signal, () => cancelRequested);
+    // The body speaks `ResolvedValue` throughout; record mode changes WHAT the value is at the one
+    // projection site, and the class's `Out` parameter is the type-level record of that choice.
+    const result = this.run(op, ctx, internal.signal, () => cancelRequested) as Promise<ExecResult<Out, LlmMetrics>>;
     return {
       events: emptyEvents(),
       result,
@@ -240,6 +255,16 @@ export class PromptExecutor implements Executor<ExecServices, LlmMetrics> {
     // stops: everything past here sees a `ResolvedValue`, which is why `exec` and `hw` no longer name
     // `thinking` at all.
     const output = call.value;
+    // RECORD mode: no projection — the execution value IS the payload (see
+    // {@link PromptExecutorOptions.record}); the class's `Out` parameter carries that outward.
+    if (this.options.record) {
+      const payload = (output ?? { finishReason: "error" }) as unknown as ResolvedValue;
+      const recordMetrics: LlmMetrics = { ...call.metrics, startMs };
+      if (isOk(call)) return { value: payload, metrics: recordMetrics };
+      const canceledCall = wasCanceled() || ctx.abortSignal?.aborted === true;
+      const recordError = canceledCall ? { ...call.error, classification: "canceled" as const } : call.error;
+      return { error: recordError, value: payload, metrics: recordMetrics };
+    }
     // A generated FILE lands in a `blob`-kind output parameter — that is what §7.1 means by "a produced
     // artifact is an output parameter, not a parallel channel". A json/text parameter ignores it.
     const value: ResolvedValue | undefined =
@@ -259,6 +284,11 @@ export class PromptExecutor implements Executor<ExecServices, LlmMetrics> {
 
 /** Convenience factory mirroring the class constructor — the BARE core (no wrappers). Compose the
  *  cross-cutting behaviors you want with `compose(core).with(withRateLimit(...)).with(withRetry(...))`. */
-export function createPromptExecutor(options: PromptExecutorOptions = {}): Executor<ExecServices, LlmMetrics> {
-  return new PromptExecutor(options);
+export function createPromptExecutor(options?: PromptExecutorOptions & { record?: false }): Executor<ExecServices, LlmMetrics>;
+export function createPromptExecutor(
+  options: PromptExecutorOptions & { record: true },
+): Executor<ExecServices, LlmMetrics, Operation<InlineFamily>, LlmOutput>;
+export function createPromptExecutor(options: PromptExecutorOptions = {}): Executor<ExecServices, LlmMetrics, Operation<InlineFamily>, never> {
+  // `never` is assignable to BOTH overloads' Out; the constructed instance's true Out is the flag's.
+  return new PromptExecutor(options) as PromptExecutor<never>;
 }

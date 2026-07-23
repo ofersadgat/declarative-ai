@@ -50,17 +50,20 @@ export interface HydrationOptions<Op> {
  * the entire point — so it composes via the same `.with(...)` as everything else but yields a stack
  * whose `start` takes the FAMILY's ops.
  */
-export function withHydration<Op, R = ExecServices, M extends ExecMetrics = ExecMetrics>(
+export function withHydration<Op, R = ExecServices, M extends ExecMetrics = ExecMetrics, Out = ResolvedValue>(
   resolve: Hydrator<Op, R>,
   options: HydrationOptions<Op> = {},
-): (inner: Executor<R, M, Operation<InlineFamily>>) => Executor<R, M, Op> {
+): (inner: Executor<R, M, Operation<InlineFamily>, Out>) => Executor<R, M, Op, Out> {
   return (inner) => ({
     capabilities: inner.capabilities,
     metrics: inner.metrics,
     ...(options.capabilitiesFor ? { capabilitiesFor: options.capabilitiesFor } : {}),
-    start(op: Op, ctx: R): ExecHandle<ResolvedValue, M> {
+    start(op: Op, ctx: R): ExecHandle<Out, M> {
       const services = ctx as ExecServices;
       const clock = services.clock ?? systemClock;
+      // The body speaks `ResolvedValue` (wrapHandle's floor) and passes the inner value through
+      // untouched, so the outward `Out` is asserted once here rather than threaded through the
+      // cancellation scaffolding.
       return wrapHandle<M>(
         async (ctl) => {
           const startMs = clock.now();
@@ -76,10 +79,10 @@ export function withHydration<Op, R = ExecServices, M extends ExecMetrics = Exec
           if (ctl.canceled()) {
             return { error: { classification: "canceled", reason: "canceled during hydration" }, metrics: { startMs, durationMs: clock.now() - startMs } as ExecMetrics as M };
           }
-          return ctl.started(inner.start(inline, ctx)).result;
+          return ctl.started(inner.start(inline, ctx) as unknown as ExecHandle<ResolvedValue, M>).result;
         },
         { signal: services.abortSignal },
-      );
+      ) as unknown as ExecHandle<Out, M>;
     },
   });
 }
