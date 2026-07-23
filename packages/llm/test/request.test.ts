@@ -26,7 +26,7 @@ describe("executeRequest — declaration + env convenience", () => {
       env,
     });
     expect(errorOf(out)).toBeUndefined();
-    expect(out.value?.parsed).toEqual({ answer: "4" });
+    expect(out.value?.value).toEqual({ answer: "4" });
   });
 
   it("throws when the environment has no provider router", async () => {
@@ -73,7 +73,32 @@ describe("executeRequest — declaration + env convenience", () => {
       },
     });
     expectTypeOf(out).toEqualTypeOf<LlmCallResult<string>>();
-    const value: string | undefined = out.value?.parsed;
+    const value: string | undefined = out.value?.value;
     expect(value).toBe("four");
+  });
+});
+
+describe("executeLlmCall — injectable schema-profile resolution", () => {
+  it("uses env.schemaProfile over the built-in catalog profile", async () => {
+    const { JSON_OBJECT } = await import("../src/schema");
+    const { executeLlmCall } = await import("../src/call");
+    const seen: string[] = [];
+    // An advisory profile that REQUIRES the word "json" in the prompt: with no "json" anywhere the
+    // call must fail fast (permanent) BEFORE hitting the provider. The default (catalog) profile for
+    // this model is the strict Anthropic tier, which never fails this way — so reaching the failure
+    // proves the injected resolver was consulted.
+    const out = await executeLlmCall(
+      { model: "anthropic/claude-haiku-4-5", prompt: "what is 2+2?", schema: flatSchema, timeoutMs: 5000 },
+      {
+        modelRouter: fakeRouter(okModel()),
+        schemaProfile: (modelId) => {
+          seen.push(modelId);
+          return { ...JSON_OBJECT, promptRequiresJSONSpecifier: true };
+        },
+      },
+    );
+    expect(seen).toEqual(["anthropic/claude-haiku-4-5"]);
+    expect(errorOf(out)?.classification).toBe("permanent");
+    expect(errorOf(out)?.reason).toMatch(/promptRequiresJSONSpecifier/);
   });
 });

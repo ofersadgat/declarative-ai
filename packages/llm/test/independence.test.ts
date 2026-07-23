@@ -130,7 +130,7 @@ describe("§8 exit criteria — package independence", () => {
     const out = await executeLlmCall(def, { modelRouter: fakeRouter(model), validator });
 
     expect(errorOf(out)).toBeUndefined();
-    expect(out.value?.parsed).toEqual({ answer: "4" });
+    expect(out.value?.value).toEqual({ answer: "4" });
     expect(seen).toEqual([{ answer: "4" }]); // the boundary check ran
   });
 
@@ -148,7 +148,7 @@ describe("§8 exit criteria — package independence", () => {
     const out = await executeLlmCall({ model: "anthropic/claude-haiku-4-5", prompt: "what is 2+2?" }, { modelRouter: fakeRouter(model) });
     // The overload discriminates on the ABSENCE of a schema, so this is `LlmCallResult<string>` — it
     // previously claimed `JsonValue`, which was simply wrong.
-    const value: string | undefined = out.value?.parsed;
+    const value: string | undefined = out.value?.value;
     expect(value).toBe("four");
   });
 });

@@ -128,13 +128,15 @@ export class MapMemoCache implements MemoCache {
   }
 }
 
-export interface MemoizeOptions {
+export interface MemoizeOptions<Op = Operation<InlineFamily>> {
   /**
-   * Derive the operation's content hash. Defaults to {@link hashOperation}. An op with a cheaper or
-   * more canonical identity supplies its own — e.g. a hierarchical workflow passes its snapshot hash so
-   * `memoize` never brute-force-canonicalizes an opaque bundle.
+   * Derive the operation's content hash. Defaults to {@link hashOperation}, which canonicalizes and
+   * hashes the op's serializable content — valid for ANY serializable op shape, including an id-family
+   * op (whose leaves are ids, so it is small and cheap to hash). An op with a cheaper or more canonical
+   * identity supplies its own: a hierarchical workflow passes its snapshot hash so `memoize` never
+   * brute-force-canonicalizes an opaque bundle; a content-addressed op passes its own id.
    */
-  identify?(op: Operation<InlineFamily>): string;
+  identify?(op: Op): string;
   /**
    * Who is answering — the `executorId` component of {@link memoKey}. Defaults to a per-inner-executor
    * token generated here, which is what makes a shared cache SAFE by default: two stacks over different
@@ -161,7 +163,7 @@ export interface MemoizeOptions {
  *  executor that goes away takes its token with it; the counter only ever has to be unique in-process. */
 const AUTO_NAMESPACE = new WeakMap<object, string>();
 let autoNamespaceSeq = 0;
-function autoNamespace(exec: Executor): string {
+function autoNamespace(exec: object): string {
   let token = AUTO_NAMESPACE.get(exec);
   if (token === undefined) {
     token = `executor#${++autoNamespaceSeq}`;
@@ -198,15 +200,20 @@ function cacheHitMetrics(metrics: ExecMetrics, nowMs: number): ExecMetrics {
  * instead — sound, because that layer recomputes the sent op from the full transcript, so the memo key
  * inside sees the real content identity.
  */
-export function withMemoize<R = ExecServices>(config: { cache: MemoCache } & MemoizeOptions): ExecutorWrapper<R, R>;
-export function withMemoize<R = ExecServices>(config: { cache: MemoCache } & MemoizeOptions, inner: Executor<R>): Executor<R>;
-export function withMemoize<R = ExecServices>(
-  config: { cache: MemoCache } & MemoizeOptions,
-  inner?: Executor<R>,
-): ExecutorWrapper<R, R> | Executor<R> {
+export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>>(
+  config: { cache: MemoCache } & MemoizeOptions<Op>,
+): ExecutorWrapper<R, R, ExecMetrics, Op>;
+export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>>(
+  config: { cache: MemoCache } & MemoizeOptions<Op>,
+  inner: Executor<R, ExecMetrics, Op>,
+): Executor<R, ExecMetrics, Op>;
+export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>>(
+  config: { cache: MemoCache } & MemoizeOptions<Op>,
+  inner?: Executor<R, ExecMetrics, Op>,
+): ExecutorWrapper<R, R, ExecMetrics, Op> | Executor<R, ExecMetrics, Op> {
   const { cache, identify } = config;
   const strictCacheWrites = config.strictCacheWrites ?? false;
-  const wrap = ((innerExec: Executor): Executor => {
+  const wrap = ((innerExec: Executor<ExecServices, ExecMetrics, Op>): Executor<ExecServices, ExecMetrics, Op> => {
     // The composition-time refusal survives only for an executor whose static record IS the whole
     // truth. A DISPATCHER's is not: one session-capable prompt executor behind it would otherwise make
     // every FUNCTION op in the same registry un-memoizable, refused before a single op was even looked
@@ -221,7 +228,7 @@ export function withMemoize<R = ExecServices>(
       capabilities: innerExec.capabilities,
       metrics: innerExec.metrics,
       ...forwardCapabilitiesFor(innerExec),
-      start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue> {
+      start(op: Op, ctx: ExecServices): ExecHandle<ResolvedValue> {
         // THE DISPATCHED ENTRY's record, not the dispatcher's (§2 makes each entry's capabilities
         // required and total — this is where that becomes worth something). Reading
         // `innerExec.capabilities` consulted one static record for a whole registry, so all three gates
@@ -255,7 +262,10 @@ export function withMemoize<R = ExecServices>(
             // threw straight out of the caller's `start(...)` call — breaking the never-throws seam that
             // all of `handles.ts` exists to hold, through a documented (§7.3) input shape.
             const key = memoKey({
-              operationHash: identify ? identify(op) : hashOperation(op),
+              // The default identity hashes the op's canonical serialized content — sound for any
+              // serializable `Op` (see {@link MemoizeOptions.identify}), so the cast asserts
+              // serializability, not inline-ness.
+              operationHash: identify ? identify(op) : hashOperation(op as unknown as Operation<InlineFamily>),
               ...(treeHash !== undefined ? { workspaceTreeHash: treeHash } : {}),
               executorId: namespace,
             });
@@ -303,7 +313,7 @@ export function withMemoize<R = ExecServices>(
         );
       },
     };
-  }) as unknown as ExecutorWrapper<R, R>;
+  }) as unknown as ExecutorWrapper<R, R, ExecMetrics, Op>;
   return inner ? wrap(inner) : wrap;
 }
 

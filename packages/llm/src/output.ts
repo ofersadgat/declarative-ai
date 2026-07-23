@@ -135,11 +135,17 @@ export function mergeLlmMetrics(a: LlmMetrics, b: LlmMetrics): LlmMetrics {
  * forward it; a caller who wants the trace asks the llm layer, which is the layer that has it.
  */
 export interface LlmOutput<T = JsonValue> {
-  /** The parsed structured value. Absent when the model produced nothing parseable — `rawText` still
-   *  holds whatever it did produce. NOT named `value`: that name belongs to the envelope. */
-  parsed?: T;
-  /** Raw accumulated output text — always present (possibly ""); the partial on failure. */
-  rawText: string;
+  /**
+   * The call's output value: the parsed (and post-processed, decoded) structured value, or in TEXT mode
+   * the output text itself. Absent only when the model produced nothing usable — and then the raw text
+   * it DID produce travels on the failure ({@link LlmFailure.rawOutput}), because unusable output is
+   * diagnostic evidence, not a value. There is deliberately no separate `rawText` field: on success it
+   * was informationally the value again (its wire form), and carrying both invited them to drift.
+   *
+   * Reads nest through the envelope as `result.value.value` — the envelope's `value` is this payload,
+   * and the payload's `value` is the op's output value.
+   */
+  value?: T;
   thinking?: ReasoningSegment[];
   toolCalls?: ToolCall[];
   toolResults?: ToolResult[];
@@ -153,6 +159,18 @@ export interface LlmOutput<T = JsonValue> {
   providerSessionId?: string;
 }
 
+/**
+ * The llm layer's failure: the shared classified {@link Failure}, plus the raw output text of a call
+ * whose result could not become a value — truncated, unparseable, or empty structured output. It rides
+ * the FAILURE because that is the only case it is not redundant: a successful parse IS the raw text,
+ * decoded. A plain `Failure` is structurally an `LlmFailure`, so failures built by lower layers
+ * (fail-fast, transport errors) need nothing extra.
+ */
+export interface LlmFailure extends Failure {
+  /** What the model actually emitted, when the failure is that it wasn't usable. */
+  rawOutput?: string;
+}
+
 /** One call's estimated token footprint, input/output split — what rate pre-admission is priced on.
  *  Structurally the same shape `exec`'s rate-limit seam names, satisfied without importing it. */
 export interface CallTokenEstimate {
@@ -164,5 +182,6 @@ export interface CallEstimate extends CallTokenEstimate {
   modelId?: string;
 }
 
-/** One provider call's result: the shared envelope, this layer's payload, this layer's metrics. */
-export type LlmCallResult<T = JsonValue> = ResultWithMetrics<LlmOutput<T>, Failure, LlmMetrics>;
+/** One provider call's result: the shared envelope, this layer's payload, this layer's failure and
+ *  metrics. */
+export type LlmCallResult<T = JsonValue> = ResultWithMetrics<LlmOutput<T>, LlmFailure, LlmMetrics>;

@@ -31,8 +31,8 @@ describe("decode on the structured output path (API.md, 'Codecs and type names')
       prompt: "when?",
       schema: { type: "number", "x-type": "DateTime" },
     });
-    expect(out.value?.parsed).toBeInstanceOf(Date);
-    expect(out.value?.parsed).toEqual(new Date(1_700_000_000_000));
+    expect(out.value?.value).toBeInstanceOf(Date);
+    expect(out.value?.value).toEqual(new Date(1_700_000_000_000));
   });
 
   it("decodes a nested x-type leaf, AFTER validating the WIRE (number) form", async () => {
@@ -48,7 +48,7 @@ describe("decode on the structured output path (API.md, 'Codecs and type names')
       },
     });
     expect(seenWire).toEqual([1_700_000_000_000]); // the validator saw the epoch, not a Date
-    const parsed = out.value?.parsed as { at: unknown; note: unknown };
+    const parsed = out.value?.value as { at: unknown; note: unknown };
     expect(parsed.at).toBeInstanceOf(Date);
     expect(parsed.at).toEqual(new Date(1_700_000_000_000));
     expect(parsed.note).toBe("hi");
@@ -60,7 +60,7 @@ describe("decode on the structured output path (API.md, 'Codecs and type names')
       prompt: "how much?",
       schema: { type: "number", "x-type": "Money" }, // no codec registered for "Money"
     });
-    expect(out.value?.parsed).toBe(5);
+    expect(out.value?.value).toBe(5);
   });
 
   it("is a byte-for-byte passthrough for a plain structured call with no x-type", async () => {
@@ -69,6 +69,6 @@ describe("decode on the structured output path (API.md, 'Codecs and type names')
       prompt: "2+2?",
       schema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] },
     });
-    expect(out.value?.parsed).toEqual({ answer: "4" });
+    expect(out.value?.value).toEqual({ answer: "4" });
   });
 });

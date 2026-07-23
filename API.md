@@ -33,6 +33,7 @@ the README, this doc links to it instead.
   - [Composition](#composition)
   - [Generic wrappers](#generic-wrappers)
   - [Memoization](#memoization)
+  - [Hydration — the family transition](#hydration--the-family-transition)
   - [Injected service seams](#injected-service-seams)
   - [The capability registry](#the-capability-registry)
   - [Sessions](#sessions)
@@ -824,7 +825,7 @@ function isOk<S, E>(r: Result<S, E>): r is { value: S };
 does not compile (it would silently widen `value`), so `isOk(r)` and `"error" in r` are the narrowing
 checks. A failed call still keeps its partial `value`, which is what makes a failure diagnosable.
 
-**Execution returns only the op's output value.** What a *model* produced — `rawText`, `thinking`,
+**Execution returns only the op's output value.** What a *model* produced — `thinking`,
 `toolCalls`, `finishReason` — is [`@declarative-ai/llm`](#declarative-aillm)'s `LlmOutput`, and it stops at
 `promptop`: none of it rides on an `ExecResult`, because none of it is meaningful for a function op.
 
@@ -842,14 +843,14 @@ Supporting shapes:
 | `ExecMetrics` | what EXECUTION measures — `{ durationMs, startMs?, childLlmCalls? }`. No tokens and no money: those belong to whatever ran. A richer `M` (llm's `LlmMetrics`) satisfies this floor structurally and adds its own fields; `mergeExecMetrics` / `EXEC_METRICS_ALGEBRA` combine two of them (duration sums, `startMs` is the first observation, `childLlmCalls` sum). |
 | `Failure` (from `json`) | `{ classification: ErrorClass; reason: string; retryAfterMs?; rateLimited? }`. `reason` is the REAL underlying cause, never a bookkeeping message like "retries exhausted". The SAME value classifies an llm call, an execution, and a stored record. |
 
-#### `Executor<R, M>` and `ExecHandle<O, M>`
+#### `Executor<R, M, Op>` and `ExecHandle<O, M>`
 
 ```ts
-interface Executor<R = ExecServices, M extends ExecMetrics = ExecMetrics> {
+interface Executor<R = ExecServices, M extends ExecMetrics = ExecMetrics, Op = Operation<InlineFamily>> {
   readonly capabilities: Capabilities;      // the ops record — an executor IS what a `runtime` entry delegates to
   readonly metrics: MetricsAlgebra<M>;      // how its measurements combine (retry attempts, child→parent)
-  capabilitiesFor?(op: Operation<InlineFamily>): Capabilities;  // a DISPATCHER's per-op record (see below)
-  start(op: Operation<InlineFamily>, ctx: R): ExecHandle<ResolvedValue, M>;
+  capabilitiesFor?(op: Op): Capabilities;   // a DISPATCHER's per-op record (see below)
+  start(op: Op, ctx: R): ExecHandle<ResolvedValue, M>;
 }
 
 interface ExecHandle<O = ResolvedValue, M extends ExecMetrics = ExecMetrics> {
@@ -867,6 +868,12 @@ exactly the fields its wrappers consume — a missing one is a compile error (se
 Because the payload is an `Operation`, wrapper composition applies **uniformly to prompt and function ops
 alike** — previously it could not reach anything dispatched through the function registry, so `withRetry`
 and `withMemoize` simply stopped at that boundary.
+
+**`Op` is the operation payload the stack accepts**, defaulting to the resolved inline op — the only thing
+a leaf can run, and where every content-reading wrapper (pricing, repair, the leaf) is pinned. The layers
+that need only the op's IDENTITY generalize: `withMemoize` keys any serializable op, and
+[`withHydration`](#hydration--the-family-transition) is the transition that lets a stack accept another
+family's ops (e.g. content-id ops) above it while running inline ops below it.
 
 **`events` is single-consumer.** Events are *delivered* — each to exactly one iterator — not broadcast, so
 a second `for await` over the same handle would steal events from the first; attaching twice throws rather
@@ -961,8 +968,10 @@ The **inside-out builder** — the recommended form, because it type-tracks requ
 
 ```ts
 function compose<R>(core: Executor<R>): ComposableExecutor<R>;
-class ComposableExecutor<R> implements Executor<R> {
-  with<ROut>(wrap: ExecutorWrapper<R, ROut>): ComposableExecutor<ROut>;
+class ComposableExecutor<R, M, Op> implements Executor<R, M, Op> {
+  // Subsumes both an ExecutorWrapper (op type unchanged) and a family-transition
+  // adapter like withHydration, which changes what the stack above it accepts.
+  with<ROut, OpOut = Op>(wrap: (inner: Executor<R, M, Op>) => Executor<ROut, M, OpOut>): ComposableExecutor<ROut, M, OpOut>;
   start(op, ctx): ExecHandle;   // it IS an Executor — drops into a registry unchanged
 }
 ```
@@ -1025,13 +1034,18 @@ interface MemoCache {
   set(key: string, result: ExecResult<ResolvedValue>): Promise<void> | void;
 }
 class MapMemoCache implements MemoCache { constructor(maxEntries?: number); }   // opt-in LRU bound
-interface MemoizeOptions {
-  identify?(op: Operation<InlineFamily>): string;   // cheaper/canonical op identity
+interface MemoizeOptions<Op = Operation<InlineFamily>> {
+  identify?(op: Op): string;                        // cheaper/canonical op identity (an id-family op: its own id)
   namespace?: string;                               // the executorId component — WHO answered
 }
 
-function withMemoize<R>(config: { cache: MemoCache } & MemoizeOptions): ExecutorWrapper<R, R>;
+function withMemoize<R, Op = Operation<InlineFamily>>(config: { cache: MemoCache } & MemoizeOptions<Op>): ExecutorWrapper<R, R, ExecMetrics, Op>;
 ```
+
+`withMemoize` is generic in `Op`: the default `identify` hashes the op's canonical serialized content —
+valid for ANY serializable op shape — so it composes above a
+[`withHydration`](#hydration--the-family-transition) transition and keys the CHEAP family op, never the
+hydrated content.
 
 **The identity component is the OPERATION's content hash.** That is the whole simplification the single
 execution seam buys: a resolved op's `input` parameters carry their bindings, so the op already embeds the
@@ -1059,6 +1073,40 @@ entry. `withMemoize` **throws at composition time** if it would wrap a `sessionR
 whose static record is not the whole truth, defers that refusal into `start`, per op) — session state isn't
 in the memo key, so a hit would replay a stale answer and skip the transcript update; compose `withSession`
 **outside** it instead (sound, because that layer recomputes the sent op from the full transcript).
+
+### Hydration — the family transition
+
+Source: `hydrate.ts`.
+
+```ts
+type Hydrator<Op, R = ExecServices> = (op: Op, ctx: R) => Operation<InlineFamily> | Promise<Operation<InlineFamily>>;
+
+function withHydration<Op, R, M>(
+  resolve: Hydrator<Op, R>,
+  options?: { capabilitiesFor?: (op: Op) => Capabilities },
+): (inner: Executor<R, M, Operation<InlineFamily>>) => Executor<R, M, Op>;
+```
+
+An id-leaf family has the OPPOSITE cost profile from the inline family: identity is cheap (the op's
+leaves are content ids; it may carry its own hash) and content is expensive (every leaf is a store
+read). So the identity-only layers should run before the content exists, and the content-reading ones
+after. `withHydration` is that boundary — NOT an `ExecutorWrapper` (it changes the op type the stack
+accepts, which is the point), but it composes through the same `.with(...)`:
+
+```ts
+compose(leaf)                        // inline: reads content
+  .with(withRateLimit({ limiter })) // inline: estimates off the prompt text
+  .with(withBudget({ meter }))      // inline: reserve → settle around the real call
+  .with(withHydration(resolve))     // ← id ops above, inline ops below
+  .with(withMemoize({ cache, identify: (op) => op.id }))  // id: keys on the content id, free
+  .with(withBudget({ meter, computeCost }))               // id: bills memo reuse
+```
+
+On a memo **hit** nothing below the transition runs — the store reads happen only on a miss. `resolve`
+is the family's hydrator ("hydration is the family's business"): artifact loads, structural-sharing
+folds, producer edges. A hydration fault comes back as a **classified failure** through the never-throws
+handle (`failureOf` reads retriability off the error), and the optional `capabilitiesFor` keeps per-op
+capability gating available above the transition without hydrating.
 
 ### Injected service seams
 
@@ -1653,6 +1701,8 @@ interface LlmCallEnvironment {
   validator?: OutputValidator;                         // json's three-line seam — nothing here knows ajv
   toolExecutors?: Record<string, ToolExecutor>;        // function-tool impls, keyed by name
   abortSignal?: AbortSignal;
+  schemaProfile?: (modelId: string) => ProviderSchemaProfile | undefined;  // transport-profile resolution;
+                                                       // defaults to the catalog-backed profileForModelId
 }
 type CallDeps = LlmCallEnvironment & { modelRouter: ModelRouter };   // modelRouter required
 
@@ -1667,12 +1717,13 @@ Non-serializable by design — this never enters the content hash or the durable
 The result — the shared envelope, this layer's payload (`LlmOutput`), this layer's metrics (`LlmMetrics`):
 
 ```ts
-type LlmCallResult<T = JsonValue> = ResultWithMetrics<LlmOutput<T>, Failure, LlmMetrics>;
-//    = ({ value: LlmOutput<T> } | { error: Failure; value?: LlmOutput<T> }) & { metrics: LlmMetrics }
+type LlmCallResult<T = JsonValue> = ResultWithMetrics<LlmOutput<T>, LlmFailure, LlmMetrics>;
+//    = ({ value: LlmOutput<T> } | { error: LlmFailure; value?: LlmOutput<T> }) & { metrics: LlmMetrics }
 
 interface LlmOutput<T = JsonValue> {   // what the CALL produced — the payload under `.value`
-  parsed?: T;              // the parsed structured value (absent when nothing parseable came back)
-  rawText: string;         // always present (possibly ""); the partial on failure
+  value?: T;               // the output value: the parsed/decoded structure, or in TEXT mode the text.
+                           // Absent only when nothing usable came back — the raw text the model DID
+                           // produce then rides the failure (`LlmFailure.rawOutput`), not the payload.
   thinking?: ReasoningSegment[];
   toolCalls?: ToolCall[]; toolResults?: ToolResult[];
   files?: GeneratedFile[]; // FILES the model generated — they land in a `blob`-kind output slot
@@ -1977,7 +2028,7 @@ in the same way.
 | Wrapper | Signature (config form) | What it does |
 | --- | --- | --- |
 | `withRateLimit` | `withRateLimit({ limiter }): ExecutorWrapper` | Admit the call through the injected `RateLimiter` (concurrency slot + rate headroom) and feed the outcome back (drives AIMD). A cancel while queued prevents it from ever starting. |
-| `withBudget` | `withBudget(config?): ExecutorWrapper` | Reserve against `ctx.meter` before the call — clamping the output ceiling to what the balance affords, refusing when it cannot cover a useful minimum — then **settle** the actual cost after (a failed call still settles). Feeds observed output tokens back so the next reserve in the run is better priced, and stamps `metrics.ledgerId`. |
+| `withBudget` | `withBudget(config?): ExecutorWrapper` | The ONE billing wrapper, two modes. **Reserve mode** (default): reserve against `ctx.meter` before the call — clamping the output ceiling to what the balance affords, refusing when it cannot cover a useful minimum — then **settle** the actual cost after (a failed call still settles); feeds observed output tokens back so the next reserve in the run is better priced. **Post-charge mode** (`computeCost` present): run the inner executor, then debit `computeCost(op, result)` and fold it into the reported `costUsd` — the mode an OUTER instance above `withMemoize` uses to bill memo reuse off the hit's annotation, applying to every op kind. |
 | `withSession` | `withSession(config?): ExecutorWrapper` | Resolve the op's logical `sessionId` against a `SessionStore` (from config or `ctx.sessions`): prepend the stored transcript, run, fold the reply back on success, stamp `outcome.session.id`. The session fields are **consumed** (stripped from the op sent inward), and the sent op carries the full transcript, so an inner `withMemoize` keys on the real content. Refuses `providerSessionId` outright — no current executor can thread a provider-side handle. |
 
 `withSession` must sit **outside** `withMemoize` (which throws at composition time if it would wrap a

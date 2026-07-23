@@ -376,3 +376,82 @@ describe("per-entry capabilities forwarding (so a withMemoize ABOVE these wrappe
     expect(starts()).toBe(1); // second call served from cache
   });
 });
+
+describe("withBudget — post-charge mode (computeCost)", () => {
+  type Reuse = { reuse?: { originalCostUsd: number; owners: string[] } };
+  /** An inner executor resolving a fixed result — a memo layer serving a hit, say. */
+  const stubInner = (metrics: WideMetrics & Reuse, value: unknown = "cached"): Executor<ExecServices, WideMetrics> => ({
+    capabilities: { ...RUNTIME_CAPABILITIES },
+    metrics: { merge: (_a, b) => b },
+    start: () => wrapHandle(async () => ({ value: value as never, metrics })),
+  });
+  const chargeReuse = (me: string) => (_op: Operation<InlineFamily>, r: { metrics: WideMetrics & Reuse }): number => {
+    const reuse = r.metrics.reuse;
+    return reuse && !reuse.owners.includes(me) ? reuse.originalCostUsd : 0;
+  };
+  const debitMeter = (): { meter: BudgetMeter; debits: number[]; reserved: number[] } => {
+    const debits: number[] = [];
+    const reserved: number[] = [];
+    return {
+      meter: {
+        reserve: async (est) => {
+          reserved.push(est);
+          return { settle: async () => undefined };
+        },
+        availableCostUsd: async () => 100,
+        debit: async (c) => void debits.push(c),
+      },
+      debits,
+      reserved,
+    };
+  };
+
+  it("debits the computed charge and folds it into the reported costUsd — no pre-call reserve", async () => {
+    const { meter, debits, reserved } = debitMeter();
+    const hit: WideMetrics & Reuse = { durationMs: 0, costUsd: 0, costSource: "table", reuse: { originalCostUsd: 0.02, owners: ["alice"] } };
+    const out = await withBudget({ meter, computeCost: chargeReuse("bob") }, stubInner(hit)).start(promptOp(), {}).result;
+    expect(debits).toEqual([0.02]);
+    expect(reserved).toEqual([]); // a computed charge prices the RESULT; there is nothing to reserve
+    expect(out.metrics.costUsd).toBeCloseTo(0.02, 12);
+  });
+
+  it("a zero charge (an owner's own hit, or a real call billed by the inner instance) touches nothing", async () => {
+    const { meter, debits, reserved } = debitMeter();
+    const hit: WideMetrics & Reuse = { durationMs: 0, costUsd: 0, costSource: "table", reuse: { originalCostUsd: 0.02, owners: ["alice"] } };
+    const out = await withBudget({ meter, computeCost: chargeReuse("alice") }, stubInner(hit)).start(promptOp(), {}).result;
+    expect(debits).toEqual([]);
+    expect(reserved).toEqual([]);
+    expect(out.metrics.costUsd).toBe(0);
+  });
+
+  it("falls back to an immediate reserve→settle for a meter without a debit channel", async () => {
+    const settled: number[] = [];
+    const reserved: number[] = [];
+    const meter: BudgetMeter = {
+      reserve: async (est) => {
+        reserved.push(est);
+        return { settle: async (c) => void settled.push(c) };
+      },
+      availableCostUsd: async () => 100,
+    };
+    const hit: WideMetrics & Reuse = { durationMs: 0, costUsd: 0, costSource: "table", reuse: { originalCostUsd: 0.05, owners: [] } };
+    const out = await withBudget({ meter, computeCost: chargeReuse("bob") }, stubInner(hit)).start(promptOp(), {}).result;
+    expect(reserved).toEqual([0.05]);
+    expect(settled).toEqual([0.05]);
+    expect(out.metrics.costUsd).toBeCloseTo(0.05, 12);
+  });
+
+  it("charges FUNCTION ops too — reuse is not a prompt-only concern", async () => {
+    const { meter, debits } = debitMeter();
+    const fnOp: Operation<InlineFamily> = {
+      kind: "function",
+      functionRef: "combine",
+      input: {},
+      output: { name: "out", kind: "json" },
+    };
+    const hit: WideMetrics & Reuse = { durationMs: 0, costUsd: 0, costSource: "table", reuse: { originalCostUsd: 0.01, owners: [] } };
+    const out = await withBudget({ meter, computeCost: chargeReuse("bob") }, stubInner(hit)).start(fnOp, {}).result;
+    expect(debits).toEqual([0.01]);
+    expect(out.metrics.costUsd).toBeCloseTo(0.01, 12);
+  });
+});

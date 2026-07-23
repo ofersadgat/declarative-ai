@@ -24,7 +24,7 @@ import { ModelInfo } from "./model-catalog";
 import { promptAsMessages, promptText, type CallPromptInput } from "./prompt";
 import { adaptReasoning } from "./reasoning";
 import { providerNativeId, type ModelRouter } from "./router";
-import { adaptSchemaCached, profileForModelId } from "./schema";
+import { adaptSchemaCached, profileForModelId, type ProviderSchemaProfile } from "./schema";
 
 /** A runtime tool implementation — the `execute` for a declared FUNCTION tool, looked up by tool name.
  *  Injected via the ENVIRONMENT (not serialized), mirroring how the model handle and validator are. */
@@ -53,6 +53,14 @@ export interface LlmCallEnvironment {
   toolExecutors?: Record<string, ToolExecutor>;
   /** External abort (caller cancel) — combined with the per-call `timeoutMs` signal. */
   abortSignal?: AbortSignal;
+  /**
+   * How this model's structured-output transport profile is resolved. Defaults to the built-in
+   * catalog-backed `profileForModelId`. An environment seam because profile knowledge is DEPLOYMENT
+   * state, not declaration content — a consumer that derives profiles from its own store (e.g. a DB of
+   * observed `supported_parameters`) injects its resolver here instead of priming a global. Returning
+   * `undefined` means "no profile known": the schema is sent unadapted.
+   */
+  schemaProfile?: (modelId: string) => ProviderSchemaProfile | undefined;
 }
 
 /** The environment with `modelRouter` REQUIRED (the base call can't resolve a model without it). */
@@ -104,7 +112,7 @@ async function runCall<T>(def: LlmCallDefinition<T>, env: CallDeps, timeoutArg?:
   // Adapt the schema for the provider transport, then resolve the model with the MATCHING strict flag —
   // so a schema that fits the constrained decoder gets `strict`, one that doesn't is sent as a
   // json_object hint, and a text-tier model gets no `response_format` at all.
-  const profile = def.schema ? profileForModelId(def.model) : undefined;
+  const profile = def.schema ? (env.schemaProfile ?? profileForModelId)(def.model) : undefined;
   const adapt = def.schema && profile ? adaptSchemaCached(def.schema, profile) : undefined;
   const model = env.modelRouter.resolveModel(def.model, { strictStructuredOutput: adapt?.enforce === "strict" });
 
@@ -306,12 +314,12 @@ function appendToSystem(system: CallPromptInput["system"], add: string): CallPro
   return Array.isArray(system) ? [...system, hint] : [system, hint];
 }
 
-/** Build a terminal PERMANENT-failure outcome without hitting the provider. Mirrors the `CallOutcome`
- *  shape `generateStructured` returns on error: best-effort empty output + the failure. */
+/** Build a terminal PERMANENT-failure outcome without hitting the provider. Mirrors the shape
+ *  `generateStructured` returns on error: best-effort empty output + the failure. */
 function failFast<T>(reason: string): LlmCallResult<T> {
   return {
     error: { classification: "permanent", reason },
-    value: { rawText: "", finishReason: "error" },
+    value: { finishReason: "error" },
     metrics: { durationMs: 0, costUsd: 0, costSource: "unknown" },
   };
 }

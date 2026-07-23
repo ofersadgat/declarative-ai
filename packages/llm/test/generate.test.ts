@@ -58,8 +58,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
     });
 
     expect(errorOf(out)).toBeUndefined();
-    expect(out.value?.parsed).toEqual({ answer: "4" });
-    expect(out.value?.rawText).toBe('{"answer":"4"}');
+    expect(out.value?.value).toEqual({ answer: "4" });
     expect(out.metrics.inputTokens).toBe(10);
     expect(out.metrics.outputTokens).toBe(5);
     expect(out.metrics.costUsd).toBeCloseTo(0.000035, 12); // claude-haiku-4-5 $1/$5: (10*1 + 5*5)/1e6
@@ -187,8 +186,8 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
 
     expect(errorOf(out)?.classification).toBe("api-retriable");
     expect(errorOf(out)?.reason).toMatch(/unparseable|truncated|empty/);
-    expect(out.value?.rawText).toBe('{"answer":'); // partial output preserved
-    expect(out.value?.parsed).toBeUndefined();
+    expect(errorOf(out)?.rawOutput).toBe('{"answer":'); // partial output preserved, on the failure
+    expect(out.value?.value).toBeUndefined();
   });
 
   it("classifies a thrown 429 as transient", async () => {
@@ -220,7 +219,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
 
     expect(errorOf(out)?.classification).toBe("api-retriable");
     expect(errorOf(out)?.reason).toContain("validation failed");
-    expect(out.value?.parsed).toEqual({ answer: "4" }); // value preserved despite the failure
+    expect(out.value?.value).toEqual({ answer: "4" }); // value preserved despite the failure
   });
 
   it("parses structured output delivered via a json tool call (no text-delta)", async () => {
@@ -243,8 +242,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
     });
 
     expect(errorOf(out)).toBeUndefined();
-    expect(out.value?.parsed).toEqual({ answer: "4" });
-    expect(out.value?.rawText).toBe('{"answer":"4"}'); // partial salvage works on the tool path too
+    expect(out.value?.value).toEqual({ answer: "4" });
   });
 
   it("captures reasoning as positioned segments, not a single blob", async () => {
@@ -267,7 +265,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
 
     expect(errorOf(out)).toBeUndefined();
     expect(out.value?.thinking).toEqual([{ type: "reasoning", text: "2 plus 2 is 4", textOffset: 0 }]);
-    expect(out.value?.parsed).toEqual({ answer: "4" });
+    expect(out.value?.value).toEqual({ answer: "4" });
   });
 
   it("does NOT use an intermediate tool's args as output; captures them in the trace", async () => {
@@ -293,8 +291,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
 
     expect(errorOf(out)).toBeUndefined();
     // Output is the TEXT channel, not the calculator's args.
-    expect(out.value?.parsed).toEqual({ answer: "4" });
-    expect(out.value?.rawText).toBe('{"answer":"4"}');
+    expect(out.value?.value).toEqual({ answer: "4" });
     // The intermediate tool is preserved as a discriminated trace segment, not output.
     expect(out.value?.thinking).toEqual([
       { type: "tool-call", text: '{"expr":"2+2"}', textOffset: 0, toolName: "calculator" },
@@ -319,7 +316,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
       schema: flatSchema,
     });
 
-    expect(out.value?.parsed).toEqual({ answer: "4" });
+    expect(out.value?.value).toEqual({ answer: "4" });
     expect(out.value?.thinking).toEqual([
       { type: "tool-call", text: '{"q":"hi"}', textOffset: 0, toolName: "search" },
     ]);
@@ -383,7 +380,7 @@ describe("generateStructured — call-capability passthrough", () => {
     });
 
     expect(errorOf(out)).toBeUndefined();
-    expect(out.value?.parsed).toEqual({ answer: "4" });
+    expect(out.value?.value).toEqual({ answer: "4" });
     // The SDK lowered our structured system + message array to the provider prompt without dropping either.
     const wire = JSON.stringify(captured?.prompt);
     expect(wire).toContain("be terse");
@@ -411,9 +408,9 @@ describe("generateStructured — typed output", () => {
     });
 
     // Compile-time: `T` flows from the branded schema to the value (enforced by `npm run typecheck`).
-    expectTypeOf(out.value?.parsed).toEqualTypeOf<Answer | undefined>();
+    expectTypeOf(out.value?.value).toEqualTypeOf<Answer | undefined>();
     // Runtime: the value is still the parsed object.
-    expect(out.value?.parsed?.answer).toBe("4");
+    expect(out.value?.value?.answer).toBe("4");
   });
 
   it("an unbranded schema yields the JsonValue default, never unknown (§2.2)", async () => {
@@ -431,8 +428,8 @@ describe("generateStructured — typed output", () => {
     });
 
     // A dynamically-built call still yields JSON, never "anything" — the §2.2 generic-default rule.
-    expectTypeOf(out.value?.parsed).toEqualTypeOf<JsonValue | undefined>();
-    expect(out.value?.parsed).toEqual({ answer: "4" });
+    expectTypeOf(out.value?.value).toEqualTypeOf<JsonValue | undefined>();
+    expect(out.value?.value).toEqual({ answer: "4" });
   });
 });
 
@@ -447,14 +444,14 @@ describe("a generated FILE part never sinks the primary output", () => {
 
   it("decodes standard base64 into bytes", async () => {
     const out = await generateFlat({ model: streamingModel(textThenFile("aGVsbG8=")), schema: flatSchema, prompt: "x" });
-    expect(out.value?.parsed).toEqual({ answer: "42" });
+    expect(out.value?.value).toEqual({ answer: "42" });
     expect(out.value?.files?.[0]!.bytes).toEqual(new Uint8Array([104, 101, 108, 108, 111]));
   });
 
   it("decodes the URL-SAFE alphabet and missing padding, which `atob` alone rejects", async () => {
     // "hello?" base64url-encoded, unpadded — `atob` throws on both the `_` and the short length.
     const out = await generateFlat({ model: streamingModel(textThenFile("aGVsbG8_")), schema: flatSchema, prompt: "x" });
-    expect(out.value?.parsed).toEqual({ answer: "42" });
+    expect(out.value?.value).toEqual({ answer: "42" });
     expect(out.value?.files?.[0]!.bytes).toEqual(new Uint8Array([104, 101, 108, 108, 111, 63]));
   });
 
@@ -462,7 +459,7 @@ describe("a generated FILE part never sinks the primary output", () => {
     // The decode used to throw inside the `fullStream` loop, abandoning it before `finish` — so the
     // parsed answer AND every token/cost figure were lost, and the call reported as an error.
     const out = await generateFlat({ model: streamingModel(textThenFile("!!!not base64!!!")), schema: flatSchema, prompt: "x" });
-    expect(out.value?.parsed).toEqual({ answer: "42" });
+    expect(out.value?.value).toEqual({ answer: "42" });
     expect(errorOf(out)).toBeUndefined();
     expect(out.value?.files).toBeUndefined();
     expect(out.metrics.inputTokens).toBe(10);

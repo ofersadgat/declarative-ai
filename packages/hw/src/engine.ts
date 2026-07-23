@@ -960,9 +960,9 @@ export class WorkflowEngine {
     if (!isOk(outcome)) return fail(outcome.error);
 
     // Conversation artifact (SPEC §4.7): every SUCCEEDED prompt operation appends its exchange to the
-    // session. The assistant turn is the op's OUTPUT VALUE. It used to prefer the model's `rawText`, but
-    // that is `LlmOutput` payload and stops at the prompt executor — and for a text-output op the output
-    // value IS that text, so the two agree wherever it mattered.
+    // session. The assistant turn is the op's OUTPUT VALUE. It used to prefer the model's raw text, but
+    // that stops at the prompt executor — and for a text-output op the output value IS that text, so
+    // the two agree wherever it mattered.
     await this.appendTranscript(sessionId, [
       { role: "user", content: prompt },
       { role: "assistant", content: typeof outcome.value === "string" ? outcome.value : JSON.stringify(outcome.value ?? null) },

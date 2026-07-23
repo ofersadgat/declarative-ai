@@ -1,8 +1,8 @@
 import { Output, jsonSchema, streamText, type LanguageModel, type ModelMessage, type StopCondition, type SystemModelMessage, type ToolChoice, type ToolSet } from "ai";
 import { createLogger } from "./logger";
 import { ModelInfo } from "./model-catalog";
-import { classifyError, decodeWithSchema, describeError, isRateLimit, retryAfterMs as retryAfterMsOf, type Failure, type JsonSchema, type JsonValue } from "@declarative-ai/json";
-import type { LlmCallResult, LlmMetrics, LlmOutput, ReasoningSegment, TokenCounts, ToolCall, ToolResult } from "./output";
+import { classifyError, decodeWithSchema, describeError, isRateLimit, retryAfterMs as retryAfterMsOf, type JsonSchema, type JsonValue } from "@declarative-ai/json";
+import type { LlmCallResult, LlmFailure, LlmMetrics, LlmOutput, ReasoningSegment, TokenCounts, ToolCall, ToolResult } from "./output";
 import type { GeneratedFile } from "./files";
 import type { LlmCallDefinition, SamplingConfiguration } from "./llmConfig";
 import { promptAsMessages, type CallPromptInput } from "./prompt";
@@ -17,10 +17,11 @@ import { promptAsMessages, type CallPromptInput } from "./prompt";
  * reconstruct to the ORIGINAL schema, and optional-validate on the way out. `maxRetries: 0`
  * — retries are the budget-gated eval loop's (§10.4).
  *
- * Never throws for an LLM failure: a single `CallOutcome` ALWAYS carries the best-effort
- * output (`value`/`rawText`), the reasoning (`thinking`), and costed `metrics`, with an
- * OPTIONAL `error`. Preserving output + thinking on failure is what makes a failed eval
- * diagnosable and maps to the §4 `ValueResult = ValueRef & { error? }` shape.
+ * Never throws for an LLM failure: the result ALWAYS carries the best-effort output
+ * (`value`), the reasoning (`thinking`), and costed `metrics`, with an OPTIONAL `error` —
+ * and a failure that produced no value carries what the model DID emit on
+ * `LlmFailure.rawOutput`. Preserving output + thinking on failure is what makes a failed
+ * eval diagnosable rather than empty.
  */
 
 const log = createLogger("engine.providers.generate", { tag: "llm" });
@@ -271,13 +272,12 @@ export async function generateStructured<T = JsonValue>(
     value?: unknown;
     finishReason: string;
     tokens: TokenCounts;
-    failure?: Failure;
+    failure?: LlmFailure;
   }): LlmCallResult<T> => {
     // `value` is reconstructed as `unknown` (parsed JSON / postProcess output) and asserted to `T`
     // here, the single construction site — the §4 Ajv boundary is what makes that assertion sound.
     const output: LlmOutput<T> = {
-      parsed: args.value as T | undefined,
-      rawText: outputText(),
+      value: args.value as T | undefined,
       thinking: thinking.length > 0 ? thinking : undefined,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       toolResults: toolResults.length > 0 ? toolResults : undefined,
@@ -286,16 +286,22 @@ export async function generateStructured<T = JsonValue>(
     };
     const metrics = metricsOf(args.tokens);
     if (args.failure) {
+      // A failure that produced no VALUE still produced TEXT (a truncation's partial, an unparseable
+      // body) — that is diagnostic evidence, and the failure is where it rides (`LlmFailure.rawOutput`).
+      // With a value present (a validation reject preserving its parse) the raw text is that value's
+      // wire form and adds nothing.
+      const raw = args.value === undefined ? outputText() : "";
+      const failure: LlmFailure = raw ? { ...args.failure, rawOutput: raw } : args.failure;
       log.warn("llm call failed", {
         modelId: modelId,
-        classification: args.failure.classification,
-        reason: args.failure.reason,
+        classification: failure.classification,
+        reason: failure.reason,
         finishReason: output.finishReason,
         ...metrics,
       });
-      // The FAILURE branch still carries the payload: a truncated generation keeps its partial text and
-      // its thinking, which is what makes a failed call diagnosable rather than empty.
-      return { error: args.failure, value: output, metrics };
+      // The FAILURE branch still carries the payload: a truncated generation keeps its thinking and
+      // trace, which is what makes a failed call diagnosable rather than empty.
+      return { error: failure, value: output, metrics };
     }
     log.info("llm call ok", {
       modelId: modelId,

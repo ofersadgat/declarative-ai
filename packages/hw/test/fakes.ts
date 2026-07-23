@@ -55,7 +55,7 @@ export type Script = (call: FakeCall) => ExecResult<ResolvedValue, WorkflowMetri
 
 export const ok = (value: JsonValue, costUsd = 0.01): ExecResult<ResolvedValue, WorkflowMetrics> => ({
   value,
-  // No `rawText`: the model's raw text is `LlmOutput` payload and stops at the prompt executor. What
+  // No model payload here: what the model produced is `LlmOutput` and stops at the prompt executor. What
   // an execution returns is the op's output-parameter value.
   metrics: { durationMs: 1, costUsd, costSource: "table" },
 });
