@@ -272,9 +272,19 @@ describe("createClaudeCodeFunction — delegated agent as a registered async fun
       captured = opts;
       yield { type: "result", result: { text: "x" } };
     };
-    const validator = { validateValue: () => ({ ok: true }) };
+    let hits = 0;
+    const validator = {
+      validateValue: () => {
+        hits++;
+        return { ok: true };
+      },
+    };
     await createClaudeCodeFunction({ query }).run(inputs(), { tools: { bash: tool() }, validator });
-    expect(captured?.validator).toBe(validator);
+    // The ctx validator arrives WRAPPED by json's fail-closed `syncOnly` narrowing, so identity is not
+    // the claim — DELEGATION is: the query-side validator consults the injected one.
+    expect(captured?.validator).toBeDefined();
+    expect(captured!.validator!.validateValue({} as never, 1 as never)).toEqual({ ok: true });
+    expect(hits).toBe(1);
   });
 
   it("nativeTools resolves a logical tool to the agent's aliased built-in, injecting the rest", async () => {

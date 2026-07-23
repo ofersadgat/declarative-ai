@@ -13,13 +13,10 @@
  *    resolved lazily from an injected resolver — no network parser needed.
  */
 import { Ajv, type ValidateFunction } from "ajv";
-import { hashCanonical, type JsonValue, type SchemaDocument } from "@declarative-ai/json";
+import { hashCanonical, type JsonValue, type SchemaDocument, type ValidationResult } from "@declarative-ai/json";
 import type { OutputValidator } from "@declarative-ai/exec";
 
-export interface ValidationResult {
-  ok: boolean;
-  errors?: string;
-}
+export type { ValidationResult };
 
 /** Lazy schema-document lookup by content id (findmyprompt: the artifact store). */
 export interface SchemaResolver {
@@ -37,8 +34,10 @@ export class SchemaValidator implements OutputValidator {
     this.ajv = new Ajv({ allErrors: true, strict: false });
   }
 
-  /** Validate a value against an INLINE schema document (no `$ref` store resolution).
-   *  Compiled validators are cached by the document's content hash. */
+  /** Validate a value against an INLINE schema document (no `$ref` store resolution) — the SYNC seam
+   *  (`SyncOutputValidator`), which mid-walk consumers (hw slot validation) rely on. A store-backed
+   *  document goes through {@link asBoundaryValidator} instead. Compiled validators are cached by the
+   *  document's content hash. */
   validateValue(schema: SchemaDocument, value: JsonValue): ValidationResult {
     const id = "inline:" + hashCanonical(schema);
     let fn = this.compiled.get(id);
@@ -46,6 +45,10 @@ export class SchemaValidator implements OutputValidator {
       fn = this.ajv.compile(schema);
       this.compiled.set(id, fn);
     }
+    return this.outcome(fn, value);
+  }
+
+  private outcome(fn: ValidateFunction, value: JsonValue): ValidationResult {
     return fn(value) ? { ok: true } : { ok: false, errors: this.ajv.errorsText(fn.errors) };
   }
 
@@ -83,6 +86,25 @@ export class SchemaValidator implements OutputValidator {
       if (refDoc) await this.register(refId, refDoc);
     }
   }
+}
+
+/**
+ * Lift a {@link SchemaValidator} to the BOUNDARY seam (`OutputValidator`, maybe-async): a document
+ * whose `$ref` closure needs the injected resolver (content-addressed store ids) compiles through the
+ * async store-backed path; a ref-free document (or a warm cache) answers synchronously through
+ * `validateValue`. This is the validator an llm-call environment wants when schemas are id-family
+ * artifacts — inject it as `env.validator` / `ctx.validator` and the call layer awaits it.
+ */
+export function asBoundaryValidator(validator: SchemaValidator): OutputValidator {
+  return {
+    validateValue(schema: SchemaDocument, value: JsonValue) {
+      if (collectRefs(schema).size > 0) {
+        const id = "ref:" + hashCanonical(schema);
+        return validator.validate(id, value, schema);
+      }
+      return validator.validateValue(schema, value);
+    },
+  };
 }
 
 /** Collect every `$ref` string target reachable in a schema document. */

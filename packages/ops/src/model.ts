@@ -221,6 +221,13 @@ export interface IdFamily {
   binding: Ref<IdFamily>;
 }
 
+/** The inline-family instantiations, NAMED — the payloads leaf executors and lowerings speak. A
+ *  consumer that only ever runs resolved ops (a call seam, a WDK step payload) says `InlinePromptOp`
+ *  instead of respelling the instantiation at every site. */
+export type InlineOperation = Operation<InlineFamily>;
+export type InlinePromptOp = PromptOp<InlineFamily>;
+export type InlineFunctionOp = FunctionOp<InlineFamily>;
+
 /** The hw/JaiRA substrate: every leaf is the value itself; producers are embedded ops or a
  *  DECLARED CHILD's local key (the local-name analog of an op id). */
 export interface InlineFamily {

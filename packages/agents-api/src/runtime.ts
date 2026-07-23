@@ -19,6 +19,7 @@
  */
 import {
   failureOf,
+  syncOnly,
   type BudgetMeter,
   type ExecMetrics,
   type BudgetMetrics,
@@ -191,7 +192,9 @@ export function createClaudeCodeFunction(options: ClaudeCodeFunctionOptions = {}
         allowedTools,
         ...(denied.length > 0 ? { disallowedTools: denied } : {}),
         mcpTools,
-        ...(ctx.validator !== undefined ? { validator: ctx.validator } : {}),
+        // The injected-tool input gate is sync (agents-api `seam.ts`); the ctx seam is maybe-async —
+        // narrow FAIL-CLOSED (json's `syncOnly`) rather than let an async validator read as a pass.
+        ...(ctx.validator !== undefined ? { validator: syncOnly(ctx.validator) } : {}),
         permissionMode: permissionModeOf(config),
         // Route the agent's native tool-approval callback through our approver (DESIGN §5.1, "Delegated approval fidelity").
         canUseTool: approve

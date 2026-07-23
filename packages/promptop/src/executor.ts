@@ -48,6 +48,32 @@ declare module "@declarative-ai/exec" {
   }
 }
 
+/**
+ * Execute ONE `PromptOp` at the llm layer — lowering + `executeLlmCall`, returning the FULL
+ * `LlmCallResult` (value, `thinking`, `finishReason`, metrics). This is the op-level call for a
+ * consumer that PERSISTS what the model produced (an `OperationRecord`'s `R` is the payload, so the
+ * projection would lose exactly what it stores); the {@link PromptExecutor} below is the same
+ * pipeline behind the `Executor` seam, PROJECTING the payload down to the op's output value for the
+ * execution stack. Lowering faults resolve as a `permanent` failure — the seam never throws.
+ */
+export async function executePromptOp(
+  op: PromptOp<InlineFamily>,
+  env: CallDeps,
+  options: LoweringOptions & { runner?: CallRunner } = {},
+): Promise<LlmCallResult> {
+  let def: LlmCallDefinition;
+  try {
+    def = lowerPromptOp(op, options);
+  } catch (e) {
+    return {
+      error: { classification: "permanent", reason: e instanceof Error ? e.message : String(e) },
+      value: { finishReason: "error" },
+      metrics: { durationMs: 0, costUsd: 0, costSource: "unknown" },
+    };
+  }
+  return (options.runner ?? defaultRunner)(def, env, def.timeoutMs);
+}
+
 /** The runtime environment this executor builds, re-exported so a custom {@link CallRunner} can name
  *  what it receives. */
 export type { CallDeps, LlmCallResult, LlmCallDefinition };

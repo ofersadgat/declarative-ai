@@ -25,7 +25,7 @@
  * Being version-pinned observation rather than a published contract, this is the first thing to check
  * if a future CLI rejects our decisions.
  */
-import type { AgentPermissionDecision, AgentToolRequest, InjectedTool, JsonValue, OutputValidator, SchemaDocument } from "./deps";
+import type { AgentPermissionDecision, AgentToolRequest, InjectedTool, JsonValue, SchemaDocument, SyncOutputValidator } from "./deps";
 
 /** The MCP server name our tools are exposed under; the agent sees `mcp__dai__<tool>`. */
 export const MCP_SERVER_NAME = "dai";
@@ -242,7 +242,7 @@ export async function handleToolCall(
   spec: {
     tools?: Record<string, InjectedTool>;
     approve?: (req: AgentToolRequest) => Promise<AgentPermissionDecision>;
-    validator?: OutputValidator;
+    validator?: SyncOutputValidator;
   },
   name: string,
   args: unknown,
@@ -290,7 +290,7 @@ export async function handleToolCall(
  * arbitrary payload and a host impl, so it fails closed like every other gate in this module.
  */
 function validateToolInput(
-  validator: OutputValidator | undefined,
+  validator: SyncOutputValidator | undefined,
   tool: InjectedTool,
   input: Record<string, JsonValue>,
 ): string | undefined {

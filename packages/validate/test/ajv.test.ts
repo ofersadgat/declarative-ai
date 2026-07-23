@@ -30,3 +30,26 @@ describe("SchemaValidator", () => {
     await expect(v.validate("schema:missing", {})).rejects.toThrow(/not found/);
   });
 });
+
+describe("asBoundaryValidator — the maybe-async boundary lift", () => {
+  it("resolves store-id $refs through the resolver (async path) and validates against the closure", async () => {
+    const { SchemaValidator, asBoundaryValidator } = await import("../src/ajv");
+    const stored: Record<string, object> = {
+      "json:leaf": { type: "object", properties: { n: { type: "number" } }, required: ["n"] },
+    };
+    const v = new SchemaValidator({ getSchema: async (id) => stored[id] as never });
+    const boundary = asBoundaryValidator(v);
+    const schema = { type: "object", properties: { child: { $ref: "json:leaf" } }, required: ["child"] } as never;
+    expect(await boundary.validateValue(schema, { child: { n: 1 } })).toEqual({ ok: true });
+    const bad = await boundary.validateValue(schema, { child: { n: "x" } });
+    expect(bad.ok).toBe(false);
+    expect(bad.errors).toMatch(/number/);
+  });
+
+  it("a ref-free document answers synchronously through the SYNC seam", async () => {
+    const { SchemaValidator, asBoundaryValidator } = await import("../src/ajv");
+    const boundary = asBoundaryValidator(new SchemaValidator());
+    const res = boundary.validateValue({ type: "string" } as never, "hi");
+    expect(res).toEqual({ ok: true }); // NOT a promise — the inline family's truth
+  });
+});

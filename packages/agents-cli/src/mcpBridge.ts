@@ -27,7 +27,7 @@
  *    off the agent path) whenever the caller supplies one. `agents-api`'s adapter supplies `ctx.validator`
  *    automatically, so the engine-driven path is checked without anyone opting in.
  */
-import type { AgentPermissionDecision, AgentToolRequest, InjectedTool, OutputValidator } from "./deps";
+import type { AgentPermissionDecision, AgentToolRequest, InjectedTool, SyncOutputValidator } from "./deps";
 import { bridgePath, handleToolCall, isAuthorizedBridgeRequest, newBridgeToken, toolDescriptors } from "./mcpProtocol";
 
 /** What a bridge exposes to the CLI. */
@@ -47,7 +47,7 @@ export interface McpBridgeSpec {
   /** Checks an injected tool's arguments against its own `inputSchema` before the impl sees them.
    *  Absent ⇒ unvalidated, as everywhere else a seam is optional — so the caller that owns the tools is
    *  the one that decides. */
-  validator?: OutputValidator;
+  validator?: SyncOutputValidator;
 }
 
 /** The injectable seam: stand up a server for this spec. Tests inject a fake; the default is below. */

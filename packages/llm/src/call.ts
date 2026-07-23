@@ -99,12 +99,12 @@ async function runCall<T>(def: LlmCallDefinition<T>, env: CallDeps, timeoutArg?:
 
   // Boundary validation is always against the ORIGINAL schema (the value `postProcess` reconstructs
   // back to), never the provider-adapted one we send.
-  let validate: ((value: JsonValue) => void) | undefined;
+  let validate: ((value: JsonValue) => void | Promise<void>) | undefined;
   if (env.validator && def.schema) {
     const validator = env.validator;
     const originalSchema = def.schema;
-    validate = (value: JsonValue) => {
-      const result = validator.validateValue(originalSchema, value);
+    validate = async (value: JsonValue) => {
+      const result = await validator.validateValue(originalSchema, value);
       if (!result.ok) throw new Error(`output failed schema validation: ${result.errors ?? "unknown error"}`);
     };
   }
