@@ -2,8 +2,8 @@
  * Shared fakes for the @declarative-ai/llm test suites — the mock stream plumbing and a fake provider
  * router — so a change to the mock stream shape or the `ModelRouter` interface lands in ONE place.
  */
-import { isOk, type Failure } from "@declarative-ai/json";
-import type { LlmCallResult, LlmOutput } from "../src/output";
+import { isOk } from "@declarative-ai/json";
+import type { LlmCallResult, LlmFailure, LlmOutput } from "../src/output";
 import { simulateReadableStream, type LanguageModel } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import type { JsonValue } from "@declarative-ai/json";
@@ -50,7 +50,7 @@ const FAKE_METRICS = { inputTokens: 10, outputTokens: 5, costUsd: 0.001, costSou
 
 export function okOutcome(partial: Partial<LlmCallResult> = {}): LlmCallResult {
   return {
-    value: { parsed: { answer: "4" }, rawText: '{"answer":"4"}', finishReason: "stop" },
+    value: { value: { answer: "4" }, finishReason: "stop" },
     metrics: FAKE_METRICS,
     ...partial,
   };
@@ -59,7 +59,7 @@ export function okOutcome(partial: Partial<LlmCallResult> = {}): LlmCallResult {
 export function validationFailure(errors = "data/answer must be string"): LlmCallResult {
   return {
     // The failure keeps its payload: the value that FAILED validation is what a repair turn reads.
-    value: { parsed: { answer: 7 }, rawText: '{"answer":7}', finishReason: "stop" },
+    value: { value: { answer: 7 }, finishReason: "stop" },
     metrics: FAKE_METRICS,
     error: {
       classification: "api-retriable",
@@ -96,7 +96,7 @@ export function generateFlat<T = JsonValue>(flat: FlatCall<T>): Promise<LlmCallR
 }
 
 /** Read a call's failure, or `undefined` when it succeeded — `error` is not a property of the union. */
-export function errorOf<T>(r: LlmCallResult<T>): Failure | undefined {
+export function errorOf<T>(r: LlmCallResult<T>): LlmFailure | undefined {
   return isOk(r) ? undefined : r.error;
 }
 

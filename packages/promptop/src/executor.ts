@@ -208,18 +208,18 @@ export class PromptExecutor implements Executor<ExecServices, LlmMetrics> {
       return lostMetrics(err instanceof Error ? err.message : String(err));
     }
 
-    // THE PROJECTION (DESIGN §3.1). An `LlmOutput` — parsed value, raw text, thinking, tool
-    // calls, finish reason — is what the PROVIDER produced. What an EXECUTION returns is the value of
+    // THE PROJECTION (DESIGN §3.1). An `LlmOutput` — output value, thinking, tool calls, finish
+    // reason — is what the PROVIDER produced. What an EXECUTION returns is the value of
     // the op's output parameter, and nothing else. So this is the boundary where the model payload
     // stops: everything past here sees a `ResolvedValue`, which is why `exec` and `hw` no longer name
-    // `rawText` or `thinking` at all.
+    // `thinking` at all.
     const output = call.value;
     // A generated FILE lands in a `blob`-kind output parameter — that is what §7.1 means by "a produced
     // artifact is an output parameter, not a parallel channel". A json/text parameter ignores it.
     const value: ResolvedValue | undefined =
       op.output.kind === "blob" && output?.files && output.files.length > 0
         ? output.files[0]!.bytes
-        : (output?.parsed as ResolvedValue | undefined);
+        : (output?.value as ResolvedValue | undefined);
 
     const metrics: LlmMetrics = { ...call.metrics, startMs };
     if (isOk(call)) return { value: value as ResolvedValue, metrics };

@@ -205,16 +205,44 @@ export interface BudgetOptions extends ResolutionOptions {
     estimateCostUsd(modelId: string, inputTokens: number, outputTokens: number): number;
     affordableOutputTokens(modelId: string, inputTokens: number, availableUsd: number): number;
   };
+  /**
+   * Selects POST-CHARGE mode: this layer's cost is COMPUTED FROM THE RESULT instead of reserved
+   * against a pre-call estimate. The mode is implied rather than a separate flag because it follows
+   * from the data dependency — a computed charge prices a result that does not exist before the call,
+   * so there is nothing to reserve.
+   *
+   * The wrapper runs the inner executor, then bills `computeCost(op, result)` when it is > 0: via
+   * {@link BudgetMeter.debit} (the channel for spend that cannot be refused), falling back to an
+   * immediate reserve→settle for a meter without one — which may under-collect on an empty balance,
+   * since a post-hoc charge cannot un-serve the result. The amount is folded into the result's
+   * `costUsd` so the layers above see the true spend.
+   *
+   * This is what an OUTER budget instance stacked ABOVE `withMemoize` uses to bill memo REUSE: the
+   * cache implementation annotates a hit's metrics with what the original run cost and who already
+   * owns it, and `computeCost` turns that into this principal's charge — 0 on a miss (no annotation),
+   * so real calls are billed once, by the INNER reserve-mode instance. Unlike reserve mode this
+   * applies to EVERY op kind, not just prompts: any op's cached record can carry a reuse charge.
+   */
+  computeCost?: (op: Operation<InlineFamily>, result: ExecResult<ResolvedValue, BudgetReadable>) => number;
 }
 
 /**
- * Per-call budget RESERVATION (the reserve→debit wallet lifecycle): before the call, hold its ESTIMATED
- * cost against the injected {@link BudgetMeter}; after it returns, settle the reserve to the ACTUAL
- * cost. When the estimate doesn't fit the balance, FLIP the relationship — compute the AFFORDABLE
- * output ceiling from the remaining headroom and rewrite the op's `maxOutputTokens` to it, so the
- * reserve becomes provider-ENFORCED instead of a guess; still short ⇒ an `out-of-credits` outcome, no
- * call made. A failed call still settles (its cost, usually $0, is real spend and the hold must not
- * linger). With no meter available the wrapper runs the inner call untouched.
+ * The ONE billing wrapper, in one of two modes selected by {@link BudgetOptions.computeCost}:
+ *
+ * **Reserve mode** (no `computeCost`) — per-call budget RESERVATION (the reserve→debit wallet
+ * lifecycle): before the call, hold its ESTIMATED cost against the injected {@link BudgetMeter}; after
+ * it returns, settle the reserve to the ACTUAL cost. When the estimate doesn't fit the balance, FLIP
+ * the relationship — compute the AFFORDABLE output ceiling from the remaining headroom and rewrite the
+ * op's `maxOutputTokens` to it, so the reserve becomes provider-ENFORCED instead of a guess; still
+ * short ⇒ an `out-of-credits` outcome, no call made. A failed call still settles (its cost, usually
+ * $0, is real spend and the hold must not linger).
+ *
+ * **Post-charge mode** (`computeCost` present) — run the inner executor, then debit what the RESULT
+ * says this layer owes (see {@link BudgetOptions.computeCost}). An outer post-charge instance above
+ * `withMemoize` and an inner reserve instance below it is the standard composition: hits are billed by
+ * the outer layer from the record's reuse annotation, real calls by the inner reserve.
+ *
+ * With no meter available the wrapper runs the inner call untouched, in either mode.
  */
 export function withBudget<R = ExecServices, M extends BudgetReadable = BudgetReadable>(
   config?: BudgetOptions,
@@ -246,6 +274,28 @@ export function withBudget<R = ExecServices, M extends BudgetReadable = BudgetRe
     ...forwardCapabilitiesFor(innerExec),
     start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue, BudgetReadable> {
       const meter = config?.meter ?? ctx.meter;
+      const computeCost = config?.computeCost;
+      if (computeCost) {
+        if (!meter) return innerExec.start(op, ctx);
+        return wrapHandle<BudgetReadable>(async (ctl): Promise<ExecResult<ResolvedValue, BudgetReadable>> => {
+          const result = await ctl.started(innerExec.start(op, ctx)).result;
+          const amount = computeCost(op, result);
+          if (!(amount > 0)) return result;
+          if (meter.debit) {
+            await meter.debit(amount);
+          } else {
+            // No debit channel: an immediate reserve→settle is the closest a refusable meter gets. A
+            // refusal is swallowed — the result was already served, so refusing cannot un-spend it —
+            // which is exactly the under-collection `BudgetMeter.debit`'s doc warns about.
+            const hold = await meter.reserve(amount);
+            if (hold) await hold.settle(amount);
+          }
+          // The charge is real spend of THIS execution: fold it into the reported cost so run totals
+          // and outer layers see it. `costSource` is untouched — the amount came from the caller's own
+          // cost model, and relabeling the underlying measurement would destroy its provenance.
+          return { ...result, metrics: { ...result.metrics, costUsd: result.metrics.costUsd + amount } };
+        });
+      }
       if (!meter || !isPrompt(op)) return innerExec.start(op, ctx);
       // The RESOLVED model: a `defaults`-supplied one used to be invisible here, so this early return
       // fired and the whole call ran unmetered — a complete no-op wrapper, silently.
@@ -303,9 +353,9 @@ export function withBudget<R = ExecServices, M extends BudgetReadable = BudgetRe
 /**
  * Fold a successful result into an assistant turn for the transcript.
  *
- * Reads the op's OUTPUT VALUE. It used to prefer `rawText`, but the model's raw text is `LlmOutput`
- * payload and stops at the prompt executor — and for a text-output op the output value IS that text,
- * so the two agree wherever it mattered.
+ * Reads the op's OUTPUT VALUE. It used to prefer the model's raw text, but that stops at the prompt
+ * executor — and for a text-output op the output value IS that text, so the two agree wherever it
+ * mattered.
  */
 function foldResultToAssistant(result: ExecResult<ResolvedValue, ExecMetrics>): ModelMessage[] {
   if (!isOk(result) || result.value === undefined) return [];

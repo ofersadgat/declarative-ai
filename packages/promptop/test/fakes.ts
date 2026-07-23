@@ -31,7 +31,7 @@ const FAKE_METRICS = { inputTokens: 10, outputTokens: 5, costUsd: 0.001, costSou
  *  patch the envelope. */
 export function okOutcome(over: Partial<LlmOutput> & { error?: Failure; metrics?: Partial<LlmMetrics> } = {}): LlmCallResult {
   const { error, metrics: metricsOver, ...payload } = over;
-  const value: LlmOutput = { parsed: { answer: "4" }, rawText: '{"answer":"4"}', finishReason: "stop", ...payload };
+  const value: LlmOutput = { value: { answer: "4" }, finishReason: "stop", ...payload };
   const metrics: LlmMetrics = { ...FAKE_METRICS, ...metricsOver };
   return error ? { error, value, metrics } : { value, metrics };
 }
@@ -39,7 +39,7 @@ export function okOutcome(over: Partial<LlmOutput> & { error?: Failure; metrics?
 export function validationFailure(errors = "data/answer must be string"): LlmCallResult {
   return {
     // The failure keeps its payload — the value that FAILED validation is what a repair turn reads.
-    value: { parsed: { answer: 7 }, rawText: '{"answer":7}', finishReason: "stop" },
+    value: { value: { answer: 7 }, finishReason: "stop" },
     metrics: FAKE_METRICS,
     error: {
       classification: "api-retriable",

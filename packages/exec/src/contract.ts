@@ -14,7 +14,7 @@
  *
  * **What this package does NOT know.** An execution returns the value of the op's output PARAMETER —
  * a `ResolvedValue`, which is ops vocabulary, because executing ops is this package's job. It never
- * learns what a token is, what a model produced, or what anything costs: `rawText`, `thinking`,
+ * learns what a token is, what a model produced, or what anything costs: `thinking`,
  * `toolCalls`, and `finishReason` used to ride on the result and are now `llm`'s `LlmOutput`, which
  * stops at `promptop`. Money and tokens are quarantined in `budget.ts` and `ratelimit.ts`, which
  * nothing else here imports.
@@ -119,17 +119,25 @@ export interface ExecHandle<O, M extends ExecMetrics = ExecMetrics> {
 }
 
 /**
- * An executable. Generic in `R` — the environment it still REQUIRES at `start` — and in `M`, what it
- * measures. Composition NARROWS `R`: a wrapper that reads a ctx seam (e.g. `withDeadline` →
- * `deadline`/`stepStartMs`) ADDS it to `R`, so a stack's `start` demands exactly the fields its
- * wrappers consume — a missing one is a compile error (see {@link compose}).
+ * An executable. Generic in `R` — the environment it still REQUIRES at `start` — in `M`, what it
+ * measures, and in `Op`, the operation PAYLOAD it accepts. Composition NARROWS `R`: a wrapper that
+ * reads a ctx seam (e.g. `withDeadline` → `deadline`/`stepStartMs`) ADDS it to `R`, so a stack's
+ * `start` demands exactly the fields its wrappers consume — a missing one is a compile error (see
+ * {@link compose}).
+ *
+ * `Op` defaults to the RESOLVED inline op — the only thing a leaf can run — and every wrapper that
+ * reads op CONTENT (a prompt to price, a user text to repair) is pinned there. What generalizes is the
+ * layers that need only the op's IDENTITY: `withMemoize` keys any serializable op, and
+ * `withHydration` is the family-transition wrapper that turns a stack over inline ops into a stack
+ * over some other family's ops (e.g. content-id ops whose leaves are cheap to hash and expensive to
+ * load — hydration then happens only below the memo, on a miss).
  *
  * `metrics` is how the executor's measurements COMBINE — across retry attempts, or a child into a
  * parent. It is registered by the producer because only the producer knows which of its fields sum,
  * which take the latest, and which are the first observation; every consumer of a merge calls it
  * without learning what the fields mean.
  */
-export interface Executor<R = ExecServices, M extends ExecMetrics = ExecMetrics> {
+export interface Executor<R = ExecServices, M extends ExecMetrics = ExecMetrics, Op = Operation<InlineFamily>> {
   readonly capabilities: Capabilities;
   readonly metrics: MetricsAlgebra<M>;
   /**
@@ -147,8 +155,8 @@ export interface Executor<R = ExecServices, M extends ExecMetrics = ExecMetrics>
    * A wrapper MUST forward it (`capabilitiesFor: (o) => inner.capabilitiesFor!(o)`), or the stack
    * silently degrades to the static record.
    */
-  capabilitiesFor?(op: Operation<InlineFamily>): Capabilities;
-  start(op: Operation<InlineFamily>, ctx: R): ExecHandle<ResolvedValue, M>;
+  capabilitiesFor?(op: Op): Capabilities;
+  start(op: Op, ctx: R): ExecHandle<ResolvedValue, M>;
 }
 
 // --- The named facets a workflow's operations reference ------------------------
@@ -334,9 +342,9 @@ export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
  * (`withDeadline(): ExecutorWrapper<R, R & { deadline; stepStartMs }>`). The stacking ORDER encodes
  * semantics — see the two forms below.
  */
-export type ExecutorWrapper<RIn = ExecServices, ROut = RIn, M extends ExecMetrics = ExecMetrics> = (
-  inner: Executor<RIn, M>,
-) => Executor<ROut, M>;
+export type ExecutorWrapper<RIn = ExecServices, ROut = RIn, M extends ExecMetrics = ExecMetrics, Op = Operation<InlineFamily>> = (
+  inner: Executor<RIn, M, Op>,
+) => Executor<ROut, M, Op>;
 
 /**
  * Forward a dispatcher's per-op capability lookup through a wrapper — spread into the wrapper's executor
@@ -347,9 +355,9 @@ export type ExecutorWrapper<RIn = ExecServices, ROut = RIn, M extends ExecMetric
  * fire at composition time or has to wait for an op. A wrapper that always defined the method would
  * erase that distinction for every layer above it.
  */
-export function forwardCapabilitiesFor<R, M extends ExecMetrics>(
-  inner: Executor<R, M>,
-): { capabilitiesFor?: (op: Operation<InlineFamily>) => Capabilities } {
+export function forwardCapabilitiesFor<R, M extends ExecMetrics, Op = Operation<InlineFamily>>(
+  inner: Executor<R, M, Op>,
+): { capabilitiesFor?: (op: Op) => Capabilities } {
   const perOp = inner.capabilitiesFor;
   return perOp ? { capabilitiesFor: (op): Capabilities => perOp.call(inner, op) } : {};
 }
@@ -381,12 +389,12 @@ export function composeExecutors<M extends ExecMetrics = ExecMetrics>(
  * `withDeadline`) is a compile error, and it IS an {@link Executor} so it drops into a registry
  * unchanged.
  */
-export class ComposableExecutor<R = ExecServices, M extends ExecMetrics = ExecMetrics> implements Executor<R, M> {
+export class ComposableExecutor<R = ExecServices, M extends ExecMetrics = ExecMetrics, Op = Operation<InlineFamily>> implements Executor<R, M, Op> {
   /** Forwarded so the per-op capability lookup survives the builder — and forwarded CONDITIONALLY, so
    *  that "this executor has no per-op record" (which `withMemoize` reads as "the static record IS the
    *  whole truth") survives too. See {@link Executor.capabilitiesFor}. */
-  readonly capabilitiesFor?: (op: Operation<InlineFamily>) => Capabilities;
-  constructor(private readonly inner: Executor<R, M>) {
+  readonly capabilitiesFor?: (op: Op) => Capabilities;
+  constructor(private readonly inner: Executor<R, M, Op>) {
     const perOp = inner.capabilitiesFor;
     if (perOp) this.capabilitiesFor = (op): Capabilities => perOp.call(inner, op);
   }
@@ -396,15 +404,23 @@ export class ComposableExecutor<R = ExecServices, M extends ExecMetrics = ExecMe
   get metrics(): MetricsAlgebra<M> {
     return this.inner.metrics;
   }
-  with<ROut>(wrap: ExecutorWrapper<R, ROut, M>): ComposableExecutor<ROut, M> {
+  /**
+   * Add an OUTER layer. The parameter shape subsumes both an {@link ExecutorWrapper} (op type
+   * unchanged) and a FAMILY-TRANSITION adapter like `withHydration`, which changes what the stack
+   * above it accepts: `compose(leaf).with(withBudget(...)).with(withHydration(resolve)).with(withMemoize(...))`
+   * prices inline ops below the transition and memoizes id ops above it.
+   */
+  with<ROut, OpOut = Op>(wrap: (inner: Executor<R, M, Op>) => Executor<ROut, M, OpOut>): ComposableExecutor<ROut, M, OpOut> {
     return new ComposableExecutor(wrap(this.inner));
   }
-  start(op: Operation<InlineFamily>, ctx: R): ExecHandle<ResolvedValue, M> {
+  start(op: Op, ctx: R): ExecHandle<ResolvedValue, M> {
     return this.inner.start(op, ctx);
   }
 }
 
 /** Start the inside-out builder around a core executor — see {@link ComposableExecutor}. */
-export function compose<R = ExecServices, M extends ExecMetrics = ExecMetrics>(core: Executor<R, M>): ComposableExecutor<R, M> {
+export function compose<R = ExecServices, M extends ExecMetrics = ExecMetrics, Op = Operation<InlineFamily>>(
+  core: Executor<R, M, Op>,
+): ComposableExecutor<R, M, Op> {
   return new ComposableExecutor(core);
 }

@@ -79,7 +79,7 @@ describe("tools — executed loop", () => {
 
     expect(errorOf(out)).toBeUndefined();
     expect(executedWith).toEqual({ city: "NYC" }); // executor ran with the parsed input
-    expect(out.value?.parsed).toBe("It is sunny in NYC."); // final model turn after the tool result
+    expect(out.value?.value).toBe("It is sunny in NYC."); // final model turn after the tool result
     expect(out.value?.toolCalls?.[0]).toMatchObject({ toolName: "get_weather", input: { city: "NYC" } });
     expect(out.value?.toolResults?.[0]?.output).toMatchObject({ tempF: 72, city: "NYC" });
   });
@@ -115,7 +115,7 @@ describe("executeLlmCall — tool declarations + injected executors", () => {
 
     expect(errorOf(out)).toBeUndefined();
     expect(executed).toBe(true); // the injected executor ran (declaration → ToolSet → loop)
-    expect(out.value?.parsed).toBe("It is sunny in NYC.");
+    expect(out.value?.value).toBe("It is sunny in NYC.");
     expect(out.value?.toolCalls?.[0]).toMatchObject({ toolName: "get_weather", input: { city: "NYC" } });
     expect(out.value?.toolResults?.[0]?.output).toMatchObject({ tempF: 72 });
   });

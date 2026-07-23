@@ -12,6 +12,7 @@ export * from "./contract";
 export * from "./handles";
 export * from "./operationExecutor";
 export * from "./memo";
+export * from "./hydrate";
 export * from "./wrappers";
 export * from "./concurrency";
 export * from "./deadline";

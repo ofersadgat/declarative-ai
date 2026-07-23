@@ -296,7 +296,7 @@ type ErrorClass = "network-retriable" | "api-retriable" | "permanent" | "deadlin
 `if (r.error)` does not compile — the narrowing checks are `isOk(r)` and `"error" in r`. A failed call
 still keeps its partial `value`, which is what makes a failure diagnosable rather than empty.
 
-**Execution returns only the op's output value.** What a *model* produced — `rawText`, `thinking`,
+**Execution returns only the op's output value.** What a *model* produced — `thinking`,
 `toolCalls`, `finishReason` — is `@declarative-ai/llm`'s `LlmOutput`, and it stops at `promptop`: none
 of it rides on an `ExecResult`, because none of it is meaningful for a function op. A caller who wants
 the trace asks the llm layer, which is the layer that has it (§4.1).
