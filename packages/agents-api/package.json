@@ -1,0 +1,18 @@
+{
+  "name": "@declarative-ai/agents-api",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@declarative-ai/exec": "*",
+    "@declarative-ai/json": "*",
+    "@declarative-ai/ops": "*",
+    "@declarative-ai/permissions": "*"
+  },
+  "peerDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "*"
+  },
+  "peerDependenciesMeta": {
+    "@anthropic-ai/claude-agent-sdk": { "optional": true }
+  }
+}

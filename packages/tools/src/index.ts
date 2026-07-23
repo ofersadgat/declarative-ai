@@ -1,4 +1,4 @@
-import type { Tool } from "@declarative-ai/core";
+import type { Tool } from "@declarative-ai/exec";
 import { fsTools } from "./fsTools";
 import { searchTools } from "./searchTools";
 import { shellTools } from "./shellTools";

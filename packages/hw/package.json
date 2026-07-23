@@ -2,11 +2,12 @@
   "name": "@declarative-ai/hw",
   "version": "0.1.0",
   "type": "module",
-  "exports": {
-    ".": "./src/index.ts"
-  },
+  "exports": { ".": "./src/index.ts" },
   "dependencies": {
-    "@declarative-ai/core": "*",
-    "@declarative-ai/services": "*"
+    "@declarative-ai/exec": "*",
+    "@declarative-ai/json": "*",
+    "@declarative-ai/ops": "*",
+    "@declarative-ai/permissions": "*",
+    "@declarative-ai/validate": "*"
   }
 }

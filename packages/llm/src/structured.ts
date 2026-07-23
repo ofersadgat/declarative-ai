@@ -11,9 +11,13 @@
  * never replaces, that validation.
  */
 
-type SchemaNode = Record<string, unknown>;
+import type { JsonValue, MutableSchema } from "@declarative-ai/json";
 
-/** Normalize a stored schema value (unwrap double-serialized strings, infer object type). */
+/** The one schema-document vocabulary, in its mutable transform form (API.md, "The JSON vocabulary"). */
+type SchemaNode = MutableSchema;
+
+/** Normalize a stored schema value (unwrap double-serialized strings, infer object type). The `unknown`
+ *  input is the sanctioned boundary position: this IS the parse step for a stored/wire schema. */
 export function parseOutputSchema(raw: unknown): SchemaNode | null {
   if (raw == null) return null;
   let schema: unknown = raw;
@@ -56,12 +60,12 @@ const UNSUPPORTED_KEYWORDS = [
  *  3. `type: [...]` collapses to its non-null member;
  *  4. unsupported keywords are stripped.
  */
-export function patchSchemaForAnthropic(schema: unknown): unknown {
+export function patchSchemaForAnthropic(schema: JsonValue): JsonValue {
   return patchInPlace(structuredClone(schema));
 }
 
-function patchInPlace(schema: unknown): unknown {
-  if (typeof schema !== "object" || schema === null) return schema;
+function patchInPlace(schema: JsonValue): JsonValue {
+  if (typeof schema !== "object" || schema === null || Array.isArray(schema)) return schema;
   const s = schema as SchemaNode;
 
   for (const kw of UNSUPPORTED_KEYWORDS) delete s[kw];
@@ -80,19 +84,21 @@ function patchInPlace(schema: unknown): unknown {
             const props = v.properties as SchemaNode;
             for (const key of Object.keys(props)) {
               allKeys.add(key);
+              const incomingValue = props[key];
+              if (incomingValue === undefined) continue;
               if (!(key in mergedProps)) {
-                mergedProps[key] = props[key];
+                mergedProps[key] = incomingValue;
               } else {
                 const existing = mergedProps[key] as SchemaNode;
-                const incoming = props[key] as SchemaNode;
-                if (existing.const && incoming.const) {
-                  const vals = new Set<unknown>();
-                  if (existing.enum) (existing.enum as unknown[]).forEach((x) => vals.add(x));
+                const incoming = incomingValue as SchemaNode;
+                if (existing.const !== undefined && incoming.const !== undefined) {
+                  const vals = new Set<JsonValue>();
+                  if (Array.isArray(existing.enum)) existing.enum.forEach((x) => vals.add(x));
                   else vals.add(existing.const);
                   vals.add(incoming.const);
                   mergedProps[key] = { type: "string", enum: [...vals] };
-                } else if (existing.enum && incoming.const) {
-                  (existing.enum as unknown[]).push(incoming.const);
+                } else if (Array.isArray(existing.enum) && incoming.const !== undefined) {
+                  existing.enum.push(incoming.const);
                 }
               }
             }
@@ -116,13 +122,17 @@ function patchInPlace(schema: unknown): unknown {
 
   if (Array.isArray(s.type)) {
     const types = s.type as string[];
-    s.type = types.find((t) => t !== "null") ?? types[0];
+    const collapsed = types.find((t) => t !== "null") ?? types[0];
+    if (collapsed !== undefined) s.type = collapsed;
   }
 
-  if (s.items) s.items = patchInPlace(s.items);
+  if (s.items !== undefined) s.items = patchInPlace(s.items);
   if (s.properties && typeof s.properties === "object") {
     const props = s.properties as SchemaNode;
-    for (const key of Object.keys(props)) props[key] = patchInPlace(props[key]);
+    for (const key of Object.keys(props)) {
+      const prop = props[key];
+      if (prop !== undefined) props[key] = patchInPlace(prop);
+    }
   }
   if (typeof s.additionalProperties === "object" && s.additionalProperties !== null) {
     s.additionalProperties = patchInPlace(s.additionalProperties);
@@ -172,7 +182,7 @@ export function findDiscriminators(variants: SchemaNode[]): string[] {
  * matched variant by its discriminator(s) and strip the rest. A no-op for schemas
  * without a union.
  */
-export function reconstructOutput(output: unknown, schema: SchemaNode | null): unknown {
+export function reconstructOutput(output: JsonValue, schema: SchemaNode | null): JsonValue {
   if (output == null || schema == null) return output;
   if (typeof output !== "object") return output;
 
@@ -181,7 +191,7 @@ export function reconstructOutput(output: unknown, schema: SchemaNode | null): u
       const variants = schema[kw] as SchemaNode[];
       const discriminators = findDiscriminators(variants);
       if (discriminators.length === 0 || Array.isArray(output)) break;
-      const obj = output as Record<string, unknown>;
+      const obj = output as Record<string, JsonValue>;
       if (discriminators.some((d) => obj[d] === undefined)) break;
       const matched = variants.find((v) => {
         const props = v.properties as Record<string, SchemaNode> | undefined;
@@ -190,9 +200,10 @@ export function reconstructOutput(output: unknown, schema: SchemaNode | null): u
       });
       if (!matched) break;
       const props = (matched.properties as Record<string, SchemaNode>) ?? {};
-      const trimmed: Record<string, unknown> = {};
+      const trimmed: Record<string, JsonValue> = {};
       for (const key of Object.keys(props)) {
-        if (key in obj) trimmed[key] = reconstructOutput(obj[key], props[key] ?? null);
+        const v = obj[key];
+        if (v !== undefined) trimmed[key] = reconstructOutput(v, props[key] ?? null);
       }
       return trimmed;
     }
@@ -204,9 +215,9 @@ export function reconstructOutput(output: unknown, schema: SchemaNode | null): u
   }
 
   if (!Array.isArray(output) && schema.properties && typeof schema.properties === "object") {
-    const obj = output as Record<string, unknown>;
+    const obj = output as Record<string, JsonValue>;
     const props = schema.properties as Record<string, SchemaNode>;
-    const result: Record<string, unknown> = {};
+    const result: Record<string, JsonValue> = {};
     for (const [key, value] of Object.entries(obj)) {
       result[key] = props[key] ? reconstructOutput(value, props[key]) : value;
     }

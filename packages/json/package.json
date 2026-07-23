@@ -1,0 +1,12 @@
+{
+  "name": "@declarative-ai/json",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.2.0",
+    "canonicalize": "^2.1.0"
+  }
+}

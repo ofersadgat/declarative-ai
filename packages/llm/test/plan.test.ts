@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
+import type { JsonSchema } from "@declarative-ai/json";
 import { plan } from "../src/plan";
-import type { LlmCallDefinition } from "../src/llmStep";
+import type { LlmCallDefinition } from "../src/llmConfig";
 import { ModelInfo } from "../src/model-catalog";
 import { flatSchema } from "./fakes";
 
-const baseDef: LlmCallDefinition & { schema?: Record<string, unknown> } = {
+const baseDef: LlmCallDefinition & { schema?: JsonSchema } = {
   model: "anthropic/claude-haiku-4-5",
   system: "be terse",
   prompt: "what is 2+2?",
@@ -72,5 +73,32 @@ describe("plan — per-mediaType modality gating", () => {
       timeoutMs: 1000,
     });
     expect(p.issues.some((i) => /does not accept video inputs/.test(i))).toBe(true);
+  });
+});
+
+describe("content hashing with binary attachments", () => {
+  // `FileInput.data` may hold raw bytes since blob became a leaf kind (§7), and JCS has no
+  // `Uint8Array` case — it serializes as an object with ONE KEY PER BYTE. A megabyte attachment
+  // therefore built a multi-megabyte string and sorted millions of numeric keys before hashing.
+  const withBytes = (bytes: Uint8Array): LlmCallDefinition => ({
+    ...baseDef,
+    attachments: [{ mediaType: "image/png", data: bytes }],
+  });
+
+  it("hashes a large byte attachment promptly", () => {
+    const big = new Uint8Array(2_000_000).fill(7);
+    const started = Date.now();
+    expect(plan(withBytes(big)).contentHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it("is stable for identical bytes and distinct for different bytes", () => {
+    expect(plan(withBytes(new Uint8Array([1, 2, 3]))).contentHash).toBe(plan(withBytes(new Uint8Array([1, 2, 3]))).contentHash);
+    expect(plan(withBytes(new Uint8Array([1, 2, 3]))).contentHash).not.toBe(plan(withBytes(new Uint8Array([1, 2, 4]))).contentHash);
+  });
+
+  it("leaves a byte-free declaration's hash alone", () => {
+    expect(plan(baseDef).contentHash).toBe(plan(baseDef).contentHash);
+    expect(plan(baseDef).contentHash).not.toBe(plan(withBytes(new Uint8Array([1]))).contentHash);
   });
 });

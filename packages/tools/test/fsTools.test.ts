@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { ExecServices } from "@declarative-ai/core";
+import type { ExecServices } from "@declarative-ai/exec";
 import {
   allTools,
   editFileTool,
@@ -68,9 +68,9 @@ describe("fs tools — round-trip on a real workspace", () => {
 
 describe("capabilities + workspace requirement", () => {
   it("read_file and list_dir are read-only; write_file is not", () => {
-    expect(readFileTool.capabilities?.readOnly).toBe(true);
-    expect(listDirTool.capabilities?.readOnly).toBe(true);
-    expect(writeFileTool.capabilities?.readOnly).toBe(false);
+    expect(readFileTool.readOnly).toBe(true);
+    expect(listDirTool.readOnly).toBe(true);
+    expect(writeFileTool.readOnly).toBe(false);
   });
 
   it("fsTools + allTools expose the sets keyed by logical name", () => {

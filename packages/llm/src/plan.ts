@@ -7,11 +7,12 @@
  * Pair with `resolveConfig` (core): `resolveConfig(layers)` composes + parses the config; build the
  * declaration (config + prompt + schema); `plan(declaration)` analyzes it. Nothing here executes.
  */
-import { hashCanonical, isReasoningConfig } from "@declarative-ai/core";
-import { estimateCallTokens } from "@declarative-ai/services";
+import { hashCanonical, sha256Hex, type JsonSchema, type Serializable } from "@declarative-ai/json";
+import { isReasoningConfig } from "./llmConfig";
+import { estimateCallTokens } from "./tokens";
 import type { FilePart, ModelMessage } from "ai";
-import { promptText } from "./generate";
-import type { LlmCallDefinition } from "./llmStep";
+import { promptText } from "./prompt";
+import type { LlmCallDefinition } from "./llmConfig";
 import { ModelInfo, SAMPLING_PARAM_NAMES, type Modalities } from "./model-catalog";
 import { familyForModel, type ModelFamily } from "./router";
 import { adaptSchemaCached, profileForModelId, type Enforcement } from "./schema";
@@ -32,6 +33,31 @@ export interface CallPlan {
   estimate: { inputTokens: number; outputTokens: number; costUsd?: number };
   /** Human-readable fit issues (unsupported params, reasoning rejected, etc.). */
   issues: string[];
+}
+
+/**
+ * The declaration reduced to something CANONICALIZABLE. `FileInput.data` may now hold raw bytes (§7
+ * made blob a leaf kind), and JCS has no `Uint8Array` case — it is neither an array nor `toJSON`-able,
+ * so it serializes as a plain object with ONE KEY PER BYTE. A 5 MB attachment becomes a ~50 MB string
+ * and a sort over five million numeric keys before the digest is even started. Bytes are replaced by
+ * their own hash, which is both fast and the identity we actually want: the same image supplied twice
+ * by different means plans to the same content hash.
+ */
+function hashableDefinition(def: LlmCallDefinition): Serializable {
+  const attachments = def.attachments;
+  if (!attachments?.some((a) => a.data instanceof Uint8Array)) return def as unknown as Serializable;
+  return {
+    ...def,
+    attachments: attachments.map((a) => (a.data instanceof Uint8Array ? { ...a, data: { bytesHash: sha256Hex(latin1(a.data)) } } : a)),
+  } as unknown as Serializable;
+}
+
+/** Bytes as an injective string — every byte maps to a distinct code unit, so the digest is stable and
+ *  collision-free without a base64 round trip. */
+function latin1(bytes: Uint8Array): string {
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return s;
 }
 
 /** The input modality a media part requires, derived from its IANA media type: `image/*` → "image",
@@ -58,7 +84,7 @@ function requiredInputModalities(def: LlmCallDefinition): Set<string> {
 }
 
 /** Plan a resolved call declaration (config + prompt [+ schema]) — no execution, no network. */
-export function plan(def: LlmCallDefinition & { schema?: Record<string, unknown> }): CallPlan {
+export function plan(def: LlmCallDefinition & { schema?: JsonSchema }): CallPlan {
   const modelId = def.model;
   // Route-prefixed `{route}/{model}` — the exact catalog key (§5). The catalog / profile / cost lookups
   // all key on this full id; `familyForModel` extracts the route for the `family` field + issue messages.
@@ -101,7 +127,7 @@ export function plan(def: LlmCallDefinition & { schema?: Record<string, unknown>
 
   return {
     provider: { family: familyForModel(modelId), modelId },
-    contentHash: hashCanonical(def),
+    contentHash: hashCanonical(hashableDefinition(def)),
     unsupportedParams,
     ...(modalities !== undefined ? { modalities } : {}),
     ...(structuredOutput !== undefined ? { structuredOutput } : {}),

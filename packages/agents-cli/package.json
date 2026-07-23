@@ -1,0 +1,22 @@
+{
+  "name": "@declarative-ai/agents-cli",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@declarative-ai/agents-api": "*",
+    "@declarative-ai/exec": "*",
+    "@declarative-ai/json": "*",
+    "@declarative-ai/ops": "*"
+  },
+  "peerDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "peerDependenciesMeta": {
+    "@modelcontextprotocol/sdk": {
+      "optional": true
+    }
+  }
+}

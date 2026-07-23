@@ -1,10 +1,12 @@
 /**
- * Workspace path resolution for fs-backed tools. A tool receives the current op's {@link Workspace} via
- * `ctx.workspace` (a Session-owned resource, RUNTIMES-AND-PERMISSIONS.md §3) and resolves every path input
- * relative to its `root`, refusing to escape it (SPEC §7.2 — "may not access files outside the project").
+ * Workspace path resolution for fs-backed tools. A tool receives the current op's `Workspace` via
+ * `ctx.workspace` (a Session-owned resource, DESIGN §5.1, "Sessions: the run-scoped resource bundle") and resolves every path
+ * input relative to its `root`, refusing to escape it (SPEC §7.2 — "may not access files outside the
+ * project").
  */
 import path from "node:path";
-import type { ExecServices, Workspace } from "@declarative-ai/core";
+import type { ExecServices, Workspace } from "@declarative-ai/exec";
+
 
 /** The workspace for the current op, or a clear error when a workspace tool runs without one configured. */
 export function requireWorkspace(ctx: ExecServices): Workspace {

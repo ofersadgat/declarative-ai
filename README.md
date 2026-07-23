@@ -16,25 +16,51 @@ rate limiting, cost metering, cancellation, sessions, file I/O, and a normalized
 Consumers: **findmyprompt** (prompt/config optimizer; searches over units) and **JaiRA** (interactive
 agent-orchestration app; runs units with humans in the loop).
 
-- [DESIGN.md](DESIGN.md) — architecture, the settled declarative model, the contract, extraction map, and
-  consumer migration plans (the canonical design doc).
-- [API.md](API.md) — the full API reference: every exported type and function, package by package, with
-  intended usage.
+- [DESIGN.md](DESIGN.md) — architecture, the settled declarative model, the contract, the runtime/tool/
+  permission model, the extraction map, and consumer migration plans.
+- [API.md](API.md) — the API reference, package by package, with intended usage.
 - [SPEC.md](SPEC.md) — the hierarchical-workflow formalism (normative for `@declarative-ai/hw`).
 
 ## Packages
 
-| Package | Contents |
-| --- | --- |
-| `@declarative-ai/core` | Edge-safe contract (`Executor<R>`/`ExecutionSpec`/`Outcome`/events), the `LlmConfiguration` declaration + strict parsing + resolution, error classification, RFC 8785 content hashing + memo keys, session/blob store seams, composition (`compose(...).with(...)` builder + loose `composeExecutors`) |
-| `@declarative-ai/services` | Ajv schema validation, budget-gated retry with full-jitter backoff, AIMD rate limiting + token buckets, deadline arithmetic, token estimation |
-| `@declarative-ai/llm` | The `llm-call` core: model router (Anthropic/OpenRouter), structured streaming generation with cache-split cost accounting, schema/reasoning adaptation, tools, file I/O, model catalog, `plan`, and the composable wrappers (`withRetry`/`withDeadline`/`withRateLimit`/`withSession`/`withMemoize`) |
-| `@declarative-ai/hw` | The `hierarchical-workflow` formalism: expression language, state-file loader/validator, snapshot hashing, evaluator engine, and its executor |
-| `@declarative-ai/tools` | Workspace-backed agent tools (`read_file`/`write_file`/`edit_file`/`list_dir`/`grep`/`glob`/`run_command`) that operate on `ctx.workspace` with a path-escape guard — the impls that make the composed `llm` runtime a coding agent |
-| `@declarative-ai/claude-code` | The delegated `claude-code` runtime (`createClaudeCodeRuntime`): drives the Claude Agent SDK behind an injectable seam, mapping `runtime.tools`→allow-list, `ctx.workspace`→cwd, and routing the agent's tool approvals through `ctx.approve` |
+```text
+                          json
+                     ┌──────┴──────┐
+                    llm           ops
+                     │             │
+                     │            exec
+                     │   ┌─────┬───┴────┬────────────┬────────────┐
+                     └ promptop │   validate    permissions   agents-api
+                             tools      └───────┬──────┘            │
+                                                hw             agents-cli
+```
+
+Read the edges as "depends on the package above it": `ops → json`; `llm → json` only; `exec → ops`;
+`promptop → exec + llm`; `validate`/`permissions`/`tools`/`agents-api` → `exec`; `hw → exec + validate +
+permissions`; `agents-cli → agents-api`. **`hw` does not depend on `promptop`** — it takes the prompt
+executor as a plain `Executor`, which is what keeps the AI SDK out of the workflow engine's graph.
+
+| Package | Contents | Heavy deps |
+| --- | --- | --- |
+| `@declarative-ai/json` | The bottom of the graph, and nothing in it can be declined: `JsonValue`/`Jsonify<T>`/`JsonSchema<T>`/`SchemaDocument`/`Serializable`, the codec + type-name registry (`x-type`), schema templates (`$param`), schema inference, `selectType`, RFC 8785 canonicalization + hashing, the classified error vocabulary (`ErrorClass`/`Failure`), and the `Result`/`ResultWithMetrics` envelope all three result types build on | `canonicalize`, `@noble/hashes` |
+| `@declarative-ai/ops` | The typed operation spine: the op model generic over a REF FAMILY (`PromptOp`/`FunctionOp`/`Parameter`/`Ref`, id-addressed or inline), the ONE function registry of discriminated entries (`pure` \| `host` \| `runtime`) with required per-variant capabilities, the `Signature` ⇄ schema bridge, the `Metrics` floor, `OperationRecord`, op metadata, and the `FromSchema` typed layer | `json-schema-to-ts` (types only) |
+| `@declarative-ai/exec` | The ONE execution seam: `Executor.start(op, ctx)`, `ExecHandle`, `ExecResult`, the augmentable `ExecServices`, composition (`compose(...).with(...)`), memoization, AIMD rate limiting + token buckets, deadline arithmetic, retry, `SessionStore` | — |
+| `@declarative-ai/llm` | One structured LLM call, end to end and `exec`-free: `executeLlmCall(definition, environment)`, the model router (Anthropic/OpenRouter), streaming generation with cache-split cost accounting, `LlmConfiguration` + strict parsing/resolution, schema/reasoning adaptation, tools, files, the model catalog, and `plan` | `ai`, `@ai-sdk/*`, `undici` |
+| `@declarative-ai/promptop` | `PromptOp → LlmCallDefinition` lowering, the prompt `Executor`, and the llm-aware wrappers (`withRateLimit`/`withBudget`/`withSession`) | — |
+| `@declarative-ai/validate` | Structural JSON-Schema subtyping, the ONE generic binding checker (parameterized by ref family), and one ajv wrapper with an injectable `$ref` resolver. The only package carrying a heavy dependency | **ajv** |
+| `@declarative-ai/permissions` | The tool-call permission model: `ExecPolicy`, `Approver`, profile × mode resolution, baselines | — |
+| `@declarative-ai/tools` | Workspace-backed agent tools (`read_file`/`write_file`/`edit_file`/`list_dir`/`grep`/`glob`/`run_command`) with a path-escape guard — the impls that make a composed prompt executor a coding agent | `node:*` |
+| `@declarative-ai/hw` | The `hierarchical-workflow` formalism: expression language, state-file loader/validator, snapshot hashing, evaluator engine, and its executor. It takes the prompt executor as a plain `Executor`, so the AI SDK stays out of its graph | **ajv**, transitively — it depends on `validate` for the binding checker |
+| `@declarative-ai/agents-api` | Delegated agents reached through an in-process SDK (`createClaudeCodeFunction`), plus the normalized `AgentQuery` seam both agent packages share. Its entry declares `policyEnforcement: "callback"` — it routes the agent's tool approvals back through `ctx.approve` | peer |
+| `@declarative-ai/agents-cli` | The same adapter over a CLI subprocess, reaching back for approvals and host tools over an MCP bridge (`--mcp-config` + `--permission-prompt-tool`), so its entry declares `policyEnforcement: "callback"` too. `CLI_CONFIG_ONLY_CAPS` is the honest record for a run with no approver at all | — |
 
 Packages are consumed as TypeScript source (`exports` → `src/index.ts`); consumers bundle (Next:
 `transpilePackages`; Electron: esbuild/vite).
+
+**They are independently usable, and that is enforced.** A structured LLM call needs `json + llm` and
+nothing else — `npm i @declarative-ai/llm` installs no ajv. Optional capabilities declare their own seams
+by augmenting `ExecServices`, so `exec` does not know that validation, permissions, model routing, or
+workspaces-with-filesystems exist.
 
 ## The model
 
@@ -103,15 +129,16 @@ npm test            # vitest across packages/*/test
 
 `executeRequest` is the ergonomic convenience: a full declaration with its environment attached under `env`.
 It is the *only* place declaration and environment co-exist — it strips `env` before anything hashes or
-serializes the declaration. `typedSchema<T>` threads the output type through to `outcome.value`.
+serializes the declaration. `typedSchema<T>` threads the output type through to `result.value.parsed`.
 
 ```ts
 import { executeRequest, createModelRouter, typedSchema } from "@declarative-ai/llm";
-import { SchemaValidator } from "@declarative-ai/services";
+import { isOk } from "@declarative-ai/json";
+import { SchemaValidator } from "@declarative-ai/validate";
 
 interface Answer { answer: string; confidence: number }
 
-const outcome = await executeRequest<Answer>({
+const result = await executeRequest<Answer>({
   // --- declaration ---
   model: "anthropic/claude-sonnet-5",
   system: "You are terse.",
@@ -131,12 +158,15 @@ const outcome = await executeRequest<Answer>({
   },
 });
 
-// NEVER throws for a call failure — always a best-effort populated outcome.
-if (outcome.error) {
-  console.error(outcome.error.classification, outcome.error.reason);
+// NEVER throws for a call failure — always a best-effort populated result. The success branch has no
+// `error` key, so `isOk` (or `"error" in result`) is the narrowing check; the model's payload is the
+// `LlmOutput` under `.value`, with the parsed structured value on `.value.parsed`.
+if (!isOk(result)) {
+  console.error(result.error.classification, result.error.reason);
 } else {
-  console.log(outcome.value.answer, outcome.value.confidence); // typed as Answer
-  console.log(outcome.metrics.cost, outcome.metrics.costSource); // "provider" | "table"
+  const { parsed } = result.value;                               // LlmOutput<Answer>
+  console.log(parsed?.answer, parsed?.confidence);               // typed as Answer
+  console.log(result.metrics.costUsd, result.metrics.costSource); // "provider" | "table" | "unknown"
 }
 ```
 
@@ -188,34 +218,32 @@ p.unsupportedParams; // sampling params this model would silently drop
 p.issues;            // human-readable fit problems (unsupported params, modality mismatch, …)
 ```
 
-### 3. The contract path — a composed executor stack
+### 3. The contract path — one seam, a composed executor stack
 
-For the full contract (`Executor`/`ExecutionSpec`/`Outcome`, event stream, cancellation, and the wrapper
-stack), start from the bare core and compose the behaviors you want. Order matters — see the comment.
+An `Executor` takes an **`Operation`** and returns an `ExecHandle`; that is the whole contract. Dispatch is
+by op kind — `"prompt"` to the prompt executor, `"function"` to a registry lookup — so wrapper composition
+applies uniformly to both, which it could not when function ops went through a separate registry path.
 
 ```ts
-import { compose, composeExecutors, type Outcome } from "@declarative-ai/core";
-import { SchemaValidator, AdaptiveRateController } from "@declarative-ai/services";
 import {
-  createLlmCallExecutor, createModelRouter,
-  withRateLimit, withDeadline, withRetry, withMemoize,
-  type LlmCallDefinition,
-} from "@declarative-ai/llm";
+  MapMemoCache, compose, composeExecutors, withDeadline, withMemoize, withRetry,
+  type InlineFamily, type Operation,
+} from "@declarative-ai/exec";
+import { AdaptiveRateController } from "@declarative-ai/exec";
+import { SchemaValidator } from "@declarative-ai/validate";
+import { createPromptExecutor, withRateLimit } from "@declarative-ai/promptop";
+import { createModelRouter } from "@declarative-ai/llm";
 
-// A MemoCache is any { get, set } — an in-memory map, or a durable store.
-const store = new Map<string, Outcome>();
-const memo = { get: (k: string) => store.get(k), set: (k: string, o: Outcome) => void store.set(k, o) };
-
-const core = createLlmCallExecutor({ router: createModelRouter() });
+const core = createPromptExecutor({ router: createModelRouter() });
 const limiter = new AdaptiveRateController({ maxConcurrency: 8 });
+const memo = new MapMemoCache(); // a MemoCache is any { get, set } — a map, or a durable store
 
 // Wrappers nest so the INNERMOST applies per attempt and the OUTERMOST wraps the whole call:
 //   withMemoize outermost  → caches the FINAL (post-retry) result
-//   withRetry               → one re-attempt policy: transient (backoff) + validation (feedback repair)
+//   withRetry              → one re-attempt policy: transient (backoff) + validation (feedback repair)
 //   withDeadline / withRateLimit innermost → apply per attempt
 // Pick whichever form reads clearer — they nest identically.
 
-// Every wrapper takes a `config` object mirroring the ctx seams it reads, then an optional inner executor.
 // Form 1 — direct nesting (inner as the last arg), reads inside-out:
 const e1 = withMemoize({ cache: memo }, withRetry({ transient: 3, validation: { turns: 2, feedback: true } }, withDeadline(withRateLimit({ limiter }, core))));
 
@@ -227,66 +255,71 @@ const exec = compose(core)
   .with(withMemoize({ cache: memo }));
 
 // Loose variadic convenience (flat list, no requirement tracking):
-//   composeExecutors(core, withRateLimit({ limiter }), withDeadline(), withRetry({ transient: 3 }), withMemoize({ cache: memo }));
+//   composeExecutors(core, withRateLimit({ limiter }), withDeadline(), withRetry({ transient: 3 }));
 // Provide a seam at CONSTRUCTION and it drops out of `.start` — e.g. withDeadline({ deadline: { maxDurationMs: 60_000 } })
 // supplies the deadline, so `.start` then requires only `stepStartMs` (still per-execution).
 void [e1, composeExecutors];
 
-const def: LlmCallDefinition = {
-  model: "anthropic/claude-sonnet-5",
-  prompt: "Summarize declarative infrastructure in one sentence.",
-  temperature: 0.3,
-};
-
-const spec = {
-  kind: "llm-call" as const,
-  definition: def, // its content identity is derived by withMemoize when you memoize — not carried here
-  inputs: {},
-  outputSchema: { type: "object", properties: { summary: { type: "string" } }, required: ["summary"] },
-  limits: { timeoutMs: 30_000 },
+// The payload is an OPERATION. A resolved op carries its inputs as bound literals, which is why the memo
+// key is just the op's content hash — there is no `definition` + `inputs` pair to hash separately.
+const op: Operation<InlineFamily> = {
+  kind: "prompt",
+  user: "Summarize declarative infrastructure in one sentence.",
+  config: { model: "anthropic/claude-sonnet-5", temperature: 0.3 },
+  input: {},
+  output: { name: "output", kind: "json", schema: { type: "object", properties: { summary: { type: "string" } }, required: ["summary"] } },
 };
 
 // Because the stack composed withDeadline(), `start` now REQUIRES deadline + stepStartMs at the type level
 // (forgetting stepStartMs is a compile error, not a runtime surprise):
-const handle = exec.start(spec, {
+const handle = exec.start(op, {
   validator: new SchemaValidator(),
   deadline: { maxDurationMs: 60_000 },
   stepStartMs: Date.now(),
+  timeoutMs: 30_000,
 });
 
 for await (const ev of handle.events) {
   if (ev.type === "output_partial") process.stdout.write(ev.text);
 }
-const outcome = await handle.outcome; // resolves; never rejects for a unit failure
+const result = await handle.result;   // resolves; never rejects for a unit failure
+// `handle.events` is SINGLE-CONSUMER — the loop above drains it; a second `for await` would throw.
+// Read it as `isOk(result) ? result.value : result.error`.
 ```
 
 > **Composition rules the types enforce.** `withMemoize` *throws at composition time* if it would wrap a
 > session layer (session state isn't in the memo key, so a hit would replay a stale answer). Compose
-> `withSession` **outside** `withMemoize` instead — sound, because `withSession` rewrites the sent
-> definition to carry the full transcript, and `withMemoize` derives its key by hashing that definition.
+> `withSession` **outside** `withMemoize` instead — sound, because `withSession` rewrites the sent op to
+> carry the full transcript, and `withMemoize` keys on that op.
 
 ### 4. Sessions — client-managed conversations
 
 A declaration carries a **logical** `sessionId`. `withSession` resolves it against an injected
 `SessionStore`: it prepends the stored transcript to the new turn, runs the call, then folds the reply back
 into the transcript (only on success). The session fields are consumed, the sent definition carries the
-full history (so an inner `withMemoize` keys on the real content), and `outcome.session.id` returns the
-continuation token.
+full history (so an inner `withMemoize` keys on the real content), and the conversation continues under
+the same logical `sessionId` the caller passed — the execution result carries no session field.
 
 ```ts
-import { composeExecutors, MapSessionStore } from "@declarative-ai/core";
-import { createLlmCallExecutor, createModelRouter, withSession, type LlmCallDefinition } from "@declarative-ai/llm";
+import { MapSessionStore, composeExecutors, type InlineFamily, type Operation } from "@declarative-ai/exec";
+import { createPromptExecutor, withSession } from "@declarative-ai/promptop";
+import { createModelRouter } from "@declarative-ai/llm";
 
 const store = new MapSessionStore();
-const exec = composeExecutors(createLlmCallExecutor({ router: createModelRouter() }), withSession({ sessions: store }));
+const exec = composeExecutors(createPromptExecutor({ router: createModelRouter() }), withSession({ sessions: store }));
 
-const ask = (prompt: string): LlmCallDefinition => ({ model: "anthropic/claude-sonnet-5", prompt, sessionId: "chat-1" });
-const run = (def: LlmCallDefinition) =>
-  exec.start({ kind: "llm-call", definition: def, inputs: {}, limits: { timeoutMs: 30_000 } }, {}).outcome;
+const ask = (user: string): Operation<InlineFamily> => ({
+  kind: "prompt",
+  user,
+  config: { model: "anthropic/claude-sonnet-5", sessionId: "chat-1" },
+  input: {},
+  output: { name: "output", kind: "json" },
+});
 
-await run(ask("My name is Dana."));      // seeds the "chat-1" transcript
-const out = await run(ask("What's my name?")); // prior turns are prepended automatically
-out.session?.id;                         // "chat-1"
+await exec.start(ask("My name is Dana."), {}).result;      // seeds the "chat-1" transcript
+const out = await exec.start(ask("What's my name?"), {}).result; // prior turns are prepended automatically
+// The store now holds the "chat-1" transcript, keyed by the logical id the declaration carries.
+void out;
 ```
 
 > Loud failures, not silent degradation: a `sessionId` with no store available is an error, and
@@ -329,23 +362,24 @@ const outcome = await executeRequest({
   },
 });
 
-outcome.toolCalls;   // [{ toolName: "get_weather", input: { city: "NYC" } }] — what the model asked for
-outcome.toolResults; // [{ output: { tempF: 72, city: "NYC" } }] — what your executor returned
-outcome.value;       // the model's final answer after the tool result
+// `outcome` is an LlmCallResult; the model's output rides in the `LlmOutput` under `.value`:
+outcome.value?.toolCalls;   // [{ toolName: "get_weather", input: { city: "NYC" } }] — what the model asked for
+outcome.value?.toolResults; // [{ output: { tempF: 72, city: "NYC" } }] — what your executor returned
+outcome.value?.parsed;      // the model's final answer after the tool result
 
 // Omit the executor and the call is returned instead of run:
-//   tools: [weather]  (no toolExecutors.get_weather) → outcome.toolCalls populated, no toolResults
+//   tools: [weather]  (no toolExecutors.get_weather) → value.toolCalls populated, no toolResults
 ```
 
-### 6. Files — attachments in, artifacts out, modality gating
+### 6. Files — attachments in, blob outputs, modality gating
 
-File/media inputs are a neutral, serializable `FileInput` (`{ mediaType, data }`) where the bytes travel
-inline as base64, as a URL, or **by reference** (content hash / workspace path) resolved through an injected
-`BlobStore` — so large media stays out of the declaration and the memo key. Model-generated files come back
-as a parallel `outcome.artifacts` channel, never folded into the typed `value`.
+Binary data is a **leaf value**, so hydration is the ref family's business — the same as text and json.
+There is no blob store to inject and no reference form to resolve: **sources are the caller's problem.**
+The library takes bytes, a base64 string, or a URL the provider fetches itself, which is what keeps
+`json`, `ops`, and `llm` free of `fetch` and `node:fs`.
 
 ```ts
-// INPUT: attach an image (inline base64), merged into the user turn at the boundary
+// INPUT: attach an image, merged into the user turn at the boundary
 const described = await executeRequest({
   model: "anthropic/claude-sonnet-5",
   prompt: "Describe this image.",
@@ -354,12 +388,25 @@ const described = await executeRequest({
   env: { modelRouter: createModelRouter() },
 });
 
-// Large media by reference (needs env.blobs: BlobStore):
-//   attachments: [{ mediaType: "application/pdf", data: { contentHash: "<sha256>" } }]
+// Raw bytes work too — no store, no reference form to resolve:
+//   attachments: [{ mediaType: "application/pdf", data: pdfBytes }]
 
-// OUTPUT: a model-generated file lands in artifacts (base64 + mediaType + contentHash)
-described.artifacts?.[0]; // { content: "<base64>", format: "image/png", contentHash: "<sha256>" }
+// OUTPUT: a model-generated file comes back as BYTES on the LlmOutput...
+described.value?.files?.[0]; // { mediaType: "image/png", bytes: Uint8Array }
 ```
+
+A produced artifact is a **blob-kind output slot**, not a parallel output channel — there is no
+`artifacts` side-channel on the result. An op declaring a blob output gets the bytes in `outcome.value`:
+
+```ts
+// `kindFor` derives `blob` from JSON Schema's OWN binary keywords, never a bespoke marker:
+output: { name: "output", kind: "blob", schema: { type: "string", contentEncoding: "base64", contentMediaType: "image/png" } }
+```
+
+An inline-family blob leaf holds `Uint8Array | ByteStream`. **Stream materialization is not implemented**:
+where a stream would have to become bytes — hashing for a memo key, fan-out to two consumers — the
+machinery raises rather than draining it for you, so a live stream must be materialized by the caller
+first. See [DESIGN.md](DESIGN.md) §10.1.
 
 `plan` gates media **before** you spend — each input by the modality its media type requires, and each
 requested output modality against the model's catalog capabilities:
@@ -378,27 +425,28 @@ plan({
 
 `resolveConfig` merges raw config fragments low→high (later layers win per key), then strict-parses the
 result. The merge is **family-aware** (introducing `reasoning` clears inherited sampling knobs, with a
-warning — "replace, don't explode") and it splits the definition-layer fields
-(`system`/`prompt`/`messages`/`attachments`/`timeoutMs`) out of the config bag. Identity is always the
+warning — "replace, don't explode"). It returns ONE `LlmCallDefinition` — config knobs and signature
+together — because the old `{ config, definition }` pair existed only so a strict parse would not choke on
+the prompt-shaped keys, and every caller immediately merged the two halves back. Identity is always the
 resolved content hash; registry ids are provenance only.
 
 ```ts
-import { resolveConfig, MapConfigurationRegistry } from "@declarative-ai/core";
+import { resolveConfig, MapConfigurationRegistry } from "@declarative-ai/llm";
 
 const registry = new MapConfigurationRegistry().set("fast", {
   model: "anthropic/claude-haiku-4-5", temperature: 0.2, maxOutputTokens: 256,
 });
 
-const { config, definition, warnings } = resolveConfig([
+const { definition, warnings } = resolveConfig([
   { model: "anthropic/claude-haiku-4-5", temperature: 0.7 }, // engine default   (low priority)
   registry.get("fast"),                            // a named preset
   { temperature: 0.9, system: "be terse" },        // inline override  (high priority)
 ]);
 
-config.temperature;  // 0.9  — later layer wins
-config.maxOutputTokens; // 256 — inherited from the "fast" preset
-definition.system;   // "be terse" — split out of the config surface
-warnings;            // e.g. a family switch that cleared the opposite family's knobs
+definition.temperature;     // 0.9  — later layer wins
+definition.maxOutputTokens; // 256 — inherited from the "fast" preset
+definition.system;          // "be terse" — the signature half, merged the same way
+warnings;                   // e.g. a family switch that cleared the opposite family's knobs
 ```
 
 Everything is **parse, don't validate**: a present-but-wrong-typed field, an unknown key, or an
@@ -407,55 +455,65 @@ irreconcilable sampling+reasoning bag throws loudly at the boundary rather than 
 ### 8. Hierarchical workflows
 
 `@declarative-ai/hw` runs a declarative state-machine (see [SPEC.md](SPEC.md)) as an execution unit. A
-state's operation is a `runtime` (dispatched through `registry.runtimes` — the `llm` runtime runs through
-the same `llm-call` core) or a `function` (`registry.functions` — host code, incl. interactive UI). A
-runtime's prompt comes from an inline `template` or a named `skill` (`registry.skills`). A runtime may also
-be given **tools** (`registry.tools`, referenced by logical name in `runtime.tools`) that it calls
-mid-loop, gated by a **profile × mode** permission system — see
-[RUNTIMES-AND-PERMISSIONS.md](RUNTIMES-AND-PERMISSIONS.md).
+state has ONE `operation`, and it is an **op** from `@declarative-ai/ops`: a `PromptOp` (one structured
+LLM call, dispatched to the injected prompt `Executor`) or a `FunctionOp` (`registry.functions`).
+Everything that isn't a bare LLM call is a FunctionOp — host code, interactive UI, a sub-workflow, and a
+delegated agent like `claude-code` alike; what distinguishes them is the resolved registry entry's
+capabilities, never the op's shape. A prompt op's text comes from an inline `template` or a named `skill`
+(`registry.skills`).
+Session, tool, conversation, and permission concerns sit in a sibling `environment` block — tools
+(`registry.tools`) are gated by a **profile × mode** permission system, see [DESIGN.md](DESIGN.md) §5.1.
 
 ```ts
-import { MapCapabilityRegistry } from "@declarative-ai/core";
-import { SchemaValidator } from "@declarative-ai/services";
-import { createLlmRuntime, createLlmCallExecutor, withRetry } from "@declarative-ai/llm";
-import { createHierarchicalWorkflowExecutor, loadBundle, snapshotHash } from "@declarative-ai/hw";
+import { newCapabilityRegistry, withRetry } from "@declarative-ai/exec";
+import { SchemaValidator } from "@declarative-ai/validate";
+import { createPromptExecutor } from "@declarative-ai/promptop";
+import { createClaudeCodeFunction } from "@declarative-ai/agents-api";
+import { createWorkflowExecutor, workflowIdentify } from "@declarative-ai/hw";
 
-// One typed registry: the named things a state can reference. No modelRouter passed → env-key default;
-// per-state defaults + configRef presets live on the runtime, not in a separate binding table.
-const registry = new MapCapabilityRegistry();
-registry.runtimes.register(
-  "llm",
-  createLlmRuntime({
-    defaults: { model: "anthropic/claude-sonnet-5", temperature: 0.3 },
-    // The composed llm-call executor stack the runtime delegates to (retry transient + repair validation):
-    executor: withRetry({ transient: 3, validation: { turns: 2, feedback: true } }, createLlmCallExecutor()),
-  }),
-);
-// registry.functions.register("choose_option", …)  // host UI / functions
-// registry.skills.register("critique", "Review …")   // named prompt templates
+// One typed registry: the named things a state can reference — three plain Maps (`functions`, `skills`,
+// `tools`). No modelRouter passed → env-key default.
+const registry = newCapabilityRegistry();
+// registry.functions.set("choose_option", hostFunction(impl, { interactive: true, readOnly: true, memoizable: false }));
+// const agent = createClaudeCodeFunction();
+// registry.functions.set("claude-code", runtimeFunction(agent.run, agent.capabilities));
+// registry.skills.set("critique", "Review …");
 
-const hw = createHierarchicalWorkflowExecutor({ registry });
+// The executor a `PromptOp` dispatches to — hw takes it as a plain `Executor`, so it never learns that a
+// prompt op HAS an llm lowering, and the AI SDK stays out of hw's dependency graph.
+const prompt = withRetry({ transient: 3, validation: { turns: 2, feedback: true } }, createPromptExecutor({
+  defaults: { model: "anthropic/claude-sonnet-5", temperature: 0.3 },
+}));
 
 const states = /* state-file JSON map, see SPEC.md */ {};
-const bundle = loadBundle(states, "feature/plan"); // { rootId, states } — validated, hashable
+const hw = createWorkflowExecutor({ definition: { rootId: "feature/plan", states }, registry, prompt });
 
+// A workflow run is started by a FUNCTION OP whose bound inputs are the workflow's inputs.
 const handle = hw.start(
-  { kind: "hierarchical-workflow", definition: bundle, inputs: { issue: "…" } },
+  {
+    kind: "function",
+    functionRef: "planning-workflow",
+    input: { issue: { kind: "json", binding: { json: "…" } } },
+    output: { name: "output", kind: "json" },
+  },
   { validator: new SchemaValidator() },
 );
-// To memoize a workflow run, supply its snapshot identity to the memoize wrapper:
-//   withMemoize({ cache, identify: () => snapshotHash(bundle) })
+// To memoize a workflow run, hand the memoize wrapper its snapshot identity:
+//   withMemoize({ cache, identify: workflowIdentify({ rootId: "feature/plan", states }) })
+void workflowIdentify;
 
-const outcome = await handle.outcome; // never throws for unit failure; metrics fold child cost/calls
+const result = await handle.result;   // never throws for unit failure; metrics fold child calls
 ```
 
 ## Status
 
-The declarative refactor has landed across all five phases plus a hardening pass — 378
-tests green, clean typecheck. No test touches a real provider or the network: fakes throughout (fake router,
-`MockLanguageModelV3`, in-memory stores). Remaining work is tracked as deferred follow-ups in
-[DESIGN.md](DESIGN.md) §10.1. Publishing compiled artifacts is deferred until the contract stabilizes across
-the two consumers.
+All eleven packages are implemented: one execution seam, serialization typing that tells the truth about
+the wire form, and `blob` as a ref kind. Clean typecheck across every package; the full suite is green
+(731 tests). No test touches a real provider or the network — fakes throughout (fake router,
+`MockLanguageModelV3`, in-memory stores).
+
+Known limits and non-blocking follow-ups are tracked in [DESIGN.md](DESIGN.md) §10.1. Publishing compiled
+artifacts is deferred until the contract stabilizes across the two consumers.
 
 ## License
 

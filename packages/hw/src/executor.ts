@@ -1,153 +1,142 @@
 /**
- * The `hierarchical-workflow` executor (DESIGN §7): exposes one workflow run as an
- * ai-exec execution unit. The definition is a state-file bundle; its content IDENTITY is the
- * snapshot hash (SPEC §12), which `workflowDefinitionHash` computes from the bundle. That is a
- * memoization concern — pass it to `withMemoize(cache, { identify: workflowDefinitionHash })` so a
- * workflow run is memoizable under the standard key (DESIGN §3.4) without the caller carrying a
- * `definitionHash` on the generic spec.
+ * A hierarchical workflow as an `Executor` (DESIGN §7, §3.1).
+ *
+ * With `ExecutionSpec` and `UnitKind` gone, a workflow run is started by a `FunctionOp` whose bound
+ * inputs are the workflow's declared inputs; the BUNDLE is held at construction, which is what it
+ * always was in practice — a workflow's identity is its snapshot, not a payload the caller re-supplies
+ * per run. Because this is an ordinary `Executor`, the generic wrappers compose around it unchanged:
+ * `compose(workflow).with(withMemoize({ cache, identify: workflowIdentify(definition) }))`.
  */
 import {
+  EventQueue,
+  failureOf,
+  hashOperation,
   memoKey,
+  resolveLiteralInputs,
+  type Capabilities,
   type CapabilityRegistry,
-  type ExecEvent,
-  type ExecFailure,
+  type Failure,
+  type ResolvedValue,
   type ExecHandle,
-  type ExecMetrics,
-  type ExecutionSpec,
-  type Executor,
-  type ExecutorCapabilities,
   type ExecServices,
-  type Outcome,
-  type ProducedArtifact,
-  type UnitKind,
-} from "@declarative-ai/core";
+  type Executor,
+  type InlineFamily,
+  type JsonValue,
+  type Operation,
+  type ExecResult,
+} from "@declarative-ai/exec";
 import { WorkflowEngine } from "./engine";
 import type { StateDef } from "./format";
+import { isByteStream, materialize, MaterializeError } from "./materialize";
 import { loadBundle, snapshotHash } from "./loader";
-import type { Persistence } from "./ports";
+import type { Persistence, WorkflowMetrics } from "./ports";
+import { mergeWorkflowMetrics } from "./ports";
 import { validateBundle } from "./validate";
 
-/** The unit definition: raw state files + the root id (as stored/authored). */
+/** The workflow definition: raw state files + the root id (as stored/authored). */
 export interface HierarchicalWorkflowDefinition {
   rootId: string;
-  states: Record<string, StateDef | Record<string, unknown>>;
+  states: Record<string, StateDef>;
 }
 
-export interface HwExecutorOptions {
-  /** The typed capability registry — `runtimes` (agent ops), `functions` (host code / interactive UI),
-   *  `skills` (named prompt templates). A state's `runtime.name`/`function.name` selects an entry. */
-  registry: CapabilityRegistry;
+export interface WorkflowExecutorOptions {
+  /** The authored bundle this executor runs. */
+  definition: HierarchicalWorkflowDefinition;
+  /** The typed capability registry — `functions` (host code, sub-workflows, and delegated agents alike,
+   *  as ONE map of discriminated entries), `skills` (named prompt templates), `tools`. */
+  registry: CapabilityRegistry<WorkflowMetrics>;
+  /** The executor a `PromptOp` inside the workflow dispatches to (`@declarative-ai/promptop`). Typed
+   *  as a plain `Executor`, so hw never learns that a prompt op HAS an llm lowering — which is what
+   *  keeps the AI SDK out of this package's dependency graph. */
+  prompt?: Executor<ExecServices, WorkflowMetrics>;
   persistence?: Persistence;
 }
 
-const CAPABILITIES: ExecutorCapabilities = {
+const CAPABILITIES: Capabilities = {
   structuredOutput: true,
   sessionResume: false, // v1: a canceled workflow is re-run (DESIGN §7)
   streaming: true,
   interactive: true, // supported via interactive `function` states (registry.functions)
+  readOnly: false,
   mutatesWorkspace: false, // becomes true per-definition once process units exist
   policyEnforcement: "none",
   memoizable: true,
   runtime: "edge-safe",
 };
 
-/** The content identity of a workflow spec's definition — its snapshot hash (SPEC §12). This is the
- *  memo-key identity component `withMemoize` needs: `withMemoize(cache, { identify: workflowDefinitionHash })`. */
-export function workflowDefinitionHash(spec: ExecutionSpec): string {
-  const def = spec.definition as HierarchicalWorkflowDefinition;
-  return snapshotHash(loadBundle(def.states as Record<string, unknown>, def.rootId));
+/**
+ * The content identity of a workflow execution: the bundle's SNAPSHOT hash folded with the op's own
+ * hash (which carries the run's resolved inputs). This is the `identify` seam `withMemoize` takes, and
+ * it is why `memoize` never has to brute-force-canonicalize an opaque bundle.
+ */
+export function workflowIdentify(definition: HierarchicalWorkflowDefinition): (op: Operation<InlineFamily>) => string {
+  const snapshot = snapshotHash(loadBundle(definition.states, definition.rootId));
+  return (op) => `${snapshot}:${hashOperation(op)}`;
 }
 
-/** Compute the memo key for a workflow execution (DESIGN §3.4). */
-export function workflowMemoKey(spec: ExecutionSpec): string {
-  return memoKey({
-    kind: spec.kind,
-    definitionHash: workflowDefinitionHash(spec),
-    inputs: spec.inputs,
-    workspaceTreeHash: spec.workspace?.treeHash,
-  });
+/** The memo key for a workflow execution, for a caller keying its own cache. */
+export function workflowMemoKey(definition: HierarchicalWorkflowDefinition, op: Operation<InlineFamily>, workspaceTreeHash?: string): string {
+  return memoKey({ operationHash: workflowIdentify(definition)(op), ...(workspaceTreeHash !== undefined ? { workspaceTreeHash } : {}) });
 }
 
-class EventQueue {
-  private buffer: ExecEvent[] = [];
-  private waiters: Array<(v: IteratorResult<ExecEvent>) => void> = [];
-  private closed = false;
-
-  push(event: ExecEvent): void {
-    if (this.closed) return;
-    const waiter = this.waiters.shift();
-    if (waiter) waiter({ value: event, done: false });
-    else this.buffer.push(event);
-  }
-
-  close(): void {
-    this.closed = true;
-    for (const waiter of this.waiters.splice(0)) waiter({ value: undefined as never, done: true });
-  }
-
-  iterate(): AsyncIterable<ExecEvent> {
-    const self = this;
-    return {
-      [Symbol.asyncIterator](): AsyncIterator<ExecEvent> {
-        return {
-          next(): Promise<IteratorResult<ExecEvent>> {
-            const buffered = self.buffer.shift();
-            if (buffered !== undefined) return Promise.resolve({ value: buffered, done: false });
-            if (self.closed) return Promise.resolve({ value: undefined as never, done: true });
-            return new Promise((resolve) => self.waiters.push(resolve));
-          },
-        };
-      },
-    };
-  }
-}
-
-export class HierarchicalWorkflowExecutor implements Executor {
-  readonly kind: UnitKind = "hierarchical-workflow";
+export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics> {
+  readonly metrics = { merge: mergeWorkflowMetrics };
   readonly capabilities = CAPABILITIES;
 
-  constructor(private readonly options: HwExecutorOptions) {}
+  constructor(private readonly options: WorkflowExecutorOptions) {}
 
-  start(spec: ExecutionSpec, ctx: ExecServices): ExecHandle {
+  start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue, WorkflowMetrics> {
     const events = new EventQueue();
     const abort = new AbortController();
-    const outcome = this.execute(spec, ctx, events, abort).finally(() => events.close());
+    const result = this.execute(op, ctx, events, abort).finally(() => events.close());
     return {
       events: events.iterate(),
-      outcome,
+      result,
       cancel: async () => {
         abort.abort();
-        await outcome;
+        await result;
       },
     };
   }
 
   private async execute(
-    spec: ExecutionSpec,
+    op: Operation<InlineFamily>,
     ctx: ExecServices,
     events: EventQueue,
     abort: AbortController,
-  ): Promise<Outcome> {
+  ): Promise<ExecResult<ResolvedValue, WorkflowMetrics>> {
     const startMs = Date.now();
-    const fail = (classification: ExecFailure["classification"], reason: string, metrics?: Partial<ExecMetrics>): Outcome => ({
-      metrics: { durationMs: Date.now() - startMs, startMs, ...metrics },
+    const fail = (classification: Failure["classification"], reason: string, metrics?: Partial<WorkflowMetrics>): ExecResult<ResolvedValue, WorkflowMetrics> => ({
+      metrics: { durationMs: Date.now() - startMs, startMs, costUsd: 0, costSource: "unknown", ...metrics },
       error: { classification, reason },
     });
 
-    // --- Definition intake -----------------------------------------------------
-    const def = spec.definition as HierarchicalWorkflowDefinition | undefined;
-    if (!def || typeof def.rootId !== "string" || def.states === null || typeof def.states !== "object") {
-      return fail("permanent", "definition must be { rootId, states }");
+    // --- Inputs -----------------------------------------------------------
+    const resolved = resolveLiteralInputs(op);
+    if ("error" in resolved) return fail("permanent", resolved.error);
+    // A blob INPUT that arrived as a live stream must be drained BEFORE the op is hashed for a memo key
+    // (§7.3, rule 1): `hashOperation` cannot hash a stream and throws, by design, exactly so this drain
+    // happens first. The drain upgrades the op's binding IN PLACE, so the op the outer `withMemoize`
+    // hashes carries bytes — and re-running the same (already-drained) op is idempotent. Only runtime
+    // inputs are ever streams; an authored document is JSON, so the snapshot hash never sees one.
+    try {
+      await materializeOpInputs(op, resolved.values, ctx.abortSignal);
+    } catch (e) {
+      return fail("permanent", e instanceof MaterializeError ? e.message : `input materialization failed: ${(e as Error).message}`);
     }
+
+    // --- Definition intake ------------------------------------------------
+    const def = this.options.definition;
     let bundle;
     try {
-      bundle = loadBundle(def.states as Record<string, unknown>, def.rootId);
+      bundle = loadBundle(def.states, def.rootId);
     } catch (e) {
       return fail("permanent", `definition failed to load: ${(e as Error).message}`);
     }
-    // No caller-supplied `definitionHash` to reconcile: identity is derived from the bundle itself
-    // where it's needed (memoization), so there is no stale-hash footgun to guard against here.
-    const report = validateBundle(bundle);
+    // Validation is a function of *(document, registry)* (§2): with the registry in hand, a
+    // `functionRef` naming nothing registered is an authoring error caught before the run rather than
+    // a run-fatal surprise partway through it.
+    const report = validateBundle(bundle, { functions: this.options.registry.functions });
     if (report.errors.length > 0) {
       const first = report.errors
         .slice(0, 5)
@@ -156,37 +145,33 @@ export class HierarchicalWorkflowExecutor implements Executor {
       return fail("permanent", `workflow validation failed (${report.errors.length} errors): ${first}`);
     }
 
-    // How human interaction flows (block, auto-approve, reject in a search context) is the workflow
-    // designer's composition, expressed through the registered `function`s themselves — not an executor
-    // policy. A caller that wants to refuse a human-gated definition up front does so by what it registers
-    // (e.g. a rejecting function) or its own static scan before calling `start()`.
-
-    // --- Abort / timeout wiring ------------------------------------------------
+    // --- Abort / timeout wiring -------------------------------------------
     let timedOutByLimit = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    if (spec.limits?.timeoutMs !== undefined) {
+    if (ctx.timeoutMs !== undefined) {
       timer = setTimeout(() => {
         timedOutByLimit = true;
         abort.abort();
-      }, spec.limits.timeoutMs);
+      }, ctx.timeoutMs);
     }
-    const onSpecAbort = (): void => abort.abort();
-    if (spec.abortSignal?.aborted) abort.abort();
-    else spec.abortSignal?.addEventListener("abort", onSpecAbort, { once: true });
+    const onCtxAbort = (): void => abort.abort();
+    if (ctx.abortSignal?.aborted) abort.abort();
+    else ctx.abortSignal?.addEventListener("abort", onCtxAbort, { once: true });
 
-    // --- Engine run ------------------------------------------------------------
+    // --- Engine run --------------------------------------------------------
     const engine = new WorkflowEngine({
       bundle,
       registry: this.options.registry,
+      prompt: this.options.prompt,
       validator: ctx.validator,
       persistence: this.options.persistence,
       services: ctx,
       clock: ctx.clock,
       onEvent: (event) => {
-        // Normalized event surface (DESIGN §3.2): completions carry metrics for
-        // budget/cost observers; the rest stream as progress.
+        // Normalized event surface (DESIGN §3.2): completions carry metrics for budget/cost observers;
+        // the rest stream as progress.
         if (event.type === "operation.completed" && event.metrics) {
-          events.push({ type: "child_outcome", ref: { kind: this.kind, label: event.stateId }, metrics: event.metrics });
+          events.push({ type: "child_result", ref: { label: event.stateId }, metrics: event.metrics });
         } else if (event.type === "transition.taken") {
           events.push({ type: "progress", message: `${event.stateId} → ${event.to} (iteration ${event.iteration})` });
         } else if (event.type === "instance.entered") {
@@ -199,63 +184,105 @@ export class HierarchicalWorkflowExecutor implements Executor {
 
     let result;
     try {
-      result = await engine.run({ inputs: spec.inputs, abortSignal: abort.signal });
+      result = await engine.run({ inputs: resolved.values, abortSignal: abort.signal });
     } catch (e) {
-      return fail("permanent", `engine crashed: ${(e as Error).message}`);
+      // A crashed engine may already have run children that SPENT MONEY, so the spend accumulated up to
+      // the crash is reported rather than zeroed — `costUsd: 0` here would silently forgive real charges.
+      const spent = engine.spentSoFar();
+      return {
+        error: failureOf(e, "engine crashed"),
+        metrics: {
+          durationMs: Date.now() - startMs,
+          startMs,
+          costUsd: spent.childCost,
+          costSource: spent.childCost > 0 ? "table" : "unknown",
+          childLlmCalls: spent.childLlmCalls,
+          childCostUsd: spent.childCost,
+        },
+      };
     } finally {
       if (timer !== undefined) clearTimeout(timer);
-      spec.abortSignal?.removeEventListener("abort", onSpecAbort);
+      ctx.abortSignal?.removeEventListener("abort", onCtxAbort);
     }
 
-    const artifacts: ProducedArtifact[] = result.artifacts.map((a) => ({
-      name: a.name,
-      content: a.content,
-      path: a.path,
-      format: a.format,
-    }));
-    const metrics: ExecMetrics = {
+    const metrics: WorkflowMetrics = {
       durationMs: Date.now() - startMs,
       startMs,
-      cost: result.metrics.childCost, // composite cost INCLUDES child cost (core contract)
-      childCalls: result.metrics.childCalls,
-      childCost: result.metrics.childCost,
+      // A composite's cost INCLUDES its children's (the exec contract).
+      costUsd: result.metrics.childCost,
+      costSource: "table",
+      childLlmCalls: result.metrics.childLlmCalls,
+      childCostUsd: result.metrics.childCost,
     };
 
     if (result.outcome === "timeout" || (result.outcome === "canceled" && timedOutByLimit)) {
-      return {
-        artifacts,
-        metrics,
-        error: { classification: "deadline", reason: "workflow exceeded its time limit" },
-      };
+      return { metrics, error: { classification: "deadline", reason: "workflow exceeded its time limit" } };
     }
     if (result.outcome === "canceled") {
-      return { artifacts, metrics, error: { classification: "canceled", reason: "workflow canceled" } };
+      return { metrics, error: { classification: "canceled", reason: "workflow canceled" } };
     }
     if (result.outcome === "error" || result.outputs === undefined) {
-      return {
-        artifacts,
-        metrics,
-        error: result.failure ?? { classification: "permanent", reason: "workflow terminated with error" },
-      };
+      return { metrics, error: result.failure ?? { classification: "permanent", reason: "workflow terminated with error" } };
     }
 
-    // Spec-level output contract (in addition to per-state validation the engine did).
-    if (spec.outputSchema && ctx.validator) {
-      const res = ctx.validator.validateValue(spec.outputSchema, result.outputs);
+    // The run's RESULT is stored/returned to the caller (§7.3, rule 3), so a blob output that reached
+    // this boundary as a live STREAM — a single-consumer pipe that ran all the way to the top — is
+    // drained here. This is the one place that knows the value is the terminal result rather than an
+    // intermediate to pipe onward. A drain failure is a NON-RETRIABLE result failure, context-named.
+    let outputs: Record<string, ResolvedValue>;
+    try {
+      outputs = await materializeResultOutputs(result.outputs, abort.signal);
+    } catch (e) {
+      return { metrics, error: { classification: "permanent", reason: e instanceof MaterializeError ? e.message : `output materialization failed: ${(e as Error).message}` } };
+    }
+
+    // The op-level output contract (in addition to per-state validation the engine did).
+    const outputSchema = op.output.schema;
+    if (outputSchema && ctx.validator) {
+      const res = ctx.validator.validateValue(outputSchema, (outputs ?? null) as JsonValue);
       if (!res.ok) {
         return {
-          value: result.outputs,
-          artifacts,
+          value: outputs as JsonValue | undefined,
           metrics,
-          error: { classification: "api-retriable", reason: `workflow outputs failed the spec contract: ${res.errors}` },
+          error: { classification: "api-retriable", reason: `workflow outputs failed the operation's contract: ${res.errors}` },
         };
       }
     }
 
-    return { value: result.outputs, artifacts, metrics };
+    return { value: (outputs ?? null) as ResolvedValue, metrics };
   }
 }
 
-export function createHierarchicalWorkflowExecutor(options: HwExecutorOptions): HierarchicalWorkflowExecutor {
-  return new HierarchicalWorkflowExecutor(options);
+export function createWorkflowExecutor(options: WorkflowExecutorOptions): WorkflowExecutor {
+  return new WorkflowExecutor(options);
+}
+
+/**
+ * Drain any blob input bound to a live stream, upgrading the op's binding IN PLACE and mirroring the
+ * bytes into the already-resolved `values` the engine will run with (§7.3, rule 1). In place because
+ * the op object is the very one `withMemoize` hashes: replacing the stream on its binding is what lets
+ * `hashOperation` see bytes instead of throwing. A `Uint8Array` binding is left untouched.
+ */
+async function materializeOpInputs(op: Operation<InlineFamily>, values: Record<string, ResolvedValue>, signal: AbortSignal | undefined): Promise<void> {
+  for (const [name, param] of Object.entries(op.input)) {
+    const binding = param.binding;
+    if (binding === undefined || !("blob" in binding) || !isByteStream(binding.blob)) continue;
+    const bytes = await materialize(binding.blob, signal, `operation input '${name}'`);
+    binding.blob = bytes;
+    values[name] = bytes;
+  }
+}
+
+/**
+ * Drain any blob RESULT output that reached the run boundary as a live stream (§7.3, rule 3). Copies
+ * lazily — only when a stream is actually present — so the common all-bytes result is returned as-is.
+ */
+async function materializeResultOutputs(outputs: Record<string, ResolvedValue>, signal: AbortSignal | undefined): Promise<Record<string, ResolvedValue>> {
+  let copy: Record<string, ResolvedValue> | undefined;
+  for (const [name, value] of Object.entries(outputs)) {
+    if (!isByteStream(value)) continue;
+    copy ??= { ...outputs };
+    copy[name] = await materialize(value, signal, `workflow output '${name}'`);
+  }
+  return copy ?? outputs;
 }

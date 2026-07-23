@@ -4,19 +4,22 @@
 > hierarchical-workflow formalism implemented by `@declarative-ai/hw`, migrated from
 > `JaiRA/SPEC.md` (which remains the product spec for the JaiRA app).
 > Normative for this library: §2.3–§2.4 (states, state IDs), §3 (state machine
-> semantics), §4 (inputs/outputs/params/artifacts/conversations), §5 (state
-> file format), §6 (transition expressions), §7.3 and §9 (worked examples,
+> semantics), §4 (inputs/outputs/artifacts/conversations), §5 (state
+> file format), §6 (expressions and static validation), §7.3 and §9 (worked examples,
 > used as golden tests), §8 (function states / interactive UI, realized here as
-> interactive `HostFunction`s in `registry.functions`), §10.1–§10.4 (statuses, run records, durability, async
+> interactive functions in `registry.functions`), §10.1–§10.4 (statuses, run records, durability, async
 > children), §12 (versioning → snapshot hashing). Sections about tasks,
 > boards, Git isolation, safety policy, and MVP scope describe the JaiRA
 > product and are context for the library, not requirements on it.
 >
-> **How the library realizes this formalism** — the executor, the `runtime`-operation
-> `llm` runtime (`createLlmRuntime`, config resolution per operation), session coordination by
-> logical id, snapshot hashing/memoization, the typed `CapabilityRegistry`, and the `Persistence`
-> port — is documented in [DESIGN.md](DESIGN.md) §7 (with the settled declarative
-> model in §1). The precise `@declarative-ai/hw` API surface is in [API.md](API.md).
+> **How the library realizes this formalism** — the executor, the injected prompt `Executor` a
+> `PromptOp` is dispatched to (`@declarative-ai/promptop`; config resolution per operation),
+> session coordination by logical id, snapshot hashing/memoization, the typed
+> `CapabilityRegistry`, and the `Persistence` port — is documented in
+> [DESIGN.md](DESIGN.md) §7 (with the settled declarative model in §1). The typed operation
+> vocabulary a state compiles to (`Operation`, `Parameter`, `Ref`, the ref families) lives in
+> `@declarative-ai/ops`; its design is [DESIGN.md](DESIGN.md) §3.1 and its type surface is
+> [API.md](API.md), which is also the precise `@declarative-ai/hw` API reference.
 
 ## 1. Purpose
 
@@ -70,9 +73,8 @@ A workflow state is defined by one state file. State files form a tree.
 
 Each state may define:
 
-- Inputs.
+- Inputs (including configuration knobs — inputs with a `default`).
 - Outputs.
-- Parameters.
 - Child states.
 - Default child order.
 - Agent execution behavior.
@@ -142,19 +144,28 @@ then decides what to do.
 
 ### 3.2 Operations
 
-A state does its work by running operations. Operation kinds:
+A state does its work by running **one operation** and its child states. A state
+declares at most one `operation`, of one of two kinds:
 
-- `function`: a registered host function invoked by name (`registry.functions`) that returns structured
-  data — including an interactive UI component that collects input from the user.
-- `runtime`: a named runtime adapter (`registry.runtimes`; e.g. `llm`, `claude_code`) driven by the
-  state's prompt. The prompt comes from an inline `template` or a named `skill` (a reusable prompt
-  template from `registry.skills`).
-- Child states, entered by sequence order or by explicit transition.
+- `prompt`: one structured model call, driven by the state's prompt. The prompt comes from an
+  inline `template` or a named `skill` (a reusable prompt template from `registry.skills`).
+  Dispatched to the injected prompt `Executor`.
+- `function`: a registered function invoked by name (`registry.functions`) that returns structured
+  data. This one kind covers host code, an interactive UI component that collects input from the
+  user, a sub-workflow, a composite unit, and a **delegated agent adapter** (`claude-code`, …)
+  alike. Nothing about the operation distinguishes them — the resolved registry entry's
+  capabilities do (§7.1).
 
-A state may declare any combination of these. Operations run one at a time in a
-fixed priority order: `function`, then `runtime`, then child states in
+Child states are entered by sequence order or by explicit transition.
+
+A state may declare an operation, children, or both. Operations run one at a time
+in a fixed priority order: the state's `operation`, then child states in
 `sequence` order. Async child states are the only exception to one-at-a-time
 execution.
+
+How an operation runs — the session it belongs to, the tools it may call, the conversation
+preamble it receives, its permission baseline — is declared in a sibling `environment` block, not
+in the operation (§7.1).
 
 ### 3.3 Evaluation Loop
 
@@ -258,20 +269,45 @@ Children do not directly mutate parent state.
 
 A parent's declared outputs are resolved when the parent terminates.
 
-## 4. Inputs, Outputs, Parameters, and Artifacts
+## 4. Inputs, Outputs, and Artifacts
 
-### 4.1 Required By Default
+### 4.1 Declared Slots
+
+`inputs` and `outputs` are maps of name → **slot**. A slot is a `Parameter`:
+
+```text
+kind         "text" | "json" | "blob" | "prompt" | "function" — the slot's value type.
+             Defaults to "text" for a string-typed schema, "json" otherwise; a `blob`
+             (artifact) slot declares its kind explicitly (§4.6).
+schema       A plain JSON Schema document. Absent = unconstrained (accepts anything).
+binding      Where the value comes from (§4.2). Absent = a FREE slot, filled by the
+             caller: the parent's wiring for an input, the operation for an output.
+index        Positional sort key for bare/tuple ingestion. Wiring, not type.
+default      Value used when nothing is wired in. Also the explicit opt-out from the
+             reachability rule (§6.2).
+optional     Slots are required by default; `true` relaxes that.
+description  Human-readable documentation for the slot.
+```
+
+The whole type of a slot lives in `schema` — there is no parallel `type`/`enum`/`items`/
+`properties`/`required`/`format` vocabulary beside it. An artifact-typed slot is a `blob`-kind
+slot whose schema names the content's media type (§4.6); an unconstrained slot (no `schema`) is
+the generic/passthrough case (§4.4).
+
+`kind`, `schema`, `binding`, and `index` are the slot proper; `default`, `optional`, and
+`description` are authoring metadata carried alongside it. An output slot may also declare a
+`name`, which otherwise defaults to its key in the `outputs` map.
 
 Inputs and outputs are required by default.
 
 A field is optional only when:
 
 - It declares `optional: true`.
-- It is an input with a `default` value.
+- It declares a `default` value.
 
 Schema validation failure blocks the state.
 
-### 4.2 Inputs
+### 4.2 Inputs and Wiring
 
 Inputs are named values available to a state. Inputs may come from:
 
@@ -280,8 +316,7 @@ Inputs are named values available to a state. Inputs may come from:
 - Previous child outputs.
 - Artifacts.
 - Conversation artifacts.
-- Literal values.
-- Parameters.
+- Literal values (including a `default`, which makes an input a configuration knob).
 
 A child state receives only its declared inputs. It does not know where those
 inputs came from.
@@ -293,8 +328,8 @@ Good:
   "critique": {
     "state": "feature/plan/critique",
     "inputs": {
-      "plan_doc": "children.context.outputs.plan_doc",
-      "goals": "children.goals.outputs.goals"
+      "plan_doc": { "child": "context", "output": "plan_doc" },
+      "goals": { "child": "goals", "output": "goals" }
     }
   }
 }
@@ -306,17 +341,64 @@ Bad:
 The critique state directly reads ../context.outputs.plan_doc.
 ```
 
-Wiring values are expressions evaluated against the parent's context. A bare
-string is a reference; literal values must be wrapped:
+A wiring value is a **binding**: a structured object, never a path string. Five binding
+forms are the base vocabulary; the rest are authoring **sugar** that the loader lowers onto
+the base forms, so the validator, the snapshot hasher, and the engine only ever see base
+cases.
+
+| Authored binding | Meaning | Lowers to |
+| --- | --- | --- |
+| `{ "text": "significant" }` | A string literal. | itself (base) |
+| `{ "json": { "n": 3 } }` | A JSON literal of any shape. | itself (base) |
+| `{ "result": … }` | Reuse of an already-existing generation result. | itself (base) |
+| `{ "refs": … }` | An inline arrangement (array/object) whose leaves are refs. | itself (base) |
+| `{ "op": … }` | A producer edge: a declared child's key, or an embedded operation. | itself (base) |
+| `{ "child": "context" }` | The child's outputs object. | `{ "op": "context" }` |
+| `{ "child": "context", "output": "plan_doc" }` | One named output of the child. | the producer edge above, plus a `select` producer projecting that property |
+| `{ "input": "issue" }` | This state's declared input, by name. | a `scope.get` producer |
+| `{ "expr": "outputs.weaknesses" }` | A small computation in the expression DSL (§6). | an `expr.eval` producer whose output schema is the inferred type |
+| `{ "artifact": "design_doc" }` | A session-owned artifact, by name. | an `artifact.get` producer |
+| `{ "conversation": "review", "message": 3 }` | A session's transcript, or one message of it. | a `conversation.get` producer |
+
+Every sugar becomes a **producer edge** (or a literal), so the base vocabulary stays closed
+and one uniform mechanism resolves all wiring: a producer edge on a declared child resolves
+to that child's outputs when it has run, and parks the consumer while it is still in flight
+(§10.4).
+
+`{ "result": … }` and `{ "child": … }` are different concepts: the former references a result
+that already exists, the latter is an edge the engine may still have to run.
+
+Literals are wired by their own form; there is no wrapper object:
 
 ```json
-{ "severity_threshold": { "value": "significant" } }
+{ "severity_threshold": { "text": "significant" } }
 ```
+
+The same binding forms wire a child's inputs (`children.<key>.inputs`), fill an operation's
+input slots (`operation.input`), and derive a state's outputs (§4.3).
 
 ### 4.3 Outputs
 
-Outputs are named values produced by a state. An output may declare a `from`
-expression, evaluated against the state's context when the state terminates.
+Outputs are named values produced by a state. An output slot with no `binding` is produced by
+the state's operation and validated when the operation completes. An output slot **with** a
+`binding` is *derived*: the binding is resolved against the state's context when the state
+terminates.
+
+```json
+{
+  "outputs": {
+    "plan_doc": {
+      "kind": "blob",
+      "schema": { "type": "string", "contentMediaType": "markdown" },
+      "binding": { "child": "context", "output": "plan_doc" }
+    },
+    "outcome": {
+      "schema": { "type": "string", "enum": ["complete", "blocked"] },
+      "binding": { "expr": "children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'" }
+    }
+  }
+}
+```
 
 Outputs should be schema-validated when they are used for:
 
@@ -328,7 +410,8 @@ Outputs should be schema-validated when they are used for:
 ### 4.4 Generic Passthrough Outputs
 
 Some wrapper or delegation states need to return whatever a child state produces.
-This is supported explicitly with passthrough outputs.
+This is supported explicitly, as a slot that declares no `schema` — an unconstrained
+slot constrains nothing, so any producer satisfies it.
 
 Example:
 
@@ -336,8 +419,7 @@ Example:
 {
   "outputs": {
     "child_outputs": {
-      "type": "passthrough",
-      "from": "children.critique.outputs"
+      "binding": { "child": "critique" }
     }
   }
 }
@@ -350,29 +432,33 @@ Generic outputs may be stored or passed upward. Transition-relevant outputs
 should be explicitly typed.
 ```
 
-### 4.5 Parameters
+### 4.5 Configuration Knobs
 
-Parameters configure reusable states.
+There is no separate `params` concept: a state that configures reusable behavior does so with
+ordinary **inputs** that carry a `default`. An input with a default is optional — the caller may
+override it by wiring the input, and otherwise the default stands. This is the same collapse the
+operation model already makes (an operation has inputs, not params); a state is no different.
 
 Example:
 
 ```json
 {
-  "params": {
+  "inputs": {
     "severity_threshold": {
-      "type": "string",
-      "enum": ["minor", "significant", "critical"],
+      "schema": { "type": "string", "enum": ["minor", "significant", "critical"] },
       "default": "significant"
     },
     "max_findings": {
-      "type": "number",
+      "schema": { "type": "number" },
       "default": 10
     }
   }
 }
 ```
 
-Parameters can be optional when they have defaults.
+A configuration input is read exactly like any other input: by a binding
+(`{ "input": "severity_threshold" }`), by an expression (`inputs.severity_threshold`), or by
+prompt interpolation (`{{inputs.severity_threshold}}`).
 
 ### 4.6 Artifacts
 
@@ -385,6 +471,18 @@ Artifacts are durable work products. Examples:
 - Review notes.
 - Conversation summaries.
 - Full conversation logs.
+
+An artifact-typed slot is a **`blob`-kind slot** (§4.1) whose schema names the content's media type:
+
+```json
+{ "kind": "blob", "schema": { "type": "string", "contentMediaType": "markdown" } }
+```
+
+The slot's `kind` is what marks it; `contentMediaType` names the artifact's content format. Both are
+ordinary JSON Schema — there is no bespoke marker keyword, because a produced artifact is simply a
+blob-kind output slot rather than a parallel output channel. The value travelling through such a slot
+is bytes, an artifact reference, or inline string content, and a prompt operation that produces one is
+asked for its content as a string.
 
 Git is responsible for artifact versioning. JaiRA records artifact references
 and workflow metadata, but artifact history is delegated to the project Git
@@ -407,10 +505,18 @@ selected_artifacts
 The initial default is `full_history`, but the schema must support all modes so
 projects can move toward more controlled context selection over time.
 
-Transcripts are scoped per **session** (`runtime.session`, RUNTIMES-AND-PERMISSIONS.md §3): `full_history`
-threads the prior exchanges of the *same* session. States that declare no session share the run's default
-session (so a plain workflow threads history across all its states); a distinct `runtime.session` isolates a
-subtree's conversation.
+A state selects its mode in `environment.conversation` (§7.1); the selected preamble is injected
+into that state's own call.
+
+Transcripts are scoped per **session** (`environment.session`, DESIGN.md §5.1):
+`full_history` threads the prior exchanges of the *same* session. States that declare no session share
+the run's default session (so a plain workflow threads history across all its states); a distinct
+`environment.session` isolates a subtree's conversation.
+
+Injecting a preamble and *reading a transcript as data* are different things. The `environment.conversation`
+block is the preamble; a `{ "conversation": "<session>", "message": n }` binding (§4.2) wires a
+transcript — or one message of it — into a slot as an ordinary value, which is how a state summarizes or
+answers questions about an earlier session.
 
 ## 5. State File Format
 
@@ -425,11 +531,10 @@ but the MVP should define canonical JSON semantics first.
 id
 label
 description
-params
 inputs
 outputs
-runtime
-function
+operation
+environment
 children
 sequence
 transitions
@@ -447,22 +552,21 @@ limits
 `description`
 : Short explanation of the state purpose.
 
-`params`
-: Reusable state configuration.
-
 `inputs`
-: Schema for values the state receives.
+: Declared slots for values the state receives — including configuration knobs (inputs with a `default`, §4.5).
 
 `outputs`
-: Schema for values the state emits.
+: Declared slots for values the state emits.
 
-`runtime`
-: Runtime-adapter execution configuration (`name`, `config`, `conversation`, and a `prompt` from an
-  inline `template` or a named `skill`).
+`operation`
+: The state's single operation (§7.1): `{ "kind": "prompt", … }` (a structured model call from an
+  inline `template` or a named `skill`) or `{ "kind": "function", "function": "<name>", … }` (a
+  registered function — host code, an interactive UI component, a sub-workflow, or a delegated
+  agent adapter).
 
-`function`
-: Registered host-function invocation (`name` + function params), including built-in interactive UI
-  components.
+`environment`
+: Execution-environment configuration for that operation: `session`, `tools`, `conversation`
+  preamble, and `permissions`.
 
 `children`
 : Declared child states, their input wiring, and async flags.
@@ -489,8 +593,10 @@ References to a child that has started but not yet finished are pending, not
 evaluation round, and input wiring using one waits for it to resolve
 (Section 10.4).
 
-The same language is used for transition conditions, input wiring references,
-and output `from` expressions.
+The same language is used for transition conditions (`when`), for `{ "expr": … }` binding leaves
+(§4.2), and for `{{…}}` interpolation in prompt templates. It is no longer the wiring default:
+ordinary data references are structured bindings, not expression strings, so the DSL survives only
+where a computation is genuinely needed.
 
 The expression language should support:
 
@@ -536,50 +642,160 @@ The expression language must be pure. It must not support:
 
 ### 6.1 Expression Context
 
-Expressions may read from a controlled context.
+Expressions may read from a controlled context. The namespaces split by **role**.
 
-Suggested namespaces:
+The **ref vocabulary** — the data namespaces authored bindings address. They are readable from
+`{ "expr": … }` leaves and from guards too, since an expr leaf is itself a producer over the same
+data:
 
 ```text
 inputs.*
 outputs.*
-params.*
-function.*
 children.<id>.outputs.*
 children.<id>.outcome
-run.*
-limits.*
 artifacts.*
 conversations.*
 ```
 
-## 7. Runtime Execution
+The **guard-only scalars** — control-flow state, never addressable by a reference binding,
+reachable only from `when` guards and `{ "expr": … }` leaves:
 
-### 7.1 Local Runtimes
+```text
+run.iteration
+limits.max_iterations
+limits.timeout
+```
 
-The MVP supports local code-agent runtimes only. A `runtime` operation names a runtime adapter registered
-in `registry.runtimes`.
+There is no `function.*` namespace. A function operation's result is an ordinary state output, so
+guards read `outputs.*` and `children.<id>.outputs.*` uniformly.
 
-Example runtimes:
+A reference whose root is not one of these namespaces is a validation error, as is a reference to
+an undeclared input, output, or child.
 
-- `llm` (a bare structured model call — the simplest runtime)
-- `claude_code`
-- `codex`
-- `opencode`
-- Project-specific local command adapters.
+### 6.2 Static Validation
 
-Runtimes are adapters with capabilities, not interchangeable strings: they share one interface but differ
-in what they can do (a bare `llm` call vs a file-editing agent). See
-[RUNTIMES-AND-PERMISSIONS.md](RUNTIMES-AND-PERMISSIONS.md) for the composed-vs-delegated distinction.
+A workflow is validated before it is accepted for execution. Errors block execution; warnings do
+not. Beyond the structural checks (a child naming an unknown state, a required child input left
+unwired, a duplicate `sequence` entry, a transition target that is neither a declared child nor a
+`terminate.*` outcome, an unknown slot `kind`), three checks make the wiring itself type-safe.
 
-A runtime operation may declare **tools** it is allowed to call mid-loop (`runtime.tools`: logical names
-resolved through `registry.tools`) and a **session** id it runs under (`runtime.session`, sharing
-conversation + permissions across states). The composed `llm` runtime runs its tools in a bounded loop; a
-delegated agent is handed the allow-list.
+**Binding compatibility.** Every binding is checked against the schema of the slot it fills:
+`isSubschema(producer, consumer)` — "is every value the producer can emit necessarily valid for
+this consumer?". The producer's schema is read from what the binding lowers to:
 
-### 7.2 Runtime Responsibilities
+- a `{ "text" }` / `{ "json" }` literal — the exact value, as a `const`-constrained schema, so a
+  literal satisfies an `enum`-constrained consumer;
+- a producer edge on a declared child — that child's declared outputs as one object schema
+  (each output's own schema, required unless it is `optional` or has a `default`);
+- `{ "child", "output" }` — the named property's schema; selecting an output the child does not
+  declare is an error;
+- `{ "input" }` — the declared slot's own schema;
+- `{ "expr" }` — the inferred result type (below);
+- `{ "artifact" }` / `{ "conversation" }` — session-owned resources whose contents are known only
+  at run time, so the check defers to run-time validation.
 
-A runtime (e.g. a local code agent) may:
+An unconstrained consumer slot accepts anything and is skipped. Compatibility is sound structural
+subtyping (object width honoring `additionalProperties: false`, `required` coverage, `integer` ⊆
+`number`, `enum`/`const` ⊆) and **conservative** otherwise: an unmodeled keyword or a union
+rejects with a precise reason rather than passing silently.
+
+**Expression typing.** Every `when` guard and every `{ "expr": … }` leaf is type-inferred against
+the namespaces of §6.1: member access projects property schemas, comparison and `!` yield boolean,
+`&&`/`||` and `?:` yield the join of their branches, and a literal infers to its exact value — so
+`cond ? 'complete' : 'blocked'` infers as the enum `["complete", "blocked"]` and satisfies an
+enum-constrained slot instead of widening to `string`. A guard **must infer to boolean**: this is
+strict, with no truthiness coercion, so a `when` that infers to a number is a validation error
+rather than a falsy surprise at run time. A `schema` declared on an `{ "expr" }` leaf is an
+*assertion*, checked against the inferred type; it is not the only source of typing.
+
+**Reachability.** The *type* of a producer edge is always statically known; whether the producer
+has *run* by the time the edge is resolved is a control-flow property, settled by definite-assignment
+analysis over `sequence` and `transitions`. The rule is strict: a reference to a child not proven
+to have run on every path reaching its evaluation point is an **error**, so an absent value never
+propagates silently. Reading a child's outputs from an expression carries the same obligation as
+wiring it.
+
+- Members of `sequence` are proven, in order.
+- An `async` sequence member is also proven: async means "started but not awaited", so its outputs
+  may be *pending* at read time — and pending is a run-time park (the dataflow join, §10.4), not a
+  permanently-missing value. The engine parks the consumer until the producer resolves.
+- A child reachable only through a conditional transition is **not** proven.
+- `optional: true` or a `default` on the *consuming* slot is the explicit opt-out: both declare
+  that an absent value is acceptable here.
+
+The analysis is deliberately conservative: it proves ordered sequences and refuses everything else.
+
+Warnings, which do not block execution, cover the cases that are suspicious rather than wrong: a
+child state that is not a descendant path of its parent (legal, so shared library states stay
+expressible), a transition back into a `sequence` member with neither `limits.max_iterations` nor a
+`run.iteration` guard, a prompt operation with neither a template nor a skill, and a state that
+declares no operation and no children.
+
+Static validation cannot settle values, only types. Run-time validation of actual values against
+declared schemas (a nondeterministic producer can emit anything) remains at every boundary.
+
+## 7. Operations and the Execution Environment
+
+### 7.1 The Operation and Its Environment
+
+A state declares at most one `operation`, of one of two kinds.
+
+A **prompt operation** is one structured model call:
+
+```text
+kind        "prompt"
+prompt      { "template": "…" } or { "skill": "<name>" } — exactly one. Both render with
+            {{inputs.*}} interpolation; a skill resolves through registry.skills.
+system      Optional system prompt.
+config      The model-configuration surface (model, sampling, configRef, …).
+input       Slots (§4.1) feeding the call; a bound slot is resolved before the call runs. The op's
+            resolved inputs ARE the template's {{inputs.*}} scope, so a render variable (e.g. a
+            skill invocation's arguments) is just a bound input.
+output      The operation's output slot. Defaults to one object slot built from the state's
+            declared outputs — which is what a `{ "child", "output" }` binding projects against.
+```
+
+A **function operation** invokes a registered function:
+
+```text
+kind        "function"
+function    A name in registry.functions.
+config      The authored surface for this invocation, bound as the operation's `config` input.
+input       Slots feeding the call.
+output      As above.
+```
+
+**There is no separate runtime concept.** A delegated agent runtime (`claude-code`, and future
+adapters) is a plain function operation naming a registered adapter. So are sub-workflows,
+composite units, interactive UI components, and pure host transforms — one op shape for all of
+them. What distinguishes them is the **capabilities of the resolved registry entry**
+(`mutatesWorkspace`, `memoizable`, `policyEnforcement`, …), never the shape of the operation. The
+`llm` runtime is not one of these entries: a prompt operation is dispatched to an injected prompt
+`Executor` instead, which is the same seam every other executor implements.
+
+Adapters are therefore still adapters with capabilities, not interchangeable strings: a bare model
+call and a file-editing agent differ in what they can do. See [DESIGN.md](DESIGN.md) §4.4 for the
+composed-vs-delegated distinction.
+
+Everything about *how* an operation runs — as opposed to what it is — lives in the sibling
+`environment` block, because it is not part of the operation's identity:
+
+```text
+session       Logical session id this state runs under; owns the conversation transcript,
+              workspace, and permissions. Same id across states ⇒ a shared session; absent ⇒
+              the run's default session.
+tools         Logical names of tools the operation may call mid-loop, resolved through
+              registry.tools. A composed prompt operation runs them in a bounded loop; a
+              delegated agent is handed the allow-list.
+conversation  { "mode": "full_history" | "summary" | "fresh" | "selected_artifacts",
+                "artifacts": [ … ] } — the preamble injected into this call (§4.7).
+permissions   The authored per-state permission baseline: `profile`, `default`, per-tool modes
+              (§7.4).
+```
+
+### 7.2 Agent Responsibilities
+
+An agent operation (e.g. a delegated local code agent) may:
 
 - Inspect the project.
 - Modify files within the project directory.
@@ -588,7 +804,7 @@ A runtime (e.g. a local code agent) may:
 - Produce structured outputs matching the state schema.
 - Propose transitions when allowed by the state.
 
-A runtime may not:
+An agent operation may not:
 
 - Bypass human approval gates.
 - Mutate workflow state directly.
@@ -596,7 +812,7 @@ A runtime may not:
 - Access files outside the project directory.
 - Execute blocked commands.
 
-### 7.3 Runtime State Example
+### 7.3 Operation State Example
 
 ```json
 {
@@ -605,60 +821,69 @@ A runtime may not:
   "description": "Review the current plan for significant weaknesses.",
   "inputs": {
     "plan_doc": {
-      "type": "artifact",
-      "format": "markdown"
+      "kind": "blob",
+      "schema": { "type": "string", "contentMediaType": "markdown" }
     },
     "severity_threshold": {
-      "type": "string",
-      "enum": ["minor", "significant", "critical"],
+      "schema": {
+        "type": "string",
+        "enum": ["minor", "significant", "critical"]
+      },
       "default": "significant"
     }
   },
   "outputs": {
     "outcome": {
-      "type": "string",
-      "enum": ["clean", "needs_changes", "blocked"]
+      "schema": {
+        "type": "string",
+        "enum": ["clean", "needs_changes", "blocked"]
+      }
     },
     "weaknesses": {
-      "type": "array",
-      "items": {
-        "type": "string"
+      "schema": {
+        "type": "array",
+        "items": { "type": "string" }
       }
     },
     "critique_report": {
-      "type": "artifact",
-      "format": "markdown"
+      "kind": "blob",
+      "schema": { "type": "string", "contentMediaType": "markdown" }
     },
     "human_decision": {
-      "type": "string",
-      "enum": ["approve", "request_changes", "block"],
+      "schema": {
+        "type": "string",
+        "enum": ["approve", "request_changes", "block"]
+      },
       "optional": true,
-      "from": "children.human_review.outputs.decision"
+      "binding": { "child": "human_review", "output": "decision" }
     }
   },
-  "runtime": {
-    "name": "claude_code",
-    "conversation": {
-      "mode": "full_history"
-    },
+  "operation": {
+    "kind": "prompt",
+    "config": { "model": "critic" },
     "prompt": {
       "template": "Review the plan document. Find significant weaknesses at or above the configured severity threshold. Return structured output matching this state's output schema."
+    }
+  },
+  "environment": {
+    "conversation": {
+      "mode": "full_history"
     }
   },
   "children": {
     "address_weaknesses": {
       "state": "feature/plan/critique/address_weaknesses",
       "inputs": {
-        "plan_doc": "inputs.plan_doc",
-        "weaknesses": "outputs.weaknesses",
-        "critique_report": "outputs.critique_report"
+        "plan_doc": { "input": "plan_doc" },
+        "weaknesses": { "expr": "outputs.weaknesses" },
+        "critique_report": { "expr": "outputs.critique_report" }
       }
     },
     "human_review": {
       "state": "feature/plan/critique/human_review",
       "inputs": {
-        "plan_doc": "inputs.plan_doc",
-        "critique_report": "outputs.critique_report"
+        "plan_doc": { "input": "plan_doc" },
+        "critique_report": { "expr": "outputs.critique_report" }
       }
     }
   },
@@ -687,19 +912,48 @@ A runtime may not:
 }
 ```
 
-Execution walk-through: the runtime operation runs first. `clean` terminates
+Execution walk-through: the state's operation runs first. `clean` terminates
 immediately, before any child runs. `needs_changes` runs one fix pass and then
 terminates so the parent can decide whether to re-plan. `blocked` collects a
-human decision, surfaced through the `human_decision` output. The
+human decision, surfaced through the `human_decision` output — an output derived
+from a binding rather than produced by the operation, and `optional` because the
+child that produces it runs only on the conditional path (§6.2). The
 child-completion transitions are declared first so the evaluation that runs
 after a child completes does not re-enter it. The retry loop lives in the
 parent (Section 9), which re-runs the whole planning pass and gets a fresh
 critique instance each time.
 
+Handing the same state to a delegated agent instead of the prompt runner changes only the
+operation block — the slots, wiring, children, and transitions are untouched:
+
+```json
+{
+  "operation": {
+    "kind": "function",
+    "function": "claude-code",
+    "config": { "permissionMode": "plan" },
+    "input": {
+      "prompt": {
+        "binding": { "text": "Review the plan document and report significant weaknesses." }
+      }
+    }
+  },
+  "environment": {
+    "session": "planning",
+    "tools": ["read_file"],
+    "permissions": { "profile": "plan" }
+  }
+}
+```
+
+The adapter reads its instruction from the `prompt` input and its authored surface from `config`;
+the engine hands a delegated adapter raw tools, because such an entry declares that it authorizes
+its own loop's calls (§7.4).
+
 ### 7.4 Tool-Call Permissions
 
-When a runtime is given tools, each tool call is authorized by a **profile × mode** (full detail in
-[RUNTIMES-AND-PERMISSIONS.md](RUNTIMES-AND-PERMISSIONS.md) §4):
+When an operation is given tools, each tool call is authorized by a **profile × mode** (full detail in
+[DESIGN.md](DESIGN.md) §5.1):
 
 - **profile** — which effects are in scope: `read-only`, `plan`, or `full`. A `read-only`/`plan` profile
   admits only tools that declare themselves read-only; `plan` stays read-only until a human approves an
@@ -708,16 +962,20 @@ When a runtime is given tools, each tool call is authorized by a **profile × mo
   approval gate whose decision persists at a chosen scope — `once`, `always this session`, `always this
   workflow run`, or `always` (the host process) — all in-memory; durable policy is authored, not decided.
 
-A state authors its starting policy via `runtime.permissions` (`profile` / `default` / per-tool modes),
-overriding a workflow-wide default; live human decisions overlay on top, most-specific scope winning. The
-gate is only active when the host supplies an approver; otherwise tools run unguarded.
+A state authors its starting policy via `environment.permissions` (`profile` / `default` / per-tool
+modes), overriding a workflow-wide default; live human decisions overlay on top, most-specific scope
+winning. The gate is only active when the host supplies an approver; otherwise tools run unguarded. A
+delegated adapter — a registry entry declaring that it enforces policy through its own callback —
+receives raw tools and routes its native approval callback back through the same approver, so it is
+gated once, not twice.
 
 ## 8. Function States (Interactive UI)
 
 Human interaction is modeled as a `function` operation whose registered function is interactive — not as a
 special human runtime. An interactive function displays state inputs and returns structured data;
 transition logic remains in the state file. (Non-interactive functions — pure transforms, data fetches,
-validators — use the same operation; a UI component is just the interactive case.)
+validators — use the same operation kind; a UI component is just the interactive case, marked by the
+registry entry's capabilities, not by the operation.)
 
 ### 8.1 MVP Built-In Components
 
@@ -737,34 +995,41 @@ Suggested MVP interactive functions:
   "label": "Human Review",
   "inputs": {
     "plan_doc": {
-      "type": "artifact",
-      "format": "markdown"
+      "kind": "blob",
+      "schema": { "type": "string", "contentMediaType": "markdown" }
     },
     "critique_report": {
-      "type": "artifact",
-      "format": "markdown"
+      "kind": "blob",
+      "schema": { "type": "string", "contentMediaType": "markdown" }
     }
   },
   "outputs": {
     "decision": {
-      "type": "string",
-      "enum": ["approve", "request_changes", "block"]
+      "schema": {
+        "type": "string",
+        "enum": ["approve", "request_changes", "block"]
+      }
     },
     "comments": {
-      "type": "string",
-      "format": "markdown",
+      "schema": { "type": "string", "format": "markdown" },
       "optional": true
     }
   },
-  "function": {
-    "name": "choose_option",
-    "prompt": "Review the critique result.",
-    "options": ["approve", "request_changes", "block"]
+  "operation": {
+    "kind": "function",
+    "function": "choose_option",
+    "config": {
+      "prompt": "Review the critique result.",
+      "options": ["approve", "request_changes", "block"]
+    }
   }
 }
 ```
 
-This state declares no transitions: once the function completes, no
+The interactive function's authored surface — its prompt text and options — rides the operation's
+`config`, bound as an ordinary input; the operation shape gains nothing for being interactive.
+
+This state declares no transitions: once the operation completes, no
 operations remain, so the state terminates with `terminate.success` and its
 validated outputs. The parent branches on `outputs.decision`.
 
@@ -776,47 +1041,48 @@ validated outputs. The parent branches on `outputs.decision`.
   "label": "Planning",
   "inputs": {
     "issue": {
-      "type": "artifact",
-      "format": "markdown"
+      "kind": "blob",
+      "schema": { "type": "string", "contentMediaType": "markdown" }
     }
   },
   "outputs": {
     "outcome": {
-      "type": "string",
-      "enum": ["complete", "blocked"],
-      "from": "children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'"
+      "schema": {
+        "type": "string",
+        "enum": ["complete", "blocked"]
+      },
+      "binding": {
+        "expr": "children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'"
+      }
     },
     "plan_doc": {
-      "type": "artifact",
-      "format": "markdown",
-      "from": "children.context.outputs.plan_doc"
+      "kind": "blob",
+      "schema": { "type": "string", "contentMediaType": "markdown" },
+      "binding": { "child": "context", "output": "plan_doc" }
     },
     "critique": {
-      "type": "passthrough",
-      "from": "children.critique.outputs"
+      "binding": { "child": "critique" }
     }
   },
   "children": {
     "goals": {
       "state": "feature/plan/goals",
       "inputs": {
-        "issue": "inputs.issue"
+        "issue": { "input": "issue" }
       }
     },
     "context": {
       "state": "feature/plan/context",
       "inputs": {
-        "issue": "inputs.issue",
-        "goals": "children.goals.outputs.goals"
+        "issue": { "input": "issue" },
+        "goals": { "child": "goals", "output": "goals" }
       }
     },
     "critique": {
       "state": "feature/plan/critique",
       "inputs": {
-        "plan_doc": "children.context.outputs.plan_doc",
-        "severity_threshold": {
-          "value": "significant"
-        }
+        "plan_doc": { "child": "context", "output": "plan_doc" },
+        "severity_threshold": { "text": "significant" }
       }
     }
   },
@@ -848,6 +1114,13 @@ first two transitions evaluate to false until `critique` runs again). When the
 iteration limit is reached, or critique reports `blocked`, the final
 transition fires and the `outcome` output resolves to `blocked`.
 
+The whole file type-checks statically (§6.2): the `outcome` expression is a conditional over two
+string literals, so it infers as the enum `["complete", "blocked"]` and satisfies the slot's
+schema; `plan_doc` projects a `markdown` artifact off `context`'s declared outputs; `critique` is
+the passthrough case, an unconstrained slot bound to the child's whole outputs object; and every
+child edge is reachable-proven because `goals`, `context`, and `critique` are all `sequence`
+members.
+
 ## 10. Execution Lifecycle
 
 ### 10.1 State Run Status
@@ -877,7 +1150,7 @@ Each state run records:
 - Input artifact references.
 - Output artifact references.
 - Conversation references.
-- Runtime name and configuration.
+- Operation kind, target (prompt template/skill, or function name), and configuration.
 - Commands requested.
 - Commands executed.
 - Commands blocked.
@@ -896,7 +1169,7 @@ At minimum, the persisted data must answer:
 
 - Which task was active?
 - Which state path was active?
-- Was a runtime operation running?
+- Was an operation running?
 - Was user input pending?
 - Which artifacts had been produced?
 - Did a transition already occur?
@@ -928,17 +1201,23 @@ Example — fan-out reviews with a dataflow join:
   "children": {
     "claude_review": {
       "state": "review/agent_review",
-      "async": true
+      "async": true,
+      "inputs": {
+        "change": { "input": "change" }
+      }
     },
     "codex_review": {
       "state": "review/agent_review",
-      "async": true
+      "async": true,
+      "inputs": {
+        "change": { "input": "change" }
+      }
     },
     "synthesize": {
       "state": "review/synthesize",
       "inputs": {
-        "review_a": "children.claude_review.outputs.report",
-        "review_b": "children.codex_review.outputs.report"
+        "review_a": { "child": "claude_review", "output": "report" },
+        "review_b": { "child": "codex_review", "output": "report" }
       }
     }
   },
@@ -950,6 +1229,10 @@ Both reviews start without blocking. The sequence cursor reaches `synthesize`
 immediately, but its inputs reference both review outputs, so it waits for
 both to resolve before starting. With no transitions declared, the state
 terminates with `terminate.success` once all three children finish.
+
+The two producer edges into `synthesize` pass the reachability check (§6.2) even though the
+reviews are async: an async sequence member is still proven to run, and "in flight" is a run-time
+park, not a permanently-missing value.
 
 ### 10.5 Branch Isolation and Concurrent Tasks
 
@@ -1113,7 +1396,7 @@ resolved before expanding beyond the MVP:
 9. How should subtasks relate to parent task completion?
 10. Should spawned subtasks block parent completion by default?
 11. How are skills (named prompt templates) authored and registered into
-    `registry.skills` (project-level library format), and what params does a
+    `registry.skills` (project-level library format), and what inputs does a
     skill-sourced prompt render take?
 12. How does a task get bound to a branch: at creation, by a state, or by the
     user?
@@ -1134,7 +1417,8 @@ resolved before expanding beyond the MVP:
 12. Agent filesystem access is scoped to the task's worktree.
 13. Destructive Git operations are blocked; constructive Git use is allowed.
 14. Execution history is stored by default and can be pruned safely.
-15. Operations run in fixed priority order: function, runtime, children.
+15. Operations run in fixed priority order: the state's single operation, then
+    children in `sequence` order.
 16. Entering a state creates a fresh instance; results never leak across
     instances.
 17. Workflow definitions are engine-owned; agents cannot read or modify them.

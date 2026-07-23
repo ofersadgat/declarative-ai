@@ -2,18 +2,19 @@
   "name": "declarative-ai",
   "private": true,
   "version": "0.1.0",
-  "description": "Shared AI execution library: uniform contract for executing AI units (LLM calls, hierarchical workflows, agents) with validation, retry, rate limiting, metering, and a normalized event stream.",
+  "description": "Declarative AI: one execution seam over a typed operation model — LLM calls, hierarchical workflows, and delegated agents, with validation, retry, rate limiting, metering, and a normalized event stream.",
   "type": "module",
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit -p packages/core && tsc --noEmit -p packages/services && tsc --noEmit -p packages/llm && tsc --noEmit -p packages/hw && tsc --noEmit -p packages/tools && tsc --noEmit -p packages/claude-code",
+    "typecheck": "tsc --noEmit -p packages/json && tsc --noEmit -p packages/ops && tsc --noEmit -p packages/exec && tsc --noEmit -p packages/validate && tsc --noEmit -p packages/permissions && tsc --noEmit -p packages/llm && tsc --noEmit -p packages/promptop && tsc --noEmit -p packages/tools && tsc --noEmit -p packages/hw && tsc --noEmit -p packages/agents-api && tsc --noEmit -p packages/agents-cli",
     "test": "vitest run",
     "test:watch": "vitest",
     "update:model-info": "tsx packages/llm/scripts/updateModelInfo.ts"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node": "^22.10.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.2",

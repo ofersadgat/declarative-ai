@@ -1,24 +1,39 @@
 /**
- * Test doubles for the new capability-registry model: a scripted `Runtime` set (one script dispatched by
- * runtime name), and scripted `HostFunction`s (was the InteractionPort). The fakes stand in for
- * @declarative-ai/llm's `createLlmRuntime` and host UI functions — the engine only sees the core contracts.
+ * Test doubles for the capability model: a scripted PROMPT `Executor` (dispatching on the op's
+ * configured model name) and scripted registry entries. The fakes stand in for
+ * `@declarative-ai/promptop`'s executor and for host UI functions — the engine only ever sees the
+ * `@declarative-ai/exec` contracts, which is exactly what lets hw be tested with no LLM in the graph.
  */
 import {
-  MapCapabilityRegistry,
+  failureOf,
+  hostFunction,
+  isOk,
+  newCapabilityRegistry,
+  type Capabilities,
+  type CapabilityRegistry,
   type ExecHandle,
+  type ExecResult,
   type ExecServices,
-  type ExecutorCapabilities,
-  type HostFunction,
-  type Outcome,
-  type Runtime,
-  type RuntimeOp,
-} from "@declarative-ai/core";
+  type Executor,
+  type Failure,
+  type FunctionInputs,
+  type FunctionResult,
+  type HostCapabilities,
+  type InlineFamily,
+  type JsonValue,
+  type Operation,
+  type PromptOp,
+  type ResolvedValue,
+  type Tool,
+} from "@declarative-ai/exec";
+import { mergeWorkflowMetrics, type WorkflowMetrics } from "../src/ports";
 
-const CAPS: ExecutorCapabilities = {
+const CAPS: Capabilities = {
   structuredOutput: true,
   sessionResume: false,
   streaming: false,
   interactive: false,
+  readOnly: true,
   mutatesWorkspace: false,
   policyEnforcement: "none",
   memoizable: true,
@@ -27,15 +42,22 @@ const CAPS: ExecutorCapabilities = {
 
 async function* empty(): AsyncGenerator<never> {}
 
-/** A recorded runtime invocation: the normalized op plus the runtime NAME it was dispatched to. */
-export type FakeCall = RuntimeOp & { name: string };
+/** A recorded prompt-op invocation: the resolved op plus the services it ran with. The old
+ *  `PromptOpEnvironment` is gone — its three fields are `ExecServices` fields now (§4.1). */
+export interface FakeCall {
+  op: PromptOp<InlineFamily>;
+  ctx: ExecServices;
+  /** The op's configured model — what a state's `operation.config.model` selected. */
+  name: string;
+}
 
-export type Script = (call: FakeCall) => Outcome | Promise<Outcome>;
+export type Script = (call: FakeCall) => ExecResult<ResolvedValue, WorkflowMetrics> | Promise<ExecResult<ResolvedValue, WorkflowMetrics>>;
 
-export const ok = (value: unknown, cost = 0.01): Outcome => ({
+export const ok = (value: JsonValue, costUsd = 0.01): ExecResult<ResolvedValue, WorkflowMetrics> => ({
   value,
-  rawText: JSON.stringify(value),
-  metrics: { durationMs: 1, cost, inputTokens: 10, outputTokens: 20 },
+  // No `rawText`: the model's raw text is `LlmOutput` payload and stops at the prompt executor. What
+  // an execution returns is the op's output-parameter value.
+  metrics: { durationMs: 1, costUsd, costSource: "table" },
 });
 
 /** A promise you resolve from the test body. */
@@ -49,51 +71,41 @@ export function deferred<T>(): Deferred<T> {
   return { promise, resolve };
 }
 
-/** A set of fake runtimes backed by ONE script (dispatched on the runtime name), sharing a call log. */
-export class FakeRuntimes {
+/** A fake prompt `Executor` backed by ONE script, sharing a call log. */
+export class FakePromptExecutor implements Executor<ExecServices, WorkflowMetrics> {
+  readonly metrics = { merge: mergeWorkflowMetrics };
   readonly calls: FakeCall[] = [];
-  readonly ctxs: ExecServices[] = [];
+  readonly capabilities = CAPS;
   constructor(private readonly script: Script) {}
 
-  runtime(name: string): Runtime {
-    return {
-      capabilities: CAPS,
-      run: (op: RuntimeOp, ctx: ExecServices): ExecHandle => {
-        const call: FakeCall = { ...op, name };
-        this.calls.push(call);
-        this.ctxs.push(ctx);
-        const outcome = (async (): Promise<Outcome> => {
-          const canceled = new Promise<Outcome>((resolve) => {
-            const onAbort = (): void =>
-              resolve({ metrics: { durationMs: 0 }, error: { classification: "canceled", reason: "aborted" } });
-            if (op.abortSignal?.aborted) onAbort();
-            else op.abortSignal?.addEventListener("abort", onAbort, { once: true });
-          });
-          try {
-            return await Promise.race([Promise.resolve(this.script(call)), canceled]);
-          } catch (e) {
-            return { metrics: { durationMs: 0 }, error: { classification: "permanent", reason: (e as Error).message } };
-          }
-        })();
-        return { events: empty(), outcome, cancel: async () => {} };
-      },
-    };
-  }
-
-  /** Register the given runtime names into a registry, all backed by this script. */
-  register(registry: MapCapabilityRegistry, names: string[]): MapCapabilityRegistry {
-    for (const name of names) registry.runtimes.register(name, this.runtime(name));
-    return registry;
+  start(operation: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue, WorkflowMetrics> {
+    const op = operation as PromptOp<InlineFamily>;
+    const config = op.config !== null && typeof op.config === "object" && !Array.isArray(op.config) ? op.config : {};
+    const call: FakeCall = { op, ctx, name: typeof config.model === "string" ? config.model : "" };
+    this.calls.push(call);
+    const outcome = (async (): Promise<ExecResult<ResolvedValue, WorkflowMetrics>> => {
+      const canceled = new Promise<ExecResult<ResolvedValue, WorkflowMetrics>>((resolve) => {
+        const onAbort = (): void => resolve({ error: { classification: "canceled", reason: "aborted" }, metrics: { durationMs: 0, costUsd: 0, costSource: "unknown" } });
+        if (ctx.abortSignal?.aborted) onAbort();
+        else ctx.abortSignal?.addEventListener("abort", onAbort, { once: true });
+      });
+      try {
+        return await Promise.race([Promise.resolve(this.script(call)), canceled]);
+      } catch (e) {
+        return { error: { classification: "permanent", reason: (e as Error).message }, metrics: { durationMs: 0, costUsd: 0, costSource: "unknown" } };
+      }
+    })();
+    return { events: empty(), result: outcome, cancel: async () => {} };
   }
 }
 
-/** The runtime name a recorded call dispatched to (was the fixture's model id). */
+/** The model a recorded call dispatched to (the fixture's `operation.config.model`). */
 export function modelOf(call: FakeCall): string {
   return call.name;
 }
 
 export function promptOf(call: FakeCall): string {
-  return call.prompt ?? "";
+  return call.op.user ?? "";
 }
 
 /** The rendered template tail — the prompt with any conversation-history preamble
@@ -105,29 +117,68 @@ export function promptTail(call: FakeCall): string {
   return at < 0 ? p.trim() : p.slice(at + marker.length).trim();
 }
 
-/** A scripted host function (was ScriptedPort): returns queued responses FIFO; records its invocations.
- *  Interactive by default (stands in for a UI component). */
-export class ScriptedFunction implements HostFunction {
-  readonly capabilities: { interactive?: boolean; pure?: boolean };
-  readonly calls: Array<{ config: unknown; inputs: unknown }> = [];
+/** The tools the call was given, by name. */
+export function toolNamesOf(call: FakeCall): string[] {
+  return Object.keys(call.ctx.tools ?? {});
+}
+
+/** The default capabilities a scripted (interactive) host function declares. Required and TOTAL, per
+ *  variant — there is no "registered but uncharacterized" entry any more (§2). */
+export const INTERACTIVE: HostCapabilities = { interactive: true, readOnly: true, memoizable: false };
+
+/** A scripted host function: returns queued responses FIFO; records its invocations. Its impl RESOLVES
+ *  a `FunctionResult<ResolvedValue, WorkflowMetrics>` (§4.2), so an exhausted queue is a CLASSIFIED failure rather than a thrown exception the
+ *  engine has to guess a classification for. */
+export class ScriptedFunction {
+  readonly calls: FunctionInputs[] = [];
   constructor(
-    private readonly queue: unknown[],
-    capabilities: { interactive?: boolean; pure?: boolean } = { interactive: true },
-  ) {
-    this.capabilities = capabilities;
-  }
-  run(args: Record<string, unknown>): unknown {
-    this.calls.push(args as { config: unknown; inputs: unknown });
+    private readonly queue: JsonValue[],
+    readonly capabilities: HostCapabilities = INTERACTIVE,
+  ) {}
+
+  readonly run = async (inputs: FunctionInputs): Promise<FunctionResult<ResolvedValue, WorkflowMetrics>> => {
+    this.calls.push(inputs);
     const next = this.queue.shift();
-    if (next === undefined) throw new Error("scripted function responses exhausted");
-    return next;
+    if (next === undefined) return { error: failureOf(new Error("scripted function responses exhausted")) };
+    return { value: next };
+  };
+
+  /** Register under `name` as a host entry. */
+  register(registry: CapabilityRegistry<WorkflowMetrics>, name: string): this {
+    registry.functions.set(name, hostFunction(this.run, this.capabilities));
+    return this;
   }
 }
 
-/** A function that always rejects — the search-context stand-in for a human gate. */
-export const rejectingFunction: HostFunction = {
-  capabilities: { interactive: true },
-  run: (args) => {
-    throw new Error(`interactive function '${(args as { config?: { name?: string } }).config?.name}' not allowed in this context`);
-  },
+/** A fresh capability registry with the one discriminated function map. */
+export function newRegistry(): CapabilityRegistry<WorkflowMetrics> {
+  return newCapabilityRegistry<WorkflowMetrics>();
+}
+
+/** A function that always fails — the search-context stand-in for a refused human gate. Errors as DATA
+ *  (§4.2), which is the contract; {@link throwingFunction} is the impl that ignores it. */
+export const rejectingFunction = async (): Promise<FunctionResult<ResolvedValue, WorkflowMetrics>> => ({
+  error: failureOf(new Error("interactive function not allowed in this context")),
+});
+
+/** A function that THROWS rather than resolving a `FunctionResult<ResolvedValue, WorkflowMetrics>`. Nothing at registration forces an impl
+ *  through `liftThrowing`, so this is a shape the engine must survive: the workflow degrades per SPEC
+ *  §3.3 instead of the exception escaping `engine.run()`. */
+export const throwingFunction = async (): Promise<FunctionResult<ResolvedValue, WorkflowMetrics>> => {
+  throw new Error("interactive function not allowed in this context");
 };
+
+/** A trivial tool for permission/gating tests. */
+export function fakeTool(name: string, readOnly = false): Tool {
+  return {
+    description: name,
+    inputSchema: { type: "object" },
+    readOnly,
+    run: () => ({ ok: true }),
+  };
+}
+
+/** Read a result's failure, or `undefined` when it succeeded — `error` is not a property of the union. */
+export function errorOf<O, M extends { durationMs: number }>(r: ExecResult<O, M>): Failure | undefined {
+  return isOk(r) ? undefined : r.error;
+}

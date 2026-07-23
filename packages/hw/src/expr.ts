@@ -344,7 +344,7 @@ export function evaluateExpression(src: string, context: Record<string, unknown>
 
 /**
  * Every root-anchored reference path in the expression, e.g.
- * `children.critique.outputs.outcome === 'clean' && run.iteration < 3` →
+ * `children.critique.outputs.result === 'clean' && run.iteration < 3` →
  * [["children","critique","outputs","outcome"], ["run","iteration"]].
  * Used by the workflow validator's static reference checks.
  */

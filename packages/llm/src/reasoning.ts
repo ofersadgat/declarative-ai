@@ -13,12 +13,13 @@
  * MAPPING logic is unit-tested, and the result is `undefined` when nothing is requested — so a no-reasoning
  * call is byte-identical to before (this can't regress existing runs).
  */
-import type { ReasoningSpec } from "@declarative-ai/core";
+import type { JsonValue } from "@declarative-ai/json";
+import type { ProviderOptions, ReasoningSpec } from "./llmConfig";
 
 /** Representative thinking budgets for an effort level, for providers that only accept a budget. */
 const EFFORT_BUDGET: Record<"low" | "medium" | "high", number> = { low: 2048, medium: 8192, high: 16384 };
 
-export function adaptReasoning(spec: ReasoningSpec | undefined, opts: { anthropic: boolean }): Record<string, unknown> | undefined {
+export function adaptReasoning(spec: ReasoningSpec | undefined, opts: { anthropic: boolean }): ProviderOptions | undefined {
   if (!spec || (spec.effort === undefined && spec.budgetTokens === undefined)) return undefined;
   if (opts.anthropic) {
     const budgetTokens = spec.budgetTokens ?? (spec.effort ? EFFORT_BUDGET[spec.effort] : undefined);
@@ -26,6 +27,6 @@ export function adaptReasoning(spec: ReasoningSpec | undefined, opts: { anthropi
     return { anthropic: { thinking: { type: "enabled", budgetTokens } } };
   }
   // OpenRouter (default): prefer the effort level; fall back to the token budget as `max_tokens`.
-  const reasoning = spec.effort !== undefined ? { effort: spec.effort } : { max_tokens: spec.budgetTokens };
+  const reasoning: Record<string, JsonValue> = spec.effort !== undefined ? { effort: spec.effort } : { max_tokens: spec.budgetTokens ?? null };
   return { openrouter: { reasoning } };
 }

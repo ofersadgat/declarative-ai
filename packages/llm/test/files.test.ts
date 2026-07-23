@@ -1,11 +1,9 @@
 import { MockLanguageModelV3 } from "ai/test";
-import type { BlobStore } from "@declarative-ai/core";
 import { describe, expect, it } from "vitest";
-import { generateStructured } from "../src/generate";
-import { executeStructuredCall } from "../src/llmStep";
+import { executeLlmCall } from "../src/call";
 import { ModelInfo } from "../src/model-catalog";
 import { plan } from "../src/plan";
-import { fakeRouter, stream, usage } from "./fakes";
+import { fakeRouter, generateFlat, stream, usage, errorOf } from "./fakes";
 
 const TEXT = [
   { type: "stream-start", warnings: [] },
@@ -15,8 +13,8 @@ const TEXT = [
   { type: "finish", finishReason: "stop", usage: usage(1, 1) },
 ];
 
-describe("file OUTPUT capture", () => {
-  it("captures a model-generated file into outcome.artifacts (base64 + mediaType + contentHash)", async () => {
+describe("file OUTPUT capture (DESIGN §3.7)", () => {
+  it("captures a model-generated file as BYTES, not as a parallel artifacts channel", async () => {
     const model = new MockLanguageModelV3({
       doStream: async () =>
         stream([
@@ -25,11 +23,13 @@ describe("file OUTPUT capture", () => {
           { type: "finish", finishReason: "stop", usage: usage(1, 1) },
         ]),
     });
-    const out = await generateStructured({ model, modelId: "m", prompt: "draw a cat" });
-    expect(out.error).toBeUndefined();
-    expect(out.artifacts).toHaveLength(1);
-    expect(out.artifacts![0]).toMatchObject({ content: "aGVsbG8=", format: "image/png" });
-    expect(out.artifacts![0]!.contentHash).toMatch(/^[0-9a-f]{64}$/);
+    const out = await generateFlat({ model, modelId: "m", prompt: "draw a cat" });
+    expect(errorOf(out)).toBeUndefined();
+    expect(out.value?.files).toHaveLength(1);
+    expect(out.value?.files![0]!.mediaType).toBe("image/png");
+    // A blob leaf holds bytes — the transport's base64 never escapes into the value (§7).
+    expect(Array.from(out.value!.files![0]!.bytes)).toEqual([...new TextEncoder().encode("hello")]);
+    expect("artifacts" in out).toBe(false);
   });
 });
 
@@ -42,42 +42,41 @@ describe("file INPUT lowering (attachments)", () => {
         return stream(TEXT);
       },
     });
-    const out = await executeStructuredCall(
+    const out = await executeLlmCall(
       { model: "openrouter/m", prompt: "describe", attachments: [{ mediaType: "image/png", data: { base64: "aGVsbG8=" } }], timeoutMs: 30_000 },
       { modelRouter: fakeRouter(model) },
     );
-    expect(out.error).toBeUndefined();
+    expect(errorOf(out)).toBeUndefined();
     const wire = JSON.stringify(captured?.prompt);
     expect(wire).toContain("image/png");
     expect(wire).toContain("describe"); // text + file merged into one user turn
   });
 
-  it("resolves a contentHash attachment via the injected blob store", async () => {
-    let loadedRef: unknown;
-    const blobs: BlobStore = {
-      load: async (ref) => {
-        loadedRef = ref;
-        return { bytes: new Uint8Array([1, 2, 3]) };
+  it("takes raw BYTES directly — there is no blob store to inject (§7.2)", async () => {
+    let captured: Record<string, unknown> | undefined;
+    const model = new MockLanguageModelV3({
+      doStream: async (opts) => {
+        captured = opts as unknown as Record<string, unknown>;
+        return stream(TEXT);
       },
-      put: async () => ({ contentHash: "h" }),
-    };
-    const model = new MockLanguageModelV3({ doStream: async () => stream(TEXT) });
-    const out = await executeStructuredCall(
-      { model: "openrouter/m", prompt: "x", attachments: [{ mediaType: "application/pdf", data: { contentHash: "abc" } }], timeoutMs: 30_000 },
-      { modelRouter: fakeRouter(model), blobs },
-    );
-    expect(out.error).toBeUndefined();
-    expect(loadedRef).toEqual({ contentHash: "abc" });
-  });
-
-  it("fails permanently when a contentHash attachment has no blob store to resolve it", async () => {
-    const model = new MockLanguageModelV3({ doStream: async () => stream(TEXT) });
-    const out = await executeStructuredCall(
-      { model: "openrouter/m", prompt: "x", attachments: [{ mediaType: "application/pdf", data: { contentHash: "abc" } }], timeoutMs: 30_000 },
+    });
+    const out = await executeLlmCall(
+      { model: "openrouter/m", prompt: "x", attachments: [{ mediaType: "application/pdf", data: new Uint8Array([1, 2, 3]) }], timeoutMs: 30_000 },
       { modelRouter: fakeRouter(model) },
     );
-    expect(out.error?.classification).toBe("permanent");
-    expect(out.error?.reason).toMatch(/blob store/);
+    expect(errorOf(out)).toBeUndefined();
+    expect(JSON.stringify(captured?.prompt)).toContain("application/pdf");
+  });
+
+  it("passes a URL attachment through as a URL — the SDK fetches it, we never do (§7.2)", async () => {
+    const model = new MockLanguageModelV3({ doStream: async () => stream(TEXT) });
+    const out = await executeLlmCall(
+      { model: "openrouter/m", prompt: "x", attachments: [{ mediaType: "application/pdf", data: { url: "https://example.invalid/a.pdf" } }], timeoutMs: 30_000 },
+      { modelRouter: fakeRouter(model) },
+    );
+    // The download is the SDK's, and it fails here because the host does not exist — which is exactly
+    // the evidence that the URL travelled through our lowering untouched, with no `fetch` of our own.
+    expect(errorOf(out)?.reason).toContain("https://example.invalid/a.pdf");
   });
 });
 

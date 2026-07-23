@@ -16,8 +16,12 @@
  * (OpenAI-strict) and differ only in `limits` / `supportsStructuredOutput`.
  */
 
-/** A JSON Schema node (an object schema). Arrays/primitives are passed through untouched. */
-export type SchemaNode = Record<string, unknown>;
+import type { JsonValue, MutableSchema } from "@declarative-ai/json";
+
+/** A JSON Schema node (an object schema) being TRANSFORMED — the ops mutable working form of the one
+ *  `JsonSchema` document type (API.md, "The JSON vocabulary"), so an adapted schema flows straight back into the
+ *  declaration vocabulary. Arrays/primitives are passed through untouched. */
+export type SchemaNode = MutableSchema;
 
 /**
  * How ONE JSON Schema keyword is handled by a provider:
@@ -37,7 +41,7 @@ export type KeywordRule =
   | {
       support: "yes" | "strip" | "describe";
       pos?: "any" | "nested";
-      allowedValues?: readonly unknown[];
+      allowedValues?: readonly JsonValue[];
     };
 
 /**
@@ -192,7 +196,7 @@ export interface AdaptResult {
   enforce: Enforcement;
   /** Reverse the model's answer back to the ORIGINAL schema's shape (union reconstruction, any-decode,
    *  nullable-optional drop). Identity when nothing lossy was applied. */
-  postProcess: (value: unknown) => unknown;
+  postProcess: (value: JsonValue) => JsonValue;
   /** Why the call landed where it did (e.g. why it fell back to advisory). */
   notes: AdaptNote[];
 }

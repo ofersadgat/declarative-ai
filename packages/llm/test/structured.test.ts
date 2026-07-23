@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { JsonValue } from "@declarative-ai/json";
 import {
   findDiscriminators,
   parseOutputSchema,
@@ -65,7 +66,7 @@ describe("patchSchemaForAnthropic (§5.1)", () => {
     // ORIGINAL schema, never by trusting the patched one. The opt-in necessity guard lives in
     // `test/live/anthropic-structured.live.test.ts`: when Anthropic accepts the raw union, this
     // whole workaround (flattening + over-strict required) can be removed.
-    const original = {
+    const original: JsonValue = {
       oneOf: [
         { type: "object", properties: { kind: { const: "a" }, av: { type: "number" } }, required: ["kind", "av"] },
         { type: "object", properties: { kind: { const: "b" }, bv: { type: "string" } }, required: ["kind", "bv"] },
