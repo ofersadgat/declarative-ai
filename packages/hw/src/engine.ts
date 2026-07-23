@@ -34,7 +34,7 @@ import {
   type ExecServices,
   type Executor,
   type FunctionInputs,
-  type OutputValidator,
+  type SyncOutputValidator,
   type InlineFamily,
   type JsonSchema,
   type JsonValue,
@@ -92,7 +92,9 @@ export interface EngineConfig {
    *  fails with that reason. Typed as a plain `Executor`, so the engine never learns that a prompt op
    *  has an llm lowering — dispatch is by OP KIND and nothing more (§4.1). */
   prompt?: Executor<ExecServices, WorkflowMetrics>;
-  validator?: OutputValidator;
+  /** SYNC by requirement: slot validation runs mid-walk (`validateSlotValue`) and cannot suspend;
+   *  hw schemas are inline documents, so a sync validator is the inline family's truth. */
+  validator?: SyncOutputValidator;
   persistence?: Persistence;
   /** Forwarded to runtimes/functions (rate limiter, meter, ...) as their `services`. `validator`/session
    *  store are supplied by the engine. */
@@ -191,7 +193,7 @@ const DEFAULT_SESSION = "default";
 type Turn = { role: "user" | "assistant"; content: string };
 
 export class WorkflowEngine {
-  private readonly validator: OutputValidator;
+  private readonly validator: SyncOutputValidator;
   private readonly clock: Clock;
   private nextInstanceId = 1;
   /** A run-level configuration failure (e.g. a required `function` is not registered):

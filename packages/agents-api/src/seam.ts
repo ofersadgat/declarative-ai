@@ -5,7 +5,7 @@
  * this interface (not the SDK's) is what lets the whole package be built and tested without the SDK
  * installed and without an API key.
  */
-import type { FunctionInputs, JsonSchema, JsonValue, OutputValidator } from "@declarative-ai/exec";
+import type { FunctionInputs, JsonSchema, JsonValue, SyncOutputValidator } from "@declarative-ai/exec";
 
 /** The permission mode handed to the delegated agent (its NATIVE profile control). */
 export type AgentPermissionMode = "default" | "plan" | "acceptEdits" | "bypassPermissions";
@@ -51,8 +51,10 @@ export interface AgentQueryOptions {
   canUseTool?: AgentPermissionCallback;
   /** Boundary validation for INJECTED tool arguments. An agent's tool call arrives as untyped JSON and
    *  no MCP server validates it, so an adapter that injects tools checks each call against the tool's
-   *  own `inputSchema` through this seam (`json`'s three lines — no ajv on the agent path). */
-  validator?: OutputValidator;
+   *  own `inputSchema` through this seam (`json`'s three lines — no ajv on the agent path). SYNC by
+   *  requirement: the gate sits inline in the MCP request handler, and tool `inputSchema`s are inline
+   *  documents — the inline family's truth. */
+  validator?: SyncOutputValidator;
   abortSignal?: AbortSignal;
 }
 

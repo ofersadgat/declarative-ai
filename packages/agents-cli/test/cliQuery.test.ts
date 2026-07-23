@@ -229,13 +229,23 @@ describe("the bridge lifecycle", () => {
     // the module documents does not exist on the real path.
     const { spawn } = fakeSpawn(['{"type":"result","result":"done"}']);
     const { startBridge, state } = fakeBridge();
-    const validator = { validateValue: () => ({ ok: true }) };
+    let hits = 0;
+    const validator = {
+      validateValue: () => {
+        hits++;
+        return { ok: true };
+      },
+    };
     const ctx: ExecServices = {
       tools: { read_file: { inputSchema: { type: "object" }, readOnly: true, run: () => ({ ok: true }) } },
       validator,
     };
     await createCliAgentFunction({ spawn, startBridge }).run(inputs(), ctx as never);
-    expect((state.spec as { validator?: unknown }).validator).toBe(validator);
+    // Wrapped by json's fail-closed `syncOnly` narrowing on the way down — the claim is DELEGATION.
+    const bridged = (state.spec as { validator?: { validateValue: (s: never, v: never) => { ok: boolean } } }).validator;
+    expect(bridged).toBeDefined();
+    expect(bridged!.validateValue({} as never, 1 as never)).toEqual({ ok: true });
+    expect(hits).toBe(1);
   });
 
   it("always kills the child, even when the consumer stops reading early", async () => {

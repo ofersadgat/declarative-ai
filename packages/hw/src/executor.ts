@@ -25,6 +25,7 @@ import {
   type Operation,
   type ExecResult,
 } from "@declarative-ai/exec";
+import { syncOnly } from "@declarative-ai/exec";
 import { WorkflowEngine } from "./engine";
 import type { StateDef } from "./format";
 import { isByteStream, materialize, MaterializeError } from "./materialize";
@@ -38,6 +39,7 @@ export interface HierarchicalWorkflowDefinition {
   rootId: string;
   states: Record<string, StateDef>;
 }
+
 
 export interface WorkflowExecutorOptions {
   /** The authored bundle this executor runs. */
@@ -163,7 +165,11 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
       bundle,
       registry: this.options.registry,
       prompt: this.options.prompt,
-      validator: ctx.validator,
+      // The engine's slot validation is mid-walk and SYNC (`SyncOutputValidator`); the ctx seam is the
+      // maybe-async boundary validator. hw schemas are inline documents, so a real injection answers
+      // synchronously — an async (store-backed) one is refused FAIL-CLOSED with a naming reason rather
+      // than treated as a pass.
+      validator: ctx.validator ? syncOnly(ctx.validator) : undefined,
       persistence: this.options.persistence,
       services: ctx,
       clock: ctx.clock,
@@ -239,7 +245,7 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
     // The op-level output contract (in addition to per-state validation the engine did).
     const outputSchema = op.output.schema;
     if (outputSchema && ctx.validator) {
-      const res = ctx.validator.validateValue(outputSchema, (outputs ?? null) as JsonValue);
+      const res = await ctx.validator.validateValue(outputSchema, (outputs ?? null) as JsonValue);
       if (!res.ok) {
         return {
           value: outputs as JsonValue | undefined,

@@ -65,8 +65,9 @@ export interface GenerateEnvironment<T = JsonValue> {
    *  any-decode, nullable-optional drop). This is also the seam a `Jsonify`→decoded lift belongs at
    *  (API.md, "Codecs and type names"): validate the wire form, then decode. */
   postProcess?: (value: JsonValue) => JsonValue;
-  /** Boundary check against the ORIGINAL schema; throws to signal a PERMANENT validation failure. */
-  validate?: (value: JsonValue, originalSchema: JsonSchema<T>) => void;
+  /** Boundary check against the ORIGINAL schema; throws (or rejects) to signal a PERMANENT validation
+   *  failure — async because a store-backed validator may have `$ref` reads to do. */
+  validate?: (value: JsonValue, originalSchema: JsonSchema<T>) => void | Promise<void>;
   /** The RESOLVED tool set (declarations combined with runtime `execute` impls), keyed by name. */
   tools?: ToolSet;
   /** How the model may select among `tools`. */
@@ -622,7 +623,7 @@ export async function generateStructured<T = JsonValue>(
 
   if (env.validate) {
     try {
-      env.validate(value, def.schema!);
+      await env.validate(value, def.schema!);
     } catch (err) {
       // Preserve the parsed value even though it failed validation (§4 preserve-on-error).
       return build({

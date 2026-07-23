@@ -206,12 +206,49 @@ function refsInto(node: unknown, out: Set<string>, seen: Set<object>): void {
   }
 }
 
+/** What a boundary check reports. */
+export interface ValidationResult {
+  ok: boolean;
+  errors?: string;
+}
+
 /**
  * The MINIMAL structural validation seam, declared once at the bottom so every layer that needs a
  * boundary check names the SAME three-line interface and none of them learns about ajv.
  * `@declarative-ai/validate`'s `SchemaValidator` implements it; `exec` and `llm` consume it. Values are
  * JSON by construction at this boundary (a parsed output against a schema document).
+ *
+ * MAY resolve asynchronously: an inline-schema validator answers synchronously, but a STORE-BACKED one
+ * (content-addressed `$ref`s resolved from an artifact store) has reads to do on a cold cache — that is
+ * a fact of the id family, not an implementation detail to hide. Every consumer `await`s the result,
+ * which costs a sync implementation nothing.
  */
 export interface OutputValidator {
-  validateValue(schema: SchemaDocument, value: JsonValue): { ok: boolean; errors?: string };
+  validateValue(schema: SchemaDocument, value: JsonValue): ValidationResult | Promise<ValidationResult>;
+}
+
+/**
+ * The SYNC refinement, for consumers that validate mid-walk and cannot suspend (hw's slot validation,
+ * the MCP input gate). Their schemas are inline documents, so a sync validator is not a compromise —
+ * it is the inline family's truth. Every `SyncOutputValidator` IS an `OutputValidator`.
+ */
+export interface SyncOutputValidator {
+  validateValue(schema: SchemaDocument, value: JsonValue): ValidationResult;
+}
+
+/**
+ * Narrow the maybe-async boundary validator to the SYNC seam — FAIL-CLOSED: an implementation that
+ * actually suspends is refused with a naming reason rather than treated as a pass, because the sync
+ * consumers (mid-walk slot validation, the MCP input gate) sit between an arbitrary payload and a host
+ * impl. A genuinely sync validator passes through untouched.
+ */
+export function syncOnly(v: OutputValidator): SyncOutputValidator {
+  return {
+    validateValue: (schema, value) => {
+      const r = v.validateValue(schema, value);
+      return r instanceof Promise
+        ? { ok: false, errors: "this consumer requires a synchronous validator (inline schemas); an async (store-backed) validator was injected" }
+        : r;
+    },
+  };
 }

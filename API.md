@@ -174,9 +174,17 @@ type SchemaOutput<S>;                                          // JsonSchema<T> 
 function typedSchema<T>(schema: SchemaDocument): JsonSchema<T>; // brand — identity at runtime
 function collectRefs(node: unknown, out?: Set<string>): Set<string>;  // every `$ref` target reachable
 
-interface OutputValidator {   // the MINIMAL structural validation seam, declared once at the bottom
-  validateValue(schema: SchemaDocument, value: JsonValue): { ok: boolean; errors?: string };
+interface ValidationResult { ok: boolean; errors?: string }
+
+interface OutputValidator {   // the MINIMAL structural validation seam, declared once at the bottom.
+  // MAY resolve async: a store-backed validator (content-addressed $refs) has reads to do — the
+  // boundary consumers (executeLlmCall) await it, which costs a sync implementation nothing.
+  validateValue(schema: SchemaDocument, value: JsonValue): ValidationResult | Promise<ValidationResult>;
 }
+interface SyncOutputValidator {  // the SYNC refinement for mid-walk consumers (hw slot validation,
+  validateValue(schema: SchemaDocument, value: JsonValue): ValidationResult;  // the MCP input gate)
+}
+function syncOnly(v: OutputValidator): SyncOutputValidator;  // FAIL-CLOSED narrowing (a suspender is refused)
 ```
 
 | Type | Use it when |
@@ -423,6 +431,11 @@ interface IdFamily {                                interface InlineFamily {
 
 type Id = string;                                       // content id or UUID
 type OperationRef = { promptId: Id } | { functionId: Id };
+
+// The inline-family instantiations, NAMED — what leaf executors and lowerings speak:
+type InlineOperation = Operation<InlineFamily>;
+type InlinePromptOp = PromptOp<InlineFamily>;
+type InlineFunctionOp = FunctionOp<InlineFamily>;
 
 type Bytes = Uint8Array | ByteStream;                   // ByteStream is the WHATWG ReadableStream shape,
                                                         // declared STRUCTURALLY so json/ops need no DOM types
@@ -1156,7 +1169,7 @@ The seam interfaces:
 
 | Interface | Shape | Notes |
 | --- | --- | --- |
-| `OutputValidator` | `validateValue(schema: SchemaDocument, value: JsonValue): { ok; errors? }` | Declared in `json`; implemented by `@declarative-ai/validate`'s `SchemaValidator`. |
+| `OutputValidator` | `validateValue(schema: SchemaDocument, value: JsonValue): ValidationResult \| Promise<ValidationResult>` | Declared in `json`; maybe-ASYNC (a store-backed validator has `$ref` reads to do; `executeLlmCall` awaits). The sync refinement `SyncOutputValidator` + the fail-closed `syncOnly` narrowing serve mid-walk consumers. Implemented by `@declarative-ai/validate`'s `SchemaValidator` (sync) / `asBoundaryValidator` (maybe-async, store-backed). |
 | `RateLimiter` | `schedule<T>(est: CallEstimate, run): Promise<T>`; `reportOutcome({ rateLimited?; modelId? })` | Construction-injected into `withRateLimit` (not a ctx seam). `CallEstimate = { inputTokens; outputTokens; modelId? }`. |
 | `BudgetMeter` | `reserve(estCostUsd): Promise<BudgetReservation \| null>`; `availableCostUsd(): Promise<number>`; `debit?(actualCostUsd)` | Per-call wallet reservation; `null` ⇒ balance can't cover it. `BudgetReservation.settle(actualCostUsd)` corrects the reserve. `debit` records spend that ALREADY happened and could not be reserved first — a delegated agent bills inside its own loop, so its charge arrives as a fact rather than a request. |
 | `Clock` | `now(): number` | Injectable time source (tests, deterministic replay). |
@@ -1401,15 +1414,17 @@ class SchemaValidator implements OutputValidator {
   validate(schemaId: string, value: unknown, schemaDoc?: unknown): Promise<ValidationResult>;
   errorsText(fn: ValidateFunction): string;
 }
-interface ValidationResult { ok: boolean; errors?: string; }
 interface SchemaResolver { getSchema(id: string): Promise<unknown | undefined>; }
 function collectRefs(node: unknown, out?: Set<string>): Set<string>;
+function asBoundaryValidator(v: SchemaValidator): OutputValidator;   // maybe-async: $ref docs go store-backed
 ```
 
-Two modes: **inline** (`validateValue`, compiled + cached by the schema's content hash — this is the
-`OutputValidator` `executeLlmCall` and the hw engine consume) and **store-backed** (`compile`/
-`validate`, resolving `$ref` ids lazily through an injected `SchemaResolver`). `collectRefs` gathers every
-`$ref` target in a document.
+Two modes: **inline** (`validateValue`, compiled + cached by the schema's content hash, SYNC — the
+`SyncOutputValidator` the hw engine consumes) and **store-backed** (`compile`/`validate`, resolving
+`$ref` ids lazily through an injected `SchemaResolver`). `asBoundaryValidator` lifts a validator to the
+maybe-async boundary seam: a ref-bearing document compiles through the store-backed path, a ref-free one
+answers synchronously — the validator an llm-call environment wants when schemas are id-family
+artifacts. `collectRefs` gathers every `$ref` target in a document.
 
 `SchemaValidator` simply *implements* `json`'s three-line `OutputValidator` seam — this package declares no
 `ExecServices` augmentation, because `exec` already names the minimal structural interface it consumes and
@@ -1991,6 +2006,11 @@ never-throws contract.
 The MINIMAL core: lower, run, map onto an `ExecResult`, and nothing else. Source: `executor.ts`.
 
 ```ts
+// The op-level call, NO projection: lowering + executeLlmCall, returning the FULL LlmCallResult
+// (value, thinking, finishReason, metrics). For a consumer that PERSISTS what the model produced
+// (an OperationRecord's R is the payload); lowering faults resolve `permanent` — never throws.
+function executePromptOp(op: InlinePromptOp, env: CallDeps, options?: LoweringOptions & { runner?: CallRunner }): Promise<LlmCallResult>;
+
 function createPromptExecutor(options?: PromptExecutorOptions): Executor;
 class PromptExecutor implements Executor {}
 

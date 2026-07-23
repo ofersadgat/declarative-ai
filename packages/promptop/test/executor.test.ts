@@ -181,3 +181,30 @@ describe("core — tools and blob outputs", () => {
     expect(out.value).toBe("four");
   });
 });
+
+describe("executePromptOp — the op-level call (no projection)", () => {
+  it("lowers the op and returns the FULL LlmCallResult — thinking and finishReason intact", async () => {
+    const { runner, calls } = fakeRunner([
+      okOutcome({ thinking: [{ type: "reasoning", text: "hmm", textOffset: 0 }] }),
+    ]);
+    const { executePromptOp } = await import("../src/executor");
+    const out = await executePromptOp(promptOp(), { modelRouter: undefined as never }, { runner });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.def.prompt).toBe("What is 2+2?");
+    expect(errorOf(out)).toBeUndefined();
+    expect(out.value?.value).toEqual({ answer: "4" });
+    expect(out.value?.thinking?.[0]?.text).toBe("hmm"); // the payload the Executor projection would drop
+    expect(out.value?.finishReason).toBe("stop");
+  });
+
+  it("a lowering fault is a permanent failure through the never-throws seam — the runner is never hit", async () => {
+    const { runner, calls } = fakeRunner([okOutcome()]);
+    const { executePromptOp } = await import("../src/executor");
+    // A config-layer `prompt` is the documented lowering error (a PromptOp's prompt is its `user` text).
+    const bad = promptOp({}, { prompt: "smuggled" });
+    const out = await executePromptOp(bad, { modelRouter: undefined as never }, { runner });
+    expect(calls).toHaveLength(0);
+    expect(errorOf(out)?.classification).toBe("permanent");
+    expect(errorOf(out)?.reason).toMatch(/config supplies `prompt`/);
+  });
+});
