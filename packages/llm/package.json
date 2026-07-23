@@ -2,12 +2,9 @@
   "name": "@declarative-ai/llm",
   "version": "0.1.0",
   "type": "module",
-  "exports": {
-    ".": "./src/index.ts"
-  },
+  "exports": { ".": "./src/index.ts" },
   "dependencies": {
-    "@declarative-ai/core": "*",
-    "@declarative-ai/services": "*",
+    "@declarative-ai/json": "*",
     "@ai-sdk/anthropic": "^3.0.81",
     "@openrouter/ai-sdk-provider": "^2.9.0",
     "ai": "^6.0.195",

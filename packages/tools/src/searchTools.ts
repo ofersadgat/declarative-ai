@@ -1,12 +1,12 @@
 /**
- * Search tools (RUNTIMES-AND-PERMISSIONS.md §2): `grep` (content search) and `glob` (path match), both
+ * Search tools (DESIGN §5.1, "Functions and tools"): `grep` (content search) and `glob` (path match), both
  * read-only and pure-fs (no ripgrep/shell dependency, so they run identically on every platform). They
  * walk the workspace, skipping conventional heavy/generated directories, and report POSIX-style paths
  * relative to the workspace root regardless of the host separator.
  */
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { Tool } from "@declarative-ai/core";
+import type { Tool } from "@declarative-ai/exec";
 import { requireWorkspace, resolveInWorkspace } from "./workspace";
 
 /** Directory names skipped by both tools — generated/heavy trees an agent almost never wants to search. */
@@ -83,7 +83,7 @@ export const grepTool: Tool = {
     properties: { pattern: { type: "string" }, path: { type: "string" }, flags: { type: "string" } },
     required: ["pattern"],
   },
-  capabilities: { readOnly: true },
+  readOnly: true,
   async run(input, ctx) {
     const ws = requireWorkspace(ctx);
     const rel = typeof input.path === "string" && input.path.length > 0 ? input.path : ".";
@@ -121,7 +121,7 @@ export const grepTool: Tool = {
 export const globTool: Tool = {
   description: "List workspace files matching a glob pattern (** across dirs, * within a segment, ?). Input: { pattern }.",
   inputSchema: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] },
-  capabilities: { readOnly: true },
+  readOnly: true,
   async run(input, ctx) {
     const ws = requireWorkspace(ctx);
     const re = globToRegExp(reqString(input, "pattern"));

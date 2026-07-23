@@ -1,0 +1,12 @@
+{
+  "name": "@declarative-ai/validate",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@declarative-ai/exec": "*",
+    "@declarative-ai/json": "*",
+    "@declarative-ai/ops": "*",
+    "ajv": "^8.20.0"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@declarative-ai/exec",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@declarative-ai/json": "*",
+    "@declarative-ai/ops": "*"
+  }
+}

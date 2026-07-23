@@ -29,46 +29,69 @@
  * any transition in the following evaluation round does the same.
  */
 import {
-  type Approver,
   type CapabilityRegistry,
-  type ExecFailure,
-  type ExecMetrics,
+  type Failure,
   type ExecServices,
+  type Executor,
+  type FunctionInputs,
   type OutputValidator,
-  type PermissionBaseline,
-  type PermissionMode,
-  type ProfilePredicate,
-  type RuntimeOp,
+  type InlineFamily,
+  type JsonSchema,
+  type JsonValue,
+  type FunctionOp,
+  type NamedParameter,
+  type Operation,
+  type Parameter,
+  type PromptOp,
+  type RefKind,
+  type RegisteredFunction,
   type SessionStore,
-  type SmartApprover,
+  type ResolvedValue,
   type Tool,
   type Workspace,
   type Clock,
   MapSessionStore,
+  isOk,
+  runFunction,
+} from "@declarative-ai/exec";
+import type { WorkflowMetrics } from "./ports";
+import {
   PermissionLedger,
   planExitTool,
   withPermission,
-} from "@declarative-ai/core";
-import { SchemaValidator } from "@declarative-ai/services";
+  type Approver,
+  type PermissionBaseline,
+  type PermissionMode,
+  type ProfilePredicate,
+  type SmartApprover,
+} from "@declarative-ai/permissions";
+import { SchemaValidator } from "@declarative-ai/validate";
 import { evaluate, isPending, parseExpression, PENDING, type Expr } from "./expr";
 import type {
-  ChildDecl,
   ConversationMode,
-  FieldSchema,
-  FunctionConfig,
-  OutputFieldSchema,
-  RuntimeConfig,
-  StateDef,
+  EnvironmentDecl,
+  LoadedChild,
+  LoadedState,
+  SlotMeta,
   TerminationOutcome,
   WorkflowBundle,
 } from "./format";
+import { skillNameOf } from "./loader";
+import { isResolvedValue, isResolveError, resolveInputs, resolveRef, type ResolutionScope } from "./resolve";
+import { isByteStream, materialize, MaterializeError } from "./materialize";
+import { isFannedOut } from "./fanout";
 import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, type Persistence } from "./ports";
 
 export interface EngineConfig {
   bundle: WorkflowBundle;
-  /** The typed capability registry: `runtimes` (agent ops), `functions` (host code / UI), `skills`
-   *  (named prompt templates). Replaces the old `providers` binding table + flat executor registry. */
-  registry: CapabilityRegistry;
+  /** The typed capability registry: `functions` (host code, sub-workflows, and delegated agent
+   *  adapters alike — ONE map of discriminated entries, DESIGN §5.1), `skills` (named prompt
+   *  templates), `tools` (executables an agent may call mid-loop). */
+  registry: CapabilityRegistry<WorkflowMetrics>;
+  /** The `Executor` a `PromptOp` dispatches to (`@declarative-ai/promptop`). Absent ⇒ a prompt state
+   *  fails with that reason. Typed as a plain `Executor`, so the engine never learns that a prompt op
+   *  has an llm lowering — dispatch is by OP KIND and nothing more (§4.1). */
+  prompt?: Executor<ExecServices, WorkflowMetrics>;
   validator?: OutputValidator;
   persistence?: Persistence;
   /** Forwarded to runtimes/functions (rate limiter, meter, ...) as their `services`. `validator`/session
@@ -76,7 +99,7 @@ export interface EngineConfig {
   services?: ExecServices;
   clock?: Clock;
   onEvent?: (event: EngineEvent) => void;
-  /** Tool-call permissions (RUNTIMES-AND-PERMISSIONS.md §4). `approve` collects a human decision on `ask`
+  /** Tool-call permissions (DESIGN §5.1, "Permissions: two orthogonal axes"). `approve` collects a human decision on `ask`
    *  (the interactive gate); absent ⇒ a state's tools run UNGUARDED. `baseline` is the workflow-wide default
    *  policy; `process` is the host-owned overlay carrying `always` decisions across runs in one process;
    *  `smart` maps a tool name to its `smart`-mode policy (arg-inspecting; escalates to `ask` when uncertain). */
@@ -85,40 +108,40 @@ export interface EngineConfig {
     baseline?: PermissionBaseline;
     process?: Map<string, PermissionMode>;
     smart?: Record<string, SmartApprover>;
-    /** Custom profile predicates by name (RUNTIMES-AND-PERMISSIONS.md §4) — a `runtime.permissions.profile`
+    /** Custom profile predicates by name (DESIGN §5.1, "Permissions: two orthogonal axes") — a `runtime.permissions.profile`
      *  naming one of these gates tools by its predicate instead of the built-in read-only/plan/full. */
     profiles?: Record<string, ProfilePredicate>;
   };
-  /** Per-session workspace resolver (RUNTIMES-AND-PERMISSIONS.md §3): maps a `runtime.session` id to the
+  /** Per-session workspace resolver (DESIGN §5.1, "Sessions: the run-scoped resource bundle"): maps a `runtime.session` id to the
    *  workspace that session's tools act within, so fan-out branches can isolate (e.g. per-worktree). Returns
    *  `undefined` ⇒ fall back to the single run-level `services.workspace`. Absent ⇒ always the run-level one. */
   workspaceFor?: (sessionId: string) => Workspace | undefined;
 }
 
 export interface WorkflowRunOptions {
-  inputs: Record<string, unknown>;
+  inputs: Record<string, ResolvedValue>;
   abortSignal?: AbortSignal;
 }
 
 export interface WorkflowRunResult {
   outcome: TerminationOutcome;
-  outputs?: Record<string, unknown>;
-  failure?: ExecFailure;
+  outputs?: Record<string, ResolvedValue>;
+  failure?: Failure;
   artifacts: ArtifactRef[];
-  metrics: { childCalls: number; childCost: number; durationMs: number };
+  metrics: { childLlmCalls: number; childCost: number; durationMs: number };
 }
 
 interface TerminationRecord {
   outcome: TerminationOutcome;
-  outputs?: Record<string, unknown>;
-  failure?: ExecFailure;
+  outputs?: Record<string, ResolvedValue>;
+  failure?: Failure;
 }
 
 interface ChildRecord {
   instanceId: number;
   status: "running" | "done";
   outcome?: TerminationOutcome;
-  outputs?: Record<string, unknown>;
+  outputs?: Record<string, ResolvedValue>;
   abort: AbortController;
   promise: Promise<void>;
 }
@@ -127,17 +150,15 @@ interface ChildRecord {
 interface Instance {
   id: number;
   stateId: string;
-  def: StateDef;
+  def: LoadedState;
   childKey?: string;
   parent?: Instance;
-  inputs: Record<string, unknown>;
-  params: Record<string, unknown>;
+  inputs: Record<string, ResolvedValue>;
   /** Operation-produced outputs accumulated so far. */
-  outputs: Record<string, unknown>;
-  /** Raw function-operation results (`function.*` namespace, SPEC §6.1). */
-  functionResults: Record<string, unknown>;
+  outputs: Record<string, ResolvedValue>;
   iteration: number;
-  opsRun: { runtime: boolean; function: boolean };
+  /** Whether the state's single operation has run (§7.1: a state has ONE operation). */
+  opRun: boolean;
   /** Live child records by child key; `undefined`/absent = never ran or superseded. */
   children: Map<string, ChildRecord>;
   /** Child keys whose error/timeout termination has not yet been handled by a transition. */
@@ -176,18 +197,31 @@ export class WorkflowEngine {
   /** A run-level configuration failure (e.g. a required `function` is not registered):
    *  aborts the whole run rather than looping as a state-level outcome a transition
    *  might keep re-entering. */
-  private fatal?: ExecFailure;
+  private fatal?: Failure;
   private rootAbort?: AbortController;
   private readonly artifacts: ArtifactRef[] = [];
   /** RUN-SCOPED session store: states sharing a logical `sessionId` continue the same conversation when the
    *  llm executor is composed with `withSession` (opt-in; orthogonal to the built-in `conversationMode`
    *  preamble). Exposed to child executors via `ctx.sessions`; an app-provided store takes precedence. */
   private readonly sessionStore = new MapSessionStore();
-  /** RUN-SCOPED permission ledger (RUNTIMES-AND-PERMISSIONS.md §4): owns the session/run overlays and the
+  /** Synchronous mirror of every transcript this run has read or written, keyed by session id — the
+   *  read side of `{ conversation }` bindings, which resolve synchronously. */
+  private readonly transcripts = new Map<string, Turn[]>();
+  /** RUN-SCOPED permission ledger (DESIGN §5.1, "Persistence granularity — a scope chain"): owns the session/run overlays and the
    *  authored baseline; the host-owned `process` overlay is injected so `always` decisions cross runs. */
   private readonly permissions: PermissionLedger;
-  private childCalls = 0;
+  private childLlmCalls = 0;
   private childCost = 0;
+
+  /**
+   * Spend accumulated so far, readable MID-RUN.
+   *
+   * A run that crashes has usually already paid for the children it completed — a failed call still
+   * costs money — so the caller needs the running total rather than a zero from a result it never got.
+   */
+  spentSoFar(): { childLlmCalls: number; childCost: number } {
+    return { childLlmCalls: this.childLlmCalls, childCost: this.childCost };
+  }
 
   constructor(private readonly config: EngineConfig) {
     this.validator = config.validator ?? new SchemaValidator();
@@ -223,7 +257,7 @@ export class WorkflowEngine {
       outputs: record.outputs,
       failure: record.failure,
       artifacts: this.artifacts,
-      metrics: { childCalls: this.childCalls, childCost: this.childCost, durationMs: this.clock.now() - start },
+      metrics: { childLlmCalls: this.childLlmCalls, childCost: this.childCost, durationMs: this.clock.now() - start },
     };
   }
 
@@ -238,8 +272,8 @@ export class WorkflowEngine {
 
   private async runInstance(
     stateId: string,
-    def: StateDef,
-    inputs: Record<string, unknown>,
+    def: LoadedState,
+    inputs: Record<string, ResolvedValue>,
     abort: AbortController,
     childKey: string | undefined,
     parent: Instance | undefined,
@@ -251,11 +285,9 @@ export class WorkflowEngine {
       childKey,
       parent,
       inputs,
-      params: defaultsOf(def.params),
       outputs: {},
-      functionResults: {},
       iteration: 0,
-      opsRun: { runtime: false, function: false },
+      opRun: false,
       children: new Map(),
       unhandledFailures: new Set(),
       abort,
@@ -270,6 +302,12 @@ export class WorkflowEngine {
       parentInstanceId: parent?.id,
       inputs: shallowRedactArtifacts(inputs),
     });
+
+    // An input authored with a BINDING (not just a static default, and not wired by the parent)
+    // resolves here, once, against the state's own scope — the by-name fill and the parent wire only
+    // populate FREE inputs. Without this a bound input, which validation type-checks and fan-out
+    // counts as a real consumer, would read as `undefined` everywhere `{ input: … }`/`inputs.*` is used.
+    this.resolveInputBindings(instance);
 
     // SPEC §5 limits.timeout (seconds) → terminate.timeout.
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -327,17 +365,12 @@ export class WorkflowEngine {
         }
       }
 
-      // (2)/(5) Highest-priority unrun operation: function, runtime, sequence children.
-      if (def.function && !instance.opsRun.function) {
-        instance.opsRun.function = true;
-        const failure = await this.runFunctionOperation(instance, def.function);
-        if (failure) return this.finish(instance, failureOutcome(instance), failure);
-        evaluationDue = true;
-        continue;
-      }
-      if (def.runtime && !instance.opsRun.runtime) {
-        instance.opsRun.runtime = true;
-        const failure = await this.runRuntimeOperation(instance, def.runtime);
+      // (2)/(5) The state's operation, then sequence children. A state has ONE operation (§7.1);
+      // dispatch is by OP KIND — `PromptOp` → the prompt runner, `FunctionOp` → the function
+      // registry (host code, sub-workflows, and delegated agents alike, §3.1).
+      if (def.operation && !instance.opRun) {
+        instance.opRun = true;
+        const failure = await this.runOperation(instance, def.operation);
         if (failure) return this.finish(instance, failureOutcome(instance), failure);
         evaluationDue = true;
         continue;
@@ -490,6 +523,10 @@ export class WorkflowEngine {
         term = { outcome: "error", failure: { classification: "permanent", reason: resolved.error } };
       } else {
         term = await this.runInstance(decl.state, childDef, resolved.values!, childAbort, key, instance);
+        // Fan-out (§7.3, rule 2) is decided at BIND time: if this producer's blob output feeds two
+        // consumers, drain it ONCE here, at the producer's completion, so both siblings read the bytes
+        // rather than racing to read one stream. A single-consumer output is left a live stream to pipe.
+        term = await this.materializeFanOut(instance, key, term);
       }
       record.status = "done";
       record.outcome = term.outcome;
@@ -531,40 +568,54 @@ export class WorkflowEngine {
 
   // --- termination ----------------------------------------------------------
 
-  private finish(instance: Instance, outcome: TerminationOutcome, failure?: ExecFailure): TerminationRecord {
+  private finish(instance: Instance, outcome: TerminationOutcome, failure?: Failure): TerminationRecord {
     if (outcome !== "success") {
       return { outcome, failure };
     }
-    // Resolve declared outputs (SPEC §3.7: resolved when the state terminates).
-    const ctx = this.exprContext(instance);
-    const outputs: Record<string, unknown> = {};
-    for (const [name, schema] of Object.entries(instance.def.outputs ?? {})) {
-      let value: unknown;
-      if (schema.from !== undefined) {
-        const v = evaluate(this.parse(schema.from), ctx);
-        value = isPending(v) ? undefined : v; // canceled async children resolve to nothing
+    // Resolve declared outputs (SPEC §3.7: resolved when the state terminates). An output with a
+    // BINDING is derived from it (what `from` used to express); one without is produced by the
+    // operation and already accumulated.
+    const scope = this.scopeFor(instance);
+    const outputs: Record<string, ResolvedValue> = {};
+    for (const [name, slot] of Object.entries(instance.def.outputs ?? {})) {
+      const meta = instance.def.slotMeta?.[`outputs.${name}`];
+      let value: ResolvedValue | undefined;
+      // Why a bound output produced nothing, when resolution actually FAILED. Kept rather than
+      // discarded: reporting "was not produced" for a binding that named a child which never ran
+      // launders the real cause, and §7.3's rule is that a failure carries the underlying one. A
+      // `default`/`optional` slot still absorbs it — the reason is only surfaced where the state
+      // would otherwise fail anyway.
+      let reason: string | undefined;
+      if (slot.binding !== undefined) {
+        const r = resolveRef(slot.binding, scope);
+        // A canceled async child resolves to nothing rather than blocking termination.
+        if (isPending(r)) value = undefined;
+        else if (isResolveError(r)) reason = r.error;
+        else value = r.value;
       } else {
         value = instance.outputs[name];
       }
+      if (value === undefined) value = meta?.default;
       if (value === undefined) {
-        if (!schema.optional) {
+        if (meta?.optional !== true) {
           return {
             outcome: "error",
-            failure: { classification: "permanent", reason: `required output '${name}' was not produced` },
+            failure: {
+              classification: "permanent",
+              reason: reason !== undefined ? `output '${name}': ${reason}` : `required output '${name}' was not produced`,
+            },
           };
         }
         continue;
       }
-      if (schema.type !== "passthrough") {
-        const err = this.validateFieldValue(name, schema, value);
-        if (err) return { outcome: "error", failure: { classification: "permanent", reason: err } };
-      }
+      const err = this.validateSlotValue(name, slot, value);
+      if (err) return { outcome: "error", failure: { classification: "permanent", reason: err } };
       outputs[name] = value;
     }
     return { outcome: "success", outputs };
   }
 
-  // --- expression context ---------------------------------------------------
+  // --- expression context / resolution scope --------------------------------
 
   private exprContext(instance: Instance): Record<string, unknown> {
     const children: Record<string, unknown> = {};
@@ -579,13 +630,44 @@ export class WorkflowEngine {
     return {
       inputs: instance.inputs,
       outputs: instance.outputs,
-      params: instance.params,
-      function: instance.functionResults,
       children,
       run: { iteration: instance.iteration },
       limits: { ...(instance.def.limits ?? {}) },
       artifacts,
-      conversations: {},
+      conversations: Object.fromEntries(this.transcripts),
+    };
+  }
+
+  /** The run-scoped view binding resolution needs (§7.4) — this instance's data addresses. */
+  private scopeFor(instance: Instance): ResolutionScope {
+    return {
+      exprContext: this.exprContext(instance),
+      childOutputs: (key) => {
+        const rec = instance.children.get(key);
+        if (!rec) return undefined;
+        // A child already run ⇒ REUSE its outputs; that reuse IS findmyprompt's memo semantics,
+        // in memory. Still running ⇒ PENDING (the dataflow join parks on it).
+        if (rec.status === "running") return PENDING;
+        return asJsonRecord(rec.outputs ?? {});
+      },
+      scopeValue: (name) => {
+        const v = instance.inputs[name];
+        return v === undefined ? undefined : (v as JsonValue);
+      },
+      artifact: (name) => {
+        const found = this.artifacts.find((a) => a.name === name);
+        return found === undefined ? undefined : (found as unknown as JsonValue);
+      },
+      // A previous conversation read as DATA (§7.5): the whole transcript, or one message of it.
+      // Served from the mirror the engine keeps as it reads/writes transcripts — binding resolution
+      // is synchronous, and a session this run has not touched has nothing to read anyway.
+      conversation: (session, message) => {
+        const turns = this.transcripts.get(session);
+        if (!turns) return undefined;
+        if (message === undefined) return turns as unknown as JsonValue;
+        const turn = turns[message];
+        return turn === undefined ? undefined : (turn as unknown as JsonValue);
+      },
     };
   }
 
@@ -602,237 +684,367 @@ export class WorkflowEngine {
   // --- input resolution -----------------------------------------------------
 
   private resolveRootInputs(
-    def: StateDef,
-    provided: Record<string, unknown>,
-  ): { values: Record<string, unknown> } | { error: string } {
-    const values: Record<string, unknown> = {};
-    for (const [name, schema] of Object.entries(def.inputs ?? {})) {
+    def: LoadedState,
+    provided: Record<string, ResolvedValue>,
+  ): { values: Record<string, ResolvedValue> } | { error: string } {
+    const values: Record<string, ResolvedValue> = {};
+    for (const [name, slot] of Object.entries(def.inputs ?? {})) {
+      const meta = def.slotMeta?.[`inputs.${name}`];
       let v = provided[name];
-      if (v === undefined) v = schema.default;
+      if (v === undefined) v = meta?.default;
       if (v === undefined) {
-        if (schema.optional) continue;
+        // A bound input is filled after entry by `resolveInputBindings` (it resolves against the
+        // instance's own scope); an optional input may stay unset. Neither is "missing".
+        if (slot.binding !== undefined || meta?.optional === true) continue;
         return { error: `required input '${name}' missing` };
       }
-      const err = this.validateFieldValue(name, schema, v);
+      const err = this.validateSlotValue(name, slot, v);
       if (err) return { error: err };
       values[name] = v;
     }
     return { values };
   }
 
-  /** PENDING ⇒ parked (dataflow join); `{error}` ⇒ blocked; else resolved values. */
+  /**
+   * Resolve a child's declared inputs from the parent's wiring (§7.4). Every wire is a base
+   * `Ref<InlineFamily>` after loading, so this is one uniform resolution — no expression/literal
+   * branch. PENDING ⇒ parked (the dataflow join); `{error}` ⇒ blocked; else the resolved values.
+   */
   private resolveChildInputs(
     instance: Instance,
-    decl: ChildDecl,
-  ): typeof PENDING | { values?: Record<string, unknown>; error?: string } {
+    decl: LoadedChild,
+  ): typeof PENDING | { values?: Record<string, ResolvedValue>; error?: string } {
     const childDef = this.config.bundle.states[decl.state];
     if (!childDef) return { error: `unknown state '${decl.state}'` };
-    const ctx = this.exprContext(instance);
-    const values: Record<string, unknown> = {};
-    for (const [name, schema] of Object.entries(childDef.inputs ?? {})) {
-      const wiring = decl.inputs?.[name];
-      let v: unknown;
-      if (wiring === undefined) {
-        v = schema.default;
-      } else if (typeof wiring === "string") {
-        v = evaluate(this.parse(wiring), ctx);
-        if (isPending(v)) return PENDING;
-      } else {
-        v = wiring.value;
+    const scope = this.scopeFor(instance);
+    const values: Record<string, ResolvedValue> = {};
+    for (const [name, slot] of Object.entries(childDef.inputs ?? {})) {
+      const meta = childDef.slotMeta?.[`inputs.${name}`];
+      const wire = decl.inputs?.[name];
+      let v: ResolvedValue | undefined;
+      if (wire !== undefined) {
+        const r = resolveRef(wire, scope);
+        if (isPending(r)) return PENDING;
+        if (isResolveError(r)) return { error: `${decl.state}: input '${name}': ${r.error}` };
+        v = r.value;
       }
-      if (v === undefined) v = schema.default;
+      if (v === undefined) v = meta?.default;
       if (v === undefined) {
-        if (schema.optional) continue;
+        // A bound input resolves after entry (`resolveInputBindings`); an optional input may stay unset.
+        if (slot.binding !== undefined || meta?.optional === true) continue;
         return { error: `${decl.state}: required input '${name}' missing` };
       }
-      const err = this.validateFieldValue(name, schema, v, decl.state);
+      const err = this.validateSlotValue(name, slot, v, decl.state);
       if (err) return { error: err };
       values[name] = v;
     }
     return { values };
   }
 
-  private validateFieldValue(name: string, schema: FieldSchema, value: unknown, statePrefix?: string): string | undefined {
+  /**
+   * Resolve any input slot that carries a BINDING into `instance.inputs`, so a producer-backed input
+   * is not silently `undefined` (the by-name fill and the parent wire populate only FREE inputs).
+   * Resolved against the instance's own scope at entry; a value already present — provided by the
+   * parent's wire or a static default — wins (it is the more specific value), and a binding that is
+   * PENDING or unresolvable at entry leaves the slot unset, the same graceful outcome as an unwired
+   * optional input.
+   */
+  private resolveInputBindings(instance: Instance): void {
+    const inputs = instance.def.inputs;
+    if (inputs === undefined) return;
+    const scope = this.scopeFor(instance);
+    for (const [name, slot] of Object.entries(inputs)) {
+      if (instance.inputs[name] !== undefined) continue; // already wired or defaulted
+      const binding = slot.binding;
+      if (binding === undefined) continue;
+      const r = resolveRef(binding, scope);
+      if (isResolvedValue(r)) instance.inputs[name] = r.value;
+    }
+  }
+
+  /**
+   * Validate a value against a declared slot's schema (tier-3 boundary validation, §4). An
+   * ARTIFACT slot is checked structurally (an artifact ref, or inline string content); a slot with
+   * no schema constrains nothing.
+   */
+  private validateSlotValue(name: string, slot: Parameter<InlineFamily>, value: ResolvedValue, statePrefix?: string): string | undefined {
     const label = statePrefix ? `${statePrefix}: '${name}'` : `'${name}'`;
-    if (schema.type === "artifact") {
+    if (isArtifactSlot(slot)) {
+      // BYTES are the canonical form of a blob leaf (§7) — the whole point of the kind. A STREAM over
+      // those bytes is equally valid (§7.3): materialization is deferred, so the slot must let the live
+      // stream through rather than reject it here and force an eager drain at every boundary. A ref and
+      // inline string content are the other two accepted forms.
+      if (value instanceof Uint8Array || isByteStream(value)) return undefined;
       if (!isArtifactRef(value) && typeof value !== "string") {
-        return `${label} expects an artifact (or inline string content)`;
+        return `${label} expects an artifact (bytes, a byte stream, an artifact ref, or inline string content)`;
       }
       return undefined;
     }
-    if (schema.type === "passthrough") return undefined;
-    const doc: Record<string, unknown> = { type: schema.type };
-    if (schema.enum) doc["enum"] = schema.enum;
-    if (schema.items) doc["items"] = schema.items;
-    if (schema.properties) doc["properties"] = schema.properties;
-    if (schema.required) doc["required"] = schema.required;
-    const res = this.validator.validateValue(doc, value);
+    const schema = slot.schema;
+    if (schema === undefined || Object.keys(schema).length === 0) return undefined; // unconstrained
+    if (isArtifactRef(value)) return undefined; // an artifact carries its own identity, not the slot's shape
+    const res = this.validator.validateValue(schema, value as JsonValue);
     return res.ok ? undefined : `${label} failed validation: ${res.errors ?? "invalid"}`;
   }
 
   // --- operations -----------------------------------------------------------
 
-  private async runFunctionOperation(instance: Instance, fn: FunctionConfig): Promise<ExecFailure | undefined> {
-    this.emit({ type: "operation.started", instanceId: instance.id, stateId: instance.stateId, op: "function" });
-    const func = this.config.registry.functions.get(fn.name);
-    if (!func) {
+  /**
+   * Run the state's operation (§7.4): resolve its bindings against the run context, then dispatch
+   * the RESOLVED op by kind — a `PromptOp` to `registry.prompt` (the llm leaf runner), a
+   * `FunctionOp` to `registry.functions`. Sub-workflows, composite units, and delegated agent
+   * runtimes are all FunctionOps; nothing about the op distinguishes them, only the resolved
+   * registry entry's capabilities (§3.1). Conversation preambles, sessions, and permission gating
+   * attach exactly where they did before — only the payload shape and wiring resolution changed.
+   */
+  private async runOperation(instance: Instance, op: Operation<InlineFamily>): Promise<Failure | undefined> {
+    const kind: OperationKind = op.kind === "prompt" ? "prompt" : "function";
+    this.emit({ type: "operation.started", instanceId: instance.id, stateId: instance.stateId, op: kind });
+    const fail = (failure: Failure): Failure => {
+      this.emit({ type: "operation.failed", instanceId: instance.id, stateId: instance.stateId, op: kind, failure });
+      return failure;
+    };
+
+    // Resolve every BOUND input; FREE slots are filled by name from the state's own inputs (the
+    // model's §3.8 rule). Bound values win, because a binding is what the author wrote on THIS
+    // operation while the state's inputs are the general scope it draws from — the "explicit value
+    // overrides a binding" rule applies one level up, where a parent wires into a child's inputs
+    // (`resolveChildInputs`). A PENDING producer means the operation depends on an async child that
+    // has not resolved: a blocked operation rather than a park, since a state's operation runs once.
+    const resolved = resolveInputs(op.input, this.scopeFor(instance));
+    if (isPending(resolved)) {
+      return fail({ classification: "permanent", reason: "operation inputs depend on a child that has not resolved" });
+    }
+    if ("error" in resolved) return fail({ classification: "permanent", reason: resolved.error });
+    const opInputs: FunctionInputs = { ...instance.inputs, ...resolved.values };
+
+    return op.kind === "prompt"
+      ? this.runPromptOp(instance, op, opInputs, fail)
+      : this.runFunctionOp(instance, op, opInputs, fail);
+  }
+
+  /** Dispatch a `FunctionOp` through the function registry (§7.4). */
+  private async runFunctionOp(
+    instance: Instance,
+    op: FunctionOp<InlineFamily>,
+    opInputs: FunctionInputs,
+    fail: (f: Failure) => Failure,
+  ): Promise<Failure | undefined> {
+    const entry: RegisteredFunction<ExecServices, WorkflowMetrics> | undefined = this.config.registry.functions.get(op.functionRef);
+    if (!entry) {
       // Run-fatal, not a state outcome: a transition could otherwise keep re-entering the state (e.g.
       // §7.3's blocked → human_review) and loop forever.
-      const failure: ExecFailure = {
+      const failure = fail({
         classification: "permanent",
-        reason: `state '${instance.stateId}' requires function '${fn.name}' but no such function is registered`,
-      };
-      this.emit({ type: "operation.failed", instanceId: instance.id, stateId: instance.stateId, op: "function", failure });
+        reason: `state '${instance.stateId}' requires function '${op.functionRef}' but no such function is registered`,
+      });
       this.fatal = failure;
       this.rootAbort?.abort();
       return failure;
     }
-    let result: unknown;
-    try {
-      // An async function's promise is awaited here (the state's operation); an interactive function
-      // (e.g. a human-approval gate) drives its renderer internally and resolves once input arrives.
-      result = await func.run({ config: fn, inputs: shallowRedactArtifacts(instance.inputs, true) }, this.childServices());
-    } catch (e) {
-      const failure: ExecFailure = { classification: "permanent", reason: `function rejected: ${(e as Error).message}` };
-      this.emit({ type: "operation.failed", instanceId: instance.id, stateId: instance.stateId, op: "function", failure });
-      return failure;
+
+    // The execution ENVIRONMENT (session, tools, permissions) is a sibling of the op, never part of
+    // it (§7.1). A delegated adapter enforces policy through its own callback, so its tools stay raw.
+    const env = instance.def.environment ?? {};
+    const sessionId = env.session ?? DEFAULT_SESSION;
+    // The entry's capabilities are REQUIRED and total per variant (§2), so this reads a definite value
+    // instead of falling through an `undefined` and silently defaulting the permission gate.
+    const delegates = entry.kind === "runtime" && entry.capabilities.policyEnforcement === "callback";
+    const toolsOrFailure = this.resolveTools(env, sessionId, delegates);
+    if ("failure" in toolsOrFailure) return fail(toolsOrFailure.failure);
+
+    const services = this.servicesFor(sessionId, instance, toolsOrFailure.tools);
+    // Errors are DATA (§4.2): the impl RESOLVES value-or-failure, so a 429 raised inside a registered
+    // function keeps its classification instead of being reconstructed from `err.name` — which is what
+    // made every non-`AbortError` permanently failed, retry machinery and all.
+    const outcome = await runFunction(entry, opInputs, services);
+    // An impl that reports what it cost (a delegated agent bills inside its own loop) rolls up here,
+    // exactly as a prompt op's outcome does — otherwise the spend of the most expensive thing in the
+    // graph is the one thing the run's metrics never see. `childLlmCalls` counts LLM calls: a prompt op
+    // IS one such call — hence the `1 +` on that path — but a function op is NOT. A pure helper or any
+    // non-LLM function makes zero, so an ABSENT count means zero LLM calls, not one that went unreported.
+    // (The field was `childCalls` when it came from findmyprompt, where a function only ever ran in
+    // service of a call, so a missing count implied 1; here that assumption invents a call that never ran.)
+    const metrics = outcome.metrics;
+    if (metrics) {
+      this.childLlmCalls += metrics.childLlmCalls ?? 0;
+      this.childCost += metrics.costUsd;
     }
     if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
-    const failure = this.acceptOpOutputs(instance, "function", result);
-    if (failure) return failure;
-    if (result !== null && typeof result === "object") Object.assign(instance.functionResults, result);
-    this.emit({ type: "operation.completed", instanceId: instance.id, stateId: instance.stateId, op: "function" });
+    if (!isOk(outcome)) return fail(outcome.error);
+    // The op's declared output KIND decides how its value is read — a `blob` output IS the value
+    // (bytes), any other kind is a record of named outputs. Omitting it here left the blob branch
+    // unreachable from the function path, so a function op producing a `Uint8Array` failed with "did
+    // not produce required output" about the file it had just produced (§7.1).
+    const failure = this.acceptOpOutputs(instance, "function", outcome.value, op.output.kind);
+    if (failure) return fail(failure);
+    this.emit({
+      type: "operation.completed",
+      instanceId: instance.id,
+      stateId: instance.stateId,
+      op: "function",
+      ...(metrics !== undefined ? { metrics } : {}),
+    });
     return undefined;
   }
 
-  private async runRuntimeOperation(instance: Instance, rt: RuntimeConfig): Promise<ExecFailure | undefined> {
-    const op: OperationKind = "runtime";
-    this.emit({ type: "operation.started", instanceId: instance.id, stateId: instance.stateId, op });
-    const fail = (failure: ExecFailure): ExecFailure => {
-      this.emit({ type: "operation.failed", instanceId: instance.id, stateId: instance.stateId, op, failure });
-      return failure;
-    };
-
-    const runtime = this.config.registry.runtimes.get(rt.name);
-    if (!runtime) return fail({ classification: "permanent", reason: `no runtime '${rt.name}' registered` });
-
-    // The logical SESSION this operation runs under (RUNTIMES-AND-PERMISSIONS.md §3): the sharing key for
-    // its owned resources — conversation transcript, workspace, permissions. Absent ⇒ the run's default
-    // session, so a plain workflow is ONE shared session (SPEC §4.7 full_history threads across states);
-    // set a distinct `runtime.session` to isolate a subtree (e.g. a fan-out branch).
-    const sessionId = rt.session ?? DEFAULT_SESSION;
-
-    // Prompt source: a named skill (a template from registry.skills) OR the inline template.
-    let template: string;
-    if (rt.prompt?.skill !== undefined) {
-      const skillTemplate = this.config.registry.skills.get(rt.prompt.skill);
-      if (skillTemplate === undefined) return fail({ classification: "permanent", reason: `skill '${rt.prompt.skill}' is not registered` });
-      template = skillTemplate;
-    } else {
-      template = rt.prompt?.template ?? "";
+  /** Dispatch a `PromptOp` through the registered prompt runner (§6/§7.4). */
+  private async runPromptOp(
+    instance: Instance,
+    op: PromptOp<InlineFamily>,
+    opInputs: FunctionInputs,
+    fail: (f: Failure) => Failure,
+  ): Promise<Failure | undefined> {
+    const promptExecutor = this.config.prompt;
+    if (!promptExecutor) {
+      return fail({ classification: "permanent", reason: "this workflow contains a prompt state but no prompt executor is wired in (EngineConfig.prompt)" });
     }
 
-    const rendered = this.renderTemplate(template, instance, rt.params);
+    const env = instance.def.environment ?? {};
+    // The logical SESSION this operation runs under (DESIGN §5.1, "Sessions: the run-scoped resource bundle"): the sharing key
+    // for its owned resources — conversation transcript, workspace, permissions. Absent ⇒ the run's
+    // default session, so a plain workflow is ONE shared session (SPEC §4.7 threads across states).
+    const sessionId = env.session ?? DEFAULT_SESSION;
+
+    // The `user` slot holds an inline template, or a `skill:` reference resolved through
+    // `registry.skills` (the two authored prompt sources, §7.1).
+    let template = op.user;
+    const skill = skillNameOf(op.user);
+    if (skill !== undefined) {
+      const skillTemplate = this.config.registry.skills.get(skill);
+      if (skillTemplate === undefined) return fail({ classification: "permanent", reason: `skill '${skill}' is not registered` });
+      template = skillTemplate;
+    }
+    const rendered = this.renderTemplate(template, instance, opInputs);
     const transcript = await this.readTranscript(sessionId);
-    const preamble = this.conversationPreamble(rt.conversation?.mode ?? "full_history", transcript, rt.conversation?.artifacts);
+    const preamble = this.conversationPreamble(env.conversation?.mode ?? "full_history", transcript, env.conversation?.artifacts);
     const prompt = preamble ? `${preamble}\n\n${rendered}` : rendered;
 
-    // Resolve the state's declared tool NAMES through `registry.tools` into executables for the runtime.
-    // An unregistered tool is a permanent operation failure (the same contract as an unregistered skill).
-    let tools: Record<string, Tool> | undefined;
-    if (rt.tools !== undefined && rt.tools.length > 0) {
-      tools = {};
-      for (const name of rt.tools) {
-        const tool = this.config.registry.tools.get(name);
-        if (!tool) return fail({ classification: "permanent", reason: `tool '${name}' is not registered` });
-        tools[name] = tool;
-      }
-      // Permission gate (RUNTIMES-AND-PERMISSIONS.md §4): with an approver configured, wrap every tool so a
-      // call is authorized by profile × mode; seed this state's authored profile once; inject the plan-exit
-      // gate while the session is in `plan`. Without an approver, tools run unguarded.
-      //
-      // A DELEGATED runtime (`policyEnforcement: "callback"`) authorizes its OWN loop's tool calls by routing
-      // its native callback through `ctx.approve` — wrapping here too would double-gate, so it gets RAW tools.
-      const approve = this.config.permissions?.approve;
-      const delegatesPermissions = runtime.capabilities.policyEnforcement === "callback";
-      if (approve && !delegatesPermissions) {
-        if (rt.permissions?.profile) this.permissions.seedProfile(sessionId, rt.permissions.profile);
-        const authoredMode = (name: string): PermissionMode | undefined => rt.permissions?.tools?.[name] ?? rt.permissions?.default;
-        const smartFor = this.config.permissions?.smart;
-        const profiles = this.config.permissions?.profiles;
-        const guarded: Record<string, Tool> = {};
-        for (const [name, tool] of Object.entries(tools)) {
-          guarded[name] = withPermission(tool, {
-            ledger: this.permissions,
-            sessionId,
-            toolName: name,
-            approve,
-            authoredMode: authoredMode(name),
-            smart: smartFor?.[name],
-            profiles,
-          });
-        }
-        if (this.permissions.resolveProfile(sessionId) === "plan") {
-          guarded["exit_plan"] = planExitTool({ ledger: this.permissions, sessionId, approve });
-        }
-        tools = guarded;
-      }
-    }
+    const toolsOrFailure = this.resolveTools(env, sessionId, false);
+    if ("failure" in toolsOrFailure) return fail(toolsOrFailure.failure);
+    const tools = toolsOrFailure.tools;
 
-    const outputSchema = buildOutputSchema(this.producedOutputFields(instance.def));
-    const runtimeOp: RuntimeOp = {
-      prompt,
-      config: rt.config ?? {},
-      outputSchema,
-      tools,
-      timeoutMs: instance.def.limits?.timeout !== undefined ? instance.def.limits.timeout * 1000 : undefined,
-      abortSignal: instance.abort.signal,
+    // The op the runner receives is the authored one with its bindings RESOLVED: the rendered
+    // prompt in `user`, and the state's produced outputs as the structured-output contract.
+    //
+    // A BLOB-kind op output is the exception (§7.1): the operation produces bytes, not a JSON record
+    // of named outputs, so overwriting its schema with the object contract would ask a model for JSON
+    // and then hand back a file. Its schema is left alone and the bytes fill the single produced slot.
+    const producedSlots = this.producedOutputSlots(instance.def);
+    const produced = op.output.kind === "blob" ? undefined : buildOutputSchema(producedSlots, instance.def);
+    const resolvedOp: PromptOp<InlineFamily> = {
+      ...op,
+      user: prompt,
+      output: { ...op.output, ...(produced !== undefined ? { schema: produced } : {}) },
     };
 
-    // Per-session workspace (RUNTIMES-AND-PERMISSIONS.md §3): states sharing a `sessionId` share one; a
-    // fan-out can isolate each branch (e.g. its own worktree) via `workspaceFor`. Falls back to the single
-    // run-level `services.workspace` when the host provides no per-session resolver / entry for this id.
-    const services = this.childServices();
-    const workspace = this.config.workspaceFor?.(sessionId) ?? services.workspace;
-    if (workspace !== services.workspace) services.workspace = workspace;
-
+    // The per-call ENVIRONMENT the old `PromptOpEnvironment` carried — tools, the time budget,
+    // cancellation — are `ExecServices` fields now, which is why that type could be deleted outright.
+    const services = this.servicesFor(sessionId, instance, tools);
+    if (instance.def.limits?.timeout !== undefined) services.timeoutMs = instance.def.limits.timeout * 1000;
     let outcome;
     try {
-      outcome = await runtime.run(runtimeOp, services).outcome;
+      outcome = await promptExecutor.start(resolvedOp, services).result;
     } catch (e) {
-      // Runtimes must not reject for unit failures; a rejection is a runtime bug —
-      // normalized here so the workflow still degrades per SPEC §3.3.
-      return fail({ classification: "permanent", reason: `runtime rejected: ${(e as Error).message}` });
+      // An executor must not reject for unit failures; a rejection is a bug — normalized here so the
+      // workflow still degrades per SPEC §3.3.
+      return fail({ classification: "permanent", reason: `prompt executor rejected: ${(e as Error).message}` });
     }
-    this.childCalls += 1 + (outcome.metrics.childCalls ?? 0);
-    this.childCost += outcome.metrics.cost ?? 0;
+    this.childLlmCalls += 1 + (outcome.metrics.childLlmCalls ?? 0);
+    this.childCost += outcome.metrics.costUsd;
     if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
 
-    // Conversation artifact (SPEC §4.7): every runtime operation appends its exchange to the session store.
+    // A FAILED call contributes nothing to the transcript. It ran before this check and a failure
+    // carries no `value`, so the assistant turn was the literal string "null" — and under the default
+    // `full_history` mode every later state in the session then read that back in its preamble.
+    if (!isOk(outcome)) return fail(outcome.error);
+
+    // Conversation artifact (SPEC §4.7): every SUCCEEDED prompt operation appends its exchange to the
+    // session. The assistant turn is the op's OUTPUT VALUE. It used to prefer the model's `rawText`, but
+    // that is `LlmOutput` payload and stops at the prompt executor — and for a text-output op the output
+    // value IS that text, so the two agree wherever it mattered.
     await this.appendTranscript(sessionId, [
       { role: "user", content: prompt },
-      { role: "assistant", content: outcome.rawText ?? JSON.stringify(outcome.value ?? null) },
+      { role: "assistant", content: typeof outcome.value === "string" ? outcome.value : JSON.stringify(outcome.value ?? null) },
     ]);
 
-    if (outcome.error) {
-      return fail(outcome.error);
-    }
-    const failure = this.acceptOpOutputs(instance, op, outcome.value);
+    const failure = this.acceptOpOutputs(instance, "prompt", (outcome.value ?? null) as ResolvedValue, op.output.kind);
     if (failure) return fail(failure);
-    this.emit({ type: "operation.completed", instanceId: instance.id, stateId: instance.stateId, op, metrics: outcome.metrics });
+    this.emit({ type: "operation.completed", instanceId: instance.id, stateId: instance.stateId, op: "prompt", metrics: outcome.metrics });
     return undefined;
   }
 
-  /** The `ExecServices` runtimes/functions run with: caller services + engine validator + the run's session
-   *  store — the SAME store the built-in transcript uses, so `withSession` and the preamble share one source
-   *  (states sharing a logical `sessionId` continue one conversation; an app store wins). */
+  /**
+   * Resolve the environment's declared tool NAMES through `registry.tools` into executables, and
+   * apply the permission gate (DESIGN §5.1, "Enforcement"): with an approver configured, wrap
+   * every tool so a call is authorized by profile × mode; seed the authored profile once; inject the
+   * plan-exit gate while the session is in `plan`. A DELEGATED adapter (`policyEnforcement:
+   * "callback"`) authorizes its own loop's calls through `ctx.approve`, so it gets RAW tools —
+   * wrapping there too would double-gate.
+   */
+  private resolveTools(
+    env: EnvironmentDecl,
+    sessionId: string,
+    delegatesPermissions: boolean,
+  ): { tools?: Record<string, Tool> } | { failure: Failure } {
+    if (env.tools === undefined || env.tools.length === 0) return {};
+    const tools: Record<string, Tool> = {};
+    for (const name of env.tools) {
+      const tool = this.config.registry.tools.get(name);
+      if (!tool) return { failure: { classification: "permanent", reason: `tool '${name}' is not registered` } };
+      tools[name] = tool;
+    }
+    const approve = this.config.permissions?.approve;
+    if (!approve || delegatesPermissions) return { tools };
+
+    if (env.permissions?.profile) this.permissions.seedProfile(sessionId, env.permissions.profile);
+    const authoredMode = (name: string): PermissionMode | undefined => env.permissions?.tools?.[name] ?? env.permissions?.default;
+    const smartFor = this.config.permissions?.smart;
+    const profiles = this.config.permissions?.profiles;
+    const guarded: Record<string, Tool> = {};
+    for (const [name, tool] of Object.entries(tools)) {
+      guarded[name] = withPermission(tool, {
+        ledger: this.permissions,
+        sessionId,
+        toolName: name,
+        approve,
+        authoredMode: authoredMode(name),
+        smart: smartFor?.[name],
+        profiles,
+      });
+    }
+    if (this.permissions.resolveProfile(sessionId) === "plan") {
+      guarded["exit_plan"] = planExitTool({ ledger: this.permissions, sessionId, approve });
+    }
+    return { tools: guarded };
+  }
+
+  /** The services one operation runs with: its session's workspace, its tools, its cancellation. */
+  private servicesFor(sessionId: string, instance: Instance, tools?: Record<string, Tool>): ExecServices {
+    const services = this.childServices();
+    // Per-session workspace (DESIGN §5.1, "Sessions: the run-scoped resource bundle"): states sharing a `sessionId` share one; a
+    // fan-out can isolate each branch (e.g. its own worktree) via `workspaceFor`. Falls back to the
+    // run-level `services.workspace` when the host provides none for this id.
+    const workspace = this.config.workspaceFor?.(sessionId) ?? services.workspace;
+    if (workspace !== services.workspace) services.workspace = workspace;
+    if (tools !== undefined) services.tools = tools;
+    // A registered async function's only channel to the caller is the ctx, so cancellation rides here.
+    services.abortSignal = instance.abort.signal;
+    return services;
+  }
+
+  /** The `ExecServices` operations run with: caller services + engine validator + the run's session
+   *  store — the SAME store the built-in transcript uses, so `withSession` and the preamble share one
+   *  source (states sharing a logical `sessionId` continue one conversation; an app store wins). */
   private childServices(): ExecServices {
     return {
       ...this.config.services,
       validator: this.validator,
       sessions: this.sessions(),
-      // A delegated runtime reads this to route its native permission callback through our approval UI;
-      // the engine wraps a composed runtime's tools directly, so this is inert for the llm runtime.
+      // A delegated adapter reads this to route its native permission callback through our approval
+      // UI; the engine wraps a composed runtime's tools directly, so this is inert for a prompt op.
+      // `approve` is `@declarative-ai/permissions`' seam on `ExecServices` — `exec` does not know it
+      // exists (DESIGN §3.2).
       approve: this.config.permissions?.approve ?? this.config.services?.approve,
     };
   }
@@ -840,61 +1052,126 @@ export class WorkflowEngine {
   /**
    * Merge an operation's structured result into the instance outputs (SPEC §3.3 step 3:
    * "its outputs are validated"). Provided fields are type-checked; artifact-typed
-   * fields arrive as inline content and are registered as artifacts. Once the last
-   * output-producing operation of the state has run, required produced fields must all
-   * be present.
+   * fields arrive as inline content and are registered as artifacts. Once the state's
+   * operation has run, required produced fields must all be present.
    */
-  private acceptOpOutputs(instance: Instance, op: OperationKind, value: unknown): ExecFailure | undefined {
-    const produced = this.producedOutputFields(instance.def);
-    const record = value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-    for (const [name, schema] of Object.entries(produced)) {
-      let v = record[name];
-      if (v === undefined) continue;
-      if (schema.type === "artifact" && typeof v === "string") {
-        const ref: ArtifactRef = {
-          artifact: true,
-          name: `${instance.stateId.replace(/\//g, ".")}#${instance.id}.${name}`,
-          format: schema.format,
-          content: v,
+  private acceptOpOutputs(instance: Instance, op: OperationKind, value: ResolvedValue, outputKind?: RefKind): Failure | undefined {
+    const produced = this.producedOutputSlots(instance.def);
+
+    // A BLOB-kind operation output is the WHOLE value, not a record of named outputs (§7.1) — the
+    // bytes go straight into the state's single produced slot. Without this the `Uint8Array` fell
+    // through the record path as an empty object and the state failed with "did not produce required
+    // output", which is exactly what a generated file DID produce.
+    //
+    // A blob output that is a live STREAM is stored here AS a stream, deliberately NOT drained: one
+    // downstream consumer can then pipe it un-materialized (§7.4). The drain, when required, happens
+    // where it is DECIDED — a fan-out at the producer's completion, the run result at the executor
+    // boundary, a memo key before hashing — never eagerly at every op that produces bytes.
+    if (outputKind === "blob") {
+      const names = Object.keys(produced);
+      if (names.length !== 1) {
+        return {
+          classification: "permanent",
+          reason: `state '${instance.stateId}' has a blob operation output, which fills exactly ONE produced output slot, but the state declares ${names.length}`,
         };
-        this.artifacts.push(ref);
-        v = ref;
+      }
+      const name = names[0]!;
+      const slot = produced[name]!;
+      if (isArtifactSlot(slot) && typeof value === "string") {
+        instance.outputs[name] = this.registerArtifact(instance, name, slot, value);
       } else {
-        const err = this.validateFieldValue(name, schema, v);
+        instance.outputs[name] = value;
+      }
+      return undefined;
+    }
+
+    // A whole-value stream is NOT a record of named outputs — the `getReader`-bearing object would
+    // otherwise be walked as one (typeof "object", not array, not `Uint8Array`) and yield an empty
+    // record. Guarded so a stream only ever reaches the blob branch above.
+    const record: Record<string, ResolvedValue> =
+      value !== null && typeof value === "object" && !Array.isArray(value) && !(value instanceof Uint8Array) && !isByteStream(value)
+        ? (value as Record<string, ResolvedValue>)
+        : {};
+    for (const [name, slot] of Object.entries(produced)) {
+      let v: ResolvedValue | undefined = record[name];
+      if (v === undefined) continue;
+      if (isArtifactSlot(slot) && typeof v === "string") {
+        v = this.registerArtifact(instance, name, slot, v);
+      } else {
+        const err = this.validateSlotValue(name, slot, v);
         if (err) return { classification: "api-retriable", reason: `operation output ${err}` };
       }
       instance.outputs[name] = v;
     }
-    const remaining =
-      (instance.def.function && !instance.opsRun.function) ||
-      (instance.def.runtime && !instance.opsRun.runtime);
-    if (!remaining) {
-      for (const [name, schema] of Object.entries(produced)) {
-        if (!schema.optional && instance.outputs[name] === undefined) {
-          return { classification: "api-retriable", reason: `${op} operations did not produce required output '${name}'` };
-        }
+    for (const name of Object.keys(produced)) {
+      const meta = instance.def.slotMeta?.[`outputs.${name}`];
+      if (meta?.optional !== true && meta?.default === undefined && instance.outputs[name] === undefined) {
+        return { classification: "api-retriable", reason: `${op} operation did not produce required output '${name}'` };
       }
     }
     return undefined;
   }
 
-  /** Output fields produced by operations: everything not derived via `from` and not passthrough. */
-  private producedOutputFields(def: StateDef): Record<string, OutputFieldSchema> {
-    const out: Record<string, OutputFieldSchema> = {};
-    for (const [name, schema] of Object.entries(def.outputs ?? {})) {
-      if (schema.from === undefined && schema.type !== "passthrough") out[name] = schema;
+  /**
+   * Drain the blob outputs of a just-completed child that this state FANS OUT (§7.3, rule 2). Runs in
+   * the producer's completion path — the one async point where every consumer is still downstream — so a
+   * single read serves them all. A drain failure fails the producer's delivery non-retriably: the
+   * consumers depended on bytes that will never come, so surfacing it as the child's error termination is
+   * the honest outcome (the parent's transitions then handle it like any child failure).
+   */
+  private async materializeFanOut(instance: Instance, key: string, term: TerminationRecord): Promise<TerminationRecord> {
+    const fanOut = instance.def.fanOut;
+    const outputs = term.outputs;
+    if (fanOut === undefined || outputs === undefined || term.outcome !== "success") return term;
+    for (const [name, value] of Object.entries(outputs)) {
+      if (!isByteStream(value) || !isFannedOut(fanOut, key, name)) continue;
+      try {
+        outputs[name] = await materialize(value, instance.abort.signal, `state '${instance.stateId}' child '${key}' output '${name}'`);
+      } catch (e) {
+        const reason = e instanceof MaterializeError ? e.message : `state '${instance.stateId}' child '${key}' output '${name}': ${(e as Error).message}`;
+        return { outcome: "error", failure: { classification: "permanent", reason } };
+      }
+    }
+    return term;
+  }
+
+  /** Register inline artifact CONTENT as a session artifact and return the ref that stands for it. */
+  private registerArtifact(instance: Instance, name: string, slot: Parameter<InlineFamily>, content: string): ArtifactRef {
+    const format = artifactFormat(slot);
+    const ref: ArtifactRef = {
+      artifact: true,
+      name: `${instance.stateId.replace(/\//g, ".")}#${instance.id}.${name}`,
+      ...(format !== undefined ? { format } : {}),
+      content,
+    };
+    this.artifacts.push(ref);
+    return ref;
+  }
+
+  /** Output slots the OPERATION produces: everything not derived from a binding (§7.1 — what an
+   *  output's `from` expression used to express is now that slot's binding). */
+  private producedOutputSlots(def: LoadedState): Record<string, NamedParameter<InlineFamily>> {
+    const out: Record<string, NamedParameter<InlineFamily>> = {};
+    for (const [name, slot] of Object.entries(def.outputs ?? {})) {
+      if (slot.binding === undefined) out[name] = slot;
     }
     return out;
   }
 
   // --- prompts & conversation -----------------------------------------------
 
-  /** `{{path.to.value}}` interpolation against the instance context. Artifact refs
-   *  render as their content; arrays/objects as JSON. */
-  private renderTemplate(template: string, instance: Instance, extraParams?: Record<string, unknown>): string {
+  /**
+   * `{{path.to.value}}` interpolation against the instance context. Artifact refs render as their
+   * content; arrays/objects as JSON.
+   *
+   * `opInputs` is the operation's RESOLVED inputs (the state's inputs plus the op's own bound inputs).
+   * They become the template's `{{inputs.*}}` scope — authored render variables ride bound input slots
+   * (loader §3.1), so a prompt sees exactly the inputs its operation resolved, nothing more.
+   */
+  private renderTemplate(template: string, instance: Instance, opInputs?: Record<string, ResolvedValue>): string {
     const base = this.exprContext(instance);
-    const ctx = extraParams
-      ? { ...base, params: { ...(base.params as Record<string, unknown>), ...extraParams } }
+    const ctx = opInputs
+      ? { ...base, inputs: { ...(base.inputs as Record<string, unknown>), ...opInputs } }
       : base;
     return template.replace(TEMPLATE_REF, (_m, path: string) => {
       let v: unknown;
@@ -916,10 +1193,13 @@ export class WorkflowEngine {
     return this.config.services?.sessions ?? this.sessionStore;
   }
 
-  /** Read `sessionId`'s transcript from the session store (`SessionState.messages`). */
+  /** Read `sessionId`'s transcript from the session store (`SessionState.messages`), mirroring it for
+   *  synchronous `{ conversation }` binding resolution (§7.5 — a transcript is addressable DATA). */
   private async readTranscript(sessionId: string): Promise<Turn[]> {
     const state = await this.sessions().get(sessionId);
-    return Array.isArray(state?.messages) ? (state.messages as Turn[]) : [];
+    const turns = Array.isArray(state?.messages) ? (state.messages as Turn[]) : [];
+    this.transcripts.set(sessionId, turns);
+    return turns;
   }
 
   /** Append turns to `sessionId`'s transcript in the session store, preserving any other `SessionState`. */
@@ -928,6 +1208,7 @@ export class WorkflowEngine {
     const state = (await store.get(sessionId)) ?? {};
     const messages = [...(Array.isArray(state.messages) ? state.messages : []), ...turns];
     await store.put(sessionId, { ...state, messages });
+    this.transcripts.set(sessionId, messages as Turn[]);
   }
 
   private conversationPreamble(mode: ConversationMode, transcript: Turn[], artifactNames?: string[]): string {
@@ -956,12 +1237,27 @@ export class WorkflowEngine {
 
 // --- helpers -----------------------------------------------------------------
 
-function defaultsOf(fields: Record<string, FieldSchema> | undefined): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [name, schema] of Object.entries(fields ?? {})) {
-    if (schema.default !== undefined) out[name] = schema.default;
-  }
-  return out;
+/**
+ * An ARTIFACT slot (SPEC §4.6) — a durable work product whose content travels inline for llm-backed
+ * states. It is simply a `blob`-KIND slot now (DESIGN §3.7): the bespoke `x-artifact: true`
+ * marker existed only because artifact slots had no kind, and `kindFor` derives `blob` from JSON
+ * Schema's own `contentEncoding`/`contentMediaType` instead. The slot's `contentMediaType` IS the
+ * artifact's content format.
+ */
+function isArtifactSlot(slot: Parameter<InlineFamily>): boolean {
+  return slot.kind === "blob";
+}
+
+/** The declared content format of an artifact slot — its media type. */
+function artifactFormat(slot: Parameter<InlineFamily>): string | undefined {
+  const media = slot.schema?.contentMediaType;
+  return typeof media === "string" ? media : typeof slot.schema?.format === "string" ? slot.schema.format : undefined;
+}
+
+/** JSON view of a resolved record — the resolution scope reads JSON, and engine-internal values are
+ *  JSON by construction (they came from validated inputs, operation outputs, or literals). */
+function asJsonRecord(values: Record<string, ResolvedValue>): Record<string, JsonValue> {
+  return values as Record<string, JsonValue>;
 }
 
 /** The state failed while flagged canceled/timed-out? Loop top decides; here we always report error. */
@@ -972,39 +1268,41 @@ function failureOutcome(instance: Instance): TerminationOutcome {
 }
 
 /** Failure payload for an author-directed `terminate.error` transition. */
-function errorOf(instance: Instance, target: string): ExecFailure {
+function errorOf(instance: Instance, target: string): Failure {
   return { classification: "permanent", reason: `state '${instance.stateId}' transitioned to ${target}` };
 }
 
-function buildOutputSchema(fields: Record<string, OutputFieldSchema>): Record<string, unknown> | undefined {
-  const names = Object.keys(fields);
+/** The structured-output contract a prompt operation must satisfy: the state's produced output
+ *  slots as one object schema. An artifact slot asks for its content as a string. */
+function buildOutputSchema(slots: Record<string, NamedParameter<InlineFamily>>, def: LoadedState): JsonSchema | undefined {
+  const names = Object.keys(slots);
   if (names.length === 0) return undefined;
-  const properties: Record<string, unknown> = {};
+  const properties: Record<string, JsonValue> = {};
   const required: string[] = [];
-  for (const [name, schema] of Object.entries(fields)) {
-    if (schema.type === "artifact") {
-      properties[name] = {
-        type: "string",
-        description: `Artifact content${schema.format ? ` (${schema.format})` : ""}.`,
-      };
+  for (const [name, slot] of Object.entries(slots)) {
+    const meta = def.slotMeta?.[`outputs.${name}`];
+    if (isArtifactSlot(slot)) {
+      const format = artifactFormat(slot);
+      properties[name] = { type: "string", description: `Artifact content${format !== undefined ? ` (${format})` : ""}.` };
     } else {
-      const doc: Record<string, unknown> = { type: schema.type };
-      if (schema.enum) doc["enum"] = schema.enum;
-      if (schema.items) doc["items"] = schema.items;
-      if (schema.properties) doc["properties"] = schema.properties;
-      if (schema.description) doc["description"] = schema.description;
+      const doc: Record<string, JsonValue> = { ...((slot.schema ?? {}) as Record<string, JsonValue>) };
+      if (meta?.description !== undefined) doc.description = meta.description;
       properties[name] = doc;
     }
-    if (!schema.optional) required.push(name);
+    // A default-backed output is optional in the structured-output contract: the engine backfills the
+    // default when the model omits it (see `finish`, `acceptOpOutputs`), so requiring the model to
+    // produce it would force a fabricated value and can trip strict schema validation. This matches
+    // the `optional !== true && default === undefined` rule every other optionality check applies.
+    if (meta?.optional !== true && meta?.default === undefined) required.push(name);
   }
   return { type: "object", properties, required, additionalProperties: true };
 }
 
 /** Keep event payloads readable: inline artifact contents are elided (or kept, for UI display). */
-function shallowRedactArtifacts(values: Record<string, unknown>, keepContent = false): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
+function shallowRedactArtifacts(values: Record<string, ResolvedValue>, keepContent = false): Record<string, ResolvedValue> {
+  const out: Record<string, ResolvedValue> = {};
   for (const [k, v] of Object.entries(values)) {
-    out[k] = isArtifactRef(v) && !keepContent ? { artifact: true, name: v.name, format: v.format } : v;
+    out[k] = isArtifactRef(v) && !keepContent ? { artifact: true, name: v.name, ...(v.format !== undefined ? { format: v.format } : {}) } : v;
   }
   return out;
 }

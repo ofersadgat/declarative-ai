@@ -1,7 +1,11 @@
 import { Output, jsonSchema, streamText, type LanguageModel, type ModelMessage, type StopCondition, type SystemModelMessage, type ToolChoice, type ToolSet } from "ai";
 import { createLogger } from "./logger";
 import { ModelInfo } from "./model-catalog";
-import { classifyError, describeError, isRateLimit, retryAfterMs as retryAfterMsOf, sha256Hex, type ErrorClass, type FileInput, type ProducedArtifact, type SamplingConfiguration, type ToolCall, type ToolResult } from "@declarative-ai/core";
+import { classifyError, decodeWithSchema, describeError, isRateLimit, retryAfterMs as retryAfterMsOf, type Failure, type JsonSchema, type JsonValue } from "@declarative-ai/json";
+import type { LlmCallResult, LlmMetrics, LlmOutput, ReasoningSegment, TokenCounts, ToolCall, ToolResult } from "./output";
+import type { GeneratedFile } from "./files";
+import type { LlmCallDefinition, SamplingConfiguration } from "./llmConfig";
+import { promptAsMessages, type CallPromptInput } from "./prompt";
 
 /**
  * The streaming structured-output call (§5/§5.1) + metrics. ONE LLM request; the §6.1
@@ -31,217 +35,56 @@ const log = createLogger("engine.providers.generate", { tag: "llm" });
  *    with tools); `text` is the tool's serialized args and `toolName` names it. This is
  *    NOT the structured-output (jsonTool) call — that one becomes the output, never a segment.
  */
-export interface ReasoningSegment {
-  type: "reasoning" | "tool-call";
-  text: string;
-  /** Length of the accumulated OUTPUT text when this segment began — lets us see how it
-   *  interleaves with / precedes the output it produced (§5.1). */
-  textOffset: number;
-  /** Tool name, for `type:"tool-call"` segments. */
-  toolName?: string;
-  /** Native provider metadata (e.g. an Anthropic thinking-block signature), preserved
-   *  intact for any v2 op that feeds the trace back. */
-  providerMetadata?: Record<string, unknown>;
-}
+
+
+// The schema-document type is the ONE ops `JsonSchema<T>` (API.md, "The JSON vocabulary"): the same phantom-branded
+// document everywhere a schema travels, so the call's `schema` threads its output type through to
+// `CallOutcome<T>.value` and the §4 Ajv boundary enforces it at runtime. `typedSchema` brands a plain
+// document; the ops typed layer's `FromSchema` inference derives `T` from an `as const` literal instead.
+export type { JsonSchema };
+export { typedSchema } from "@declarative-ai/json";
 
 /**
- * Token counts pulled off an AI SDK usage object. `inputTokens`/`outputTokens` are the
- * cache-INCLUSIVE totals; the optional breakdown (Anthropic `inputTokenDetails` /
- * `outputTokenDetails`) is what makes cost billing-accurate under prompt caching and feeds
- * the §6.2 ITPM estimator (which excludes cache reads). Absent fields = the provider didn't
- * report them (then cost falls back to flat input-rate pricing).
+ * The ENVIRONMENT one transport call runs against: everything that is NOT the serializable declaration
+ * — the live model handle, the provider-ADAPTED schema and its reverse transform, the resolved tool
+ * set, the merged `providerOptions`, the boundary check, and cancellation.
+ *
+ * `GenerateStructuredParams` is gone (DESIGN §4.1). It held live handles and closures —
+ * genuinely different from a serializable declaration — but it FLATTENED declaration and environment
+ * into one bag, re-listing every decoding knob in the process. Pushing the same `(def, env)` split one
+ * layer down makes the flat bag disappear and the re-listing with it.
  */
-export interface TokenCounts {
-  /** Total input tokens, INCLUDING cache reads + writes (matches the provider's billed input). */
-  inputTokens?: number;
-  /** Total output tokens, including reasoning tokens. */
-  outputTokens?: number;
-  /** Uncached (fresh) input tokens — billed at the base input rate. */
-  noCacheTokens?: number;
-  /** Cached input tokens read on a cache hit — billed at the discounted read rate (~0.1x). */
-  cacheReadTokens?: number;
-  /** Input tokens written into the prompt cache — billed at the write rate (~1.25x). */
-  cacheWriteTokens?: number;
-  /** 1-hour-TTL subset of `cacheWriteTokens` (from `raw` usage) — billed at the 2x tier. */
-  cacheWrite1hTokens?: number;
-  /** Reasoning/thinking output tokens (subset of `outputTokens`), for diagnostics. */
-  reasoningTokens?: number;
-  /** Provider-reported grand total, when present. */
-  totalTokens?: number;
-}
-
-export interface CallMetrics extends TokenCounts {
-  /** USD price (§5/§10.2). The provider's reported charge when available (OpenRouter usage
-   *  accounting), else computed cache-aware from the token split. */
-  cost?: number;
-  /** Where `cost` came from: `"provider"` = the provider's actual charge (authoritative);
-   *  `"table"` = our price-table estimate. Absent when no cost could be determined. */
-  costSource?: "provider" | "table";
-  /** Provider's exact usage object (ground truth) — kept so `cost` is always recomputable. */
-  rawUsage?: unknown;
-  durationMs: number;
-}
-
-export interface CallFailure {
-  classification: ErrorClass;
-  /** The real underlying cause (§10.4), stored as the error artifact. */
-  reason: string;
-  /** Server-advised wait before the next attempt, from the `retry-after` header (§10.4) —
-   *  ms. Present only on a transient rate-limit/5xx that carried the header; the eval loop's
-   *  retry honors it instead of blind exponential backoff. */
-  retryAfterMs?: number;
-  /** True iff this was a 429 rate-limit — feeds AIMD's multiplicative decrease (§6.2.B). */
-  rateLimited?: boolean;
-}
-
-export interface CallOutcome<T = unknown> {
-  /** Parsed structured value when the model produced usable output (kept even when a
-   *  later validation fails); undefined only when nothing parseable was produced. Typed
-   *  as `T`, the output type the call's `schema` describes (see {@link JsonSchema}). */
-  value?: T;
-  /** Raw accumulated output text — always present (possibly ""); the partial on failure. */
-  rawText: string;
-  /** Structured reasoning trace, positioned against the output (§4/§5.1). */
-  thinking?: ReasoningSegment[];
-  /** Tool calls the model requested — the primary output for a single-turn tool op (no executor supplied),
-   *  or the intermediate calls of an executed loop. Excludes the structured-output emulation tool. */
-  toolCalls?: ToolCall[];
-  /** Results of tool calls executed in-loop (present only when executors ran). */
-  toolResults?: ToolResult[];
-  /** FILES the model generated (image/audio/…) — a parallel output channel, never folded into `value`.
-   *  Each carries inline base64 `content` + `format` (media type) + a `contentHash`. */
-  artifacts?: ProducedArtifact[];
-  finishReason: string;
-  metrics: CallMetrics;
-  /** Present iff the call failed; `value`/`rawText`/`thinking` are then best-effort partials. */
-  error?: CallFailure;
-}
-
-/**
- * A JSON Schema document, optionally BRANDED with the type `T` of the value it validates. The
- * brand (`__out`) is PHANTOM — never present at runtime, never read — so a plain
- * `Record<string, unknown>` is still a valid `JsonSchema<unknown>` (backward compatible), and any
- * `JsonSchema<T>` is still a plain record for the schema-transform/validation code. It exists only
- * to thread the output type from a call's `schema` through to `CallOutcome<T>.value`; the §4 Ajv
- * boundary is what actually ENFORCES conformance at runtime. Brand a plain schema with `typedSchema`.
- */
-export type JsonSchema<T = unknown> = Record<string, unknown> & { readonly __out?: T };
-
-/** Brand a plain JSON Schema document with the output type it produces — identity at runtime, so it
- *  can also be inlined. Lets `T` be INFERRED at the call site instead of spelled out as a type arg. */
-export function typedSchema<T>(schema: Record<string, unknown>): JsonSchema<T> {
-  return schema as JsonSchema<T>;
-}
-
-/**
- * The prompt inputs for a call, mirroring the AI SDK `Prompt` capability surface so no expressiveness is
- * lost: a `system` prompt (a plain string OR structured system message(s)) plus EITHER a `prompt` (a plain
- * string or a message array) OR a `messages` array — the latter two carry multi-turn conversation and
- * MULTIMODAL content (image/file parts live inside `ModelMessage`). Provide exactly ONE of
- * `prompt`/`messages`; both are optional at the type level so the shape threads cleanly through the layers,
- * and the SDK enforces the "one or the other" rule at the call. NB for the definition to stay serializable,
- * any file/image data inside messages must be a base64 string or URL (not a live `Uint8Array`).
- */
-export interface CallPromptInput {
-  system?: string | SystemModelMessage | SystemModelMessage[];
-  prompt?: string | ModelMessage[];
-  messages?: ModelMessage[];
-  /** Neutral file/media inputs (pdf/image/audio/video) lowered to provider file parts + merged into the
-   *  user turn at the call boundary (content-hash/path refs resolved via the injected blob store). */
-  attachments?: FileInput[];
-}
-
-/** The plain-text content of a message's `content` (a string, or the text parts of a content array). */
-function messageContentText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : ""))
-      .filter(Boolean)
-      .join(" ");
-  }
-  return "";
-}
-
-/** Normalize a prompt input to its MESSAGE-LIST form: explicit `messages` win, an array prompt IS the
- *  messages, a non-empty string prompt becomes one user turn, nothing ⇒ `[]`. The SINGLE implementation of
- *  the three-way prompt-shape branch (session transcripts, attachment lowering, repair hints). */
-export function promptAsMessages(p: CallPromptInput): ModelMessage[] {
-  if (p.messages) return p.messages;
-  if (Array.isArray(p.prompt)) return p.prompt;
-  if (typeof p.prompt === "string" && p.prompt.length > 0) return [{ role: "user", content: p.prompt }];
-  return [];
-}
-
-/** Extract all plain text from a prompt input (system + prompt/messages) — used for the json-specifier
- *  check (§5.1) and cheap token estimation. Non-text parts (images/files/tool calls) contribute nothing. */
-export function promptText(p: CallPromptInput): string {
-  const parts: string[] = [];
-  if (typeof p.system === "string") parts.push(p.system);
-  else if (Array.isArray(p.system)) parts.push(p.system.map((m) => m.content).join("\n"));
-  else if (p.system) parts.push(p.system.content);
-  if (typeof p.prompt === "string") parts.push(p.prompt);
-  else if (Array.isArray(p.prompt)) parts.push(p.prompt.map((m) => messageContentText(m.content)).join("\n"));
-  if (p.messages) parts.push(p.messages.map((m) => messageContentText(m.content)).join("\n"));
-  return parts.join("\n");
-}
-
-/**
- * The RESOLVED transport call `generateStructured` runs — the FLAT serializable decoding knobs reused
- * from core's `SamplingConfiguration` (temperature/topP/topK/penalties + base's maxOutputTokens/
- * stopSequences/seed) PLUS the pieces the executor reconstructs from a `StructuredCallParams` at the call
- * boundary: the live `model` handle (resolved from the config's `model` string via the router), the
- * provider-ADAPTED `schema` + `postProcess`, the merged `providerOptions` (raw config passthrough + the
- * neutral `reasoning` adapted at the boundary), the `abortSignal` (from `timeoutMs`), and the boundary
- * `validate`. It is deliberately distinct from the serializable `StructuredCallParams` — this one holds
- * live handles + closures and never persists — but reuses the decoding-knob surface (via
- * `SamplingConfiguration`, whose optional knobs are the flat superset once reasoning is adapted away)
- * instead of re-listing it. `model` (the config's string id) is replaced by the resolved handle, and the
- * neutral `reasoning` is replaced by `providerOptions`; both are re-supplied below.
- */
-export interface GenerateStructuredParams<T = unknown>
-  extends Omit<SamplingConfiguration, "model" | "providerOptions" | "tools" | "toolChoice" | "maxSteps">,
-    CallPromptInput {
-  /** The resolved model handle (the router turns the config's `model` string into this). */
+export interface GenerateEnvironment<T = JsonValue> {
+  /** The resolved model handle (the router turns the declaration's `model` string into this). */
   model: LanguageModel;
-  /** The routing id — for pricing and provider detection. Kept alongside `model` because the handle's
-   *  own id isn't a reliable pricing/routing key (OpenRouter prefixing, etc.). */
-  modelId: string;
-  /** The ORIGINAL/OUTGOING JSON Schema (reconstruction + validation target), branded with the output
-   *  type `T`. OMITTED for a TEXT-output op (§3.14): no schema → plain `streamText`, the raw text IS
-   *  the value (the user's text→text flow). */
-  schema?: JsonSchema<T>;
-  abortSignal?: AbortSignal;
-  /** Merged provider options (raw config passthrough + adapted reasoning) forwarded to the SDK. */
-  providerOptions?: Record<string, unknown>;
-  /** The RESOLVED tool set (declarations from the config combined with runtime `execute` impls), keyed
-   *  by name. The executor builds this; `generateStructured` just forwards it to the SDK. */
+  /** The schema actually SENT — provider-adapted. Absent ⇒ the declaration's own `schema` goes as-is;
+   *  the reconstruction + validation target is always the declaration's ORIGINAL. */
+  outgoing?: JsonSchema<T>;
+  /** Reverse the model's structured answer back to the ORIGINAL schema's shape (union reconstruction,
+   *  any-decode, nullable-optional drop). This is also the seam a `Jsonify`→decoded lift belongs at
+   *  (API.md, "Codecs and type names"): validate the wire form, then decode. */
+  postProcess?: (value: JsonValue) => JsonValue;
+  /** Boundary check against the ORIGINAL schema; throws to signal a PERMANENT validation failure. */
+  validate?: (value: JsonValue, originalSchema: JsonSchema<T>) => void;
+  /** The RESOLVED tool set (declarations combined with runtime `execute` impls), keyed by name. */
   tools?: ToolSet;
   /** How the model may select among `tools`. */
   toolChoice?: ToolChoice<ToolSet>;
-  /** The stop condition bounding an executed tool loop (e.g. `stepCountIs(n)`); set only when tools have
-   *  executors. Absent ⇒ a single step (tool calls are returned, not executed in a loop). */
+  /** The stop condition bounding an executed tool loop; set only when tools have executors. Absent ⇒ a
+   *  single step (tool calls are returned, not executed in a loop). */
   stopWhen?: StopCondition<ToolSet> | Array<StopCondition<ToolSet>>;
+  /** Merged provider options (raw config passthrough + adapted reasoning) forwarded to the SDK. */
+  providerOptions?: Record<string, JsonValue>;
   /**
-   * Milestone 4 Ajv hook: throw to signal a PERMANENT validation failure of the
-   * reconstructed value against the original schema (§5.1). Default: no-op.
-   */
-  validate?: (value: unknown, originalSchema: Record<string, unknown>) => void;
-  /**
-   * Reverse the model's structured answer back to the ORIGINAL schema's shape (§5.1) — the
-   * `postProcess` from the schema adapter (union reconstruction, any-decode, nullable-optional drop).
-   * Supplied by the executor when it PRE-adapts the schema (which also lets it set the matching strict
-   * flag at model resolution); when omitted, `generateStructured` self-adapts from the model's profile.
-   */
-  postProcess?: (value: unknown) => unknown;
-  /**
-   * Whether to attach `Output.object` (i.e. request `response_format` json/json_schema) for this call.
-   * Default `true`. The executor sets it `false` for a TEXT-tier model (§5.1 `enforce:"text"`): no
-   * `response_format` is sent, the schema is described in the prompt instead, and the JSON is still
-   * parsed out of the returned text (`schema` stays present so the parse+validate path runs). Ignored
-   * when there's no `schema` (a genuine text-output op is already plain `streamText`).
+   * Whether to attach `Output.object` (i.e. request `response_format` json/json_schema). Default
+   * `true`. The caller sets it `false` for a TEXT-tier model: no `response_format` is sent, the schema
+   * is described in the prompt instead, and the JSON is still parsed out of the returned text.
    */
   attachStructuredOutput?: boolean;
+  /** Which decoding knobs this model actually accepts. Capability, not declaration — which is why it
+   *  is environment. Default: accept everything. */
+  accepts?: (param: string) => boolean;
+  abortSignal?: AbortSignal;
 }
 
 /** Best-effort JSON stringify; "" if the value can't be serialized (cyclic, etc.). */
@@ -252,6 +95,31 @@ function safeStringify(value: unknown): string {
   } catch {
     return "";
   }
+}
+
+/**
+ * Narrow a value that arrived off the provider WIRE to `JsonValue` — the §2.2 boundary step. Everything
+ * the SDK hands us (usage objects, provider metadata, tool inputs/results, parsed output) is JSON by
+ * construction, but is typed `unknown`/`any` at the SDK seam; this is the single place that claim is
+ * made, and anything genuinely non-JSON (a cyclic object, a class instance) round-trips through JSON to
+ * become so — never silently escaping as `unknown` into an exported type.
+ */
+function asJson(value: unknown): JsonValue {
+  if (value === null) return null;
+  const t = typeof value;
+  if (t === "string" || t === "number" || t === "boolean") return value as JsonValue;
+  try {
+    return JSON.parse(JSON.stringify(value ?? null)) as JsonValue;
+  } catch {
+    return null;
+  }
+}
+
+/** The object-shaped {@link asJson}: provider metadata bags, which are always string-keyed. */
+function asJsonRecord(value: Record<string, unknown> | undefined): Record<string, JsonValue> | undefined {
+  if (value === undefined) return undefined;
+  const out = asJson(value);
+  return out !== null && typeof out === "object" && !Array.isArray(out) ? out : undefined;
 }
 
 /** A number iff `v` is a finite number, else undefined. */
@@ -290,20 +158,33 @@ export function extractTokenCounts(usage: unknown): TokenCounts {
   };
 }
 
-export async function generateStructured<T = unknown>(params: GenerateStructuredParams<T>): Promise<CallOutcome<T>> {
+export async function generateStructured<T = JsonValue>(
+  def: LlmCallDefinition<T>,
+  env: GenerateEnvironment<T>,
+): Promise<LlmCallResult<T>> {
   const startMs = Date.now();
+  const modelId = def.model;
+  const accepts = env.accepts ?? ((): boolean => true);
+  // Narrow the sampling-XOR-reasoning union ONCE: a reasoning config carries the neutral `reasoning`
+  // spec and no sampling knobs; a sampling config the reverse.
+  const sampling: Partial<SamplingConfiguration> = "reasoning" in def ? {} : def;
+  const knob = <K extends keyof SamplingConfiguration>(name: K): SamplingConfiguration[K] | undefined =>
+    accepts(name) ? sampling[name] : undefined;
 
-  const metricsOf = (t: TokenCounts): CallMetrics => {
+  const metricsOf = (t: TokenCounts): LlmMetrics => {
     // Enrich with the 1-hour cache-write slice (from raw) so the table prices TTL tiers exactly.
     const enriched: TokenCounts = { ...t, cacheWrite1hTokens: cacheWrite1hOf(rawUsage) ?? t.cacheWrite1hTokens };
     // Prefer the provider's ACTUAL charge (OpenRouter); fall back to the cache-aware table.
-    const tableCost = ModelInfo.instance.computeCost(params.modelId, enriched) ?? undefined;
+    const tableCost = ModelInfo.instance.computeCost(modelId, enriched) ?? undefined;
     const cost = providerCost ?? tableCost;
     return {
       ...enriched, // carry the full cache/reasoning breakdown through for §6.2 + persistence
-      cost,
-      costSource: cost === undefined ? undefined : providerCost !== undefined ? "provider" : "table",
-      rawUsage, // provider ground truth for retroactive recompute; closed over (set during streaming)
+      // `costUsd` is REQUIRED, so an un-priced call says 0 with `costSource: "unknown"` rather than
+      // leaving the field absent — "free" and "we could not price it" are different claims.
+      costUsd: cost ?? 0,
+      costSource: cost === undefined ? "unknown" : providerCost !== undefined ? "provider" : "table",
+      rawUsage: rawUsage === undefined ? undefined : asJson(rawUsage), // ground truth for retroactive recompute
+      startMs,
       durationMs: Date.now() - startMs,
     };
   };
@@ -329,7 +210,7 @@ export async function generateStructured<T = unknown>(params: GenerateStructured
   const toolCalls: ToolCall[] = [];
   const toolResults: ToolResult[] = [];
   // Files the model generated (image/audio/…) — a parallel output channel.
-  const producedFiles: ProducedArtifact[] = [];
+  const producedFiles: GeneratedFile[] = [];
   let salvage: TokenCounts | undefined;
   // Provider's exact usage object (ground truth). NB the SDK's cross-step aggregate
   // (`finish.totalUsage`) DROPS `raw`; it survives only on the per-step `finish-step.usage`
@@ -390,43 +271,44 @@ export async function generateStructured<T = unknown>(params: GenerateStructured
     value?: unknown;
     finishReason: string;
     tokens: TokenCounts;
-    failure?: CallFailure;
-  }): CallOutcome<T> => {
+    failure?: Failure;
+  }): LlmCallResult<T> => {
     // `value` is reconstructed as `unknown` (parsed JSON / postProcess output) and asserted to `T`
     // here, the single construction site — the §4 Ajv boundary is what makes that assertion sound.
-    const outcome: CallOutcome<T> = {
-      value: args.value as T | undefined,
+    const output: LlmOutput<T> = {
+      parsed: args.value as T | undefined,
       rawText: outputText(),
       thinking: thinking.length > 0 ? thinking : undefined,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       toolResults: toolResults.length > 0 ? toolResults : undefined,
-      artifacts: producedFiles.length > 0 ? producedFiles : undefined,
+      files: producedFiles.length > 0 ? producedFiles : undefined,
       finishReason: args.finishReason,
-      metrics: metricsOf(args.tokens),
-      error: args.failure,
     };
+    const metrics = metricsOf(args.tokens);
     if (args.failure) {
       log.warn("llm call failed", {
-        modelId: params.modelId,
+        modelId: modelId,
         classification: args.failure.classification,
         reason: args.failure.reason,
-        finishReason: outcome.finishReason,
-        ...outcome.metrics,
+        finishReason: output.finishReason,
+        ...metrics,
       });
-    } else {
-      log.info("llm call ok", {
-        modelId: params.modelId,
-        finishReason: outcome.finishReason,
-        reasoningSegments: thinking.length,
-        ...outcome.metrics,
-      });
+      // The FAILURE branch still carries the payload: a truncated generation keeps its partial text and
+      // its thinking, which is what makes a failed call diagnosable rather than empty.
+      return { error: args.failure, value: output, metrics };
     }
-    return outcome;
+    log.info("llm call ok", {
+      modelId: modelId,
+      finishReason: output.finishReason,
+      reasoningSegments: thinking.length,
+      ...metrics,
+    });
+    return { value: output, metrics };
   };
 
   const startReasoning = (id: string | undefined, providerMetadata?: Record<string, unknown>): ReasoningSegment => {
     const seg: ReasoningSegment = { type: "reasoning", text: "", textOffset: text.length };
-    if (providerMetadata) seg.providerMetadata = providerMetadata;
+    if (providerMetadata) seg.providerMetadata = asJsonRecord(providerMetadata);
     if (id !== undefined) reasoningById.set(id, seg);
     thinking.push(seg);
     return seg;
@@ -445,40 +327,40 @@ export async function generateStructured<T = unknown>(params: GenerateStructured
   // strict flag at model resolution), and `params.postProcess` reverses it back to the original shape.
   // A TEXT-output op carries neither. We never adapt here — the model is already resolved, so we can't
   // set the strict flag, which is exactly why adaptation belongs upstream.
-  const outgoing = params.schema;
-  const postProcess = params.postProcess;
+  const outgoing = env.outgoing ?? def.schema;
+  const postProcess = env.postProcess;
   // TEXT-tier (§5.1): a schema is present (so the parse+validate path below still runs) but we do NOT
   // request `response_format` — the model gets the shape in the prompt and answers with plain text.
-  const attachStructuredOutput = params.attachStructuredOutput ?? true;
+  const attachStructuredOutput = env.attachStructuredOutput ?? true;
 
   log.debug("llm call start", {
-    modelId: params.modelId,
-    schema: params.schema ? (params.schema as { title?: string }).title : "(text)",
+    modelId: modelId,
+    schema: def.schema ? (def.schema as { title?: string }).title : "(text)",
   });
 
   // Forward the prompt as the SDK's `Prompt`: `system` plus EXACTLY ONE of `messages`/`prompt` (the SDK
   // rejects both). `messages` wins when present; otherwise the `prompt` (string or message array).
   const promptPart: { messages: ModelMessage[] } | { prompt: string | ModelMessage[] } =
-    params.messages !== undefined ? { messages: params.messages } : { prompt: params.prompt ?? "" };
+    def.messages !== undefined ? { messages: def.messages } : { prompt: def.prompt ?? "" };
 
   const result = streamText({
-    model: params.model,
-    system: params.system,
+    model: env.model,
+    system: def.system,
     ...promptPart,
     maxRetries: 0,
-    abortSignal: params.abortSignal,
-    maxOutputTokens: params.maxOutputTokens,
-    temperature: params.temperature,
-    topP: params.topP,
-    topK: params.topK,
-    presencePenalty: params.presencePenalty,
-    frequencyPenalty: params.frequencyPenalty,
-    seed: params.seed,
-    stopSequences: params.stopSequences,
-    providerOptions: params.providerOptions as never,
-    ...(params.tools ? { tools: params.tools } : {}),
-    ...(params.toolChoice ? { toolChoice: params.toolChoice } : {}),
-    ...(params.stopWhen ? { stopWhen: params.stopWhen } : {}),
+    abortSignal: env.abortSignal,
+    maxOutputTokens: def.maxOutputTokens,
+    temperature: knob("temperature"),
+    topP: knob("topP"),
+    topK: knob("topK"),
+    presencePenalty: knob("presencePenalty"),
+    frequencyPenalty: knob("frequencyPenalty"),
+    seed: accepts("seed") ? def.seed : undefined,
+    stopSequences: accepts("stopSequences") ? def.stopSequences : undefined,
+    providerOptions: env.providerOptions as never,
+    ...(env.tools ? { tools: env.tools } : {}),
+    ...(env.toolChoice ? { toolChoice: env.toolChoice } : {}),
+    ...(env.stopWhen ? { stopWhen: env.stopWhen } : {}),
     ...(outgoing && attachStructuredOutput ? { output: Output.object({ schema: jsonSchema(outgoing as never) }) } : {}),
     onAbort: ({ steps }) => {
       const lastUsage = steps.at(-1)?.usage;
@@ -569,7 +451,7 @@ export async function generateStructured<T = unknown>(params: GenerateStructured
                 /* keep the raw string when it isn't JSON */
               }
             }
-            toolCalls.push({ ...(id !== undefined ? { toolCallId: id } : {}), toolName, input });
+            toolCalls.push({ ...(id !== undefined ? { toolCallId: id } : {}), toolName, input: asJson(input) });
           }
           break;
         }
@@ -581,19 +463,23 @@ export async function generateStructured<T = unknown>(params: GenerateStructured
             toolResults.push({
               ...(id !== undefined ? { toolCallId: id } : {}),
               ...(p.toolName !== undefined ? { toolName: p.toolName } : {}),
-              output: p.output ?? p.result,
+              output: asJson(p.output ?? p.result),
             });
           }
           break;
         }
         case "file": {
           // A model-GENERATED file (image/audio/…). The high-level fullStream emits `{file: GeneratedFile}`;
-          // be defensive about a low-level `{mediaType, data}` shape too. Captured as an inline artifact.
+          // be defensive about a low-level `{mediaType, data}` shape too. It lands in a blob output slot.
           const gf = p.file;
           const mediaType = gf?.mediaType ?? p.mediaType;
           const base64 = gf?.base64 ?? (typeof p.data === "string" ? p.data : undefined);
           if (base64 !== undefined && base64.length > 0 && mediaType !== undefined) {
-            producedFiles.push({ name: `file-${producedFiles.length}`, content: base64, format: mediaType, contentHash: sha256Hex(base64) });
+            // A malformed side-channel part must not sink the PRIMARY output: decoding throws inside
+            // the `fullStream` loop, which would abandon it before `finish` — losing the parsed value
+            // AND every usage/cost figure — and report the whole call as an error.
+            const bytes = base64ToBytes(base64);
+            if (bytes !== undefined) producedFiles.push({ mediaType, bytes });
           }
           break;
         }
@@ -607,7 +493,7 @@ export async function generateStructured<T = unknown>(params: GenerateStructured
         }
         case "reasoning-end": {
           const seg = p.id !== undefined ? reasoningById.get(p.id) : undefined;
-          if (seg && p.providerMetadata) seg.providerMetadata = { ...seg.providerMetadata, ...p.providerMetadata };
+          if (seg && p.providerMetadata) seg.providerMetadata = { ...seg.providerMetadata, ...asJsonRecord(p.providerMetadata) };
           break;
         }
         case "error":
@@ -629,7 +515,7 @@ export async function generateStructured<T = unknown>(params: GenerateStructured
       }
     }
   } catch (err) {
-    if (params.abortSignal?.aborted) {
+    if (env.abortSignal?.aborted) {
       return build({
         finishReason: "aborted",
         tokens: salvage ?? streamTokens ?? {},
@@ -643,7 +529,7 @@ export async function generateStructured<T = unknown>(params: GenerateStructured
     });
   }
 
-  if (aborted || params.abortSignal?.aborted) {
+  if (aborted || env.abortSignal?.aborted) {
     return build({
       finishReason: "aborted",
       tokens: salvage ?? streamTokens ?? {},
@@ -668,7 +554,7 @@ export async function generateStructured<T = unknown>(params: GenerateStructured
 
   // Text output (no schema, §3.14): the accumulated raw text IS the value. A "length" finish just
   // means the token cap was hit — the text is still usable (truncated), not a hard failure here.
-  if (!params.schema) return build({ value: text, finishReason, tokens });
+  if (!def.schema) return build({ value: text, finishReason, tokens });
 
   if (finishReason === "length") {
     return build({
@@ -723,11 +609,14 @@ export async function generateStructured<T = unknown>(params: GenerateStructured
     });
   }
 
-  const value = postProcess ? postProcess(parsed) : parsed;
+  // `parsed` is `JSON.parse` output — the boundary ends here (§2.2): from this point the value is
+  // `JsonValue`, and the §4 validate step below is what upholds the caller's asserted `T`.
+  const parsedJson = asJson(parsed);
+  const value = postProcess ? postProcess(parsedJson) : parsedJson;
 
-  if (params.validate) {
+  if (env.validate) {
     try {
-      params.validate(value, params.schema!);
+      env.validate(value, def.schema!);
     } catch (err) {
       // Preserve the parsed value even though it failed validation (§4 preserve-on-error).
       return build({
@@ -739,5 +628,48 @@ export async function generateStructured<T = unknown>(params: GenerateStructured
     }
   }
 
-  return build({ value, finishReason, tokens });
+  // Lift the validated WIRE value to its DECODED type (API.md, "Codecs and type names"): validate the
+  // `Jsonify<T>` form (above), THEN decode. `decodeWithSchema` resolves each `x-type` node's codec by
+  // name and lifts it (an epoch number → a `Date`); with no `x-type` in the schema — the overwhelming
+  // common case — it is a structural passthrough that returns the value unchanged. It runs ONLY here on
+  // the structured path (the text branch returned at line 557 before reaching this), and only AFTER
+  // validation, because the decoded form (e.g. a `Date`) would not pass the wire schema. The result is
+  // the decoded `T`, flowing into the single `as T` construction seam in `build`.
+  //
+  // A registered codec's `decode` is arbitrary code that MAY throw on a value that passed the wire schema
+  // but lies outside the codec's domain (e.g. an out-of-range epoch handed to a Date codec). Normalize
+  // that throw into a failure Outcome — as the validation reject above does — rather than letting it
+  // escape `runCall` and break the never-throws seam the removed executor layer used to hold.
+  try {
+    return build({ value: decodeWithSchema(def.schema, value), finishReason, tokens });
+  } catch (err) {
+    return build({
+      value,
+      finishReason,
+      tokens,
+      failure: { classification: "api-retriable", reason: `structured output decode failed: ${describeError(err)}` },
+    });
+  }
+}
+
+/**
+ * Decode a provider's base64 file payload to bytes — a `blob` leaf holds BYTES (§7), so the decode
+ * happens here rather than leaking a transport encoding into the value the caller receives.
+ *
+ * Accepts the URL-SAFE alphabet (`-`/`_`) and missing padding, both of which providers emit and both of
+ * which make `atob` throw. Returns `undefined` rather than throwing on anything it still cannot read:
+ * this runs inside the stream loop, where an exception costs the whole call's result and metrics.
+ */
+function base64ToBytes(base64: string): Uint8Array | undefined {
+  const normalized = base64.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), "=");
+  let binary: string;
+  try {
+    binary = atob(padded);
+  } catch {
+    return undefined;
+  }
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
 }

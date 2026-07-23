@@ -1,14 +1,15 @@
 /**
- * Shared fakes for the @declarative-ai/llm test suites — the mock stream plumbing, a fake provider
- * router, scripted `CallRunner`s, and `ExecutionSpec` builders — so a change to the mock stream shape,
- * the `ModelRouter` interface, or the spec/outcome shapes lands in ONE place instead of five files.
+ * Shared fakes for the @declarative-ai/llm test suites — the mock stream plumbing and a fake provider
+ * router — so a change to the mock stream shape or the `ModelRouter` interface lands in ONE place.
  */
+import { isOk, type Failure } from "@declarative-ai/json";
+import type { LlmCallResult, LlmOutput } from "../src/output";
 import { simulateReadableStream, type LanguageModel } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
-import type { ExecutionSpec, Outcome } from "@declarative-ai/core";
-import type { CallOutcome } from "../src/generate";
-import type { CallRunner, CallRunnerDeps, LlmCallDefinition } from "../src/executor";
-import type { StructuredCallParams } from "../src/llmStep";
+import type { JsonValue } from "@declarative-ai/json";
+import { generateStructured, type GenerateEnvironment } from "../src/generate";
+import type { LlmCallDefinition, ReasoningSpec, SamplingConfiguration } from "../src/llmConfig";
+import type { CallSignature } from "../src/prompt";
 import type { ModelRouter } from "../src/router";
 
 /** AI SDK 6 `LanguageModelV3Usage`: token totals nest under `.total`. */
@@ -45,32 +46,21 @@ export const DEF: LlmCallDefinition = {
   timeoutMs: 30_000,
 };
 
-export function specOf(overrides: Partial<ExecutionSpec> = {}, def: LlmCallDefinition = DEF): ExecutionSpec {
-  return {
-    kind: "llm-call",
-    definition: def,
-    inputs: {},
-    outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] },
-    ...overrides,
-  };
-}
+const FAKE_METRICS = { inputTokens: 10, outputTokens: 5, costUsd: 0.001, costSource: "table" as const, durationMs: 20 };
 
-export function okOutcome(partial: Partial<CallOutcome> = {}): CallOutcome {
+export function okOutcome(partial: Partial<LlmCallResult> = {}): LlmCallResult {
   return {
-    value: { answer: "4" },
-    rawText: '{"answer":"4"}',
-    finishReason: "stop",
-    metrics: { inputTokens: 10, outputTokens: 5, cost: 0.001, costSource: "table", durationMs: 20 },
+    value: { parsed: { answer: "4" }, rawText: '{"answer":"4"}', finishReason: "stop" },
+    metrics: FAKE_METRICS,
     ...partial,
   };
 }
 
-export function validationFailure(errors = "data/answer must be string"): CallOutcome {
+export function validationFailure(errors = "data/answer must be string"): LlmCallResult {
   return {
-    value: { answer: 7 },
-    rawText: '{"answer":7}',
-    finishReason: "stop",
-    metrics: { inputTokens: 10, outputTokens: 5, cost: 0.001, costSource: "table", durationMs: 20 },
+    // The failure keeps its payload: the value that FAILED validation is what a repair turn reads.
+    value: { parsed: { answer: 7 }, rawText: '{"answer":7}', finishReason: "stop" },
+    metrics: FAKE_METRICS,
     error: {
       classification: "api-retriable",
       reason: `post-reconstruction validation failed: output failed schema validation: ${errors}`,
@@ -78,20 +68,39 @@ export function validationFailure(errors = "data/answer must be string"): CallOu
   };
 }
 
-/** A fake runner that records every invocation and replays a scripted outcome sequence (the last outcome
- *  repeats once the script is exhausted). */
-export function fakeRunner(script: CallOutcome[]): { runner: CallRunner; calls: { params: StructuredCallParams; deps: CallRunnerDeps }[] } {
-  const calls: { params: StructuredCallParams; deps: CallRunnerDeps }[] = [];
-  const runner: CallRunner = async (params, deps) => {
-    calls.push({ params, deps });
-    const next = script[Math.min(calls.length - 1, script.length - 1)];
-    return next!;
-  };
-  return { runner, calls };
+/**
+ * The old FLAT call bag, kept as a TEST SHIM only. `generateStructured` now takes `(definition,
+ * environment)` (DESIGN §4.1); these suites exercise transport behavior — streaming, usage
+ * accounting, reconstruction, failure classification — not the split, so they keep their compact
+ * literals and this one function does the splitting.
+ */
+type FlatDef<T> = Omit<Partial<SamplingConfiguration>, "model" | "tools" | "toolChoice"> & Partial<CallSignature<T>> & { reasoning?: ReasoningSpec };
+type FlatCall<T> = FlatDef<T> & GenerateEnvironment<T> & { modelId?: string };
+
+export function generateFlat<T = JsonValue>(flat: FlatCall<T>): Promise<LlmCallResult<T>> {
+  const { model, modelId, outgoing, postProcess, validate, tools, toolChoice, stopWhen, providerOptions, attachStructuredOutput, accepts, abortSignal, ...def } =
+    flat;
+  return generateStructured<T>({ model: modelId ?? "anthropic/claude-haiku-4-5", ...def } as LlmCallDefinition<T>, {
+    model,
+    outgoing,
+    postProcess,
+    validate,
+    tools,
+    toolChoice,
+    stopWhen,
+    providerOptions,
+    attachStructuredOutput,
+    accepts,
+    abortSignal,
+  });
 }
 
-/** A trivial in-memory MemoCache. */
-export function memoCache(): { cache: Map<string, Outcome>; get: (k: string) => Outcome | undefined; set: (k: string, v: Outcome) => void } {
-  const cache = new Map<string, Outcome>();
-  return { cache, get: (k) => cache.get(k), set: (k, v) => void cache.set(k, v) };
+/** Read a call's failure, or `undefined` when it succeeded — `error` is not a property of the union. */
+export function errorOf<T>(r: LlmCallResult<T>): Failure | undefined {
+  return isOk(r) ? undefined : r.error;
+}
+
+/** The payload a call produced, on either branch (a failure keeps its partial). */
+export function outputOf<T>(r: LlmCallResult<T>): LlmOutput<T> | undefined {
+  return r.value;
 }

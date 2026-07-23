@@ -1,3 +1,4 @@
+import type { JsonValue } from "@declarative-ai/json";
 import type { SchemaNode } from "./profile";
 
 /**
@@ -79,7 +80,7 @@ function isHoistable(child: unknown, key: string, parentRequiresKey: boolean): c
 interface Flattened {
   schema: SchemaNode;
   /** Reconstruct a flat value back to the nested shape this node was flattened from. Lenient. */
-  restore: (value: unknown) => unknown;
+  restore: (value: JsonValue) => JsonValue;
 }
 
 const IDENTITY: Flattened["restore"] = (v) => v;
@@ -105,7 +106,7 @@ function flattenObject(node: SchemaNode): Flattened {
   const siblings = new Set(Object.keys(props));
   const outProps: SchemaNode = {};
   const outRequired: string[] = [];
-  const restorers: Array<(flat: Record<string, unknown>, out: Record<string, unknown>) => void> = [];
+  const restorers: Array<(flat: Record<string, JsonValue>, out: Record<string, JsonValue>) => void> = [];
 
   // Keep a non-hoisted child under its own key, flattening WITHIN it (the inner is reused so a
   // collision-skip doesn't recompute). The closure undoes any in-child flattening on the way back.
@@ -146,11 +147,12 @@ function flattenObject(node: SchemaNode): Flattened {
         out[key] = inner.restore(flat[key]); // lenient: an already-nested answer passes through
         return;
       }
-      const sub: Record<string, unknown> = {};
+      const sub: Record<string, JsonValue> = {};
       let present = false;
       for (const fk of Object.keys(flat)) {
-        if (fk.startsWith(prefix)) {
-          sub[fk.slice(prefix.length)] = flat[fk];
+        const fv = flat[fk];
+        if (fk.startsWith(prefix) && fv !== undefined) {
+          sub[fk.slice(prefix.length)] = fv;
           present = true;
         }
       }
@@ -164,8 +166,8 @@ function flattenObject(node: SchemaNode): Flattened {
 
   const restore: Flattened["restore"] = (value) => {
     if (!isPlainObject(value)) return value; // lenient
-    const out: Record<string, unknown> = {};
-    for (const r of restorers) r(value as Record<string, unknown>, out);
+    const out: Record<string, JsonValue> = {};
+    for (const r of restorers) r(value as Record<string, JsonValue>, out);
     return out;
   };
   return { schema, restore };
@@ -175,7 +177,7 @@ export interface FlattenResult {
   /** The depth-reduced schema (dotted keys for every hoisted object chain). */
   flat: SchemaNode;
   /** The deterministic, lenient inverse — flat value → original nested value. */
-  unflatten: (value: unknown) => unknown;
+  unflatten: (value: JsonValue) => JsonValue;
 }
 
 /** Flatten `schema` for depth: collapse hoistable object chains to dotted keys; return the inverse. */

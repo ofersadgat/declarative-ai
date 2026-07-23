@@ -2,8 +2,8 @@ import { jsonSchema, stepCountIs, tool } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { describe, expect, it } from "vitest";
 import { generateStructured } from "../src/generate";
-import { executeStructuredCall, type CallDeps } from "../src/llmStep";
-import { fakeRouter, stream, usage } from "./fakes";
+import { executeLlmCall, type CallDeps } from "../src/call";
+import { fakeRouter, generateFlat, stream, usage, errorOf } from "./fakes";
 
 const TOOL_CALL_STEP = [
   { type: "stream-start", warnings: [] },
@@ -33,7 +33,7 @@ describe("tools — single-turn (no executor)", () => {
       },
     });
 
-    const out = await generateStructured({
+    const out = await generateFlat({
       model,
       modelId: "claude-haiku-4-5",
       prompt: "weather in NYC?",
@@ -41,14 +41,14 @@ describe("tools — single-turn (no executor)", () => {
       toolChoice: "required",
     });
 
-    expect(out.error).toBeUndefined();
+    expect(errorOf(out)).toBeUndefined();
     // The tools + toolChoice reached the underlying call (the SDK lowers the keyed ToolSet to an array).
     expect((captured?.tools as Array<{ name?: string }>).map((t) => t.name)).toContain("get_weather");
     expect(JSON.stringify(captured?.toolChoice)).toContain("required");
     // The model's tool call is surfaced first-class (parsed input), not executed.
-    expect(out.toolCalls).toHaveLength(1);
-    expect(out.toolCalls?.[0]).toMatchObject({ toolName: "get_weather", input: { city: "NYC" } });
-    expect(out.toolResults).toBeUndefined();
+    expect(out.value?.toolCalls).toHaveLength(1);
+    expect(out.value?.toolCalls?.[0]).toMatchObject({ toolName: "get_weather", input: { city: "NYC" } });
+    expect(out.value?.toolResults).toBeUndefined();
   });
 });
 
@@ -60,7 +60,7 @@ describe("tools — executed loop", () => {
       doStream: async () => stream(step++ === 0 ? TOOL_CALL_STEP : TEXT_STEP),
     });
 
-    const out = await generateStructured({
+    const out = await generateFlat({
       model,
       modelId: "claude-haiku-4-5",
       prompt: "weather in NYC?",
@@ -77,15 +77,15 @@ describe("tools — executed loop", () => {
       stopWhen: stepCountIs(4),
     });
 
-    expect(out.error).toBeUndefined();
+    expect(errorOf(out)).toBeUndefined();
     expect(executedWith).toEqual({ city: "NYC" }); // executor ran with the parsed input
-    expect(out.value).toBe("It is sunny in NYC."); // final model turn after the tool result
-    expect(out.toolCalls?.[0]).toMatchObject({ toolName: "get_weather", input: { city: "NYC" } });
-    expect(out.toolResults?.[0]?.output).toMatchObject({ tempF: 72, city: "NYC" });
+    expect(out.value?.parsed).toBe("It is sunny in NYC."); // final model turn after the tool result
+    expect(out.value?.toolCalls?.[0]).toMatchObject({ toolName: "get_weather", input: { city: "NYC" } });
+    expect(out.value?.toolResults?.[0]?.output).toMatchObject({ tempF: 72, city: "NYC" });
   });
 });
 
-describe("executeStructuredCall — tool declarations + injected executors", () => {
+describe("executeLlmCall — tool declarations + injected executors", () => {
   it("builds the tool set from serializable declarations and runs the loop", async () => {
     let step = 0;
     let executed = false;
@@ -102,7 +102,7 @@ describe("executeStructuredCall — tool declarations + injected executors", () 
       },
     };
 
-    const out = await executeStructuredCall(
+    const out = await executeLlmCall(
       {
         model: "anthropic/claude-haiku-4-5",
         prompt: "weather in NYC?",
@@ -113,17 +113,17 @@ describe("executeStructuredCall — tool declarations + injected executors", () 
       deps,
     );
 
-    expect(out.error).toBeUndefined();
+    expect(errorOf(out)).toBeUndefined();
     expect(executed).toBe(true); // the injected executor ran (declaration → ToolSet → loop)
-    expect(out.value).toBe("It is sunny in NYC.");
-    expect(out.toolCalls?.[0]).toMatchObject({ toolName: "get_weather", input: { city: "NYC" } });
-    expect(out.toolResults?.[0]?.output).toMatchObject({ tempF: 72 });
+    expect(out.value?.parsed).toBe("It is sunny in NYC.");
+    expect(out.value?.toolCalls?.[0]).toMatchObject({ toolName: "get_weather", input: { city: "NYC" } });
+    expect(out.value?.toolResults?.[0]?.output).toMatchObject({ tempF: 72 });
   });
 
   it("declaration WITHOUT an injected executor is single-turn (call returned, not run)", async () => {
     const model = new MockLanguageModelV3({ doStream: async () => stream(TOOL_CALL_STEP) });
 
-    const out = await executeStructuredCall(
+    const out = await executeLlmCall(
       {
         model: "anthropic/claude-haiku-4-5",
         prompt: "weather in NYC?",
@@ -133,8 +133,8 @@ describe("executeStructuredCall — tool declarations + injected executors", () 
       { modelRouter: fakeRouter(model) }, // no toolExecutors
     );
 
-    expect(out.error).toBeUndefined();
-    expect(out.toolCalls?.[0]).toMatchObject({ toolName: "get_weather", input: { city: "NYC" } });
-    expect(out.toolResults).toBeUndefined();
+    expect(errorOf(out)).toBeUndefined();
+    expect(out.value?.toolCalls?.[0]).toMatchObject({ toolName: "get_weather", input: { city: "NYC" } });
+    expect(out.value?.toolResults).toBeUndefined();
   });
 });

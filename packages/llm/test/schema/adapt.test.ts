@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { SchemaDocument } from "@declarative-ai/json";
 import { adaptSchema, __internal } from "../../src/schema/adapt";
 import {
   ADVISORY,
@@ -72,7 +73,7 @@ describe("adaptSchema — OPENAI_STRICT", () => {
   });
 
   it("flattens a discriminated oneOf and round-trips it back through postProcess", () => {
-    const original = {
+    const original: SchemaDocument = {
       oneOf: [
         { type: "object", properties: { kind: { const: "a" }, av: { type: "number" } }, required: ["kind", "av"] },
         { type: "object", properties: { kind: { const: "b" }, bv: { type: "string" } }, required: ["kind", "bv"] },

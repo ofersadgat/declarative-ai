@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { ExecServices } from "@declarative-ai/core";
+import type { ExecServices } from "@declarative-ai/exec";
 import { allTools, requireWorkspace, runCommandTool } from "../src";
 
 // Drive the shell through tiny node scripts written into the workspace — deterministic and cross-platform
@@ -51,7 +51,7 @@ describe("run_command", () => {
   });
 
   it("is mutating (so read-only/plan profiles block it), is in allTools, and needs a workspace", () => {
-    expect(runCommandTool.capabilities?.readOnly).toBe(false);
+    expect(runCommandTool.readOnly).toBe(false);
     expect(allTools["run_command"]).toBe(runCommandTool);
     expect(() => requireWorkspace({})).toThrow(/needs a workspace/);
   });

@@ -75,6 +75,16 @@ export interface ResolveModelOptions {
   strictStructuredOutput?: boolean;
 }
 
+/**
+ * The provider ROUTER seam: resolves a route-prefixed model id (`anthropic/…`, `openrouter/…`) to the
+ * provider model handle this package calls with.
+ *
+ * It lives HERE now (DESIGN §2). The interface used to sit in core purely so
+ * `ExecServices.modelRouter` could be typed, which meant the bottom package named an AI-SDK concept it
+ * could not describe (an opaque `ModelHandle`) and llm had to re-narrow it. `@declarative-ai/promptop`
+ * augments `ExecServices` with this real type instead — that package already depends on llm, so it can
+ * name it (DESIGN §3.2).
+ */
 export interface ModelRouter {
   resolveModel(modelId: string, opts?: ResolveModelOptions): LanguageModel;
   isAnthropic(modelId: string): boolean;

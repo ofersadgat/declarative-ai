@@ -1,5 +1,5 @@
 /**
- * A starter Claude-Code-parity tool library (RUNTIMES-AND-PERMISSIONS.md §2, build order 3): cross-platform
+ * A starter Claude-Code-parity tool library (DESIGN §5.1, "Functions and tools"): cross-platform
  * fs {@link Tool}s that operate on `ctx.workspace`. These are the impls that turn the composed `llm` runtime
  * into a coding agent. Each is a plain core `Tool` (so it registers into `registry.tools` and is
  * permission-gated like any other). `read_file`/`list_dir` declare `readOnly` (in scope under the
@@ -7,7 +7,7 @@
  */
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { Tool } from "@declarative-ai/core";
+import type { Tool } from "@declarative-ai/exec";
 import { requireWorkspace, resolveInWorkspace } from "./workspace";
 
 /** Require a string field (empty allowed — e.g. an empty file body). */
@@ -28,7 +28,7 @@ function reqPath(input: Record<string, unknown>, key: string): string {
 export const readFileTool: Tool = {
   description: "Read a UTF-8 text file from the workspace. Input: { path }.",
   inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
-  capabilities: { readOnly: true },
+  readOnly: true,
   async run(input, ctx) {
     const ws = requireWorkspace(ctx);
     const abs = resolveInWorkspace(ws.root, reqPath(input, "path"));
@@ -44,7 +44,7 @@ export const writeFileTool: Tool = {
     properties: { path: { type: "string" }, content: { type: "string" } },
     required: ["path", "content"],
   },
-  capabilities: { readOnly: false },
+  readOnly: false,
   async run(input, ctx) {
     const ws = requireWorkspace(ctx);
     const abs = resolveInWorkspace(ws.root, reqPath(input, "path"));
@@ -70,7 +70,7 @@ export const editFileTool: Tool = {
     },
     required: ["path", "old_string", "new_string"],
   },
-  capabilities: { readOnly: false },
+  readOnly: false,
   async run(input, ctx) {
     const ws = requireWorkspace(ctx);
     const abs = resolveInWorkspace(ws.root, reqPath(input, "path"));
@@ -92,7 +92,7 @@ export const editFileTool: Tool = {
 export const listDirTool: Tool = {
   description: "List the entries of a workspace directory. Input: { path? } (default the workspace root).",
   inputSchema: { type: "object", properties: { path: { type: "string" } } },
-  capabilities: { readOnly: true },
+  readOnly: true,
   async run(input, ctx) {
     const ws = requireWorkspace(ctx);
     const rel = typeof input.path === "string" && input.path.length > 0 ? input.path : ".";

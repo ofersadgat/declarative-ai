@@ -1,3 +1,4 @@
+import type { JsonValue, SchemaDocument } from "@declarative-ai/json";
 import { findDiscriminators } from "../structured";
 import { flattenForDepth } from "./flatten";
 import type { AdaptNote, AdaptResult, KeywordRule, KeywordSupport, MaxDepthCountStrategy, ProviderSchemaProfile, SchemaNode } from "./profile";
@@ -28,7 +29,7 @@ function isPlainObject(v: unknown): v is SchemaNode {
 }
 
 /** Deep clone with the meta/UI tags removed. The neutral starting point for every profile. */
-function stripMetaDeep(node: unknown): unknown {
+function stripMetaDeep(node: JsonValue): JsonValue {
   if (Array.isArray(node)) return node.map(stripMetaDeep);
   if (!isPlainObject(node)) return node;
   const out: SchemaNode = {};
@@ -84,7 +85,7 @@ function wrapRootArray(node: SchemaNode): SchemaNode {
 /** Undo the wrap on the model's answer. Deliberately lenient: a bare array passes through (an advisory
  *  upstream that ignored the wrapper, or a transport that took the root array natively), and anything
  *  unrecognizable is returned as-is for the §4 Ajv boundary to reject. */
-function unwrapRootArray(value: unknown): unknown {
+function unwrapRootArray(value: JsonValue): JsonValue {
   if (Array.isArray(value)) return value;
   if (isPlainObject(value) && Array.isArray(value[ROOT_ARRAY_KEY])) return value[ROOT_ARRAY_KEY];
   return value;
@@ -110,20 +111,22 @@ function mergeUnionVariants(variants: SchemaNode[]): SchemaNode | null {
     if (!props) continue;
     for (const key of Object.keys(props)) {
       allKeys.add(key);
+      const incomingValue = props[key];
+      if (incomingValue === undefined) continue;
       if (!(key in mergedProps)) {
-        mergedProps[key] = props[key];
+        mergedProps[key] = incomingValue;
         continue;
       }
       const existing = mergedProps[key] as SchemaNode;
-      const incoming = props[key] as SchemaNode;
+      const incoming = incomingValue as SchemaNode;
       if (existing.const !== undefined && incoming.const !== undefined) {
-        const vals = new Set<unknown>();
-        if (Array.isArray(existing.enum)) (existing.enum as unknown[]).forEach((x) => vals.add(x));
+        const vals = new Set<JsonValue>();
+        if (Array.isArray(existing.enum)) existing.enum.forEach((x) => vals.add(x));
         else vals.add(existing.const);
         vals.add(incoming.const);
         mergedProps[key] = { type: "string", enum: [...vals] };
       } else if (Array.isArray(existing.enum) && incoming.const !== undefined) {
-        (existing.enum as unknown[]).push(incoming.const);
+        existing.enum.push(incoming.const);
       }
     }
   }
@@ -179,8 +182,9 @@ function applyKeywordRules(node: SchemaNode, profile: ProviderSchemaProfile, isR
     if (rule.allowedValues) {
       // The keyword is supported only for whitelisted VALUES; an in-list value is kept, an out-of-list
       // value is stripped (or described, when `support: "describe"`).
-      if (rule.allowedValues.includes(node[kw])) continue;
-      if (rule.support === "describe") describeConstraint(node, kw, node[kw]);
+      const present = node[kw];
+      if (present !== undefined && rule.allowedValues.includes(present)) continue;
+      if (rule.support === "describe" && present !== undefined) describeConstraint(node, kw, present);
       delete node[kw];
       continue;
     }
@@ -292,7 +296,8 @@ function strictify(input: SchemaNode, profile: ProviderSchemaProfile, isRoot: bo
 
   if (Array.isArray(node.type) && profile.collapseTypeArrays) {
     const types = node.type as string[];
-    node.type = types.find((t) => t !== "null") ?? types[0];
+    const collapsed = types.find((t) => t !== "null") ?? types[0];
+    if (collapsed !== undefined) node.type = collapsed;
   }
 
   return node;
@@ -423,7 +428,7 @@ function fitsStrict(schema: SchemaNode, profile: ProviderSchemaProfile): AdaptNo
 // Reverse (post-processing the model's answer back to the ORIGINAL schema)
 // ---------------------------------------------------------------------------------------------------
 
-function reverse(value: unknown, schema: unknown, profile: ProviderSchemaProfile): unknown {
+function reverse(value: JsonValue, schema: JsonValue | undefined, profile: ProviderSchemaProfile): JsonValue {
   if (value == null || !isPlainObject(schema)) return value;
 
   // 1. Union reconstruction (flatten mode): the model returned every variant's props at once — pick the
@@ -442,9 +447,10 @@ function reverse(value: unknown, schema: unknown, profile: ProviderSchemaProfile
       });
       if (!matched) break;
       const props = (isPlainObject(matched.properties) ? matched.properties : {}) as SchemaNode;
-      const trimmed: Record<string, unknown> = {};
+      const trimmed: Record<string, JsonValue> = {};
       for (const key of Object.keys(props)) {
-        if (key in obj) trimmed[key] = reverse(obj[key], props[key], profile);
+        const ov = obj[key];
+        if (ov !== undefined) trimmed[key] = reverse(ov, props[key], profile);
       }
       return trimmed;
     }
@@ -472,7 +478,7 @@ function reverse(value: unknown, schema: unknown, profile: ProviderSchemaProfile
     const props = schema.properties;
     const required = new Set(Array.isArray(schema.required) ? (schema.required as string[]) : []);
     const dropNulls = profile.optionalSupport === "nullable";
-    const result: Record<string, unknown> = {};
+    const result: Record<string, JsonValue> = {};
     for (const [key, v] of Object.entries(value)) {
       const childSchema = props[key];
       if (dropNulls && childSchema !== undefined && !required.has(key) && v === null) continue;
@@ -502,8 +508,8 @@ function strictAttempt(bare: SchemaNode, needsRootWrap: boolean, profile: Provid
  * notes. The original is never mutated. May THROW when `maxDepthStrategy` is `"error"` (or `"flatten"`
  * and depth is irreducible) — an intentional hard failure for callers that require strict decoding.
  */
-export function adaptSchema(original: SchemaNode, profile: ProviderSchemaProfile): AdaptResult {
-  const stripped = stripMetaDeep(original) as SchemaNode;
+export function adaptSchema(original: SchemaDocument, profile: ProviderSchemaProfile): AdaptResult {
+  const stripped = stripMetaDeep(original as JsonValue) as SchemaNode;
 
   // Root-array wrap: a transport that requires an OBJECT root gets the array under a single wrapper
   // property, removed again by `postProcess` (`unwrapRootArray` — lenient, so a bare-array answer from
@@ -511,7 +517,7 @@ export function adaptSchema(original: SchemaNode, profile: ProviderSchemaProfile
   // even unconstrained OpenAI-dialect JSON modes can only emit an object root.
   const needsRootWrap = isArrayRootNode(stripped) && !profile.rootArray;
   const base = needsRootWrap ? wrapRootArray(stripped) : stripped;
-  const unwrap = needsRootWrap ? unwrapRootArray : (v: unknown) => v;
+  const unwrap = needsRootWrap ? unwrapRootArray : (v: JsonValue) => v;
   const wrapNotes: AdaptNote[] = needsRootWrap
     ? [{ code: "root-array-wrapped", detail: `root array wrapped in { ${ROOT_ARRAY_KEY} } (object-root-only transport)` }]
     : [];
@@ -544,7 +550,7 @@ export function adaptSchema(original: SchemaNode, profile: ProviderSchemaProfile
   // SDK already cleans the schema declares those capabilities as supported, so this is a near-identity
   // for it. Fits → strict + reversible post-process.
   const { transformed, blocking } = strictAttempt(stripped, needsRootWrap, profile);
-  if (blocking.length === 0) return strictOf(transformed, original, []);
+  if (blocking.length === 0) return strictOf(transformed, original as SchemaNode, []);
 
   // Doesn't fit. If DEPTH is (one of) the reason(s), `maxDepthStrategy` decides what to do about it; any
   // OTHER blocker (an `{}` any node, root union, property overflow) is out of this strategy's scope and
@@ -558,7 +564,7 @@ export function adaptSchema(original: SchemaNode, profile: ProviderSchemaProfile
       // Override our (conservative) depth estimate: force strict at FULL depth and let the provider judge —
       // UNLESS a non-depth blocker remains (forcing strict can't make a closed grammar represent that).
       if (blocking.every((b) => b.code === "depth-exceeded")) {
-        return strictOf(transformed, original, [{ code: "depth-strict-forced", detail: `depth over cap ${profile.maxDepth}; forced strict (maxDepthStrategy="strict") — provider is the arbiter` }]);
+        return strictOf(transformed, original as SchemaNode, [{ code: "depth-strict-forced", detail: `depth over cap ${profile.maxDepth}; forced strict (maxDepthStrategy="strict") — provider is the arbiter` }]);
       }
       return advisoryOf(blocking);
     }
@@ -589,7 +595,7 @@ export function adaptSchema(original: SchemaNode, profile: ProviderSchemaProfile
   return advisoryOf(blocking);
 }
 
-const adaptCache = new WeakMap<SchemaNode, Map<ProviderSchemaProfile, AdaptResult>>();
+const adaptCache = new WeakMap<SchemaDocument, Map<ProviderSchemaProfile, AdaptResult>>();
 
 /**
  * Memoized {@link adaptSchema}, keyed by (schema object, profile) IDENTITY. The adaptation is pure and the
@@ -597,7 +603,7 @@ const adaptCache = new WeakMap<SchemaNode, Map<ProviderSchemaProfile, AdaptResul
  * a `plan`-then-execute flow adapts twice — so the deep clone/strictify/fit transform runs once per
  * (schema, profile) instead. Throwing profiles are not cached (they re-throw on each call).
  */
-export function adaptSchemaCached(original: SchemaNode, profile: ProviderSchemaProfile): AdaptResult {
+export function adaptSchemaCached(original: SchemaDocument, profile: ProviderSchemaProfile): AdaptResult {
   let byProfile = adaptCache.get(original);
   if (!byProfile) adaptCache.set(original, (byProfile = new Map()));
   let result = byProfile.get(profile);

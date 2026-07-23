@@ -1,5 +1,5 @@
 /**
- * The shell tool (RUNTIMES-AND-PERMISSIONS.md §2): `run_command` executes a command via the host shell in
+ * The shell tool (DESIGN §5.1, "Functions and tools"): `run_command` executes a command via the host shell in
  * the workspace and captures stdout / stderr / exit code. It is the most sensitive tool — `readOnly: false`,
  * so the `read-only`/`plan` profiles block it and `ask`/`deny` modes gate it. A non-zero exit is NOT a tool
  * failure: the model sees the code and output and decides what to do. Cross-platform via Node's `exec`
@@ -9,7 +9,7 @@
  */
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
-import type { Tool } from "@declarative-ai/core";
+import type { Tool } from "@declarative-ai/exec";
 import { requireWorkspace, resolveInWorkspace } from "./workspace";
 
 const pexec = promisify(exec);
@@ -38,7 +38,7 @@ export const runCommandTool: Tool = {
     properties: { command: { type: "string" }, cwd: { type: "string" }, timeout_ms: { type: "number" } },
     required: ["command"],
   },
-  capabilities: { readOnly: false },
+  readOnly: false,
   async run(input, ctx) {
     const ws = requireWorkspace(ctx);
     const command = reqString(input, "command");
