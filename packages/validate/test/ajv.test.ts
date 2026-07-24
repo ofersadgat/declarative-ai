@@ -52,4 +52,52 @@ describe("asBoundaryValidator — the maybe-async boundary lift", () => {
     const res = boundary.validateValue({ type: "string" } as never, "hi");
     expect(res).toEqual({ ok: true }); // NOT a promise — the inline family's truth
   });
+
+  it("getId routes EVERY document through the store-backed path under the caller's minted id", async () => {
+    const { SchemaValidator, asBoundaryValidator } = await import("../src/ajv");
+    const stored: Record<string, object> = {
+      "json:leaf": { type: "string", minLength: 2 },
+    };
+    // The caller's mint: a content-addressed id the resolver could also serve (findmyprompt: makeJson).
+    const minted = new Map<object, string>();
+    let seq = 0;
+    const idOf = (schema: object) => {
+      let id = minted.get(schema);
+      if (!id) minted.set(schema, (id = `json:minted-${++seq}`));
+      return id;
+    };
+    const v = new SchemaValidator({ getSchema: async (id) => stored[id] as never }, { getId: idOf as never });
+    const boundary = asBoundaryValidator(v);
+
+    // Ref-ful document: $refs resolve from the store; registration id is the caller's mint.
+    const withRef = { type: "object", properties: { name: { $ref: "json:leaf" } }, required: ["name"] } as never;
+    expect(await boundary.validateValue(withRef, { name: "ok" })).toEqual({ ok: true });
+    expect((await boundary.validateValue(withRef, { name: "x" })).ok).toBe(false);
+
+    // Ref-free document: ALSO the store-backed path (still awaited), so the boundary and
+    // `validate(id, …)` entry points share one compiled cache under the same id.
+    const refFree = { type: "number" } as never;
+    expect(await boundary.validateValue(refFree, 5)).toEqual({ ok: true });
+    const fnViaBoundary = await v.compile(idOf(refFree));
+    const fnViaStore = await v.compile(idOf(refFree));
+    expect(fnViaBoundary).toBe(fnViaStore); // one namespace, one cache entry
+  });
+
+  it("forJsonStore wires a content-addressed json store without a subclass", async () => {
+    const { SchemaValidator, asBoundaryValidator } = await import("../src/ajv");
+    // A store serving `{ json }` artifacts by id — the findmyprompt ArtifactStore surface.
+    const artifacts: Record<string, { json: unknown }> = {
+      "json:leaf": { json: { type: "string", minLength: 2 } },
+    };
+    const v = SchemaValidator.forJsonStore(
+      { getJson: async (id) => artifacts[id] },
+      (schema) => "json:mint-" + JSON.stringify(schema).length, // stand-in mint
+    );
+    const boundary = asBoundaryValidator(v);
+    const schema = { type: "object", properties: { name: { $ref: "json:leaf" } }, required: ["name"] } as never;
+    expect(await boundary.validateValue(schema, { name: "ok" })).toEqual({ ok: true });
+    expect((await boundary.validateValue(schema, { name: "x" })).ok).toBe(false);
+    // Store-backed validate() also works through the same adapter.
+    expect((await v.validate("json:leaf", "ok")).ok).toBe(true);
+  });
 });

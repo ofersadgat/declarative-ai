@@ -23,15 +23,48 @@ export interface SchemaResolver {
   getSchema(id: string): Promise<SchemaDocument | undefined>;
 }
 
+/** A content-addressed json store — the minimal structural surface {@link SchemaValidator.forJsonStore}
+ *  adapts into a {@link SchemaResolver} (findmyprompt: the artifact store's `getJson`). */
+export interface JsonArtifactSource {
+  getJson(id: string): Promise<{ json: unknown } | null | undefined>;
+}
+
+export interface SchemaValidatorOptions {
+  /**
+   * The caller's content-address MINT for schema documents: given a document, the canonical id the
+   * caller's store knows it by. When set, a document arriving as a DOCUMENT (the
+   * {@link asBoundaryValidator} path) registers and caches under `getId(schema)` — the SAME id a
+   * store-backed `validate(id, …)` call would use — so both entry points share one registration
+   * namespace and one compiled cache. Absent, document ids derive from `hashCanonical`.
+   */
+  getId?: (schema: SchemaDocument) => string;
+}
+
 export class SchemaValidator implements OutputValidator {
   private readonly ajv: Ajv;
   private readonly compiled = new Map<string, ValidateFunction>();
   private readonly registered = new Set<string>();
+  /** See {@link SchemaValidatorOptions.getId}; read by {@link asBoundaryValidator}. */
+  readonly getId?: (schema: SchemaDocument) => string;
 
-  constructor(private readonly resolver?: SchemaResolver) {
+  constructor(private readonly resolver?: SchemaResolver, opts: SchemaValidatorOptions = {}) {
     // strict:false — our schemas carry harmless extras (title) and we validate against the
     // ORIGINAL (unpatched) schema; we don't want Ajv to throw on unknown-keyword strictness.
     this.ajv = new Ajv({ allErrors: true, strict: false });
+    this.getId = opts.getId;
+  }
+
+  /**
+   * Wire a validator to a content-addressed json store: `$ref`s resolve as store ids, and `getId`
+   * — the caller's own content-address mint — keys document registration so every document lands
+   * under the SAME id the store knows it by (one namespace across document and `validate(id, …)`
+   * entry points). This is the whole store-backed configuration; callers need no subclass.
+   */
+  static forJsonStore(store: JsonArtifactSource, getId?: (schema: SchemaDocument) => string): SchemaValidator {
+    return new SchemaValidator(
+      { getSchema: async (id) => (await store.getJson(id))?.json as SchemaDocument | undefined },
+      { getId },
+    );
   }
 
   /** Validate a value against an INLINE schema document (no `$ref` store resolution) — the SYNC seam
@@ -94,10 +127,16 @@ export class SchemaValidator implements OutputValidator {
  * async store-backed path; a ref-free document (or a warm cache) answers synchronously through
  * `validateValue`. This is the validator an llm-call environment wants when schemas are id-family
  * artifacts — inject it as `env.validator` / `ctx.validator` and the call layer awaits it.
+ *
+ * With `getId` configured, EVERY document goes through the store-backed path under the caller's
+ * minted id (ref-free ones included) — the id then matches the caller's stored artifact, which is
+ * what keeps one registration namespace across document and `validate(id, …)` entry points.
  */
 export function asBoundaryValidator(validator: SchemaValidator): OutputValidator {
   return {
     validateValue(schema: SchemaDocument, value: JsonValue) {
+      const getId = validator.getId;
+      if (getId) return validator.validate(getId(schema), value, schema);
       if (collectRefs(schema).size > 0) {
         const id = "ref:" + hashCanonical(schema);
         return validator.validate(id, value, schema);
