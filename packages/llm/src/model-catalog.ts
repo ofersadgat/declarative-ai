@@ -17,6 +17,13 @@
  * methods are typed to the exact set of `${route}/${model}` keys (an unknown model fails to COMPILE);
  * construct it with a plain `ModelInfoInterface[]` (or read the runtime-hydrated `ModelInfo.instance`)
  * and the methods accept any `string`. Strong seed → strong methods; weak seed → weak methods.
+ *
+ * PACKAGING: this module is dependency-FREE (its only runtime import is the generated seed data; the
+ * router/schema imports are type-only) and is published as its own `@declarative-ai/llm/model-catalog`
+ * subpath for exactly that reason. Model *identity*, *pricing* and *capabilities* are the parts a UI
+ * legitimately needs, and reaching them through the package barrel would drag `call`→`router`→
+ * `dispatcher` — hence `undici`/`node:net` and the AI SDK providers — into a browser bundle. Same
+ * un-barrelling rationale as the ajv note in index.ts: keep the module graph honest, not just the API.
  */
 import { GENERATED_MODELS } from "./model-catalog-data.generated";
 import type { ModelRoute } from "./router";
