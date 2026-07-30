@@ -21,15 +21,24 @@ import {
   RESOLVER_REFS,
   type BindingDecl,
   type ChildDecl,
+  type ExecEnvironmentDecl,
   type LoadedChild,
   type LoadedState,
   type NamedParameterDecl,
-  type OperationDecl,
+  OPERATION_OWN_FIELDS,
+  type OperationFields,
+  type OutputSpread,
   type ParameterDecl,
   type SlotMeta,
   type StateDef,
   type WorkflowBundle,
 } from "./format";
+import { parseExpression } from "./expr";
+import { lowerExpression, type LowerOptions } from "./lowerExpr";
+import { environmentIdentity, mergeOperationFields, resolutionEnvironment } from "./merge";
+import { resolveStateRef, StateRefError, type StateRefOptions } from "./ref";
+import { expandReferences } from "./expand";
+import { parseReferencedFile, resolveReference, selectProperty, type Vfs } from "./reference";
 
 export class WorkflowLoadError extends Error {
   constructor(
@@ -41,9 +50,15 @@ export class WorkflowLoadError extends Error {
   }
 }
 
-/** Strip a state-file name to its state ID: forward slashes, no extension. */
+/**
+ * Strip a state-file name to its state ID: forward slashes, no data suffix.
+ *
+ * A state is authored in JSON or YAML, and the two are interchangeable — both parse to the same
+ * value tree, and `snapshotHash` hashes that value rather than the bytes, so one workflow has one
+ * identity whichever it was written in.
+ */
 export function stateIdFromPath(relPath: string): string {
-  return relPath.replace(/\\/g, "/").replace(/\.state\.json$|\.json$/i, "");
+  return relPath.replace(/\\/g, "/").replace(/\.state\.json$|\.(json|yaml|yml)$/i, "");
 }
 
 // --- Desugaring (§2.1) --------------------------------------------------------
@@ -72,7 +87,7 @@ function resolverEdge(functionRef: string, args: Record<string, Ref<InlineFamily
 }
 
 /** True for the base `Ref<InlineFamily>` cases — everything else in `BindingDecl` is sugar. */
-function isBaseRef(b: BindingDecl): b is Ref<InlineFamily> {
+function isBaseRef(b: Exclude<BindingDecl, string>): b is Ref<InlineFamily> {
   return "text" in b || "json" in b || "result" in b || "refs" in b || "op" in b;
 }
 
@@ -80,23 +95,42 @@ function isBaseRef(b: BindingDecl): b is Ref<InlineFamily> {
  * Lower ONE authored binding to a base `Ref<InlineFamily>`. The mapping is §2.1's table:
  * every sugar becomes a producer edge (or a literal), so the base vocabulary stays closed.
  */
-export function desugarBinding(binding: BindingDecl, where: string, stateId: string): Ref<InlineFamily> {
+export function desugarBinding(
+  binding: BindingDecl,
+  where: string,
+  stateId: string,
+  /** The slot this binding fills — the default for a `{ child }` binding's `output`. */
+  slotName?: string,
+  /** How an expression resolves an operation NAME to the operation (§3). */
+  lower: LowerOptions = {},
+): Ref<InlineFamily> {
+  if (typeof binding === "string") return desugarRuntimeReference(binding, where, stateId, slotName);
   if (isBaseRef(binding)) return binding;
 
   if ("child" in binding) {
-    // A producer edge on the declared child, plus a `select` projection when a specific output is
-    // named (hw states lower to single-object-output ops, so a named output IS a property select).
+    // A producer edge on the declared child, plus a `select` projection for the named output (hw
+    // states lower to single-object-output ops, so a named output IS a property select).
     const childEdge: Ref<InlineFamily> = { op: binding.child };
-    if (binding.output === undefined) return childEdge;
-    return resolverEdge(RESOLVER_REFS.select, { value: childEdge, key: { text: binding.output } });
+    // `*` is the whole object; anything else, including the defaulted slot name, is a projection.
+    const output = binding.output ?? slotName;
+    if (output === undefined || output === WHOLE_OUTPUT) return childEdge;
+    return resolverEdge(RESOLVER_REFS.select, { value: childEdge, key: { text: output } });
   }
   if ("input" in binding) {
     return resolverEdge(RESOLVER_REFS.scope, { scope: { text: "inputs" }, name: { text: binding.input } });
   }
   if ("expr" in binding) {
-    // An expression IS a pure FunctionOp producer whose output schema is the inferred type (§7.2),
-    // so ordinary binding type-checking applies to it with no special case.
-    return resolverEdge(RESOLVER_REFS.expr, { source: { text: binding.expr } });
+    // An expression IS a producer — structurally, as a TREE of operator edges rather than a source
+    // string handed to an interpreter at resolution time (EXPRESSIONS.md §1). Its references are
+    // leaves, so the fan-out planner and the validator walk it with the code they already walk every
+    // other binding with, and its type is inferred by `inferRef` rather than by re-parsing.
+    try {
+      return lowerExpression(parseExpression(binding.expr), lower);
+    } catch (e) {
+      // A malformed expression is a binding error like any other here — the same treatment
+      // `'x' is not a runtime reference` and `unrecognized binding form` already get.
+      throw new WorkflowLoadError(`${where}: expression does not parse: ${(e as Error).message}`, stateId);
+    }
   }
   if ("artifact" in binding) {
     return resolverEdge(RESOLVER_REFS.artifact, { name: { text: binding.artifact } });
@@ -109,11 +143,105 @@ export function desugarBinding(binding: BindingDecl, where: string, stateId: str
   throw new WorkflowLoadError(`${where}: unrecognized binding form ${JSON.stringify(binding)}`, stateId);
 }
 
+/** The child a spread republishes, from either spelling of "that child's outputs". */
+function spreadChildOf(binding: BindingDecl | undefined): string | undefined {
+  if (binding === undefined) return undefined;
+  if (typeof binding === "string") {
+    const parts = binding.split(".");
+    // `.children.<key>.outputs` — the whole object, which is what a spread fans out.
+    if (parts.length === 4 && parts[0] === "" && parts[1] === "children" && parts[3] === "outputs") return parts[2];
+    return undefined;
+  }
+  return "child" in binding ? binding.child : undefined;
+}
+
+/**
+ * Lower a RUNTIME reference — `.children.critique.outputs.outcome` — to the same producer edge the
+ * tagged forms lower to (REFERENCES.md §5).
+ *
+ * This is one spelling of what `{ child }`, `{ input }`, `{ artifact }` and `{ conversation }` each
+ * said separately. They remain accepted; nothing downstream can tell which spelling was used,
+ * because both arrive here and leave as the same base `Ref`.
+ */
+function desugarRuntimeReference(reference: string, where: string, stateId: string, slotName?: string): Ref<InlineFamily> {
+  if (!reference.startsWith(".")) {
+    throw new WorkflowLoadError(
+      `${where}: '${reference}' is not a runtime reference — a binding reads this instance's data, ` +
+        `so it starts with '.' (as in '.children.x.outputs.y')`,
+      stateId,
+    );
+  }
+  const path = reference.slice(1).split(".");
+  const [namespace, ...rest] = path;
+  const bad = (why: string): never => {
+    throw new WorkflowLoadError(`${where}: '${reference}' ${why}`, stateId);
+  };
+
+  switch (namespace) {
+    case "inputs": {
+      if (rest.length !== 1) bad("must name exactly one input, as '.inputs.<name>'");
+      return desugarBinding({ input: rest[0]! }, where, stateId);
+    }
+    case "outputs": {
+      // This state's own outputs are only reachable by evaluation, which is what `expr` is.
+      if (rest.length === 0) bad("must name an output");
+      return desugarBinding({ expr: `outputs.${rest.join(".")}` }, where, stateId);
+    }
+    case "children": {
+      const [child, section, ...tail] = rest;
+      if (child === undefined) bad("must name a child, as '.children.<key>.outputs.<name>'");
+      if (section === undefined || section === "outputs") {
+        // `.children.c.outputs` is the whole object; `.children.c.outputs.x` projects one output.
+        const output = tail.length === 0 ? WHOLE_OUTPUT : tail.join(".");
+        return desugarBinding({ child: child!, output }, where, stateId, slotName);
+      }
+      // `outcome` and anything else about a child is control-flow state, which guards read.
+      return desugarBinding({ expr: `children.${child}.${[section, ...tail].join(".")}` }, where, stateId);
+    }
+    case "artifacts": {
+      if (rest.length !== 1) bad("must name exactly one artifact, as '.artifacts.<name>'");
+      return desugarBinding({ artifact: rest[0]! }, where, stateId);
+    }
+    case "conversations": {
+      const [session, section, index] = rest;
+      if (session === undefined) bad("must name a session, as '.conversations.<session>'");
+      if (section === undefined) return desugarBinding({ conversation: session! }, where, stateId);
+      if (section !== "messages" || index === undefined || !/^\d+$/.test(index)) {
+        bad("must be '.conversations.<session>' or '.conversations.<session>.messages.<n>'");
+      }
+      return desugarBinding({ conversation: session!, message: Number(index) }, where, stateId);
+    }
+    default:
+      return bad(
+        `starts with '${String(namespace)}', which is not a runtime namespace — ` +
+          `expected inputs, outputs, children, artifacts or conversations`,
+      );
+  }
+}
+
+/**
+ * The `output` value meaning "the child's whole output object", and the slot-key suffix meaning
+ * "spread the child's outputs into this state's, under this prefix" (§3.4).
+ *
+ * The spread marker lives in the slot KEY rather than in `output` because a spread declares N slots,
+ * not one, and that has to be visible where the slots are declared. Overloading `output` for it
+ * would also be ambiguous: `{ "output": "plan_" }` could not be told apart from selecting an output
+ * genuinely named `plan_`.
+ */
+export const WHOLE_OUTPUT = "*";
+export const SPREAD_SUFFIX = "*";
+
 /** Lower an authored slot to a `Parameter<InlineFamily>`, splitting off its authoring metadata. */
-function desugarParameter(decl: ParameterDecl, where: string, stateId: string): { param: Parameter<InlineFamily>; meta?: SlotMeta } {
+function desugarParameter(
+  decl: ParameterDecl,
+  where: string,
+  stateId: string,
+  slotName?: string,
+  lower: LowerOptions = {},
+): { param: Parameter<InlineFamily>; meta?: SlotMeta } {
   const param: Parameter<InlineFamily> = { kind: kindOf(decl) };
   if (decl.schema !== undefined) param.schema = decl.schema;
-  if (decl.binding !== undefined) param.binding = desugarBinding(decl.binding, where, stateId);
+  if (decl.binding !== undefined) param.binding = desugarBinding(decl.binding, where, stateId, slotName, lower);
   if (decl.index !== undefined) param.index = decl.index;
   const meta: SlotMeta = {};
   if (decl.default !== undefined) meta.default = decl.default;
@@ -122,8 +250,8 @@ function desugarParameter(decl: ParameterDecl, where: string, stateId: string): 
   return { param, ...(Object.keys(meta).length > 0 ? { meta } : {}) };
 }
 
-function desugarNamedParameter(name: string, decl: NamedParameterDecl, where: string, stateId: string): { param: NamedParameter<InlineFamily>; meta?: SlotMeta } {
-  const { param, meta } = desugarParameter(decl, where, stateId);
+function desugarNamedParameter(name: string, decl: NamedParameterDecl, where: string, stateId: string, slotName?: string, lower: LowerOptions = {}): { param: NamedParameter<InlineFamily>; meta?: SlotMeta } {
+  const { param, meta } = desugarParameter(decl, where, stateId, slotName, lower);
   return { param: { ...param, name: decl.name ?? name }, ...(meta ? { meta } : {}) };
 }
 
@@ -132,11 +260,12 @@ function desugarSlotMap(
   fields: Record<string, ParameterDecl> | undefined,
   stateId: string,
   slotMeta: Record<string, SlotMeta>,
+  lower: LowerOptions = {},
 ): Record<string, Parameter<InlineFamily>> | undefined {
   if (!fields) return undefined;
   const out: Record<string, Parameter<InlineFamily>> = {};
   for (const [name, decl] of Object.entries(fields)) {
-    const { param, meta } = desugarParameter(decl, `${section}.${name}`, stateId);
+    const { param, meta } = desugarParameter(decl, `${section}.${name}`, stateId, undefined, lower);
     out[name] = param;
     if (meta) slotMeta[`${section}.${name}`] = meta;
   }
@@ -148,8 +277,46 @@ function defaultOutput(): NamedParameter<InlineFamily> {
   return { name: "output", kind: "json" };
 }
 
-/** Lower an authored operation block to a real `Operation<InlineFamily>` (§7.1). */
-export function desugarOperation(decl: OperationDecl, stateId: string, outputs?: Record<string, NamedParameterDecl>): Operation<InlineFamily> {
+/**
+ * Split a merged operation into the part the engine EXECUTES and the part it executes it IN (§5).
+ *
+ * Both halves are authored in one block now, but they are consumed by different machinery — the op
+ * goes to the prompt runner or the function registry, the environment decides the session, the tool
+ * set and the permission baseline — so the loader hands each consumer only what it needs.
+ */
+export function splitExecEnvironment(fields: OperationFields): { op: OperationFields; env: ExecEnvironmentDecl } {
+  const { session, tools, conversation, permissions, ...op } = fields;
+  const env: ExecEnvironmentDecl = {};
+  if (session !== undefined) env.session = session;
+  if (tools !== undefined) env.tools = tools;
+  if (conversation !== undefined) env.conversation = conversation;
+  if (permissions !== undefined) env.permissions = permissions;
+  return { op, env };
+}
+
+/**
+ * Lower a MERGED operation block to a real `Operation<InlineFamily>` (§7.1).
+ *
+ * `decl` is post-inheritance (§5), so `kind` and `function` may have come from an ancestor's
+ * `environment` rather than from the state file — which is why the "did the author say enough to
+ * build an operation?" checks live here rather than in the type.
+ */
+export function desugarOperation(decl: OperationFields, stateId: string, outputs?: Record<string, NamedParameterDecl>): Operation<InlineFamily> {
+  if (decl.kind === undefined) {
+    throw new WorkflowLoadError(
+      "operation declares no 'kind', and no ancestor's environment supplies one — expected 'prompt' or 'function'",
+      stateId,
+    );
+  }
+  if (decl.kind !== "prompt" && decl.kind !== "function") {
+    throw new WorkflowLoadError(`operation.kind '${String(decl.kind)}' is not 'prompt' or 'function'`, stateId);
+  }
+  if (decl.kind === "function" && decl.function === undefined) {
+    throw new WorkflowLoadError(
+      "function operation names no 'function', and no ancestor's environment supplies one",
+      stateId,
+    );
+  }
   const input: Record<string, Parameter<InlineFamily>> = {};
   for (const [name, p] of Object.entries(decl.input ?? {})) {
     input[name] = desugarParameter(p, `operation.input.${name}`, stateId).param;
@@ -167,10 +334,8 @@ export function desugarOperation(decl: OperationDecl, stateId: string, outputs?:
     // in here — every render variable is just one of `input`.
     const op: Operation<InlineFamily> = {
       kind: "prompt",
-      // A `skill` prompt resolves through `registry.skills` at render time; the op carries the
-      // reference in the same `user` slot, marked so the engine can tell the two apart.
-      user: decl.prompt?.skill !== undefined ? skillRef(decl.prompt.skill) : (decl.prompt?.template ?? ""),
-      config: (decl.config ?? {}) as JsonValue,
+      user: decl.prompt ?? "",
+      config: callConfigOf(decl) as JsonValue,
       input,
       output,
     };
@@ -179,16 +344,26 @@ export function desugarOperation(decl: OperationDecl, stateId: string, outputs?:
   }
   // A FunctionOp — a host function, a sub-workflow, or a delegated runtime adapter alike (§3.1).
   // The authored surface rides a bound `config` input; the op shape gains nothing.
-  if (decl.config !== undefined && input.config === undefined) {
-    input.config = { kind: "json", binding: { json: decl.config as JsonValue } };
+  if (decl.args !== undefined && input.config === undefined) {
+    input.config = { kind: "json", binding: { json: decl.args as JsonValue } };
   }
-  return { kind: "function", functionRef: decl.function, input, output };
+  return { kind: "function", functionRef: decl.function!, input, output };
 }
 
-/** The marker prefix distinguishing a SKILL reference from an inline template in a `user` slot. */
-export const SKILL_PREFIX = "skill:";
-export const skillRef = (name: string): string => `${SKILL_PREFIX}${name}`;
-export const skillNameOf = (user: string): string | undefined => (user.startsWith(SKILL_PREFIX) ? user.slice(SKILL_PREFIX.length) : undefined);
+/**
+ * The call configuration a prompt operation assembles: every authored field hw does not own itself.
+ *
+ * "The operation IS the call" (REFERENCES.md §7.2) — `model`, `temperature` and the rest sit
+ * directly on the operation rather than nested under a `config` bag, so an author writes one flat
+ * block and a knob hw has never heard of still reaches the model.
+ */
+function callConfigOf(decl: OperationFields): Record<string, JsonValue> {
+  const config: Record<string, JsonValue> = {};
+  for (const [key, value] of Object.entries(decl)) {
+    if (!OPERATION_OWN_FIELDS.has(key) && value !== undefined) config[key] = value as JsonValue;
+  }
+  return config;
+}
 
 /**
  * Build the operation's single object-output slot from the outputs the OPERATION produces — which is
@@ -212,16 +387,52 @@ function outputSlotFor(outputs: Record<string, NamedParameterDecl> | undefined):
   return { name: "output", kind: "json", schema };
 }
 
-/** Desugar one authored state file into its loaded form. */
-export function desugarState(id: string, def: StateDef): LoadedState {
+/**
+ * Desugar one authored state file into its loaded form.
+ *
+ * `inherited` is the merged `environment` of every ancestor on the path that reached this state
+ * (§5) — empty for a root, and for any caller that loads a state in isolation.
+ */
+export function desugarState(
+  id: string,
+  def: StateDef,
+  inherited: OperationFields = {},
+  refs: StateRefOptions = {},
+  inferredChildren?: Record<string, ChildDecl>,
+  /** How an expression in THIS state resolves an operation name (§3) — the loader supplies it. */
+  lower: LowerOptions = {},
+): LoadedState {
+  if (def.children === undefined && inferredChildren !== undefined && Object.keys(inferredChildren).length > 0) {
+    def = { ...def, children: inferredChildren };
+  }
+  // The environment this state resolves in, computed BEFORE anything below is desugared. Every
+  // reference in the slots, the wiring and the children resolves against it, so it cannot be
+  // assembled at the point the operation is (which is where it used to be) — see
+  // `resolutionEnvironment`.
+  const environment = resolutionEnvironment(inherited, def.environment);
   const slotMeta: Record<string, SlotMeta> = {};
-  const inputs = desugarSlotMap("inputs", def.inputs, id, slotMeta);
+  const inputs = desugarSlotMap("inputs", def.inputs, id, slotMeta, lower);
 
   let outputs: Record<string, NamedParameter<InlineFamily>> | undefined;
+  // A `prefix*` output declares however many slots the child has, so it cannot be lowered until that
+  // child is loaded. Collected here, expanded by the bundle once the closure is known (§3.4).
+  const spreads: OutputSpread[] = [];
   if (def.outputs) {
     outputs = {};
     for (const [name, decl] of Object.entries(def.outputs)) {
-      const { param, meta } = desugarNamedParameter(name, decl, `outputs.${name}`, id);
+      if (name.endsWith(SPREAD_SUFFIX)) {
+        const child = spreadChildOf(decl.binding);
+        if (child === undefined) {
+          throw new WorkflowLoadError(
+            `outputs.${name}: a '${SPREAD_SUFFIX}' output must bind a child's outputs — ` +
+              `'.children.<key>.outputs' or { "child": "<key>" }`,
+            id,
+          );
+        }
+        spreads.push({ prefix: name.slice(0, -SPREAD_SUFFIX.length), child, ...(decl.optional !== undefined ? { optional: decl.optional } : {}) });
+        continue;
+      }
+      const { param, meta } = desugarNamedParameter(name, decl, `outputs.${name}`, id, name, lower);
       outputs[name] = param;
       if (meta) slotMeta[`outputs.${name}`] = meta;
     }
@@ -233,97 +444,437 @@ export function desugarState(id: string, def: StateDef): LoadedState {
     for (const [key, child] of Object.entries(def.children)) {
       const wired: Record<string, Ref<InlineFamily>> = {};
       for (const [inputName, binding] of Object.entries(child.inputs ?? {})) {
-        wired[inputName] = desugarBinding(binding, `children.${key}.inputs.${inputName}`, id);
+        wired[inputName] = desugarBinding(binding, `children.${key}.inputs.${inputName}`, id, undefined, lower);
       }
       children[key] = {
-        state: child.state,
+        // A child that declares no `state` is the one its KEY names (REFERENCES.md §7.3), so the
+        // common case says the path nowhere — and a declared child differs from an inferred one
+        // (§6) only by the wiring it adds.
+        state: resolveChildRef(child.state ?? `./${key}`, id, key, refs),
         ...(child.inputs ? { inputs: wired } : {}),
         ...(child.async !== undefined ? { async: child.async } : {}),
       };
     }
   }
 
-  const { operation, inputs: _i, outputs: _o, children: _c, ...rest } = def;
+  // Guards, lowered HERE rather than by the engine: a guard may CALL an operation, and resolving a
+  // callee needs the search path, the referring state and a filesystem — load-time knowledge. Engine-
+  // side lowering worked while expressions were operators only, and threw the moment one held a call.
+  const transitions = def.transitions?.map((t, i) => {
+    if (t.when === undefined) return { ...t };
+    void i;
+    try {
+      return { ...t, whenRef: lowerExpression(parseExpression(t.when), lower) };
+    } catch (e) {
+      // Carried, not thrown — see `LoadedTransition.whenError`.
+      return { ...t, whenError: (e as Error).message };
+    }
+  });
+
+  // The effective operation (§5): the resolution environment above, then the op itself. Only a
+  // state that DECLARES an operation gets one — otherwise every pure composite under an
+  // `environment`-declaring root would inherit its ancestor's op and start running it.
+  const merged = def.operation !== undefined ? mergeOperationFields(environment, def.operation) : undefined;
+  const split = merged !== undefined ? splitExecEnvironment(merged) : undefined;
+
+  // The cursor's order, defaulted to the order the children were declared in (§6). Resolved here
+  // rather than in the engine so the validator's reachability pass and the lint surface see the same
+  // spine the engine will walk.
+  const sequence = def.sequence ?? (children ? Object.keys(children) : undefined);
+
+  // An operation the merged chain never completed is an AUTHORING error, so it is carried as data
+  // and reported by the validator alongside every other one. Throwing here instead aborted the load
+  // at the first such state, and the author saw a downstream consequence — "this leaf has no kind" —
+  // in place of the mistake they actually made two files away.
+  const operationOrError = describeOperation(split, id, def.outputs);
+
+  const { operation, environment: _e, inputs: _i, outputs: _o, children: _c, sequence: _s, transitions: _t, ...rest } = def;
   return {
     ...rest,
     id,
     ...(inputs ? { inputs } : {}),
     ...(outputs ? { outputs } : {}),
     ...(children ? { children } : {}),
-    ...(operation ? { operation: desugarOperation(operation, id, def.outputs) } : {}),
+    ...(transitions ? { transitions } : {}),
+    ...(sequence ? { sequence, sequenceAuthored: def.sequence !== undefined } : {}),
+    ...(operationOrError.operation !== undefined ? { operation: operationOrError.operation } : {}),
+    ...(operationOrError.error !== undefined ? { operationError: operationOrError.error } : {}),
+    ...(split && Object.keys(split.env).length > 0 ? { environment: split.env } : {}),
+    ...(spreads.length > 0 ? { outputSpreads: spreads } : {}),
     ...(Object.keys(slotMeta).length > 0 ? { slotMeta } : {}),
   };
 }
 
+/**
+ * Expand a state's `prefix*` outputs, now that its children are loaded (§3.4).
+ *
+ * Each of the named child's declared outputs becomes an output of THIS state, prefixed and bound to
+ * it — so a parent can republish a child's whole result without restating every slot, and still get
+ * one typed slot per value rather than one opaque object.
+ */
+function expandOutputSpreads(state: LoadedState, states: Record<string, LoadedState>): void {
+  if (state.outputSpreads === undefined) return;
+  const outputs = state.outputs ?? {};
+  const slotMeta = state.slotMeta ?? {};
+  for (const spread of state.outputSpreads) {
+    const childRef = state.children?.[spread.child];
+    const childState = childRef ? states[childRef.state] : undefined;
+    // An unknown child is a VALIDATION error with the field attached; expanding nothing keeps the
+    // load going so the validator can say so properly.
+    if (!childState) continue;
+    for (const [name, slot] of Object.entries(childState.outputs ?? {})) {
+      const target = `${spread.prefix}${name}`;
+      // An explicitly declared slot wins over a spread — the author named that one on purpose.
+      if (outputs[target] !== undefined) continue;
+      outputs[target] = {
+        name: target,
+        kind: slot.kind,
+        ...(slot.schema !== undefined ? { schema: slot.schema } : {}),
+        binding: desugarBinding({ child: spread.child, output: name }, `outputs.${spread.prefix}${SPREAD_SUFFIX}`, state.id),
+      };
+      const childMeta = childState.slotMeta?.[`outputs.${name}`];
+      const optional = spread.optional ?? childMeta?.optional;
+      if (optional !== undefined) slotMeta[`outputs.${target}`] = { optional };
+    }
+  }
+  state.outputs = outputs;
+  if (Object.keys(slotMeta).length > 0) state.slotMeta = slotMeta;
+}
+
+/** Lower the merged operation, keeping an incomplete one as a reportable error rather than a throw. */
+function describeOperation(
+  split: { op: OperationFields } | undefined,
+  id: string,
+  outputs: Record<string, NamedParameterDecl> | undefined,
+): { operation?: Operation<InlineFamily>; error?: string } {
+  if (split === undefined) return {};
+  try {
+    return { operation: desugarOperation(split.op, id, outputs) };
+  } catch (e) {
+    if (e instanceof WorkflowLoadError) return { error: e.message.replace(`${id}: `, "") };
+    throw e;
+  }
+}
+
+/** Resolve a `children[].state` reference, reporting it against the field that named it. */
+function resolveChildRef(ref: string, parentId: string, key: string, refs: StateRefOptions): string {
+  try {
+    return resolveStateRef(ref, { ...refs, from: parentId });
+  } catch (e) {
+    if (e instanceof StateRefError) throw new WorkflowLoadError(`children.${key}.state: ${e.message}`, parentId);
+    throw e;
+  }
+}
+
 // --- Bundle loading -----------------------------------------------------------
+
+export interface LoadBundleOptions extends Omit<StateRefOptions, "defaultRoot"> {
+  /**
+   * Where a bare reference hangs off — one root, or an ordered SEARCH PATH (EXPRESSIONS.md §4).
+   *
+   * A list is searched in order for a *document* reference, where a filesystem is in hand to test a
+   * candidate against. A `children[].state` still resolves against the FIRST entry only: state-id
+   * resolution is pure path arithmetic with nothing to check existence with.
+   */
+  defaultRoot?: string | readonly string[];
+  /**
+   * Fetch a state the `files` map does not hold, by canonical id — how an out-of-tree reference
+   * (`/opt/workflows/lib/review`, `$JAIRA/shared/x`) is read. Sync, because loading is; returning
+   * `undefined` leaves the reference to the validator to report as unknown.
+   */
+  loadState?: (id: string) => unknown | undefined;
+  /**
+   * The filesystem document references resolve against (REFERENCES.md §1.1). Absent ⇒ expansion is
+   * skipped, which is what an in-memory bundle with no references wants.
+   */
+  vfs?: Vfs;
+  /** Non-fatal ambiguities from reference resolution (§9). */
+  onWarn?: (message: string) => void;
+  /** Every file expansion read, for the snapshot closure (§8.1). */
+  onReferencedFile?: (file: string) => void;
+}
 
 /**
  * Load a bundle from raw file contents (`stateId or relative path` → parsed JSON), desugaring
  * each state. Restricts the bundle to the transitive closure reachable from `rootId` so the
  * snapshot hash never varies with unrelated files lying around the workflow dir.
+ *
+ * The walk carries the ENVIRONMENT CHAIN (§5): each state's effective operation is merged from every
+ * ancestor's `environment` on the path that reached it. That is a property of the path, not of the
+ * file — the tree convention is only a convention, so a shared library state can be mounted under
+ * two different parents. When those two parents would give it two DIFFERENT environments the load
+ * fails rather than picking one, because either choice would be silently wrong for the other mount.
  */
-export function loadBundle(files: Record<string, unknown>, rootId: string): WorkflowBundle {
+export function loadBundle(files: Record<string, unknown>, rootRef: string, options: LoadBundleOptions = {}): WorkflowBundle {
+  // `resolveStateRef` does path arithmetic with no filesystem in hand, so it cannot SEARCH a path —
+  // it has nothing to test a candidate's existence against and would always take the first entry.
+  // It therefore takes the primary root, which is the one a bare state id folds back against anyway.
+  // Searching for a `children[].state` needs an existence oracle and is a separate decision.
+  const primary = Array.isArray(options.defaultRoot) ? options.defaultRoot[0] : (options.defaultRoot as string | undefined);
+  const refs: StateRefOptions = {
+    ...(primary !== undefined ? { defaultRoot: primary } : {}),
+    ...(options.roots !== undefined ? { roots: options.roots } : {}),
+  };
   const authored = new Map<string, StateDef>();
   for (const [key, raw] of Object.entries(files)) {
-    const id = stateIdFromPath(key);
+    const id = resolveStateRef(stateIdFromPath(key), refs);
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
       throw new WorkflowLoadError("state file is not a JSON object", id);
     }
     const def = raw as StateDef;
-    if (def.id !== undefined && def.id !== id) {
+    if (def.id !== undefined && resolveStateRef(def.id, refs) !== id) {
       throw new WorkflowLoadError(`declared id '${def.id}' does not match path-derived id '${id}'`, id);
     }
     authored.set(id, def);
   }
-  if (!authored.has(rootId)) {
+  const rootId = resolveStateRef(rootRef, refs);
+
+  const rawById = new Map<string, StateDef>(authored);
+
+  /**
+   * Expand one state's document references (REFERENCES.md §4), or pass it through untouched when
+   * the caller supplied no filesystem — an in-memory bundle has nothing to resolve against.
+   */
+  const expandFor = (id: string, def: StateDef, path?: readonly string[]): StateDef => {
+    if (options.vfs === undefined) return def;
+    // The inherited search path, when the chain declared one, replaces the single default root for
+    // this state's bare references (EXPRESSIONS.md §4). The primary root stays first, so an id under
+    // it keeps its bare spelling and the snapshot identity is unaffected.
+    const defaultRoot = path !== undefined && path.length > 0 ? path : options.defaultRoot;
+    try {
+      return expandReferences(def, {
+        vfs: options.vfs,
+        from: id,
+        ...(defaultRoot !== undefined ? { defaultRoot } : {}),
+        ...(options.roots !== undefined ? { roots: options.roots } : {}),
+        ...(options.onWarn !== undefined ? { onWarn: options.onWarn } : {}),
+        ...(options.onReferencedFile !== undefined ? { onRead: options.onReferencedFile } : {}),
+      }) as StateDef;
+    } catch (e) {
+      throw new WorkflowLoadError((e as Error).message, id);
+    }
+  };
+
+  /**
+   * Children by DIRECTORY, for a state that declares none (§6).
+   *
+   * A state owns the namespace under its own id, so the states one segment below it are its
+   * children — `feature/plan/goals` and `feature/plan/context` are `feature/plan`'s, keyed by
+   * basename, alphabetically. The bundle's own file map IS the directory listing, so this needs no
+   * filesystem and gives the same answer whether it is reading live `workflows/` or a snapshot.
+   *
+   * Only an ABSENT `children` infers. `"children": {}` is an author saying "none", and a leaf that
+   * happens to have a directory beside it must be able to say so.
+   */
+  const childrenByParent = new Map<string, Record<string, ChildDecl>>();
+  for (const childId of [...authored.keys()].sort()) {
+    const cut = childId.lastIndexOf("/");
+    if (cut <= 0) continue;
+    const parent = childId.slice(0, cut);
+    if (!authored.has(parent)) continue;
+    const bucket = childrenByParent.get(parent) ?? {};
+    bucket[childId.slice(cut + 1)] = { state: childId };
+    childrenByParent.set(parent, bucket);
+  }
+
+  /** Read a state the files map doesn't hold — the out-of-tree escape hatch. */
+  const fetch = (id: string): StateDef | undefined => {
+    const known = rawById.get(id);
+    if (known !== undefined) return known;
+    const raw = options.loadState?.(id);
+    if (raw === null || raw === undefined) return undefined;
+    if (typeof raw !== "object" || Array.isArray(raw)) throw new WorkflowLoadError("state file is not a JSON object", id);
+    const def = raw as StateDef;
+    rawById.set(id, def);
+    return def;
+  };
+
+  if (fetch(rootId) === undefined) {
     throw new WorkflowLoadError(`root state '${rootId}' not found in bundle`);
   }
-  // Transitive closure from the root.
+  /**
+   * The id one MOUNT of a state loads under.
+   *
+   * A state mounted under two parents that hand it different environments is running as two
+   * different things, so it gets two entries — the first mount keeps the plain id, and any later
+   * one that inherits something different gets a `#`-suffixed VARIANT. Everything downstream
+   * (validation, snapshots, the board, events) then goes on treating a state as one id with one
+   * operation, which is what it needs to be; only the loader knows a variant exists.
+   *
+   * The suffix hashes the inherited environment rather than the parent's name, so the id depends on
+   * what the state RUNS AS and not on where it was reached from: two parents that happen to pass the
+   * same environment collapse back onto one entry, which is both correct and what keeps the ordinary
+   * shared-library case from sprouting duplicates.
+   */
+  const variantsById = new Map<string, Map<string, string>>();
+  const variantFor = (id: string, identity: string): string => {
+    let byIdentity = variantsById.get(id);
+    if (byIdentity === undefined) {
+      byIdentity = new Map();
+      variantsById.set(id, byIdentity);
+    }
+    const existing = byIdentity.get(identity);
+    if (existing !== undefined) return existing;
+    const variant = byIdentity.size === 0 ? id : `${id}${VARIANT_SEPARATOR}${sha256Hex(identity).slice(0, 8)}`;
+    byIdentity.set(identity, variant);
+    return variant;
+  };
+
+  // Transitive closure from the root, carrying each path's accumulated environment.
   const states: Record<string, LoadedState> = {};
-  const rawById = new Map<string, StateDef>(authored);
-  const queue = [rootId];
+  const sourceOf = new Map<string, string>();
+  const queue: Array<{ id: string; variant: string; inherited: OperationFields }> = [
+    { id: rootId, variant: rootId, inherited: {} },
+  ];
   while (queue.length > 0) {
-    const id = queue.shift()!;
-    if (states[id]) continue;
+    const { id, variant, inherited } = queue.shift()!;
+    if (states[variant]) continue;
     const def = rawById.get(id);
     if (!def) {
       // Missing children are a VALIDATION error (with context), not a load error —
       // keep loading so the validator can report all of them at once.
       continue;
     }
-    const loaded = desugarState(id, def);
+    sourceOf.set(variant, id);
+    // Document references are expanded FIRST, so children inference, environment inheritance and
+    // desugaring all see a state as though the author had typed it out in full (§8).
+    // The search path this state resolves under has to be known BEFORE its own document is expanded,
+    // which is why it is read off the raw `environment` rather than the expanded one. That is the
+    // cycle §9 flagged, and this is where it breaks: a state whose `environment` is itself a
+    // transclusion cannot use a path declared inside that same transclusion — you cannot resolve a
+    // reference with a path you have not loaded yet. Everything else inherits normally.
+    const ownEnvironment = def.environment !== undefined && !Array.isArray(def.environment) && typeof def.environment === "object" ? def.environment : undefined;
+    const searchPath = resolutionEnvironment(inherited, ownEnvironment).path;
+    const expanded = expandFor(id, def, searchPath);
+    // Desugared against the SOURCE id: `./goals` means "under the state's own path", and a variant
+    // suffix is an identity for this mount, not a different place on disk.
+  /**
+   * Resolve an operation NAME used in an expression to the operation it denotes (EXPRESSIONS.md §3).
+   *
+   * A path-resolved callee is an operation DOCUMENT — the same `OperationFields` an `operation` block
+   * is written in — so `$/functions/classify.json` looks exactly like the operation it would be if
+   * typed inline. That is what makes a built-in and a project's own indistinguishable (§2), and it is
+   * why the document carries its own `input` declarations: they are the signature a call's positional
+   * arguments bind against (§3.3).
+   *
+   * A callee is ALWAYS a reference — children and callees are separate namespaces that do not
+   * interact, so a child named `classify` and a callee `classify` simply coexist. An earlier draft
+   * had a declared child win, on a "lexical scope beats a module path" analogy; but a child is a
+   * STATE (with its own children, sequence, transitions and limits), and "calling" one would
+   * duplicate what `children[].inputs` and `.children.k.outputs.x` already do, with no clear answer
+   * for re-entry or the cursor.
+   */
+  const resolveOperationName = (
+    name: string,
+    stateId: string,
+    path: readonly string[] | undefined,
+  ): Operation<InlineFamily> | undefined => {
+    if (options.vfs === undefined) return undefined;
+    const defaultRoot = path !== undefined && path.length > 0 ? path : options.defaultRoot;
+    const located = resolveReference(name, {
+      vfs: options.vfs,
+      from: stateId,
+      ...(defaultRoot !== undefined ? { defaultRoot } : {}),
+      ...(options.roots !== undefined ? { roots: options.roots } : {}),
+    });
+    if (located.file === undefined) return undefined;
+    const text = options.vfs.read(located.file);
+    if (text === undefined) return undefined;
+    const document = selectProperty(parseReferencedFile(located.file, text), located.property, name);
+    if (document === null || typeof document !== "object" || Array.isArray(document)) {
+      throw new WorkflowLoadError(`operation '${name}' resolved to ${typeof document}, not an operation document`, stateId);
+    }
+    return desugarOperation(document as OperationFields, stateId);
+  };
+
+    const loaded = desugarState(id, expanded, inherited, refs, childrenByParent.get(id), {
+      resolveOperation: (name) => resolveOperationName(name, id, searchPath),
+    });
+    loaded.id = variant;
     // Fan-out is a static property of the wiring (§7.3, rule 2): with every consumer of every producer
     // desugared to a base ref, the loader can tally them once here rather than the engine discovering a
     // second reader at run time.
     const fanOut = computeFanOut(loaded);
     if (fanOut !== undefined) loaded.fanOut = fanOut;
-    states[id] = loaded;
-    for (const child of Object.values(def.children ?? {})) {
-      queue.push((child as ChildDecl).state);
+    states[variant] = loaded;
+    // Children inherit the chain plus THIS state's `environment` — never its `operation`, which
+    // describes what this state does, not what its subtree defaults to. Read off the EXPANDED
+    // document, like every other pass: expansion runs first precisely so nothing downstream has to
+    // know references exist, and reading the raw one here meant a transcluded `environment` reached
+    // this state and not its children.
+    const forChildren = resolutionEnvironment(inherited, expanded.environment);
+    const childIdentity = environmentIdentity(forChildren);
+    // From the LOADED children, so inferred ones (§6) are walked exactly like declared ones and
+    // their references are already resolved to canonical ids. Each child's `state` is then rewritten
+    // to the variant THIS mount reaches, so a parent always points at the child it actually runs.
+    for (const child of Object.values(loaded.children ?? {})) {
+      const childSource = child.state;
+      fetch(childSource);
+      const childVariant = variantFor(childSource, childIdentity);
+      child.state = childVariant;
+      queue.push({ id: childSource, variant: childVariant, inherited: forChildren });
     }
   }
-  // Keep the authored files for hashing — the snapshot identity is what the AUTHOR wrote.
+  // Spreads resolve against the loaded closure, so they run once the walk is done. Fan-out is
+  // recomputed after, because republishing a child's outputs adds consumers of that child.
+  for (const state of Object.values(states)) {
+    if (state.outputSpreads === undefined) continue;
+    expandOutputSpreads(state, states);
+    const fanOut = computeFanOut(state);
+    if (fanOut !== undefined) state.fanOut = fanOut;
+  }
+
+  // Keep the authored files for hashing — the snapshot identity is what the AUTHOR wrote. A variant
+  // maps back to the file it came from, so two mounts of one state store its one authored form
+  // twice, under the two ids they run as.
   const source: Record<string, StateDef> = {};
-  for (const id of Object.keys(states)) {
-    const def = rawById.get(id);
-    if (def) source[id] = def;
+  for (const variant of Object.keys(states)) {
+    const def = rawById.get(sourceOf.get(variant) ?? variant);
+    if (def) source[variant] = def;
   }
   return { rootId, states, source };
+}
+
+/**
+ * Separates a state id from the mount VARIANT suffix the loader may append (see `variantFor`).
+ *
+ * `#` because a state id is a path (§2.1) and this is not another path segment — it names which
+ * *reading* of that path is meant, exactly as a URI fragment does.
+ */
+export const VARIANT_SEPARATOR = "#";
+
+/** The authored state a (possibly variant) id came from. */
+export function sourceStateId(id: string): string {
+  const cut = id.lastIndexOf(VARIANT_SEPARATOR);
+  return cut > 0 ? id.slice(0, cut) : id;
 }
 
 /**
  * The snapshot hash — the bundle's version identity (SPEC §12). This is the content-identity a
  * `hierarchical-workflow` execution memoizes under: `workflowDefinitionHash` returns it and it becomes
  * the memo-key's definition-hash component (DESIGN §3.4) via `withMemoize`'s `identify` seam.
+ *
+ * Over the RESOLVED states, not over `bundle.source`.
+ *
+ * Definition evaluation — path lookup, reference resolution, transclusion, expression lowering — is a
+ * pre-pass, and each stage hashes the OUTPUT of its own stage: `hashOperation` keys a memo on a
+ * resolved op, and this keys a snapshot on a resolved definition. Hashing the authored form instead
+ * made a pin fix BYTES rather than MEANING, so a task pinned before a lowering change replayed its
+ * files through the new loader with no hash change to signal it; it also left every file a reference
+ * pulled in to be tracked into the identity separately, since resolution reads the project
+ * filesystem rather than the snapshot. Both problems are absent here rather than mitigated: what was
+ * referenced is inlined, and a change to what anything lowers to is a different hash by construction.
+ *
+ * This is why `LoadedState` has to be plain JSON — see `fanOut`, which was a `Set` and hashed as `{}`.
  */
 export function snapshotHash(bundle: WorkflowBundle): string {
   const entries = Object.keys(bundle.states)
-    .map((id) => [id, hashCanonical(stripDerivedId(bundle.source?.[id] ?? bundle.states[id]!))] as const)
+    .map((id) => [id, hashCanonical(stripDerivedId(bundle.states[id]!))] as const)
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return sha256Hex(canonicalize({ rootId: bundle.rootId, states: entries }));
 }
 
-/** Hash the file as authored: a derived (previously absent) `id` must not change the hash. */
+/** The `id` is the map KEY already, and a variant suffix names a mount rather than content. */
 function stripDerivedId(def: StateDef | LoadedState): JsonValue {
   const { id: _id, ...rest } = def;
   return rest as unknown as JsonValue;
@@ -333,9 +884,9 @@ function stripDerivedId(def: StateDef | LoadedState): JsonValue {
  * Node-only convenience: load every `*.json` under a directory as a bundle rooted at
  * `rootId`. Uses dynamic imports so the module stays edge-safe when unused.
  */
-export async function loadBundleFromDir(dir: string, rootId: string): Promise<WorkflowBundle> {
+export async function loadBundleFromDir(dir: string, rootId: string, options: LoadBundleOptions = {}): Promise<WorkflowBundle> {
   const { readdir, readFile } = await import("node:fs/promises");
-  const { join, relative } = await import("node:path");
+  const { join, relative, resolve } = await import("node:path");
   const files: Record<string, unknown> = {};
   const walk = async (d: string): Promise<void> => {
     for (const entry of await readdir(d, { withFileTypes: true })) {
@@ -348,5 +899,6 @@ export async function loadBundleFromDir(dir: string, rootId: string): Promise<Wo
     }
   };
   await walk(dir);
-  return loadBundle(files, rootId);
+  // The directory IS the default root, so a bare reference in any of these files means "under here".
+  return loadBundle(files, rootId, { defaultRoot: resolve(dir), ...options });
 }

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { loadBundle, snapshotHash, stateIdFromPath, WorkflowLoadError } from "../src/loader";
 import { validateBundle } from "../src/validate";
+import { referencePathsOf } from "../src/lowerExpr";
+import type { StateDef } from "../src/format";
 import { FANOUT_ID, PLAN_ID, specFanoutFiles, specPlanningFiles } from "./fixtures";
 
 describe("stateIdFromPath", () => {
@@ -25,8 +27,14 @@ describe("desugaring (API.md, \"Binding desugaring\")", () => {
     expect((goalsWire as { op: { input: Record<string, { binding?: unknown }> } }).op.input.value!.binding).toEqual({ op: "goals" });
     // A literal stays a literal.
     expect(plan.children!["critique"]!.inputs!["severity_threshold"]).toEqual({ text: "significant" });
-    // `{ expr }` → an `expr.eval` producer.
-    expect(plan.outputs!["outcome"]!.binding).toMatchObject({ op: { kind: "function", functionRef: "expr.eval" } });
+    // `{ expr }` → a TREE of operator producer edges (EXPRESSIONS.md §1), not a source string handed
+    // to an interpreter. The root here is the outermost operator, and a child read sits at a leaf as
+    // a `context.get` chain — which is what lets the fan-out planner and the validator walk an
+    // expression with the same code they walk every other binding with.
+    const outcome = plan.outputs!["outcome"]!.binding as { op: { kind: string; functionRef: string; input: Record<string, { binding?: unknown }> } };
+    expect(outcome.op.kind).toBe("function");
+    expect(outcome.op.functionRef.startsWith("op.")).toBe(true);
+    expect(referencePathsOf(outcome as never)).toContainEqual(["children", "critique", "outputs", "outcome"]);
   });
 
   it("an operation's declared output is what the OPERATION produces — bound outputs excluded", () => {
@@ -44,8 +52,8 @@ describe("desugaring (API.md, \"Binding desugaring\")", () => {
     // operation input with a literal binding, and reaches the template under `{{inputs.style}}`.
     files["feature/plan/goals"]!.operation = {
       kind: "prompt",
-      prompt: { template: "Extract goals ({{inputs.style}})." },
-      config: { model: "planner" },
+      prompt: "Extract goals ({{inputs.style}}).",
+      model: "planner",
       input: { style: { kind: "text", binding: { text: "terse" } } },
     };
     const goals = loadBundle(files, PLAN_ID).states["feature/plan/goals"]!;
@@ -214,5 +222,52 @@ describe("validateBundle failure modes", () => {
     expect(files["feature/plan/critique"]!.outputs!["human_decision"]!.optional).toBe(true);
     const report = validateBundle(loadBundle(files, PLAN_ID));
     expect(report.errors.filter((e) => /not proven to have run/.test(e.message))).toEqual([]);
+  });
+});
+
+/**
+ * A loaded bundle is a resolved DEFINITION, and a definition has to be plain JSON: the snapshot is
+ * meant to store and hash the OUTPUT of definition evaluation rather than its input, so anything in
+ * a `LoadedState` that does not survive `JSON.stringify` silently changes what a stored workflow
+ * means. `fanOut` was a `Set`, which stringifies to `{}` — every entry gone, no error raised.
+ */
+describe("a resolved definition is plain JSON", () => {
+  const defs: Record<string, StateDef> = {
+    root: {
+      label: "Root",
+      environment: { kind: "prompt", model: "m", session: "s", tools: ["bash"] },
+      inputs: { issue: { schema: { type: "string" }, default: "significant", optional: true, description: "d" } },
+      outputs: {
+        "ctx_*": { binding: ".children.ctx.outputs" },
+        verdict: { binding: { expr: "children.ctx.outputs.n > 1" } },
+        whole: { binding: ".children.ctx.outputs" },
+      },
+      children: { ctx: { state: "root/ctx", inputs: { seed: ".inputs.issue" } } },
+      sequence: ["ctx"],
+      transitions: [{ to: "terminate.success", when: "run.cursor === 'ctx'" }],
+      limits: { max_iterations: 3 },
+    },
+    "root/ctx": {
+      outputs: {
+        n: { schema: { type: "number" } },
+        doc: { kind: "blob", schema: { type: "string", contentMediaType: "text/markdown" } },
+      },
+      inputs: { seed: { schema: { type: "string" } } },
+      operation: { kind: "function", function: "f", args: { a: 1, nested: { b: [1, 2] } } },
+    },
+  };
+
+  it("round-trips every loaded state through JSON unchanged", () => {
+    const states = loadBundle(defs, "root").states;
+    const round = JSON.parse(JSON.stringify(states)) as typeof states;
+    expect(Object.keys(round).sort()).toEqual(Object.keys(states).sort());
+    for (const id of Object.keys(states)) expect(round[id], `state ${id}`).toEqual(states[id]);
+  });
+
+  it("keeps fan-out as a sorted array, so it survives serialization and hashes stably", () => {
+    const fanOut = loadBundle(defs, "root").states["root"]!.fanOut;
+    expect(Array.isArray(fanOut)).toBe(true);
+    expect([...(fanOut ?? [])]).toEqual([...(fanOut ?? [])].sort());
+    expect(JSON.parse(JSON.stringify({ fanOut }))).toEqual({ fanOut });
   });
 });

@@ -24,6 +24,7 @@ import type {
   RefKind,
 } from "@declarative-ai/exec";
 import type { PermissionMode, PermissionProfile } from "@declarative-ai/permissions";
+import { BUILTINS } from "./builtins";
 
 // The op vocabulary is hw's format vocabulary — re-exported so authors and consumers import
 // one set of names.
@@ -59,8 +60,6 @@ export type RunStatus =
  * wiring case left for the checker or the engine to know about, only producer edges.
  */
 export const RESOLVER_REFS = {
-  /** Evaluate a DSL expression against the run context; output schema = the inferred type (§7.2). */
-  expr: "expr.eval",
   /** Project one property off a producer's object output (`{ child, output }` lowering). */
   select: "select",
   /** Read a declared `inputs.*` value by name (the model's by-name free-slot fill). */
@@ -69,10 +68,45 @@ export const RESOLVER_REFS = {
   artifact: "artifact.get",
   /** Read a session's transcript, or one message of it. */
   conversation: "conversation.get",
+
+  // --- Operators (EXPRESSIONS.md §2) ------------------------------------------
+  //
+  // An expression is a tree of producer edges over THESE, rather than a source string handed to an
+  // interpreter. That is what stops `{ expr }` being the one construct needing its own static
+  // analysis: a dependency is a leaf of the tree, which the fan-out planner and the validator
+  // already walk. The set is a registry rather than a grammar, so a user-defined pure function is
+  // indistinguishable from `eq`.
+  /** One root of the expression context by name (`inputs`, `children`, `run`, …). */
+  context: "context.get",
+  /** Property access, with implicit optional chaining — distinct from `select`, which REFUSES a
+   *  missing key because a named child output that is not there is an authoring error. */
+  member: "op.member",
+  not: "op.not",
+  eq: "op.eq",
+  ne: "op.ne",
+  strictEq: "op.strictEq",
+  strictNe: "op.strictNe",
+  lt: "op.lt",
+  le: "op.le",
+  gt: "op.gt",
+  ge: "op.ge",
+  /** The three LAZY forms. They resolve their arguments on demand, which is what preserves
+   *  `false && PENDING === false` and keeps an untaken branch from running (EXPRESSIONS.md §6). */
+  and: "op.and",
+  or: "op.or",
+  cond: "op.cond",
 } as const;
 
 /** Every well-known resolver ref, for registry seeding and validator checks. */
 export const RESOLVER_REF_VALUES: readonly string[] = Object.values(RESOLVER_REFS);
+
+/**
+ * Every name the engine computes INLINE — the resolvers above plus the built-in operation library.
+ *
+ * Membership decides two things: the validator does not look for a registry entry, and
+ * `resolveProducer` runs it in-place rather than treating it as an embedded call to dispatch.
+ */
+export const RESOLVER_REF_SET: ReadonlySet<string> = new Set([...RESOLVER_REF_VALUES, ...Object.keys(BUILTINS), "map", "filter", "flatMap", "reduce"]);
 
 // --- Authored binding sugar (§2.1) -------------------------------------------
 
@@ -86,11 +120,28 @@ export const RESOLVER_REF_VALUES: readonly string[] = Object.values(RESOLVER_REF
  */
 export type BindingDecl =
   | Ref<InlineFamily>
-  /** A declared child's output. Lowers to a producer edge on the child + a `select` projection. */
+  /**
+   * A RUNTIME reference (REFERENCES.md §5) — a leading-dot path into this instance's data:
+   * `.children.critique.outputs.outcome`, `.inputs.issue`, `.artifacts.design_doc`.
+   *
+   * Always current-instance: a runtime reference into another file would have no instance to
+   * resolve against, since a state can run many times. Cross-file references are transclusion,
+   * resolved before anything runs.
+   */
+  | string
+  /**
+   * A declared child's output. Lowers to a producer edge on the child + a `select` projection.
+   *
+   * `output` defaults to the NAME OF THE SLOT being bound, because
+   * `"plan_doc": { "binding": { "child": "context", "output": "plan_doc" } }` says the same word
+   * twice and the second one is the one people forget to change. `"output": "*"` is the child's
+   * whole output object as a single value — which used to be what omitting `output` meant.
+   */
   | { child: string; output?: string }
   /** This state's declared input, by name. Lowers to a `scope.get` producer. */
   | { input: string }
-  /** A small computation in the expression DSL. Lowers to an `expr.eval` producer (§7.2). */
+  /** A small computation in the expression DSL. Lowers to a TREE of operator producer edges
+   *  (EXPRESSIONS.md §1) — parsed once, at load, never carried as a source string. */
   | { expr: string }
   /** A session-owned artifact, by name. Lowers to an `artifact.get` producer. */
   | { artifact: string }
@@ -122,46 +173,177 @@ export interface NamedParameterDecl extends ParameterDecl {
 export type ConversationMode = "full_history" | "summary" | "fresh" | "selected_artifacts";
 
 /**
- * A `prompt` operation as authored: one structured LLM call. `prompt.template` / `prompt.skill`
- * are the authored forms of the `PromptOp.user` slot (a skill is a named template resolved
- * through `registry.skills` at render time) — exactly one of the two.
+ * The EXECUTION-ENVIRONMENT fields of an operation: session, tools, conversation preamble, and the
+ * authored permission baseline (DESIGN §5.1).
+ *
+ * These used to be a sibling `environment` block, on the reasoning that "how it runs" is not part of
+ * the op's identity. They are fields of the operation now, because every one of them is a per-CALL
+ * decision — which session the call joins, which tools it may reach mid-loop, how much transcript it
+ * carries — and separating them bought nothing except a second place to look. The name `environment`
+ * was then free for what authors actually kept asking for: DEFAULTS (see {@link EnvironmentDecl}).
  */
-export interface PromptOpDecl {
-  kind: "prompt";
-  /** Prompt source — an inline `template` OR a named `skill`. `{{inputs.x}}` interpolation
-   *  applies either way, resolving against the operation's inputs. */
-  prompt?: { template?: string; skill?: string };
-  system?: string;
-  /** The `LlmConfiguration` surface (model, sampling, `configRef`, …), merged by the runner. */
-  config?: Record<string, JsonValue>;
-  input?: Record<string, ParameterDecl>;
-  output?: NamedParameterDecl;
+export interface ExecEnvironmentDecl {
+  /** Logical session id this operation runs under — owns its conversation transcript, workspace, and
+   *  permissions. Same id across states ⇒ a shared session; absent ⇒ the run's default session.
+   *
+   *  `sessionId` is accepted as a SYNONYM, so an `LlmConfiguration`-shaped block pastes in
+   *  unchanged; the loader normalizes it to this field before anything else reads the document. */
+  session?: string;
+  /** @see session — normalized away at parse; never present on a loaded state. */
+  sessionId?: string;
+  /** Logical names of tools the operation may call mid-loop — resolved through `registry.tools`. */
+  tools?: string[];
+  /** Conversation preamble injected into THIS call (distinct from a `{ conversation }` wire, which
+   *  reads a transcript as data, §7.5). */
+  conversation?: {
+    mode: ConversationMode;
+    /** For `selected_artifacts`: names of artifacts to inject. */
+    artifacts?: string[];
+  };
+  /** Authored per-operation permission baseline (DESIGN §5.1, "the definition-authored baseline"). */
+  permissions?: {
+    profile?: PermissionProfile;
+    default?: PermissionMode;
+    tools?: Record<string, PermissionMode>;
+  };
 }
 
 /**
- * A `function` operation as authored: invoke a registered function (`registry.functions`) —
- * sync or async, host code or a DELEGATED AGENT ADAPTER (§3.1). A sub-workflow, a composite
- * unit, and a `claude-code` invocation are all this one shape; the resolved registry ENTRY's
- * capabilities distinguish them, never the op.
+ * Every field an operation may carry, all optional — the shape BOTH `operation` and `environment`
+ * are written in (§5). `operation` narrows it to {@link MergedOperationDecl} once the inheritance
+ * chain has been merged; `environment` never does, because a defaults layer is partial by nature.
  */
-export interface FunctionOpDecl {
-  kind: "function";
+export interface OperationFields extends ExecEnvironmentDecl {
+  kind?: "prompt" | "function";
+  /**
+   * The prompt, as text. `{{inputs.x}}` interpolation applies.
+   *
+   * A reusable prompt is a REFERENCE to a file — `{"$ref": "$/prompts/review.md"}` — which is what
+   * replaced the old `prompt.skill` and `registry.skills` (REFERENCES.md §7.1). A referenced `.md`
+   * is still a template; nothing about interpolation changes.
+   */
+  prompt?: string;
+  system?: string;
   /** Registry name — a host function, or a runtime adapter (`claude-code`, …). */
-  function: string;
-  /** The authored surface bound as the op's `config` input (permission baseline, mode, …). */
-  config?: Record<string, JsonValue>;
+  function?: string;
+  /**
+   * A FUNCTION operation's authored arguments, bound as its `config` input.
+   *
+   * Untyped by nature — only the function knows what it takes — which makes this the one position
+   * where a reference must be written `{"$ref": …}` rather than as a bare string (§3.1).
+   */
+  args?: Record<string, JsonValue>;
   input?: Record<string, ParameterDecl>;
   output?: NamedParameterDecl;
+  /**
+   * The ordered roots a BARE reference is searched along, inherited down the tree (EXPRESSIONS.md
+   * §4). Shell `PATH` semantics: first match wins, and only the first entry produces bare ids.
+   *
+   * Two things about it are deliberate and easy to get wrong:
+   *
+   *  - **It is spliced, not unioned.** Arrays REPLACE everywhere else in this merge, and that rule
+   *    is what makes `"tools": []` the way to drop an inherited tool. Rather than exempt this one
+   *    field, a `"$INHERITED"` entry splices in what the chain supplied — the same idiom JaiRA's
+   *    `artifacts.destination: "$DEFAULT"` already uses. `["./ops", "$INHERITED"]` prepends;
+   *    `["./ops"]` shadows everything, built-ins included.
+   *  - **Its own entries may not be bare**, or resolving the path would need the path. `$VAR`,
+   *    absolute or relative only — exactly as a shell `PATH` holds directories rather than names to
+   *    search for.
+   *
+   * It sits on `OperationFields` because that is the shape the environment chain merges, and a
+   * second inheritance chain for one field would be worse. It is not an operation field in any
+   * other sense — nothing dispatches on it — which is why it is in `OPERATION_OWN_FIELDS` (so it is
+   * never hoisted into an LLM call) and out of `KIND_SPECIFIC` (a prompt op's guards resolve
+   * references too).
+   */
+  path?: readonly string[];
+
+  // --- The LlmConfiguration surface, inline on a prompt operation (REFERENCES.md §7.2) ----------
+  //
+  // Structurally restated rather than imported: hw does not depend on `@declarative-ai/llm`, and
+  // the prompt runner is what type-checks the assembled call. Any field NOT owned by hw
+  // (`OPERATION_OWN_FIELDS`) is passed through to the call config too, so a knob missing from this
+  // list still reaches the model — it just is not statically known here.
+  model?: string;
+  maxOutputTokens?: number;
+  stopSequences?: string[];
+  seed?: number;
+  maxSteps?: number;
+  toolChoice?: JsonValue;
+  providerOptions?: Record<string, JsonValue>;
+  outputModalities?: string[];
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  presencePenalty?: number;
+  frequencyPenalty?: number;
+  reasoning?: { effort?: "low" | "medium" | "high"; budgetTokens?: number };
 }
 
-/** A state's operation as authored — desugared to an `Operation<InlineFamily>` by the loader. */
-export type OperationDecl = PromptOpDecl | FunctionOpDecl;
+/**
+ * The operation fields hw itself consumes. Everything else an author writes on a prompt operation
+ * is call configuration and is hoisted into the lowered op's `config` — "the operation IS the call"
+ * (REFERENCES.md §7.2).
+ */
+export const OPERATION_OWN_FIELDS: ReadonlySet<string> = new Set([
+  "kind",
+  "prompt",
+  "system",
+  "function",
+  "args",
+  "input",
+  "output",
+  "path",
+  "session",
+  "sessionId",
+  "tools",
+  "conversation",
+  "permissions",
+]);
+
+/**
+ * A `prompt` operation: one structured LLM call, with exactly one of `prompt.template` /
+ * `prompt.skill` (a skill is a named template resolved through `registry.skills` at render time).
+ */
+export interface PromptOpDecl extends OperationFields {
+  kind: "prompt";
+}
+
+/**
+ * A `function` operation: invoke a registered function (`registry.functions`) — sync or async, host
+ * code or a DELEGATED AGENT ADAPTER (§3.1). A sub-workflow, a composite unit, and a `claude-code`
+ * invocation are all this one shape; the resolved registry ENTRY's capabilities distinguish them,
+ * never the op.
+ */
+export interface FunctionOpDecl extends OperationFields {
+  kind: "function";
+  function: string;
+}
+
+/** A state's `operation` block AS AUTHORED — partial, because an ancestor's `environment` may supply
+ *  `kind`, `function`, `config`, or anything else it leaves out. `{}` is legal and means "inherit the
+ *  whole operation". */
+export type OperationDecl = OperationFields;
+
+/** An operation after the environment chain is merged in: `kind` is settled and the shape is checked. */
+export type MergedOperationDecl = PromptOpDecl | FunctionOpDecl;
+
+/**
+ * The DEFAULTS layer (§5): an operation shape, all fields optional, inherited by this state's
+ * operation AND by every descendant's.
+ *
+ * A state's effective operation is the deep merge of every ancestor's `environment` (outermost
+ * first), then its own `environment`, then its own `operation` — the nearest layer wins. Only a state
+ * that declares an `operation` block gets one, so a pure composite under an `environment`-declaring
+ * root stays a pure composite; `"operation": {}` is the explicit opt-in to a fully inherited one.
+ */
+export type EnvironmentDecl = OperationFields;
 
 // --- States ------------------------------------------------------------------
 
 export interface ChildDecl {
-  /** State ID of the child state file. */
-  state: string;
+  /** The child's state reference. Absent ⇒ `./<key>` — the state the child's own key names. */
+  state?: string;
   /** Wiring into the child's declared inputs — the same authored binding sugar (§2.1). */
   inputs?: Record<string, BindingDecl>;
   /** SPEC §10.4: starting this child does not block the sequence. */
@@ -176,6 +358,29 @@ export interface TransitionDecl {
   when?: string;
 }
 
+/**
+ * A transition after loading: its guard LOWERED (EXPRESSIONS.md §1).
+ *
+ * Lowered at load rather than by the engine, because a guard may CALL an operation and resolving a
+ * callee is load-time knowledge — it needs the search path, the referring state and a filesystem.
+ * Lowering guards engine-side worked while expressions were operators only, and threw
+ * `'x' is not a known operation` the moment one contained a call.
+ *
+ * `when` is kept alongside: it is what the validator reports against, and what a human reads.
+ */
+export interface LoadedTransition extends TransitionDecl {
+  whenRef?: Ref<InlineFamily>;
+  /**
+   * Why the guard could not be lowered — carried as DATA, not thrown.
+   *
+   * The same rule `operationError` follows: an authoring mistake is reported by the validator
+   * alongside every other one, because throwing at load aborts at the FIRST bad state and hides the
+   * rest. A transition carrying this never fires; validation blocks the run anyway, and a guard that
+   * failed to parse must not read as unconditional.
+   */
+  whenError?: string;
+}
+
 export interface LimitsDecl {
   /** Guard value exposed as `limits.max_iterations` in expressions (SPEC §3.4). */
   max_iterations?: number;
@@ -183,57 +388,57 @@ export interface LimitsDecl {
   timeout?: number;
 }
 
-/**
- * The EXECUTION-ENVIRONMENT block: session/permission/tool concerns that configure how an
- * operation runs rather than what it is (DESIGN §5.1). Kept a sibling of
- * `operation` precisely because it is not part of the op's identity (§7.1).
- */
-export interface EnvironmentDecl {
-  /** Logical session id this state runs under — owns its conversation transcript, workspace, and
-   *  permissions. Same id across states ⇒ a shared session; absent ⇒ the run's default session. */
-  session?: string;
-  /** Logical names of tools the operation may call mid-loop — resolved through `registry.tools`. */
-  tools?: string[];
-  /** Conversation preamble injected into THIS call (distinct from a `{ conversation }` wire, which
-   *  reads a transcript as data, §7.5). */
-  conversation?: {
-    mode: ConversationMode;
-    /** For `selected_artifacts`: names of artifacts to inject. */
-    artifacts?: string[];
-  };
-  /** Authored per-state permission baseline (DESIGN §5.1, "the definition-authored baseline"). */
-  permissions?: {
-    profile?: PermissionProfile;
-    default?: PermissionMode;
-    tools?: Record<string, PermissionMode>;
-  };
-}
-
 export interface StateDef {
-  /** Equal to the file path without suffix; may be omitted and derived (validated when present). */
+  /** The state's PATH REFERENCE (§2.1) — equal to its own location, so it may be omitted and
+   *  derived (a present-but-mismatched `id` is a load error). Bare paths hang off the default
+   *  workflow root; `/…`, `$VAR/…`, `file:…`, and `./…` are the escape hatches. */
   id?: string;
   label?: string;
   description?: string;
   inputs?: Record<string, ParameterDecl>;
   outputs?: Record<string, NamedParameterDecl>;
-  /** The state's operation (§7.1). A state with children and no operation is a pure composite. */
+  /** The state's operation (§7.1). A state with children and no operation is a pure composite;
+   *  `{}` means "the operation my `environment` chain describes". */
   operation?: OperationDecl;
-  /** Execution environment — session, tools, conversation preamble, permissions. */
+  /** Defaults for this state's operation AND every descendant's (§5). */
   environment?: EnvironmentDecl;
   children?: Record<string, ChildDecl>;
+  /** Order the engine's cursor advances through `children`. Absent ⇒ declaration order (§6). */
   sequence?: string[];
   transitions?: TransitionDecl[];
   limits?: LimitsDecl;
 }
 
-/** A state after loading: its operation desugared to base `Ref` cases, ready for the checker
- *  and the engine. `operation` is a real `Operation<InlineFamily>`; the authored sugar is gone. */
-export interface LoadedState extends Omit<StateDef, "operation" | "inputs" | "outputs" | "children"> {
+/**
+ * A state after loading: its operation desugared to base `Ref` cases, ready for the checker and the
+ * engine. `operation` is a real `Operation<InlineFamily>`; the authored sugar is gone, and so is the
+ * environment chain — the loader merged it in (§5), which is why `environment` here is the RESOLVED
+ * execution environment rather than the partial defaults layer the author wrote.
+ */
+export interface LoadedState
+  extends Omit<StateDef, "operation" | "environment" | "inputs" | "outputs" | "children" | "sequence" | "transitions"> {
+  /** Transitions with their guards lowered (§1). */
+  transitions?: LoadedTransition[];
   id: string;
   inputs?: Record<string, Parameter<InlineFamily>>;
   outputs?: Record<string, NamedParameter<InlineFamily>>;
   operation?: Operation<InlineFamily>;
+  /** The merged execution environment this state's operation runs under. */
+  environment?: ExecEnvironmentDecl;
   children?: Record<string, LoadedChild>;
+  /**
+   * Why this state's `operation` could not be built — an incomplete merge (§5), reported by the
+   * validator rather than thrown, so one broken state does not hide every other authoring error.
+   * A state carrying this always has NO `operation`; the engine refuses to run it.
+   */
+  operationError?: string;
+  /** Unexpanded `prefix*` outputs, pending the child's slots — expanded by `loadBundle` (§3.4). */
+  outputSpreads?: OutputSpread[];
+  /** Always present when the state has children: the authored order, or declaration order (§6). */
+  sequence?: string[];
+  /** Whether `sequence` was written in the file rather than derived — the lint surface treats an
+   *  authored order as a claim a transition can contradict, and a derived one as no claim at all. */
+  sequenceAuthored?: boolean;
   /** Per-slot authoring metadata the op model doesn't carry (defaults, optionality, docs),
    *  keyed `"<section>.<name>"` — read by the engine when filling free slots. */
   slotMeta?: Record<string, SlotMeta>;
@@ -245,8 +450,19 @@ export interface LoadedState extends Omit<StateDef, "operation" | "inputs" | "ou
    * output and `"<childKey>\0*"` when the whole child is read enough times that every output fans out.
    * The engine drains a matching blob output ONCE, when the producer child completes, so both consumers
    * receive the bytes instead of racing to read one stream. Absent ⇒ no fan-out.
+   *
+   * A sorted ARRAY rather than a `Set`, because a `LoadedState` is a resolved definition and a
+   * definition has to be plain JSON: `JSON.stringify` renders a `Set` as `{}`, dropping every entry
+   * without an error.
    */
-  fanOut?: ReadonlySet<string>;
+  fanOut?: readonly string[];
+}
+
+/** One `prefix*` output: republish every output of `child`, prefixed, as this state's own (§3.4). */
+export interface OutputSpread {
+  prefix: string;
+  child: string;
+  optional?: boolean;
 }
 
 /** Authoring metadata for one declared slot, kept alongside (never inside) the op. */

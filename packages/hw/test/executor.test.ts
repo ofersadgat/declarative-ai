@@ -21,8 +21,9 @@ import { PLAN_ID, specPlanningFiles } from "./fixtures";
 
 const CTX: ExecServices = { validator: new SchemaValidator() };
 
+/** The definition is a RESOLVED bundle — running the loader is the caller's pre-pass (§11). */
 function planningDefinition(): HierarchicalWorkflowDefinition {
-  return { rootId: PLAN_ID, states: specPlanningFiles() };
+  return loadBundle(specPlanningFiles(), PLAN_ID);
 }
 
 const happyScript: Script = (call) => {

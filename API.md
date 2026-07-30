@@ -2082,7 +2082,7 @@ function resolveInWorkspace(root: string, rel: string): string;       // throws 
 
 `read_file` / `list_dir` / `grep` / `glob` declare `readOnly: true`; `write_file` / `edit_file` /
 `run_command` do not — which is exactly what the `read-only`/`plan` permission profiles gate on. Register
-them into `registry.tools` and reference by logical name from a state's `environment.tools`.
+them into `registry.tools` and reference by logical name from a state's `operation.tools`.
 
 `resolveInWorkspace` compares prefixes on the *normalized* root plus a path separator, so `/repo-evil`
 never counts as inside `/repo` (SPEC §7.2 — "may not access files outside the project").
@@ -2203,7 +2203,7 @@ A state's operation dispatches **by op kind** through the typed
 - a **`FunctionOp`** runs through `registry.functions` — host code, interactive UI, sub-workflows, composite
   units, and delegated agent adapters alike, since all of them are registry entries;
 - a `user` slot carrying the `skill:` prefix resolves its template through `registry.skills`;
-- a state's `environment.tools` (logical names) resolve through `registry.tools`, and the executables are
+- a state's `operation.tools` (logical names) resolve through `registry.tools`, and the executables are
   handed to the operation (an unregistered name is a permanent failure). A composed prompt operation feeds
   them into its bounded tool loop; a **delegated** adapter (entry capability
   `policyEnforcement: "callback"`) is handed **raw** tools — no `withPermission` wrap — so its own gate
@@ -2244,7 +2244,7 @@ interface EngineConfig {
   // policy; `profiles` supplies custom profile predicates by name.
   permissions?: { approve?: Approver; baseline?: PermissionBaseline; process?: Map<string, PermissionMode>;
                   smart?: Record<string, SmartApprover>; profiles?: Record<string, ProfilePredicate> };
-  // Per-session workspace resolver (DESIGN.md §5.1): a state's `environment.session` -> its
+  // Per-session workspace resolver (DESIGN.md §5.1): a state's `operation.session` -> its
   // workspace, for fan-out isolation. undefined => the run-level `services.workspace`.
   workspaceFor?: (sessionId: string) => Workspace | undefined;
 }
@@ -2487,10 +2487,26 @@ const PENDING: unique symbol;                        // an async child's not-yet
 function isPending(v: unknown): v is Pending;
 ```
 
-JavaScript evaluation semantics with one deviation — property access on `undefined`/missing yields
-`undefined` (implicit optional chaining) — and no side effects (no calls, imports, loops, or I/O). A
-reference to a started-but-unfinished async child is `PENDING`, which skips a transition for that round
-(SPEC §10.4). `referencesOf` powers the dataflow join (waiting on the inputs an expression reads).
+JavaScript evaluation semantics with two deviations — property access on `undefined`/missing yields
+`undefined` (implicit optional chaining), and access is OWN-property only, so `constructor`,
+`__proto__` and prototype methods are unreachable. A reference to a started-but-unfinished async
+child is `PENDING`, which skips a transition for that round (SPEC §10.4).
+
+An expression is **not interpreted at run time**. It is parsed once, at load, and LOWERED to a tree
+of producer edges over the operator resolvers (`lowerExpression`) — so `a === b` is a `FunctionOp`
+named `op.strictEq` with its arguments bound, and there is no source string carried through the
+document. `evaluate` remains as the reference semantics the lowering is differentially tested
+against; nothing calls it on a run.
+
+The grammar **does** have calls: `classify(x)` applies an operation resolved as a reference, which
+may be a function op or a prompt op, and the built-in operation library (arithmetic, arrays, strings,
+objects, `map`/`filter`/`flatMap`/`reduce`) are ordinary entries in the same resolver set. There is
+still no assignment, no loops, no imports and no I/O; a call's effect is dispatched by the engine and
+memoized by the resolved operation's content hash. What the language cannot do is arithmetic by
+SYNTAX — there is no `+`/`-`/`*`/`/`, which is what makes `/` unambiguous in a callee path.
+
+`referencesOf` (AST) and `referencePathsOf` (tree) power the dataflow join — waiting on the inputs an
+expression reads, a call's arguments included.
 
 The DSL is no longer the wiring default — it is a *binding kind* (`{ expr }`) plus the guard language — and
 it is type-checked, not merely parsed: see `inferExpression` under

@@ -23,7 +23,9 @@
 import type { FunctionCapabilities, InlineFamily, JsonSchema, JsonValue, Operation, Parameter, Ref, RefKind, RefTree } from "@declarative-ai/exec";
 import { checkBinding as checkBindingGeneric, isSubschema, producerSchemaOf, type CheckerHooks, type CheckIssue, type Schema } from "@declarative-ai/validate";
 import { parseExpression, referencesOf, type Expr } from "./expr";
-import { ANY_SCHEMA, inferExpression, isBooleanSchema, isUniversalSchema, type ExprScope } from "./inferExpr";
+import { EXPRESSION_REFS, pathOfRef, referencePathsOf } from "./lowerExpr";
+import { embeddedOpsOf } from "./resolve";
+import { ANY_SCHEMA, inferExpression, inferRef, isBooleanSchema, isUniversalSchema, type ExprScope } from "./inferExpr";
 import {
   GUARD_NAMESPACES,
   REF_NAMESPACES,
@@ -137,6 +139,22 @@ function validateState(
     }
   }
 
+  // A lowered CALL names an operation the run must be able to dispatch. The registry check ran only
+  // over a state's OWN `operation.functionRef`, so `shout(x)` with nothing registered passed lint and
+  // then failed mid-run with "no function 'shout' is registered".
+  for (const [where, binding] of bindingsOf(def)) {
+    for (const { op } of embeddedOpsOf(binding)) {
+      // A PROMPT callee needs no registry entry — it dispatches to the prompt executor.
+      if (op.kind !== "function") continue;
+      checkAgainstRegistry(op.functionRef, where, err, warn, env);
+      checkAgainstSignature(op, where, err, env);
+    }
+  }
+
+  // An operation the environment chain never completed (§5) — carried from the loader as data so it
+  // is reported here with everything else, instead of aborting the load.
+  if (def.operationError !== undefined) err("operation", def.operationError);
+
   // --- sequence ---------------------------------------------------------------
   const sequence = def.sequence ?? [];
   const seen = new Set<string>();
@@ -167,7 +185,13 @@ function validateState(
     }
     // Unguarded-cycle warning: a transition that re-enters a sequence member resets the cursor
     // (SPEC §3.3) and can loop forever without an iteration guard.
-    if (childKeys.has(t.to) && sequence.includes(t.to) && def.limits?.max_iterations === undefined) {
+    //
+    // Only an AUTHORED sequence counts. Every state with children has a sequence now (§6), so
+    // testing the effective one would warn about every either/or state in existence — a transition
+    // into one of two mutually exclusive children is ordinary control flow, not a declared order
+    // being contradicted. Writing the sequence out is what turns "these run in this order" into a
+    // claim a transition can violate, and that is the case worth flagging.
+    if (childKeys.has(t.to) && def.sequenceAuthored === true && sequence.includes(t.to) && def.limits?.max_iterations === undefined) {
       const guarded = ast !== undefined && referencesOf(ast).some((p) => p[0] === "run" && p[1] === "iteration");
       if (!guarded) {
         warn(`transitions[${i}]`, `transition to sequence member '${t.to}' can cycle; add limits.max_iterations or a run.iteration guard`);
@@ -263,18 +287,15 @@ function firstChildRefOf(ref: Ref<InlineFamily>): string | undefined {
       const value = producer.input.value?.binding; // `{ child: P, output: o }` lowers to a select over the edge
       return value !== undefined ? firstChildRefOf(value) : undefined;
     }
-    if (producer.functionRef === RESOLVER_REFS.expr) {
-      const src = producer.input.source?.binding;
-      if (src !== undefined && "text" in src) {
-        try {
-          for (const p of referencesOf(parseExpression(src.text))) {
-            if (p[0] === "children" && p[1] !== undefined) return p[1];
-          }
-        } catch {
-          /* a malformed expression is reported by the expression checks, not here */
-        }
-      }
-      return undefined;
+    // A lowered expression reads a child through the context (EXPRESSIONS.md §1.3), so the child it
+    // names is read structurally rather than out of a re-parsed source string.
+    const path = pathOfRef(ref);
+    if (path !== undefined) return path[0] === "children" ? path[1] : undefined;
+    // An operator's operand may still name one, even when the node as a whole is not a path.
+    for (const p of Object.values(producer.input)) {
+      if (!p.binding) continue;
+      const child = firstChildRefOf(p.binding);
+      if (child !== undefined) return child;
     }
     return undefined; // scope / artifact / conversation resolvers name no child
   }
@@ -376,6 +397,62 @@ function hooksFor(
 }
 
 /**
+ * A callee DOCUMENT declares the parameters a call's arguments bind to; the implementation it names
+ * lives in the registry. When the entry declares a signature, the two must agree — and this is the
+ * only check that can catch them drifting.
+ *
+ * Without it the document is the sole authority: a call type-checks against parameters the impl does
+ * not have, and the disagreement surfaces as a missing argument at run time. With it, renaming a
+ * parameter in one place and not the other is a lint error.
+ */
+function checkAgainstSignature(
+  op: Operation<InlineFamily> & { kind: "function" },
+  path: string,
+  err: (path: string, message: string) => void,
+  env: ValidationEnvironment,
+): void {
+  const entry = env.functions?.get(op.functionRef);
+  const declared = entry?.signature;
+  if (declared === undefined) return; // an entry that declares nothing constrains nothing
+  const expected = declared.input.schema as JsonSchema | undefined;
+  const accepted = expected?.properties;
+  // Only a declared PROPERTY SET constrains anything: an impl taking an open object accepts whatever
+  // the document names, and there is nothing to disagree about.
+  if (accepted === null || typeof accepted !== "object" || Array.isArray(accepted)) return;
+
+  for (const [name, param] of Object.entries(op.input)) {
+    // NAMES first, and this is the check that matters: a document parameter the impl has no slot for
+    // arrives as an argument nothing reads. Comparing SCHEMAS alone would miss it entirely, because
+    // JSON Schema objects are open — an impl declaring `body` happily validates `{text: …}`.
+    if (!Object.hasOwn(accepted, name)) {
+      err(path, `operation '${op.functionRef}' declares a parameter '${name}' its registered implementation does not accept`);
+      continue;
+    }
+    // Where BOTH sides declare a type, they must agree.
+    const want = (accepted as Record<string, JsonValue>)[name] as JsonSchema | undefined;
+    if (param.schema === undefined || want === undefined || isUniversalSchema(want)) continue;
+    const check = isSubschema(param.schema as Schema, want as Schema);
+    if (!check.ok) {
+      err(path, `operation '${op.functionRef}' declares parameter '${name}' as a type its implementation does not accept: ${check.reason}`);
+    }
+  }
+}
+
+/** Every binding a state carries, with the field that named it — guards included. */
+function* bindingsOf(def: LoadedState): Iterable<[string, Ref<InlineFamily>]> {
+  const op = def.operation;
+  if (op) for (const [name, p] of Object.entries(op.input)) if (p.binding) yield [`operation.input.${name}`, p.binding];
+  for (const [name, slot] of Object.entries(def.outputs ?? {})) if (slot.binding) yield [`outputs.${name}`, slot.binding];
+  for (const [name, slot] of Object.entries(def.inputs ?? {})) if (slot.binding) yield [`inputs.${name}`, slot.binding];
+  for (const [key, child] of Object.entries(def.children ?? {})) {
+    for (const [name, wire] of Object.entries(child.inputs ?? {})) yield [`children.${key}.inputs.${name}`, wire];
+  }
+  for (const [i, t] of (def.transitions ?? []).entries()) {
+    if (t.whenRef !== undefined) yield [`transitions[${i}].when`, t.whenRef];
+  }
+}
+
+/**
  * Check ONE desugared binding against the schema of the slot it fills, through the shared checker.
  */
 function checkBinding(
@@ -390,6 +467,31 @@ function checkBinding(
   errors: ValidationIssue[],
   optOut = false,
 ): void {
+  // Reference and reachability checks run over the WHOLE binding, once, before the type check.
+  //
+  // They used to live inside the expression branch of `resolverSchema`, which made them depend on
+  // which node happened to be the ROOT: `shout(children.c.outputs.x) === 'y'` was checked (the root
+  // is an operator) and `shout(children.c.outputs.x)` was not (the root is a call, and a call is not
+  // an expression ref). Checking the binding itself has no such blind spot, and it is where a call's
+  // ARGUMENTS live — they are on the ref, not on the callee's own `input`.
+  for (const reference of referencePathsOf(binding)) {
+    const root = reference[0]!;
+    if (!NAMESPACES.has(root)) {
+      errors.push({ stateId, path, message: `expression uses unknown reference root '${root}' (expected one of: ${[...NAMESPACES].join(", ")})` });
+      continue;
+    }
+    if (optOut) continue;
+    if (root === "children" && reference[1] !== undefined && !reachable.always.has(reference[1])) {
+      errors.push({
+        stateId,
+        path,
+        message:
+          def.children?.[reference[1]] === undefined
+            ? `expression references undeclared child '${reference[1]}'`
+            : `expression reads child '${reference[1]}', which is not proven to have run on every path to this point`,
+      });
+    }
+  }
   const issues = checkBindingGeneric(binding, consumerSchema, hooksFor(stateId, def, bundle, scope, reachable, errors, optOut), path, {
     optOut,
   });
@@ -415,42 +517,38 @@ function resolverSchema(
 ): JsonSchema | undefined {
   if (op.kind !== "function") return undefined;
 
-  switch (op.functionRef) {
-    case RESOLVER_REFS.expr: {
-      // An `{ expr }` leaf: infer its result type — that IS its producer schema (§7.2).
-      const source = literalTextOf(op.input.source);
-      if (source === undefined) return undefined;
-      let ast: Expr;
-      try {
-        ast = parseExpression(source);
-      } catch (e) {
-        err(`expression does not parse: ${(e as Error).message}`);
-        return undefined;
+  // A lowered EXPRESSION (EXPRESSIONS.md §1): infer its result type over the TREE — that IS its
+  // producer schema (§7.2), which is what makes ordinary `isSubschema` binding checking apply to an
+  // expression with no special case. It used to re-parse a source string; the parse now happens once,
+  // in the loader, and a malformed expression fails there rather than here.
+  if (EXPRESSION_REFS.has(op.functionRef)) {
+    const asRef: Ref<InlineFamily> = { op };
+    const { schema, unresolved } = inferRef(asRef, scope);
+    for (const unres of unresolved) err(`expression references '${unres.join(".")}', which resolves to no declared value`);
+    // Reachability applies to expressions too: reading a child's outputs from an expression is the
+    // same edge as wiring it, so it carries the same proof obligation.
+    for (const reference of referencePathsOf(asRef)) {
+      const root = reference[0]!;
+      if (!NAMESPACES.has(root)) {
+        err(`expression uses unknown reference root '${root}' (expected one of: ${[...NAMESPACES].join(", ")})`);
+        continue;
       }
-      const { schema, unresolved } = inferExpression(ast, scope);
-      for (const ref of unresolved) err(`expression references '${ref.join(".")}', which resolves to no declared value`);
-      // Reachability applies to expressions too: reading a child's outputs from an expression is the
-      // same edge as wiring it, so it carries the same proof obligation.
-      for (const ref of referencesOf(ast)) {
-        const root = ref[0]!;
-        if (!NAMESPACES.has(root)) {
-          err(`expression uses unknown reference root '${root}' (expected one of: ${[...NAMESPACES].join(", ")})`);
-          continue;
-        }
-        if (optOut) continue;
-        if (root === "children" && ref[1] !== undefined && !reachable.always.has(ref[1])) {
-          if (def.children?.[ref[1]] === undefined) err(`expression references undeclared child '${ref[1]}'`);
-          else err(`expression reads child '${ref[1]}', which is not proven to have run on every path to this point`);
-        }
+      if (optOut) continue;
+      if (root === "children" && reference[1] !== undefined && !reachable.always.has(reference[1])) {
+        if (def.children?.[reference[1]] === undefined) err(`expression references undeclared child '${reference[1]}'`);
+        else err(`expression reads child '${reference[1]}', which is not proven to have run on every path to this point`);
       }
-      // A declared schema on the leaf is an ASSERTION, checked against the inferred type.
-      const declared = op.output.schema;
-      if (declared !== undefined && !isUniversalSchema(declared) && !isUniversalSchema(schema)) {
-        const check = isSubschema(schema as Schema, declared as Schema);
-        if (!check.ok) err(`expression infers to ${describeSchema(schema)}, which does not satisfy the declared schema: ${check.reason}`);
-      }
-      return schema;
     }
+    // A declared schema on the leaf is an ASSERTION, checked against the inferred type.
+    const declared = op.output.schema;
+    if (declared !== undefined && !isUniversalSchema(declared) && !isUniversalSchema(schema)) {
+      const check = isSubschema(schema as Schema, declared as Schema);
+      if (!check.ok) err(`expression infers to ${describeSchema(schema)}, which does not satisfy the declared schema: ${check.reason}`);
+    }
+    return schema;
+  }
+
+  switch (op.functionRef) {
     case RESOLVER_REFS.select: {
       // `{ child, output }`: project one property off the child's outputs object.
       const value = op.input.value;
@@ -465,7 +563,9 @@ function resolverSchema(
       if (base === undefined || key === undefined) return undefined;
       const props = base.properties;
       if (props !== null && typeof props === "object" && !Array.isArray(props)) {
-        const p = (props as Record<string, JsonValue>)[key];
+        // OWN properties only: an inherited hit is not a declared output, and treating one as
+        // declared both skipped this error and returned a FUNCTION where a schema was expected.
+        const p = Object.hasOwn(props, key) ? (props as Record<string, JsonValue>)[key] : undefined;
         if (p === undefined) {
           err(`selects output '${key}', which the producer does not declare`);
           return undefined;
@@ -491,16 +591,14 @@ function resolverSchema(
       // `functionRef` is the child key). For both, the declared output schema is the producer type —
       // the generic rule.
       //
-      // Anything else is an operation the author EMBEDDED in a binding, and no such op is runnable:
-      // `runResolver`'s default branch refuses it, so binding to one validated clean and then never
-      // resolved. Rejecting it here is the honest half of that pair; making it run would be a model
-      // change (a binding names a declared child or uses the authored sugar, nothing else).
-      if (op.functionRef !== RESOLVER_REFS.artifact && op.functionRef !== RESOLVER_REFS.conversation && def.children?.[op.functionRef] === undefined) {
-        err(
-          `binds an embedded operation '${op.functionRef}', which no binding can run — ` +
-            `a producer edge names a declared child, or uses the authored binding sugar`,
-        );
-      }
+      // Anything else is an operation EMBEDDED in a binding — a lowered CALL (EXPRESSIONS.md §3).
+      //
+      // This used to be an error, and rejecting it was right at the time: `runResolver`'s default
+      // branch refused to run one, so a binding to it validated clean and then never resolved. Now
+      // the engine runs it (memoized, before resolution reads the result), so the pair is honest the
+      // other way round — and leaving the rejection would fail every workflow that calls anything.
+      //
+      // Its type is its declared output schema, which is the generic rule, hence `undefined`.
       return undefined;
   }
 }
@@ -565,9 +663,22 @@ interface Reachability {
 
 /**
  * Definite-assignment analysis over `sequence`/`transitions`. A `sequence` runs its members in
- * order, unconditionally, so every sequence member is proven to run on the path to the state's
- * wiring and termination. A child reachable ONLY through a conditional transition is NOT proven —
- * that is the hole §7.2 closes, and `optional`/`default` on the consuming slot is the opt-out.
+ * order, so a member is proven to run on the path to the state's wiring and termination — UNLESS a
+ * transition can fire first and terminate or divert the state. A child reachable ONLY through a
+ * conditional transition is likewise not proven; that is the hole §7.2 closes, and
+ * `optional`/`default` on the consuming slot is the opt-out.
+ *
+ * The pre-emption test is what makes this sound now that EVERY state with children has a sequence
+ * (§6): "the sequence runs unconditionally" stopped being true the moment a derived sequence sat
+ * under a state whose transitions terminate early. Critique is the case — it can answer `clean` and
+ * terminate before either child runs, so neither is proven, and a required slot reading one is
+ * still the error it was before the sequence was derived.
+ *
+ * A guard can only fire once everything it READS has resolved: a guard over
+ * `children.<key>.outputs` evaluates to PENDING until that child completes, and PENDING is skipped
+ * rather than taken (SPEC §6/§10.4). So a transition guarded on the LAST sequence member cannot
+ * pre-empt any of them, while a guard reading only this state's own `outputs` can fire the moment
+ * the operation completes and therefore pre-empts everything.
  *
  * An `async` member counts as proven. Async means "started but not awaited", i.e. its outputs may
  * be PENDING at read time — and PENDING is a RUNTIME park (the dataflow join, SPEC §10.4), not a
@@ -579,10 +690,37 @@ interface Reachability {
  * everything else.
  */
 function reachabilityOf(def: LoadedState): Reachability {
-  const always = new Set<string>();
-  for (const key of def.sequence ?? []) {
-    if (def.children?.[key]) always.add(key);
+  const sequence = def.sequence ?? [];
+  const indexOf = new Map(sequence.map((key, i) => [key, i] as const));
+
+  // The earliest point each transition could be taken, as a sequence index: -1 = "as soon as the
+  // operation completes", n = "not before member n has". A guard naming no child is unblocked.
+  let earliest = Number.POSITIVE_INFINITY;
+  for (const t of def.transitions ?? []) {
+    let blockedUntil = -1;
+    if (t.when !== undefined) {
+      let ast: Expr | undefined;
+      try {
+        ast = parseExpression(t.when);
+      } catch {
+        ast = undefined; // a guard that does not parse is reported elsewhere; assume the worst
+      }
+      if (ast) {
+        for (const path of referencesOf(ast)) {
+          if (path[0] !== "children" || path[1] === undefined) continue;
+          const at = indexOf.get(path[1]);
+          if (at !== undefined) blockedUntil = Math.max(blockedUntil, at);
+        }
+      }
+    }
+    earliest = Math.min(earliest, blockedUntil);
   }
+
+  const always = new Set<string>();
+  sequence.forEach((key, i) => {
+    // A transition that can fire at `earliest` pre-empts every member after it.
+    if (def.children?.[key] && earliest >= i) always.add(key);
+  });
   return { always };
 }
 
@@ -606,6 +744,8 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle): ExprScope {
     childrenProps[key] = { type: "object", properties: { outputs: outputs as JsonValue, outcome: outcomeSchema } } as JsonValue;
   }
 
+  const sequenceKeys = def.sequence ?? [];
+
   return {
     inputs: objectOf(def.inputs),
     outputs: objectOf(def.outputs),
@@ -613,8 +753,18 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle): ExprScope {
     // Session-owned resources: addressable, contents known only at run time.
     artifacts: { type: "object" },
     conversations: { type: "object" },
-    // Guard-only control-flow scalars (§7.5) — never a reference binding, always numbers.
-    run: { type: "object", properties: { iteration: { type: "integer" } as JsonValue } },
+    // Guard-only control-flow scalars (§7.5) — never a reference binding.
+    run: {
+      type: "object",
+      properties: {
+        iteration: { type: "integer" } as JsonValue,
+        // Where the sequence cursor is, by child key and by index — so a guard can say "if we are
+        // at x and y holds, go to z". Typed as the declared child keys, so a typo is a lint error
+        // rather than a comparison that is silently always false.
+        cursor: (sequenceKeys.length > 0 ? { type: "string", enum: ["", ...sequenceKeys] } : { type: "string" }) as JsonValue,
+        position: { type: "integer" } as JsonValue,
+      },
+    },
     limits: { type: "object", properties: { max_iterations: { type: "integer" } as JsonValue, timeout: { type: "integer" } as JsonValue } },
   };
 }

@@ -17,7 +17,7 @@
  * deliberately absent: its stream must survive un-drained so it can be piped (§7.4).
  */
 import type { InlineFamily, Ref, RefTree } from "@declarative-ai/exec";
-import { parseExpression, referencesOf } from "./expr";
+import { pathOfRef } from "./lowerExpr";
 import { RESOLVER_REFS, type LoadedState } from "./format";
 
 /** Marks a whole-child edge (`{ child: P }`, no output selected) — it consumes every output of P. */
@@ -29,7 +29,7 @@ const SEP = "\0";
  * fans out when at least TWO distinct consumers read it, counting a whole-child read as a read of every
  * output.
  */
-export function computeFanOut(state: LoadedState): ReadonlySet<string> | undefined {
+export function computeFanOut(state: LoadedState): readonly string[] | undefined {
   /** Per-(child,output) distinct-consumer counts, and per-child whole-edge counts (which apply to
    *  EVERY output of that child). Split so a whole read + a specific read of the same output tally to 2. */
   const specific = new Map<string, number>();
@@ -55,12 +55,16 @@ export function computeFanOut(state: LoadedState): ReadonlySet<string> | undefin
   for (const [child, n] of whole) {
     if (n >= 2) out.add(`${child}${SEP}${WHOLE}`);
   }
-  return out.size > 0 ? out : undefined;
+  // A SORTED ARRAY, not the `Set` this used to be. A loaded state is a resolved DEFINITION, and a
+  // definition has to be plain JSON — `JSON.stringify(new Set([...]))` is `{}`, which loses every
+  // entry with no error to notice. Sorted so the serialized form is stable whatever order the walk
+  // above happened to add keys in, which is what makes it safe to fold into a content hash.
+  return out.size > 0 ? [...out].sort() : undefined;
 }
 
-/** Whether a produced output `output` of child `childKey` is fanned out, per a precomputed set. */
-export function isFannedOut(fanOut: ReadonlySet<string> | undefined, childKey: string, output: string): boolean {
-  return fanOut !== undefined && (fanOut.has(`${childKey}${SEP}${output}`) || fanOut.has(`${childKey}${SEP}${WHOLE}`));
+/** Whether a produced output `output` of child `childKey` is fanned out, per a precomputed list. */
+export function isFannedOut(fanOut: readonly string[] | undefined, childKey: string, output: string): boolean {
+  return fanOut !== undefined && (fanOut.includes(`${childKey}${SEP}${output}`) || fanOut.includes(`${childKey}${SEP}${WHOLE}`));
 }
 
 /** Every top-level binding in a state that resolves against the run — each one a CONSUMER. */
@@ -92,31 +96,31 @@ function collect(ref: Ref<InlineFamily>, out: Set<string>): void {
       else if (value !== undefined) collect(value, out);
       return;
     }
-    if (producer.functionRef === RESOLVER_REFS.expr) {
-      // An `{ expr }` leaf reads children through the DSL — the same edge as wiring it (§7.2).
-      const src = producer.input.source?.binding;
-      if (src !== undefined && "text" in src) {
-        try {
-          for (const path of referencesOf(parseExpression(src.text))) {
-            if (path[0] === "children" && path[1] !== undefined) {
-              if (path[2] === "outputs" && path[3] !== undefined) {
-                out.add(`${path[1]}${SEP}${path[3]}`); // a specific output — the one blob consumed
-              } else if (path[2] !== "outcome") {
-                // A bare/coarse child reference consumes EVERY output. `children.P.outcome` is the
-                // termination status string, not an output, so it consumes NONE — counting it as a whole
-                // read would inflate the fan-out tally and force a needless materialization (§7.4).
-                out.add(`${path[1]}${SEP}${WHOLE}`);
-              }
-            }
-          }
-        } catch {
-          // A malformed expression is the validator's report, not this pass's concern.
-        }
+    // A lowered EXPRESSION reads children through the context, not through a child edge — it has to,
+    // or it would stop meaning what the interpreter meant (EXPRESSIONS.md §1.3). So the read is
+    // recognized structurally here instead: a `context.get("children")` at the bottom of an
+    // `op.member` chain IS the same consumption that wiring the child would be.
+    //
+    // This replaced re-parsing the expression's source text. The distinctions are the ones that
+    // parse drew, and they are load-bearing: a specific output is one blob consumed, a coarser read
+    // consumes EVERY output, and `children.P.outcome` consumes NONE — it is the termination status,
+    // not an output, and counting it would force a materialization nothing needs (§7.4).
+    const path = pathOfRef(ref);
+    if (path !== undefined) {
+      if (path[0] === "children" && path[1] !== undefined) {
+        if (path[2] === "outputs" && path[3] !== undefined) out.add(`${path[1]}${SEP}${path[3]}`);
+        else if (path[2] !== "outcome") out.add(`${path[1]}${SEP}${WHOLE}`);
       }
       return;
     }
-    // scope/artifact/conversation resolvers name no child; an embedded op might carry nested edges.
+    // scope/artifact/conversation resolvers name no child; operators and embedded ops carry nested
+    // edges, and an operand may be a child read even when the whole node is not a path.
     for (const p of Object.values(producer.input)) if (p.binding) collect(p.binding, out);
+    // A lowered CALL keeps its ARGUMENTS in `parameters`, not in the callee's own `input` — so a
+    // child read inside one (`classify(children.c.outputs.doc)`) is invisible to a walk that only
+    // descends `input`. Missing it under-counts fan-out, and an under-counted blob is never
+    // materialized: two readers then race one stream, silently (§1.3).
+    for (const p of Object.values(ref.parameters ?? {})) if (p.binding) collect(p.binding, out);
     return;
   }
   if ("refs" in ref) collectTree(ref.refs, out);

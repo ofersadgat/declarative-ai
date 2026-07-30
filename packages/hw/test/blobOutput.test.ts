@@ -28,8 +28,8 @@ function blobStates(outputs: Record<string, unknown>): Record<string, StateDef> 
       outputs: outputs as StateDef["outputs"],
       operation: {
         kind: "prompt",
-        prompt: { template: "Draw a diagram." },
-        config: { model: "artist" },
+        prompt: "Draw a diagram.",
+        model: "artist",
         output: { kind: "blob", schema: { type: "string", contentMediaType: "image/png" } },
       },
     } as StateDef,
@@ -143,7 +143,7 @@ describe("a blob-kind operation output fills the state's single produced slot", 
         label: "Render",
         inputs: {},
         outputs: { a: { schema: { type: "string" } }, b: { schema: { type: "number" } } },
-        operation: { kind: "prompt", prompt: { template: "go" }, config: { model: "m" } },
+        operation: { kind: "prompt", prompt: "go", model: "m" },
       } as StateDef,
     };
     const result = await run(states, () => ok({ a: "x", b: 2 }));

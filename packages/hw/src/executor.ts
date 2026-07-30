@@ -26,19 +26,27 @@ import {
   type ExecResult,
 } from "@declarative-ai/exec";
 import { syncOnly } from "@declarative-ai/exec";
-import { WorkflowEngine } from "./engine";
-import type { StateDef } from "./format";
+import { WorkflowEngine, type CallCache } from "./engine";
+import type { WorkflowBundle } from "./format";
 import { isByteStream, materialize, MaterializeError } from "./materialize";
-import { loadBundle, snapshotHash } from "./loader";
+import { snapshotHash } from "./loader";
 import type { Persistence, WorkflowMetrics } from "./ports";
 import { mergeWorkflowMetrics } from "./ports";
 import { validateBundle } from "./validate";
 
-/** The workflow definition: raw state files + the root id (as stored/authored). */
-export interface HierarchicalWorkflowDefinition {
-  rootId: string;
-  states: Record<string, StateDef>;
-}
+/**
+ * The workflow definition: a RESOLVED bundle.
+ *
+ * It used to be raw state files, which the executor then loaded on every start — so definition
+ * evaluation (path lookup, reference resolution, transclusion, desugaring) ran again at execution
+ * time, and a caller that had already loaded and pinned a bundle had no way to say so. Taking the
+ * resolved form is what makes a pinned run actually pinned: there is nothing left to re-evaluate,
+ * so nothing about it can change when the loader does.
+ *
+ * Callers holding authored files call `loadBundle` themselves — the pre-pass is theirs to run, and
+ * to run once.
+ */
+export type HierarchicalWorkflowDefinition = WorkflowBundle;
 
 
 export interface WorkflowExecutorOptions {
@@ -52,6 +60,19 @@ export interface WorkflowExecutorOptions {
    *  keeps the AI SDK out of this package's dependency graph. */
   prompt?: Executor<ExecServices, WorkflowMetrics>;
   persistence?: Persistence;
+  /**
+   * Where the results of CALLS are remembered (EXPRESSIONS.md §3), and what they dispatch through.
+   *
+   * Both default to something that works and neither is durable: an in-run `Map`, and direct registry
+   * invocation. A host supplies these to get what the defaults cannot — an identical call reused
+   * across runs, tasks and processes, and the wrapper stack (retry, rate limiting, budget, a
+   * content-addressed memo) around a call.
+   *
+   * Forwarded here because the engine is constructed INSIDE this executor: without it the seams exist
+   * and nothing outside hw can reach them.
+   */
+  callCache?: CallCache;
+  operations?: Executor<ExecServices, WorkflowMetrics>;
 }
 
 const CAPABILITIES: Capabilities = {
@@ -72,7 +93,7 @@ const CAPABILITIES: Capabilities = {
  * it is why `memoize` never has to brute-force-canonicalize an opaque bundle.
  */
 export function workflowIdentify(definition: HierarchicalWorkflowDefinition): (op: Operation<InlineFamily>) => string {
-  const snapshot = snapshotHash(loadBundle(definition.states, definition.rootId));
+  const snapshot = snapshotHash(definition);
   return (op) => `${snapshot}:${hashOperation(op)}`;
 }
 
@@ -128,13 +149,10 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
     }
 
     // --- Definition intake ------------------------------------------------
-    const def = this.options.definition;
-    let bundle;
-    try {
-      bundle = loadBundle(def.states, def.rootId);
-    } catch (e) {
-      return fail("permanent", `definition failed to load: ${(e as Error).message}`);
-    }
+    // Already resolved: definition evaluation is the caller's pre-pass, not something to redo on
+    // every start. This used to `loadBundle` here, which meant a pinned bundle was re-evaluated
+    // against whatever the loader does today.
+    const bundle = this.options.definition;
     // Validation is a function of *(document, registry)* (§2): with the registry in hand, a
     // `functionRef` naming nothing registered is an authoring error caught before the run rather than
     // a run-fatal surprise partway through it.
@@ -171,6 +189,10 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
       // than treated as a pass.
       validator: ctx.validator ? syncOnly(ctx.validator) : undefined,
       persistence: this.options.persistence,
+      // The two CALL seams (EXPRESSIONS.md §3), forwarded so a host can reach them: the engine is
+      // constructed in here, so without this they exist and nothing can supply them.
+      ...(this.options.callCache !== undefined ? { callCache: this.options.callCache } : {}),
+      ...(this.options.operations !== undefined ? { operations: this.options.operations } : {}),
       services: ctx,
       clock: ctx.clock,
       onEvent: (event) => {

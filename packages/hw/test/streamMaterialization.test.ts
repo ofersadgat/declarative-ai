@@ -221,7 +221,7 @@ describe("blob OUTPUT and RESULT materialization (§7.3, rule 3)", () => {
         operation: { kind: "function", function: "gen", output: blobSlot },
       } as StateDef,
     };
-    return { definition: { rootId: "render", states }, stream };
+    return { definition: loadBundle(states, "render"), stream };
   }
 
   function executorFor(definition: HierarchicalWorkflowDefinition, produce: () => ResolvedValue) {
@@ -268,7 +268,7 @@ describe("memoization materialization (§7.3, rule 1)", () => {
         outputs: { out: { ...blobSlot, binding: { input: "doc" } } },
       } as StateDef,
     };
-    return { rootId: "echo", states };
+    return loadBundle(states, "echo");
   }
 
   it("materializes a stream blob INPUT so the op hashes — no exec hashOperation throw escapes", async () => {

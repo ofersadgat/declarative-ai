@@ -27,7 +27,7 @@
  */
 import type { Failure, JsonValue, Result } from "@declarative-ai/json";
 import { classifyError, describeError, isRateLimit, retryAfterMs } from "@declarative-ai/json";
-import type { ResolvedValue } from "./model";
+import type { InlineFamily, ResolvedValue, Signature } from "./model";
 
 /** The dynamic base for function inputs (§2.2); refined per-def by `FunctionDef<I, O>`. */
 export type FunctionInputs = Record<string, ResolvedValue>;
@@ -162,7 +162,20 @@ export interface AsyncFunctionOptions {
 /**
  * One registry entry, discriminated by HOW it runs. `capabilities` is required and total per variant.
  */
-export interface PureFunction<M> {
+/**
+ * The I/O contract an entry implements, when it declares one.
+ *
+ * Optional because a registry is populated by host code that may not care — but a caller that DOES
+ * declare it gets something no name lookup can give: a checker can verify that whatever names this
+ * entry agrees with it. That matters most for a callee named from an expression, where the argument
+ * types are decided by a DOCUMENT and the implementation is over here; without a signature the two
+ * can disagree and nothing notices until the call runs.
+ */
+export interface EntrySignature {
+  signature?: Signature<InlineFamily>;
+}
+
+export interface PureFunction<M> extends EntrySignature {
   kind: "pure";
   impl: FunctionImpl<FunctionInputs, ResolvedValue, M>;
   capabilities: PureCapabilities;
@@ -170,7 +183,7 @@ export interface PureFunction<M> {
   description?: string;
 }
 
-export interface HostFunction<Ctx, M> {
+export interface HostFunction<Ctx, M> extends EntrySignature {
   kind: "host";
   impl: AsyncFunctionImpl<FunctionInputs, ResolvedValue, M, Ctx>;
   capabilities: HostCapabilities;
@@ -178,7 +191,7 @@ export interface HostFunction<Ctx, M> {
   description?: string;
 }
 
-export interface RuntimeFunction<Ctx, M> {
+export interface RuntimeFunction<Ctx, M> extends EntrySignature {
   kind: "runtime";
   impl: AsyncFunctionImpl<FunctionInputs, ResolvedValue, M, Ctx>;
   capabilities: RuntimeCapabilities;
@@ -199,9 +212,9 @@ export type RegisteredFunction<Ctx, M> = PureFunction<M> | HostFunction<Ctx, M> 
  * survives: `entry.kind !== "pure"` still narrows to the variants that HAVE `interactive`.
  */
 export type FunctionCapabilities =
-  | { kind: "pure"; capabilities: PureCapabilities }
-  | { kind: "host"; capabilities: HostCapabilities }
-  | { kind: "runtime"; capabilities: RuntimeCapabilities };
+  | ({ kind: "pure"; capabilities: PureCapabilities } & EntrySignature)
+  | ({ kind: "host"; capabilities: HostCapabilities } & EntrySignature)
+  | ({ kind: "runtime"; capabilities: RuntimeCapabilities } & EntrySignature);
 
 /**
  * The registry: a plain map from `functionRef` to entry. `refs()` was `[...map.keys()]`; `has`/`get`
@@ -213,26 +226,39 @@ export type FunctionRegistry<Ctx, M> = Map<string, RegisteredFunction<Ctx, M>>;
 export function pureFunction<M>(
   impl: FunctionImpl<FunctionInputs, ResolvedValue, M>,
   capabilities: PureCapabilities = PURE_CAPABILITIES,
+  signature?: Signature<InlineFamily>,
 ): PureFunction<M> {
-  return { kind: "pure", impl, capabilities };
+  return { kind: "pure", impl, capabilities, ...(signature !== undefined ? { signature } : {}) };
 }
 
 /** Build a host-code entry (including interactive UI). */
 export function hostFunction<Ctx, M>(
   impl: AsyncFunctionImpl<FunctionInputs, ResolvedValue, M, Ctx>,
   capabilities: HostCapabilities,
-  opts?: AsyncFunctionOptions,
+  opts?: AsyncFunctionOptions & EntrySignature,
 ): HostFunction<Ctx, M> {
-  return { kind: "host", impl, capabilities, ...(opts?.stream !== undefined ? { stream: opts.stream } : {}) };
+  return {
+    kind: "host",
+    impl,
+    capabilities,
+    ...(opts?.stream !== undefined ? { stream: opts.stream } : {}),
+    ...(opts?.signature !== undefined ? { signature: opts.signature } : {}),
+  };
 }
 
 /** Build a delegated-runtime-adapter entry. */
 export function runtimeFunction<Ctx, M>(
   impl: AsyncFunctionImpl<FunctionInputs, ResolvedValue, M, Ctx>,
   capabilities: RuntimeCapabilities,
-  opts?: AsyncFunctionOptions,
+  opts?: AsyncFunctionOptions & EntrySignature,
 ): RuntimeFunction<Ctx, M> {
-  return { kind: "runtime", impl, capabilities, ...(opts?.stream !== undefined ? { stream: opts.stream } : {}) };
+  return {
+    kind: "runtime",
+    impl,
+    capabilities,
+    ...(opts?.stream !== undefined ? { stream: opts.stream } : {}),
+    ...(opts?.signature !== undefined ? { signature: opts.signature } : {}),
+  };
 }
 
 /**

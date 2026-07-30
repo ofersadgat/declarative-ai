@@ -32,6 +32,24 @@ export type ErrorClass =
   | "canceled"
   | "policy-denied";
 
+/**
+ * The same union AS DATA, in one place.
+ *
+ * A closed set is only useful if everything enumerating it enumerates the same set: the decoder that
+ * validates a stored classification and the JSON Schema a slot declares in order to accept a failure
+ * (`FAILURE_SCHEMA`) both need the list, and two hand-written copies drift the first time a class is
+ * added.
+ */
+export const ERROR_CLASSES = [
+  "network-retriable",
+  "api-retriable",
+  "permanent",
+  "deadline",
+  "out-of-credits",
+  "canceled",
+  "policy-denied",
+] as const satisfies readonly ErrorClass[];
+
 /** The subset `classifyError` can produce (transport/response analysis only). */
 export type ClassifiedErrorClass = "network-retriable" | "api-retriable" | "permanent";
 

@@ -745,7 +745,7 @@ the whole bundle — the same lever as sharing a conversation, generalized from 
 "transcript + workspace + permissions + tools".
 
 - A session is strictly more than a transcript: the conversation is one facet of it.
-- **Sharing is explicit, isolation is the default**: an operation's `environment.session` names an id;
+- **Sharing is explicit, isolation is the default**: an operation's `session` names an id;
   the same id means a shared session, absent means the run's default session.
 - **The workspace is session-owned, not runtime-owned**, and not always shared. It is default-shared
   within a subtree — a review agent reading what a coding agent wrote is the point — and overridable to
@@ -923,14 +923,14 @@ arguments, and exactly what JaiRA's app supplies in its richer form.
   config-layer `prompt` is an error — there's nothing to do with two). So a workflow state's call is an
   `LlmConfiguration` declaration like any other, not a parallel config surface.
 
-- **Sessions coordinate by logical id.** A state's `environment.session` is the sharing key for its owned
+- **Sessions coordinate by logical id.** An operation's `session` is the sharing key for its owned
   resources — conversation transcript, workspace, and permissions (§5.1); absent ⇒
   the run's default session (so a plain workflow is one shared session). The engine keys the built-in
   `conversationMode` preamble per session, aligning it with the run-scoped `SessionStore` (§3.6, exposed as
   `ctx.sessions` for the llm `withSession` path) — both key on `sessionId`.
 
 - **Tools and permissions.** An operation may be given **tools** (`registry.tools`, referenced by
-  logical name in `environment.tools`) it calls mid-loop — a composed prompt operation runs them in its
+  logical name in `operation.tools`) it calls mid-loop — a composed prompt operation runs them in its
   bounded tool loop; a delegated agent gets the allow-list. Each call is gated by a **profile × mode**
   permission system (`read-only`/`plan`/`full` × `allow`/`deny`/`ask`) whose human decisions persist across
   an in-memory scope chain (session → workflow-run → process) over the workflow-authored baseline. The full

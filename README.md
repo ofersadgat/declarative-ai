@@ -461,8 +461,10 @@ Everything that isn't a bare LLM call is a FunctionOp — host code, interactive
 delegated agent like `claude-code` alike; what distinguishes them is the resolved registry entry's
 capabilities, never the op's shape. A prompt op's text comes from an inline `template` or a named `skill`
 (`registry.skills`).
-Session, tool, conversation, and permission concerns sit in a sibling `environment` block — tools
+Session, tool, conversation, and permission concerns are fields of the operation — tools
 (`registry.tools`) are gated by a **profile × mode** permission system, see [DESIGN.md](DESIGN.md) §5.1.
+The sibling `environment` block is the DEFAULTS layer instead: an operation with every field optional,
+inherited by a state and its whole subtree (SPEC.md §7.1a).
 
 ```ts
 import { newCapabilityRegistry, withRetry } from "@declarative-ai/exec";

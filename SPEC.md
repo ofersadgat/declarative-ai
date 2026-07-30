@@ -156,16 +156,20 @@ declares at most one `operation`, of one of two kinds:
   alike. Nothing about the operation distinguishes them — the resolved registry entry's
   capabilities do (§7.1).
 
-Child states are entered by sequence order or by explicit transition.
+Child states are entered by sequence order or by explicit transition. `children` may be omitted
+entirely, in which case they are INFERRED from the state's own namespace: every state one path
+segment below it, keyed by basename, in alphabetical order. `"children": {}` declares none.
 
 A state may declare an operation, children, or both. Operations run one at a time
 in a fixed priority order: the state's `operation`, then child states in
-`sequence` order. Async child states are the only exception to one-at-a-time
-execution.
+`sequence` order. The cursor HOLDS on the child it entered until that child resolves, so one child
+runs at a time; `async: true` on a child is the sole exception and the sole meaning of the flag.
+Concurrency is something an author asks for, never what a plain sequence falls into.
 
 How an operation runs — the session it belongs to, the tools it may call, the conversation
-preamble it receives, its permission baseline — is declared in a sibling `environment` block, not
-in the operation (§7.1).
+preamble it receives, its permission baseline — is declared in the operation itself (§7.1). The
+sibling `environment` block carries DEFAULTS for the operation instead, inherited by this state and
+every descendant.
 
 ### 3.3 Evaluation Loop
 
@@ -215,6 +219,11 @@ has not run.
 
 `run.iteration` is the count of transitions taken so far within the current
 state instance, starting at 0. It is the standard guard for cycles.
+
+`run.cursor` is the key of the child most recently ENTERED — where the sequence cursor is — and
+`run.position` its index in the sequence (`-1` before any child is entered). Transitions are
+evaluated after an operation completes or a child terminates, so "the cursor is at x" means x has
+run; a guard can therefore say *if we are at x and y holds, go to z*.
 
 ### 3.5 Active Path
 
@@ -353,8 +362,9 @@ cases.
 | `{ "result": … }` | Reuse of an already-existing generation result. | itself (base) |
 | `{ "refs": … }` | An inline arrangement (array/object) whose leaves are refs. | itself (base) |
 | `{ "op": … }` | A producer edge: a declared child's key, or an embedded operation. | itself (base) |
-| `{ "child": "context" }` | The child's outputs object. | `{ "op": "context" }` |
-| `{ "child": "context", "output": "plan_doc" }` | One named output of the child. | the producer edge above, plus a `select` producer projecting that property |
+| `{ "child": "context" }` | The child output named by THE SLOT BEING BOUND. | a producer edge on the child, plus a `select` producer projecting that property |
+| `{ "child": "context", "output": "plan_doc" }` | One named output of the child. | the same, projecting `plan_doc` |
+| `{ "child": "context", "output": "*" }` | The child's whole outputs object, as one value. | `{ "op": "context" }` |
 | `{ "input": "issue" }` | This state's declared input, by name. | a `scope.get` producer |
 | `{ "expr": "outputs.weaknesses" }` | A small computation in the expression DSL (§6). | an `expr.eval` producer whose output schema is the inferred type |
 | `{ "artifact": "design_doc" }` | A session-owned artifact, by name. | an `artifact.get` producer |
@@ -413,17 +423,31 @@ Some wrapper or delegation states need to return whatever a child state produces
 This is supported explicitly, as a slot that declares no `schema` — an unconstrained
 slot constrains nothing, so any producer satisfies it.
 
-Example:
+`output` DEFAULTS to the name of the slot being bound, because
+`"plan_doc": { "binding": { "child": "context", "output": "plan_doc" } }` says the same word twice
+and the repeat is the one people forget to change. `"*"` is the escape hatch for the whole object.
+
+Example — the three forms side by side:
 
 ```json
 {
   "outputs": {
-    "child_outputs": {
-      "binding": { "child": "critique" }
-    }
+    "plan_doc": { "binding": { "child": "context" } },
+    "summary": { "binding": { "child": "context", "output": "notes" } },
+    "child_outputs": { "binding": { "child": "critique", "output": "*" } },
+    "ctx_*": { "binding": { "child": "context" } }
   }
 }
 ```
+
+The last is a **spread**: a slot key ending in `*` republishes every output of the named child as an
+output of this state, prefixed with whatever precedes the `*` (so `ctx_plan_doc`, `ctx_notes`, …),
+each keeping its own schema and optionality. A bare `"*"` spreads them unprefixed, and an explicitly
+declared slot always wins over one a spread would have produced.
+
+The marker is in the slot KEY rather than in `output` because a spread declares N slots and that has
+to be visible where the slots are declared — and because `{ "output": "ctx_" }` could not be told
+apart from selecting an output genuinely named `ctx_`.
 
 Rule:
 
@@ -505,15 +529,16 @@ selected_artifacts
 The initial default is `full_history`, but the schema must support all modes so
 projects can move toward more controlled context selection over time.
 
-A state selects its mode in `environment.conversation` (§7.1); the selected preamble is injected
-into that state's own call.
+A state selects its mode in `operation.conversation` (§7.1); the selected preamble is injected
+into that state's own call. It may be inherited from an ancestor's `environment`, so a subtree can
+be put on one mode in one place.
 
-Transcripts are scoped per **session** (`environment.session`, DESIGN.md §5.1):
+Transcripts are scoped per **session** (`operation.session`, DESIGN.md §5.1):
 `full_history` threads the prior exchanges of the *same* session. States that declare no session share
 the run's default session (so a plain workflow threads history across all its states); a distinct
-`environment.session` isolates a subtree's conversation.
+`operation.session` isolates a subtree's conversation.
 
-Injecting a preamble and *reading a transcript as data* are different things. The `environment.conversation`
+Injecting a preamble and *reading a transcript as data* are different things. The `operation.conversation`
 block is the preamble; a `{ "conversation": "<session>", "message": n }` binding (§4.2) wires a
 transcript — or one message of it — into a slot as an ordinary value, which is how a state summarizes or
 answers questions about an earlier session.
@@ -565,14 +590,16 @@ limits
   agent adapter).
 
 `environment`
-: Execution-environment configuration for that operation: `session`, `tools`, `conversation`
-  preamble, and `permissions`.
+: DEFAULTS for `operation` — the same shape with every field optional, inherited by this state and
+  every descendant, nearest layer winning (§7.1a). Only a state that declares an `operation` gets
+  one.
 
 `children`
 : Declared child states, their input wiring, and async flags.
 
 `sequence`
-: Default order for child execution.
+: Order the cursor advances through children. Optional — absent means the order the children were
+  declared in; `[]` means no spine, so a child runs only when a transition enters it.
 
 `transitions`
 : Local transition rules.
@@ -662,6 +689,8 @@ reachable only from `when` guards and `{ "expr": … }` leaves:
 
 ```text
 run.iteration
+run.cursor
+run.position
 limits.max_iterations
 limits.timeout
 ```
@@ -777,8 +806,8 @@ Adapters are therefore still adapters with capabilities, not interchangeable str
 call and a file-editing agent differ in what they can do. See [DESIGN.md](DESIGN.md) §4.4 for the
 composed-vs-delegated distinction.
 
-Everything about *how* an operation runs — as opposed to what it is — lives in the sibling
-`environment` block, because it is not part of the operation's identity:
+Everything about *how* an operation runs — as opposed to what it is — is written in the operation
+alongside the rest, because each of these is a per-CALL decision:
 
 ```text
 session       Logical session id this state runs under; owns the conversation transcript,
@@ -789,9 +818,34 @@ tools         Logical names of tools the operation may call mid-loop, resolved t
               delegated agent is handed the allow-list.
 conversation  { "mode": "full_history" | "summary" | "fresh" | "selected_artifacts",
                 "artifacts": [ … ] } — the preamble injected into this call (§4.7).
-permissions   The authored per-state permission baseline: `profile`, `default`, per-tool modes
+permissions   The authored per-operation permission baseline: `profile`, `default`, per-tool modes
               (§7.4).
 ```
+
+#### 7.1a Inheritance
+
+`environment` is an `operation` with every field optional. A state's effective operation is
+
+```text
+merge(root.environment, …, parent.environment, own.environment, own.operation)
+```
+
+with the nearest layer winning, so a root can set the model, the session and the tool set once for
+a whole subtree. Only a state that DECLARES an `operation` gets one — `{}` is the opt-in to a fully
+inherited one, and without it a pure composite under an `environment`-declaring root stays a pure
+composite instead of inheriting an operation and running it.
+
+A state mounted under two parents that give it different environments is running as two different
+things, so it loads as two entries: the first mount keeps the plain id and any later one that
+inherits something different gets a `#`-suffixed VARIANT id, hashed from the inherited environment.
+Two parents passing the same environment collapse back onto one entry. Everything downstream — the
+checker, snapshots, the event log — goes on seeing one id with one operation per state.
+
+Most fields merge per key (`config`, `input`, `permissions.tools`); `prompt`, `schema` and `binding`
+are replaced whole, because merging them produces documents that are not prompts or bindings at all.
+Arrays (`tools`) replace, which is what makes `[]` the way to drop an inherited tool. A layer that
+changes `kind` drops the inherited `config`/`prompt`/`system`/`function`, since those mean different
+things per kind.
 
 ### 7.2 Agent Responsibilities
 
@@ -861,13 +915,9 @@ An agent operation may not:
   "operation": {
     "kind": "prompt",
     "config": { "model": "critic" },
+    "conversation": { "mode": "full_history" },
     "prompt": {
       "template": "Review the plan document. Find significant weaknesses at or above the configured severity threshold. Return structured output matching this state's output schema."
-    }
-  },
-  "environment": {
-    "conversation": {
-      "mode": "full_history"
     }
   },
   "children": {
@@ -932,16 +982,14 @@ operation block — the slots, wiring, children, and transitions are untouched:
     "kind": "function",
     "function": "claude-code",
     "config": { "permissionMode": "plan" },
+    "session": "planning",
+    "tools": ["read_file"],
+    "permissions": { "profile": "plan" },
     "input": {
       "prompt": {
         "binding": { "text": "Review the plan document and report significant weaknesses." }
       }
     }
-  },
-  "environment": {
-    "session": "planning",
-    "tools": ["read_file"],
-    "permissions": { "profile": "plan" }
   }
 }
 ```
@@ -962,8 +1010,8 @@ When an operation is given tools, each tool call is authorized by a **profile ×
   approval gate whose decision persists at a chosen scope — `once`, `always this session`, `always this
   workflow run`, or `always` (the host process) — all in-memory; durable policy is authored, not decided.
 
-A state authors its starting policy via `environment.permissions` (`profile` / `default` / per-tool
-modes), overriding a workflow-wide default; live human decisions overlay on top, most-specific scope
+A state authors its starting policy via `operation.permissions` (`profile` / `default` / per-tool
+modes), possibly inherited from an ancestor's `environment` (§7.1a), overriding a workflow-wide default; live human decisions overlay on top, most-specific scope
 winning. The gate is only active when the host supplies an approver; otherwise tools run unguarded. A
 delegated adapter — a registry entry declaring that it enforces policy through its own callback —
 receives raw tools and routes its native approval callback back through the same approver, so it is

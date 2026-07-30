@@ -46,7 +46,6 @@ interface FakeEntry {
 
 interface MakeEngineOpts {
   functions?: Record<string, FakeEntry | FakeImpl>;
-  skills?: Record<string, string>;
   tools?: Record<string, Tool>;
   /** Override the prompt executor (e.g. a delegated-capability variant). */
   prompt?: Executor<ExecServices, WorkflowMetrics>;
@@ -66,7 +65,6 @@ function makeEngine(files: Record<string, StateDef>, rootId: string, script: Scr
       registry.functions.set(name, hostFunction(entry.run as never, entry.capabilities ?? HOST));
     }
   }
-  for (const [name, template] of Object.entries(opts.skills ?? {})) registry.skills.set(name, template);
   for (const [name, t] of Object.entries(opts.tools ?? {})) registry.tools.set(name, t);
   const persistence = new InMemoryPersistence();
   const engine = new WorkflowEngine({
@@ -363,12 +361,12 @@ describe("SPEC §10.4 — async children and the dataflow join", () => {
       "parent/slow": {
         inputs: {},
         outputs: { val: { schema: { type: "string" } } },
-        operation: { kind: "prompt", prompt: { template: "slow" }, config: { model: "reviewer" } },
+        operation: { kind: "prompt", prompt: "slow", model: "reviewer" },
       },
       "parent/quick": {
         inputs: {},
         outputs: { q: { schema: { type: "string" } } },
-        operation: { kind: "prompt", prompt: { template: "quick" }, config: { model: "synthesizer" } },
+        operation: { kind: "prompt", prompt: "quick", model: "synthesizer" },
       },
     };
     const { engine } = makeEngine(files, "parent", async (spec) => {
@@ -402,12 +400,12 @@ describe("SPEC §10.4 — async children and the dataflow join", () => {
       "parent/never": {
         inputs: {},
         outputs: { v: { schema: { type: "string" } } },
-        operation: { kind: "prompt", prompt: { template: "never" }, config: { model: "reviewer" } },
+        operation: { kind: "prompt", prompt: "never", model: "reviewer" },
       },
       "parent/waiting": {
         inputs: { x: { schema: { type: "string" } } },
         outputs: {},
-        operation: { kind: "prompt", prompt: { template: "waiting" }, config: { model: "reviewer" } },
+        operation: { kind: "prompt", prompt: "waiting", model: "reviewer" },
       },
     };
     // The async child completes but produces the WRONG field, so the wiring expression
@@ -435,7 +433,7 @@ describe("timeout, cancellation, and unhandled child failures", () => {
       slowroot: {
         inputs: {},
         outputs: { x: { schema: { type: "string" }, optional: true } },
-        operation: { kind: "prompt", prompt: { template: "forever" }, config: { model: "reviewer" } },
+        operation: { kind: "prompt", prompt: "forever", model: "reviewer" },
         limits: { timeout: 0.05 },
       },
     };
@@ -455,7 +453,7 @@ describe("timeout, cancellation, and unhandled child failures", () => {
       "parent/slow": {
         inputs: {},
         outputs: { x: { schema: { type: "string" }, optional: true } },
-        operation: { kind: "prompt", prompt: { template: "forever" }, config: { model: "reviewer" } },
+        operation: { kind: "prompt", prompt: "forever", model: "reviewer" },
         limits: { timeout: 0.05 },
       },
     };
@@ -479,7 +477,7 @@ describe("timeout, cancellation, and unhandled child failures", () => {
       "parent/slow": {
         inputs: {},
         outputs: { x: { schema: { type: "string" }, optional: true } },
-        operation: { kind: "prompt", prompt: { template: "forever" }, config: { model: "reviewer" } },
+        operation: { kind: "prompt", prompt: "forever", model: "reviewer" },
         limits: { timeout: 0.05 },
       },
     };
@@ -550,10 +548,10 @@ describe("conversation modes (SPEC §4.7)", () => {
     critique.environment = { conversation: { mode: "fresh" } };
     critique.operation = {
       kind: "prompt",
-      config: { model: "critic" },
+      model: "critic",
       // An operation's bound input slots render under `{{inputs.*}}` — the one namespace a template
       // sees, the operation's resolved inputs (state inputs plus the op's own bound inputs).
-      prompt: { template: "Summarize this transcript: {{inputs.history}}" },
+      prompt: "Summarize this transcript: {{inputs.history}}",
       input: { history: { kind: "json", binding: { conversation: "default" } } },
     };
     const { engine, fake } = makeEngine(files, PLAN_ID, planningScript());
@@ -572,8 +570,8 @@ describe("conversation modes (SPEC §4.7)", () => {
     critique.environment = { conversation: { mode: "fresh" } };
     critique.operation = {
       kind: "prompt",
-      config: { model: "critic" },
-      prompt: { template: "First turn was: {{inputs.first}}" },
+      model: "critic",
+      prompt: "First turn was: {{inputs.first}}",
       input: { first: { kind: "json", binding: { conversation: "default", message: 0 } } },
     };
     const { engine, fake } = makeEngine(files, PLAN_ID, planningScript());
@@ -621,7 +619,7 @@ describe("template rendering: `{{inputs.*}}` is the operation's resolved inputs"
       label: "Solo",
       inputs: { tone: { schema: { type: "string" } } },
       outputs: { answer: { schema: { type: "string" } } },
-      operation: { kind: "prompt", config: { model: "writer" }, prompt: { template: "tone={{inputs.tone}}" } },
+      operation: { kind: "prompt", model: "writer", prompt: "tone={{inputs.tone}}" },
     } as StateDef,
   });
 
@@ -637,7 +635,7 @@ describe("template rendering: `{{inputs.*}}` is the operation's resolved inputs"
     // A render variable is authored as an operation input with a literal binding — the successor to
     // the removed `operation.params` sugar. It resolves and overlays onto the template's inputs.
     (f["solo"]!.operation as { input?: Record<string, unknown> }).input = { tone: { kind: "text", binding: { text: "terse" } } };
-    (f["solo"]!.operation as { prompt?: { template?: string } }).prompt = { template: "tone={{inputs.tone}}" };
+    (f["solo"]!.operation as { prompt?: string }).prompt = "tone={{inputs.tone}}";
     const { engine, fake } = makeEngine(f, "solo", () => ok({ answer: "a" }));
     await engine.run({ inputs: { tone: "casual" } });
     expect(promptOf(fake.calls[0]!)).toBe("tone=terse");
@@ -656,7 +654,7 @@ describe("structured-output contract (buildOutputSchema)", () => {
           summary: { schema: { type: "string" } },
           note: { schema: { type: "string" }, default: "n/a" },
         },
-        operation: { kind: "prompt", config: { model: "writer" }, prompt: { template: "go" } },
+        operation: { kind: "prompt", model: "writer", prompt: "go" },
       },
     };
     const { engine, fake } = makeEngine(files, "s", () => ok({ summary: "s" }));
@@ -680,14 +678,17 @@ describe("declared outputs at termination (SPEC §3.7)", () => {
       inputs: {},
       outputs: { report: { schema: { type: "string" }, binding: { child: "never_run", output: "report" } } },
       children: { never_run: { state: "parent/leaf" } },
-      // No sequence, and the only transition terminates: `never_run` never runs.
+      // An EMPTY sequence keeps the child out of the spine entirely — the way to say "declared, but
+      // only ever entered by a transition" now that an absent sequence means declaration order (§6).
+      // Nothing transitions to it, so `never_run` never runs.
+      sequence: [],
       transitions: [{ to: "terminate.success" }],
     } as StateDef,
     "parent/leaf": {
       label: "Leaf",
       inputs: {},
       outputs: { report: { schema: { type: "string" } } },
-      operation: { kind: "prompt", prompt: { template: "go" }, config: { model: "m" } },
+      operation: { kind: "prompt", prompt: "go", model: "m" },
     } as StateDef,
   });
 
@@ -767,40 +768,27 @@ describe("run records (SPEC §10.2)", () => {
   });
 });
 
-describe("skill as a prompt-op prompt source", () => {
-  it("renders a named skill template as the operation's prompt", async () => {
+describe("a prompt op's render variables", () => {
+  it("renders the state's inputs and the op's own bound inputs under one {{inputs.*}} namespace", async () => {
     const files: Record<string, StateDef> = {
       s: {
         inputs: { topic: { schema: { type: "string" } } },
         outputs: { summary: { schema: { type: "string" } } },
-        // A render variable is a bound operation input; it reaches the skill template under
-        // `{{inputs.*}}` alongside the state's own inputs — one namespace, the op's resolved inputs.
+        // A render variable is a bound operation input; it reaches the template under `{{inputs.*}}`
+        // alongside the state's own inputs — one namespace, the op's resolved inputs.
         operation: {
           kind: "prompt",
-          prompt: { skill: "summarize" },
+          prompt: "Summarize {{inputs.topic}} ({{inputs.style}}).",
           input: { style: { schema: { type: "string" }, binding: { text: "terse" } } },
-          config: { model: "reviewer" },
+          model: "reviewer",
         },
       },
     };
-    const { engine, fake } = makeEngine(files, "s", (call) => ok({ summary: `sum(${promptOf(call)})` }), {
-      skills: { summarize: "Summarize {{inputs.topic}} ({{inputs.style}})." },
-    });
+    const { engine, fake } = makeEngine(files, "s", (call) => ok({ summary: `sum(${promptOf(call)})` }));
     const result = await engine.run({ inputs: { topic: "codebases" } });
     expect(result.outcome).toBe("success");
-    // Both the state input `topic` and the op's bound input `style` are template variables under inputs.
     expect(result.outputs?.["summary"]).toBe("sum(Summarize codebases (terse).)");
     expect(fake.calls).toHaveLength(1);
-  });
-
-  it("an unregistered skill is a permanent failure", async () => {
-    const files: Record<string, StateDef> = {
-      s: { inputs: {}, outputs: {}, operation: { kind: "prompt", prompt: { skill: "ghost" }, config: { model: "reviewer" } } },
-    };
-    const { engine } = makeEngine(files, "s", () => ok({}));
-    const result = await engine.run({ inputs: {} });
-    expect(result.outcome).toBe("error");
-    expect(result.failure?.reason).toMatch(/skill 'ghost'/);
   });
 });
 
@@ -812,7 +800,7 @@ describe("environment tools (DESIGN §5.1, \"Functions and tools\")", () => {
       s: {
         inputs: {},
         outputs: { r: { schema: { type: "string" } } },
-        operation: { kind: "prompt", prompt: { template: "go" }, config: { model: "reviewer" } },
+        operation: { kind: "prompt", prompt: "go", model: "reviewer" },
         environment: { tools: ["echo"] },
       },
     };
@@ -829,7 +817,7 @@ describe("environment tools (DESIGN §5.1, \"Functions and tools\")", () => {
       s: {
         inputs: {},
         outputs: {},
-        operation: { kind: "prompt", prompt: { template: "go" }, config: { model: "reviewer" } },
+        operation: { kind: "prompt", prompt: "go", model: "reviewer" },
         environment: { tools: ["ghost"] },
       },
     };
@@ -845,7 +833,7 @@ describe("environment tools (DESIGN §5.1, \"Functions and tools\")", () => {
       s: {
         inputs: {},
         outputs: { r: { schema: { type: "string" } } },
-        operation: { kind: "prompt", prompt: { template: "go" }, config: { model: "reviewer" } },
+        operation: { kind: "prompt", prompt: "go", model: "reviewer" },
       },
     };
     const { engine, fake } = makeEngine(files, "s", () => ok({ r: "done" }), {
@@ -865,7 +853,7 @@ describe("tool permissions (DESIGN §5.1, \"Permissions: two orthogonal axes\")"
     s: {
       inputs: {},
       outputs: { r: { schema: { type: "string" } } },
-      operation: { kind: "prompt", prompt: { template: "go" }, config: { model: "reviewer" } },
+      operation: { kind: "prompt", prompt: "go", model: "reviewer" },
       environment: { tools: ["write"], ...(permissions ? { permissions } : {}) },
     },
   });
@@ -977,7 +965,7 @@ describe("per-session workspace overlay (DESIGN §5.1, \"Sessions: the run-scope
     s: {
       inputs: {},
       outputs: { r: { schema: { type: "string" } } },
-      operation: { kind: "prompt", prompt: { template: "go" }, config: { model: "reviewer" } },
+      operation: { kind: "prompt", prompt: "go", model: "reviewer" },
       ...(session ? { environment: { session } } : {}),
     },
   });

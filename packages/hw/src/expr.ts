@@ -17,6 +17,9 @@
  *    wiring that evaluates to PENDING waits.
  */
 
+import { BUILTIN_PARAMS } from "./builtins";
+import { RESOLVER_REFS } from "./format";
+
 /** The pending sentinel — placed in the evaluation context at unresolved async-child
  *  output nodes, and propagated through every operator that touches it. */
 export const PENDING: unique symbol = Symbol("ai-exec/hw pending");
@@ -32,10 +35,24 @@ export type Expr =
   | { type: "lit"; value: string | number | boolean | null }
   | { type: "ident"; name: string }
   | { type: "member"; obj: Expr; prop: string }
-  | { type: "unary"; op: "!"; arg: Expr }
-  | { type: "binary"; op: "==" | "!=" | "===" | "!==" | "<" | "<=" | ">" | ">="; left: Expr; right: Expr }
-  | { type: "logical"; op: "&&" | "||"; left: Expr; right: Expr }
-  | { type: "cond"; test: Expr; cons: Expr; alt: Expr };
+  /**
+   * APPLYING a named operation to arguments — the only compute node.
+   *
+   * `!x`, `a === b`, `a && b`, `a ? b : c` and `classify(x)` are all this: an operation name plus
+   * ordered arguments. There were five node types for it, which was a taxonomy over syntax rather
+   * than over meaning — every one of them lowers to the same `FunctionOp` with its arguments bound,
+   * so the only thing that ever differed was which name went in `functionRef`.
+   *
+   * `op` is that name. A built-in operator is one whose name resolves in `RESOLVER_REFS`; anything
+   * else is a REFERENCE, resolved along the `path` to an operation document (EXPRESSIONS.md §3).
+   * Which is §2's stated aim reached — "a user-defined pure function is indistinguishable from
+   * `eq`" — since the two differ only in where the name resolves.
+   *
+   * Note what `op` is NOT: a sub-expression. An operation is *named*, so `(a ? f : g)(x)` has
+   * nothing to name; and the name must stay out of the data scope, or `classify(x)` would read as a
+   * reference to an undeclared namespace called `classify`.
+   */
+  | { type: "apply"; op: string; args: Expr[] };
 
 export class ExprError extends Error {
   constructor(
@@ -47,6 +64,49 @@ export class ExprError extends Error {
   }
 }
 
+/** The operation each comparison SYNTAX names. Syntax is sugar; the operation is the meaning. */
+const BINARY_OPS: Readonly<Record<string, string>> = {
+  "==": RESOLVER_REFS.eq,
+  "!=": RESOLVER_REFS.ne,
+  "===": RESOLVER_REFS.strictEq,
+  "!==": RESOLVER_REFS.strictNe,
+  "<": RESOLVER_REFS.lt,
+  "<=": RESOLVER_REFS.le,
+  ">": RESOLVER_REFS.gt,
+  ">=": RESOLVER_REFS.ge,
+};
+
+/**
+ * The ordered parameter names each built-in operation binds its arguments to.
+ *
+ * This IS the positional-to-named mapping (§3.3), and it is deliberately the same mechanism a
+ * user-defined callee will use through its declared `index`: an operator is not special, it just
+ * has a signature that ships with the language.
+ */
+export const OPERATOR_PARAMS: Readonly<Record<string, readonly string[]>> = {
+  ...BUILTIN_PARAMS,
+  // The higher-order operations (EXPRESSIONS.md §3.5): an array, and the operation to apply to each
+  // element. The `op` position takes an operation REFERENCE, not a data path — see `lowerExpression`.
+  map: ["value", "op"],
+  filter: ["value", "op"],
+  flatMap: ["value", "op"],
+  reduce: ["value", "op", "initial"],
+  [RESOLVER_REFS.not]: ["value"],
+  [RESOLVER_REFS.eq]: ["left", "right"],
+  [RESOLVER_REFS.ne]: ["left", "right"],
+  [RESOLVER_REFS.strictEq]: ["left", "right"],
+  [RESOLVER_REFS.strictNe]: ["left", "right"],
+  [RESOLVER_REFS.lt]: ["left", "right"],
+  [RESOLVER_REFS.le]: ["left", "right"],
+  [RESOLVER_REFS.gt]: ["left", "right"],
+  [RESOLVER_REFS.ge]: ["left", "right"],
+  [RESOLVER_REFS.and]: ["left", "right"],
+  [RESOLVER_REFS.or]: ["left", "right"],
+  [RESOLVER_REFS.cond]: ["test", "then", "else"],
+  [RESOLVER_REFS.member]: ["value", "prop"],
+  [RESOLVER_REFS.context]: ["name"],
+};
+
 // --- Lexer -------------------------------------------------------------------
 
 type Token =
@@ -56,7 +116,7 @@ type Token =
   | { kind: "punct"; value: string; pos: number }
   | { kind: "eof"; pos: number };
 
-const PUNCT = ["===", "!==", "==", "!=", "<=", ">=", "&&", "||", "<", ">", "!", "?", ":", "(", ")", "."];
+const PUNCT = ["===", "!==", "==", "!=", "<=", ">=", "&&", "||", "<", ">", "!", "?", ":", "(", ")", ".", ",", "/"];
 const IDENT_START = /[A-Za-z_$]/;
 const IDENT_PART = /[A-Za-z0-9_$]/;
 
@@ -90,9 +150,13 @@ function lex(src: string): Token[] {
       out.push({ kind: "str", value: s, pos });
       continue;
     }
-    if (c >= "0" && c <= "9") {
+    // A leading `-` is part of the NUMBER, not an operator: this language has no arithmetic syntax,
+    // so `-` can only ever be a sign. Without it a negative literal had no spelling at all — `at(xs,
+    // -1)`, the natural way to index from the end, was a lex error.
+    const negative = c === "-" && src[i + 1] !== undefined && src[i + 1]! >= "0" && src[i + 1]! <= "9";
+    if (negative || (c >= "0" && c <= "9")) {
       const pos = i;
-      let j = i;
+      let j = negative ? i + 1 : i;
       while (j < src.length && src[j]! >= "0" && src[j]! <= "9") j++;
       if (src[j] === "." && src[j + 1] !== undefined && src[j + 1]! >= "0" && src[j + 1]! <= "9") {
         j++;
@@ -168,14 +232,14 @@ class Parser {
     const cons = this.ternary();
     this.expectPunct(":");
     const alt = this.ternary();
-    return { type: "cond", test, cons, alt };
+    return { type: "apply", op: RESOLVER_REFS.cond, args: [test, cons, alt] };
   }
 
   private or(): Expr {
     let left = this.and();
     while (this.atPunct("||")) {
       this.next();
-      left = { type: "logical", op: "||", left, right: this.and() };
+      left = { type: "apply", op: RESOLVER_REFS.or, args: [left, this.and()] };
     }
     return left;
   }
@@ -184,7 +248,7 @@ class Parser {
     let left = this.equality();
     while (this.atPunct("&&")) {
       this.next();
-      left = { type: "logical", op: "&&", left, right: this.equality() };
+      left = { type: "apply", op: RESOLVER_REFS.and, args: [left, this.equality()] };
     }
     return left;
   }
@@ -195,7 +259,7 @@ class Parser {
       const t = this.peek();
       if (t.kind === "punct" && (t.value === "==" || t.value === "!=" || t.value === "===" || t.value === "!==")) {
         this.next();
-        left = { type: "binary", op: t.value, left, right: this.relational() };
+        left = { type: "apply", op: BINARY_OPS[t.value]!, args: [left, this.relational()] };
       } else return left;
     }
   }
@@ -206,7 +270,7 @@ class Parser {
       const t = this.peek();
       if (t.kind === "punct" && (t.value === "<" || t.value === "<=" || t.value === ">" || t.value === ">=")) {
         this.next();
-        left = { type: "binary", op: t.value, left, right: this.unary() };
+        left = { type: "apply", op: BINARY_OPS[t.value]!, args: [left, this.unary()] };
       } else return left;
     }
   }
@@ -215,20 +279,78 @@ class Parser {
     if (this.atPunct("!")) {
       const t = this.next();
       void t;
-      return { type: "unary", op: "!", arg: this.unary() };
+      return { type: "apply", op: RESOLVER_REFS.not, args: [this.unary()] };
     }
     return this.member();
   }
 
+  /**
+   * Property access and application, left to right.
+   *
+   * A `(` turns the DOTTED PATH accumulated so far into a callee rather than applying an arbitrary
+   * expression: an operation is named by a reference (§3), so `classify(x)` and `lib.review(x)` are
+   * calls while `(a ? f : g)(x)` is not a thing this language has. Keeping application to a path is
+   * also what keeps a callee out of the data scope — see the `call` node.
+   */
   private member(): Expr {
     let e = this.primary();
-    while (this.atPunct(".")) {
-      this.next();
-      const t = this.next();
-      if (t.kind !== "ident") throw new ExprError("expected property name after '.'", t.pos);
-      e = { type: "member", obj: e, prop: t.value };
+    // A callee may be a full REFERENCE — `$JAIRA/prompts/review(…)`, `$/functions/classify(…)` — so
+    // once a `/` appears the accumulated name is built as reference TEXT rather than as member
+    // access. `/` is unambiguous here because the language has no arithmetic: it cannot be division.
+    let reference: string | undefined;
+    for (;;) {
+      if (this.atPunct(".")) {
+        this.next();
+        const t = this.next();
+        if (t.kind !== "ident") throw new ExprError("expected property name after '.'", t.pos);
+        if (reference !== undefined) reference += `.${t.value}`;
+        else e = { type: "member", obj: e, prop: t.value };
+        continue;
+      }
+      if (this.atPunct("/")) {
+        const at = this.peek().pos;
+        const base = reference ?? pathOf(e)?.join(".");
+        if (base === undefined) throw new ExprError("'/' is only meaningful inside an operation reference", at);
+        this.next();
+        const t = this.next();
+        if (t.kind !== "ident") throw new ExprError("expected a path segment after '/'", t.pos);
+        reference = `${base}/${t.value}`;
+        continue;
+      }
+      if (this.atPunct("(")) {
+        const at = this.peek().pos;
+        const callee = reference ?? pathOf(e)?.join(".");
+        if (callee === undefined) throw new ExprError("only a name may be called", at);
+        this.next();
+        e = { type: "apply", op: callee, args: this.args() };
+        reference = undefined;
+        continue;
+      }
+      if (reference !== undefined) {
+        // A rooted path is a reference to an OPERATION, and the only thing this language does with
+        // one is call it — reading data uses the leading-dot runtime form, not a file path.
+        throw new ExprError(`'${reference}' is an operation reference; it is only meaningful called`, this.peek().pos);
+      }
+      return e;
     }
-    return e;
+  }
+
+  /** A call's argument list, already past the `(`. */
+  private args(): Expr[] {
+    const out: Expr[] = [];
+    if (this.atPunct(")")) {
+      this.next();
+      return out;
+    }
+    for (;;) {
+      out.push(this.ternary());
+      if (this.atPunct(",")) {
+        this.next();
+        continue;
+      }
+      this.expectPunct(")");
+      return out;
+    }
   }
 
   private primary(): Expr {
@@ -250,9 +372,72 @@ class Parser {
   }
 }
 
+/** The dotted path an expression names, or `undefined` when it is a computation rather than a name. */
+export function pathOf(expr: Expr): string[] | undefined {
+  if (expr.type === "ident") return [expr.name];
+  if (expr.type === "member") {
+    const base = pathOf(expr.obj);
+    return base ? [...base, expr.prop] : undefined;
+  }
+  return undefined;
+}
+
 /** Parse an expression source string to an AST. Throws `ExprError` on invalid input. */
 export function parseExpression(src: string): Expr {
   return new Parser(lex(src)).parse();
+}
+
+// --- Operator semantics ------------------------------------------------------
+//
+// Extracted so there is ONE definition of what each operator means. The tree-walking evaluator below
+// is one caller; the operator RESOLVERS (`resolve.ts`, EXPRESSIONS.md §2) are the other, and an
+// expression lowered to a producer tree has to mean exactly what the interpreter meant. Two
+// implementations of "what does `.prop` reach" is precisely how the evaluator came to disagree with
+// its own type-checker about prototype properties.
+
+export type BinaryOp = "==" | "!=" | "===" | "!==" | "<" | "<=" | ">" | ">=";
+
+/** Apply a binary operator to two DETERMINATE values (PENDING is the caller's to short-circuit). */
+export function applyBinary(op: BinaryOp, l: unknown, r: unknown): boolean {
+  switch (op) {
+    case "==":
+      // eslint-disable-next-line eqeqeq
+      return l == r;
+    case "!=":
+      // eslint-disable-next-line eqeqeq
+      return l != r;
+    case "===":
+      return l === r;
+    case "!==":
+      return l !== r;
+    case "<":
+      return (l as never) < (r as never);
+    case "<=":
+      return (l as never) <= (r as never);
+    case ">":
+      return (l as never) > (r as never);
+    case ">=":
+      return (l as never) >= (r as never);
+  }
+}
+
+/**
+ * Read a property off a value, with this language's two departures from a native lookup:
+ *
+ *  - property access on `undefined`/`null` yields `undefined` rather than throwing (implicit
+ *    optional chaining, so `children.x.outputs.y` is safe before `x` has started);
+ *  - `.length` is the ONLY property a string or an array exposes, and objects expose OWN properties
+ *    only — a native lookup reaches `constructor`, `__proto__` and every prototype method, which
+ *    puts a FUNCTION into a dataflow that is JSON all the way down.
+ */
+export function memberOf(obj: unknown, prop: string): unknown {
+  if (obj === undefined || obj === null) return undefined;
+  if (typeof obj === "string" || Array.isArray(obj)) return prop === "length" ? obj.length : undefined;
+  if (typeof obj === "object") {
+    return Object.hasOwn(obj as object, prop) ? (obj as Record<string, unknown>)[prop] : undefined;
+  }
+  // Primitives (number/boolean): no useful properties in this language.
+  return undefined;
 }
 
 // --- Evaluator ---------------------------------------------------------------
@@ -273,67 +458,62 @@ export function evaluate(expr: Expr, context: Record<string, unknown>): ExprValu
     case "member": {
       const obj = evaluate(expr.obj, context);
       if (isPending(obj)) return PENDING;
-      if (obj === undefined || obj === null) return undefined;
-      if (typeof obj === "string" || Array.isArray(obj)) {
-        // `.length` is the only meaningful property on these (SPEC §6); other
-        // properties fall through to native lookup, which is harmless and pure.
-        return (obj as unknown as Record<string, unknown>)[expr.prop];
-      }
-      if (typeof obj === "object") return (obj as Record<string, unknown>)[expr.prop];
-      // Primitives (number/boolean): no useful properties in this language.
-      return undefined;
+      return memberOf(obj, expr.prop);
     }
-    case "unary": {
-      const v = evaluate(expr.arg, context);
-      if (isPending(v)) return PENDING;
-      return !v;
+    case "apply":
+      return applyOperator(expr, context);
+  }
+}
+
+/**
+ * Interpret ONE application, for the built-in operations only.
+ *
+ * `evaluate` is the reference semantics the lowering is checked against (EXPRESSIONS.md §1.1), not a
+ * second execution path — so an operation that is not a built-in is refused rather than
+ * half-implemented. Running one needs a resolved callee and a scope, which a pure walk over a
+ * context does not have.
+ */
+function applyOperator(expr: Expr & { type: "apply" }, context: Record<string, unknown>): ExprValue {
+  const arg = (i: number): ExprValue => evaluate(expr.args[i]!, context);
+  switch (expr.op) {
+    case RESOLVER_REFS.not: {
+      const v = arg(0);
+      return isPending(v) ? PENDING : !v;
     }
-    case "binary": {
-      const l = evaluate(expr.left, context);
+    case RESOLVER_REFS.and: {
+      // Determinate-falsy short-circuit even past a pending right side.
+      const l = arg(0);
       if (isPending(l)) return PENDING;
-      const r = evaluate(expr.right, context);
-      if (isPending(r)) return PENDING;
-      switch (expr.op) {
-        case "==":
-          // eslint-disable-next-line eqeqeq
-          return l == r;
-        case "!=":
-          // eslint-disable-next-line eqeqeq
-          return l != r;
-        case "===":
-          return l === r;
-        case "!==":
-          return l !== r;
-        case "<":
-          return (l as never) < (r as never);
-        case "<=":
-          return (l as never) <= (r as never);
-        case ">":
-          return (l as never) > (r as never);
-        case ">=":
-          return (l as never) >= (r as never);
-      }
-      break;
+      return l ? arg(1) : l;
     }
-    case "logical": {
-      const l = evaluate(expr.left, context);
-      if (expr.op === "&&") {
-        // Determinate-falsy short-circuit even past a pending right side.
-        if (isPending(l)) return PENDING;
-        if (!l) return l;
-        return evaluate(expr.right, context);
-      }
+    case RESOLVER_REFS.or: {
+      const l = arg(0);
       if (isPending(l)) return PENDING;
-      if (l) return l;
-      return evaluate(expr.right, context);
+      return l ? l : arg(1);
     }
-    case "cond": {
-      const t = evaluate(expr.test, context);
+    case RESOLVER_REFS.cond: {
+      const t = arg(0);
       if (isPending(t)) return PENDING;
-      return t ? evaluate(expr.cons, context) : evaluate(expr.alt, context);
+      return t ? arg(1) : arg(2);
+    }
+    default: {
+      const op = BINARY_FOR_NAME[expr.op];
+      if (op === undefined) {
+        throw new ExprError(`'${expr.op}' is an operation, which only the lowered form can run`, 0);
+      }
+      const l = arg(0);
+      if (isPending(l)) return PENDING;
+      const r = arg(1);
+      if (isPending(r)) return PENDING;
+      return applyBinary(op, l, r);
     }
   }
 }
+
+/** The comparison each built-in comparison NAME performs — the inverse of `BINARY_OPS`. */
+const BINARY_FOR_NAME: Readonly<Record<string, BinaryOp>> = Object.fromEntries(
+  Object.entries(BINARY_OPS).map(([syntax, name]) => [name, syntax as BinaryOp]),
+);
 
 /** Parse + evaluate in one step. */
 export function evaluateExpression(src: string, context: Record<string, unknown>): ExprValue {
@@ -361,18 +541,11 @@ export function referencesOf(expr: Expr): string[][] {
       }
       case "lit":
         return undefined;
-      case "unary":
-        collect(e.arg);
-        return undefined;
-      case "binary":
-      case "logical":
-        collect(e.left);
-        collect(e.right);
-        return undefined;
-      case "cond":
-        collect(e.test);
-        collect(e.cons);
-        collect(e.alt);
+      case "apply":
+        // The ARGUMENTS read data; the OPERATION NAME does not — it is resolved along the path, not
+        // against this instance. Reporting it here would make `classify(x)` look like a read of an
+        // undeclared namespace called `classify`.
+        for (const arg of e.args) collect(arg);
         return undefined;
     }
   };

@@ -21,8 +21,11 @@
  * Sequence resets (SPEC §3.3): a transition to a sequence member clears the recorded
  * results of that member and every later member (superseded — history is preserved in
  * the event record), cancels any of them still running, and default ordering resumes.
- * Child selection is simply "first sequence member with no live record", which
- * implements cursor-reset-and-resume without a separate cursor.
+ * Entering a member MOVES THE CURSOR to it, and child selection is "first member at or
+ * after the cursor with no live record" — so a transition is a jump in either direction:
+ * backwards it re-runs the tail, forwards it leaves the members it skipped skipped.
+ * The cursor then HOLDS on that member while it runs, unless the child is `async`;
+ * one child at a time is the default, and concurrency is something an author asks for.
  *
  * Unhandled failures (SPEC §3.3): an unrecoverable operation failure terminates the
  * state with error; a child that terminated with error/timeout and is not handled by
@@ -46,11 +49,13 @@ import {
   type RefKind,
   type RegisteredFunction,
   type SessionStore,
+  type Ref,
   type ResolvedValue,
   type Tool,
   type Workspace,
   type Clock,
   MapSessionStore,
+  hashOperation,
   isOk,
   runFunction,
 } from "@declarative-ai/exec";
@@ -66,21 +71,41 @@ import {
   type SmartApprover,
 } from "@declarative-ai/permissions";
 import { SchemaValidator } from "@declarative-ai/validate";
-import { evaluate, isPending, parseExpression, PENDING, type Expr } from "./expr";
+import { isPending, parseExpression, PENDING } from "./expr";
+import { lowerExpression } from "./lowerExpr";
 import type {
   ConversationMode,
-  EnvironmentDecl,
+  ExecEnvironmentDecl,
   LoadedChild,
   LoadedState,
   SlotMeta,
   TerminationOutcome,
   WorkflowBundle,
 } from "./format";
-import { skillNameOf } from "./loader";
-import { isResolvedValue, isResolveError, resolveInputs, resolveRef, type ResolutionScope } from "./resolve";
+import { bindElement, embeddedOpsOf, higherOrderEdgesOf, higherOrderOf, isResolvedValue, isResolveError, resolveEmbedded, resolveInputs, resolveRef, type ResolutionScope, type Resolved } from "./resolve";
 import { isByteStream, materialize, MaterializeError } from "./materialize";
 import { isFannedOut } from "./fanout";
 import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, type Persistence } from "./ports";
+
+/**
+ * What a call's memo remembers: the value it produced, or the failure it produced.
+ *
+ * Both are DATA (§5) and both are serializable, which is what lets a host back this with something
+ * durable. `PENDING` is deliberately not here — it is a scheduling state, not an answer.
+ */
+export type CallResult = { value: ResolvedValue } | { error: string; failure?: Failure };
+
+/**
+ * A content-addressed store of call results, keyed by `hashOperation` of the RESOLVED operation.
+ *
+ * Sync on purpose: it is read during binding resolution, which cannot suspend (`renderTemplate`
+ * resolves inside a `String.replace` callback). A host wanting a remote cache warms it between runs
+ * rather than awaiting inside one.
+ */
+export interface CallCache {
+  get(key: string): CallResult | undefined;
+  set(key: string, value: CallResult): void;
+}
 
 export interface EngineConfig {
   bundle: WorkflowBundle;
@@ -92,6 +117,27 @@ export interface EngineConfig {
    *  fails with that reason. Typed as a plain `Executor`, so the engine never learns that a prompt op
    *  has an llm lowering — dispatch is by OP KIND and nothing more (§4.1). */
   prompt?: Executor<ExecServices, WorkflowMetrics>;
+  /**
+   * The executor a CALL dispatches through (EXPRESSIONS.md §3).
+   *
+   * Supplying one is how a call gets the wrapper stack — retry, rate limiting, budget, and a
+   * content-addressed `withMemoize`. Without it the engine invokes the registry entry directly,
+   * which runs the operation but skips every one of those.
+   *
+   * Separate from `prompt` because it dispatches BOTH kinds: a call's callee may be either, and the
+   * point of the seam is that one composed stack covers both.
+   */
+  operations?: Executor<ExecServices, WorkflowMetrics>;
+  /**
+   * Where the results of CALLS are remembered (EXPRESSIONS.md §3).
+   *
+   * The question a memo has to answer is "would someone else making the identical call reuse this
+   * answer?" — so the key is content-addressed: `hashOperation` over the RESOLVED op, which embeds
+   * its argument values, is exactly "this callee with these arguments". An in-run `Map` is the
+   * default and answers it only within one run; a host that wants an identical call to be reused
+   * across runs, tasks or processes supplies a durable one.
+   */
+  callCache?: CallCache;
   /** SYNC by requirement: slot validation runs mid-walk (`validateSlotValue`) and cannot suspend;
    *  hw schemas are inline documents, so a sync validator is the inline family's truth. */
   validator?: SyncOutputValidator;
@@ -163,6 +209,25 @@ interface Instance {
   opRun: boolean;
   /** Live child records by child key; `undefined`/absent = never ran or superseded. */
   children: Map<string, ChildRecord>;
+  /**
+   * How far along `sequence` the cursor has moved. A transition into a sequence member is a JUMP: it
+   * sets the cursor there, so members BEFORE it stay skipped. Scanning from 0 for the first member
+   * with no record instead — which is what this replaced — made a forward jump fall back and run
+   * everything it had just jumped over, on the next round.
+   */
+  cursor: number;
+  /**
+   * The SYNC child the cursor is currently parked on. The cursor does not advance past it while it
+   * runs — that is what `async` means, and the only thing it means.
+   *
+   * This used to be unset for sequence entries, so the loop entered the next member the instant the
+   * previous one had a *record*: every plain child in a sequence ran concurrently, and `async: true`
+   * changed nothing anywhere. Ordering came out right only when dataflow happened to park a consumer
+   * on its producer.
+   */
+  heldFor?: string;
+  /** The child most recently ENTERED — what `run.cursor` reports to a guard. */
+  entered?: string;
   /** Child keys whose error/timeout termination has not yet been handled by a transition. */
   unhandledFailures: Set<string>;
   abort: AbortController;
@@ -291,6 +356,7 @@ export class WorkflowEngine {
       iteration: 0,
       opRun: false,
       children: new Map(),
+      cursor: 0,
       unhandledFailures: new Set(),
       abort,
       timedOut: false,
@@ -347,11 +413,22 @@ export class WorkflowEngine {
       if (instance.timedOut) return this.finish(instance, "timeout");
       if (instance.abort.signal.aborted) return this.finish(instance, "canceled");
 
+      // A guard may CALL an operation, and evaluation is synchronous — so its calls run here, exactly
+      // as an operation's input calls run before `resolveInputs`. The memo means a guard re-evaluated
+      // over many rounds pays for its call once.
+      if (evaluationDue) {
+        const guardFailure = await this.runEmbeddedOps(instance, WorkflowEngine.guardParamsOf(def));
+        if (guardFailure !== undefined) return this.finish(instance, "error", guardFailure);
+      }
+
       // (3)/(4) Transition evaluation, declared order, PENDING-skipping.
       if (evaluationDue) {
         evaluationDue = false;
+        // Whatever the cursor was waiting on has resolved by the time an evaluation round runs; if
+        // no transition handles it, the cursor is free to walk on from where it stopped.
+        instance.heldFor = undefined;
         const step = this.takeTransition(instance);
-        if (step === "terminated-success") return this.finish(instance, "success");
+        if (step === "terminated-success") return await this.finishSuccess(instance);
         if (step === "terminated-error") return this.finish(instance, "error", errorOf(instance, "terminate.error"));
         if (step === "terminated-canceled") return this.finish(instance, "canceled");
         if (step === "terminated-timeout") return this.finish(instance, "timeout");
@@ -370,6 +447,15 @@ export class WorkflowEngine {
       // (2)/(5) The state's operation, then sequence children. A state has ONE operation (§7.1);
       // dispatch is by OP KIND — `PromptOp` → the prompt runner, `FunctionOp` → the function
       // registry (host code, sub-workflows, and delegated agents alike, §3.1).
+      // A state whose operation never resolved (§5) is normally stopped by validation before a run
+      // starts. If one reaches here anyway, fail loudly — an unbuilt operation looks exactly like a
+      // pure composite, and silently doing nothing is the one outcome that must not happen.
+      if (def.operationError !== undefined) {
+        return this.finish(instance, "error", {
+          classification: "permanent",
+          reason: `state '${instance.stateId}' has no runnable operation: ${def.operationError}`,
+        });
+      }
       if (def.operation && !instance.opRun) {
         instance.opRun = true;
         const failure = await this.runOperation(instance, def.operation);
@@ -378,9 +464,16 @@ export class WorkflowEngine {
         continue;
       }
 
-      // Next sequence child = first member with no live record (implements the
-      // reset-and-resume cursor, see module header).
-      const nextKey = (def.sequence ?? []).find((k) => !instance.children.has(k));
+      // Next sequence child = first member AT OR AFTER the cursor with no live record (implements
+      // the reset-and-resume cursor, see module header). The cursor bound is what makes a transition
+      // into a later member a jump rather than a detour.
+      //
+      // The cursor HOLDS while the child it points at is a running SYNC child, so the rest of the
+      // spine does not start alongside it. `async: true` is the opt-out and the only opt-out —
+      // concurrency is a thing an author asks for, not the default a plain sequence falls into.
+      const sequence = def.sequence ?? [];
+      const held = instance.heldFor !== undefined && instance.children.get(instance.heldFor)?.status === "running";
+      const nextKey = held ? undefined : sequence.slice(instance.cursor).find((k) => !instance.children.has(k));
       if (nextKey !== undefined) {
         const entered = this.enterChild(instance, nextKey);
         if (entered === "parked") {
@@ -394,9 +487,10 @@ export class WorkflowEngine {
             reason: `child '${nextKey}' is parked on unresolvable inputs (dataflow deadlock)`,
           });
         }
-        // Async children fall through without waiting and WITHOUT triggering
-        // evaluation (SPEC §10.4); sync children wait via the running-children
-        // branch below, whose wake sets evaluationDue.
+        // An async child falls through without waiting and WITHOUT triggering evaluation
+        // (SPEC §10.4), so the cursor moves straight to the next member; a sync child now holds the
+        // cursor, and the next pass drops to the running-children branch below, whose wake sets
+        // evaluationDue.
         continue;
       }
 
@@ -408,7 +502,7 @@ export class WorkflowEngine {
         continue;
       }
       const final = this.takeTransition(instance);
-      if (final === "terminated-success") return this.finish(instance, "success");
+      if (final === "terminated-success") return await this.finishSuccess(instance);
       if (final === "terminated-error") return this.finish(instance, "error", errorOf(instance, "terminate.error"));
       if (final === "terminated-canceled") return this.finish(instance, "canceled");
       if (final === "terminated-timeout") return this.finish(instance, "timeout");
@@ -430,7 +524,7 @@ export class WorkflowEngine {
           reason: `child '${key}' terminated with ${rec?.outcome ?? "error"} and no transition handled it`,
         });
       }
-      return this.finish(instance, "success");
+      return await this.finishSuccess(instance);
     }
   }
 
@@ -463,17 +557,29 @@ export class WorkflowEngine {
   private firstMatchingTransition(instance: Instance): { to: string } | undefined {
     const transitions = instance.def.transitions ?? [];
     if (transitions.length === 0) return undefined;
-    const ctx = this.exprContext(instance);
+    const scope = this.scopeFor(instance);
     for (const t of transitions) {
-      if (t.when === undefined) return { to: t.to };
-      const v = evaluate(this.parse(t.when), ctx);
-      if (isPending(v)) continue; // skipped this round (SPEC §6/§10.4)
-      if (v) return { to: t.to };
+      // A guard that failed to lower never fires: validation blocks the run, and reading it as
+      // unconditional would be the worst possible interpretation of a typo.
+      if (t.whenError !== undefined) continue;
+      if (t.whenRef === undefined) return { to: t.to };
+      const r = resolveRef(t.whenRef, scope);
+      if (isPending(r)) continue; // skipped this round (SPEC §6/§10.4)
+      // A lowered expression cannot yield an ERROR on data: every operator's failure case is
+      // "producer is missing X", a malformed tree the loader cannot emit, and reading a missing
+      // namespace or property yields `undefined` rather than refusing. So there is no fourth
+      // outcome to give a bespoke path to — a non-value simply does not take the transition.
+      if (isResolvedValue(r) && r.value) return { to: t.to };
     }
     return undefined;
   }
 
-  /** Sync children block the loop via waitForAnyChild; async ones don't (SPEC §10.4). */
+  /**
+   * Enter a child, however control got here — the sequence cursor or a transition.
+   *
+   * A SYNC child holds the cursor until it resolves (SPEC §10.4); an `async` one does not, which is
+   * the entire difference between the two and the only place the flag is read.
+   */
   private enterChild(instance: Instance, key: string): "started" | "parked" {
     const decl = instance.def.children?.[key];
     if (!decl) throw new Error(`${instance.stateId}: transition/sequence names undeclared child '${key}'`);
@@ -483,6 +589,8 @@ export class WorkflowEngine {
     const sequence = instance.def.sequence ?? [];
     const seqIndex = sequence.indexOf(key);
     if (seqIndex >= 0) {
+      // The entry IS the cursor move — backwards it re-runs the tail, forwards it skips the head.
+      instance.cursor = seqIndex;
       for (let i = seqIndex; i < sequence.length; i++) {
         const k = sequence[i]!;
         const rec = instance.children.get(k);
@@ -496,6 +604,9 @@ export class WorkflowEngine {
 
     const resolved = this.resolveChildInputs(instance, decl);
     if (resolved === PENDING) return "parked";
+
+    instance.entered = key;
+    if (decl.async !== true) instance.heldFor = key;
 
     // Re-entering a child (SPEC §3.4) creates a fresh instance; a stale running
     // instance under the same key is canceled and replaced.
@@ -570,6 +681,19 @@ export class WorkflowEngine {
 
   // --- termination ----------------------------------------------------------
 
+  /**
+   * Terminate successfully, having first run any call embedded in an OUTPUT binding.
+   *
+   * A derived output resolves at termination (SPEC §3.7) and `finish` is synchronous, so a call in
+   * one has to be run before it — the same "engine produces, resolution reads" division the
+   * operation's own inputs follow, applied at the other place bindings resolve.
+   */
+  private async finishSuccess(instance: Instance): Promise<TerminationRecord> {
+    const failure = await this.runEmbeddedOps(instance, instance.def.outputs ?? {});
+    if (failure !== undefined) return { outcome: "error", failure };
+    return this.finish(instance, "success");
+  }
+
   private finish(instance: Instance, outcome: TerminationOutcome, failure?: Failure): TerminationRecord {
     if (outcome !== "success") {
       return { outcome, failure };
@@ -633,7 +757,17 @@ export class WorkflowEngine {
       inputs: instance.inputs,
       outputs: instance.outputs,
       children,
-      run: { iteration: instance.iteration },
+      // `run.cursor` is the child the cursor is ON: the one most recently ENTERED, not the one about
+      // to be. Transitions are evaluated after an operation completes or a child terminates, so "we
+      // are at x" means x has run — reporting the next member instead would make
+      // `run.cursor === 'a'` true before `a` had done anything, and a guard on it would skip the
+      // very child it named. Empty string before any child is entered, so a comparison is false
+      // rather than an error.
+      run: {
+        iteration: instance.iteration,
+        cursor: instance.entered ?? "",
+        position: instance.entered !== undefined ? (instance.def.sequence?.indexOf(instance.entered) ?? -1) : -1,
+      },
       limits: { ...(instance.def.limits ?? {}) },
       artifacts,
       conversations: Object.fromEntries(this.transcripts),
@@ -644,6 +778,9 @@ export class WorkflowEngine {
   private scopeFor(instance: Instance): ResolutionScope {
     return {
       exprContext: this.exprContext(instance),
+      // A lowered CALL reads its result here, exactly as a child read reads `childOutputs`:
+      // resolution never runs anything, and `undefined` (not yet run) parks the consumer.
+      operationResult: (op) => this.callCache.get(hashOperation(op)),
       childOutputs: (key) => {
         const rec = instance.children.get(key);
         if (!rec) return undefined;
@@ -673,14 +810,25 @@ export class WorkflowEngine {
     };
   }
 
-  private readonly parsed = new Map<string, Expr>();
-  private parse(src: string): Expr {
-    let ast = this.parsed.get(src);
-    if (!ast) {
-      ast = parseExpression(src);
-      this.parsed.set(src, ast);
+  /**
+   * One expression source → its lowered producer tree, cached for the run.
+   *
+   * Guards and `{{…}}` template holes are the last two places an expression was still INTERPRETED at
+   * run time, against a context, while every other expression in the system had become a tree
+   * resolved against a scope (EXPRESSIONS.md §1). Two evaluators for one language is exactly the
+   * drift that let the interpreter and its own type-checker disagree about prototype properties
+   * (§12), so there is now one.
+   *
+   * Lowering is cached, as parsing was: a guard is re-evaluated every scheduling round.
+   */
+  private readonly lowered = new Map<string, Ref<InlineFamily>>();
+  private exprRef(src: string): Ref<InlineFamily> {
+    let ref = this.lowered.get(src);
+    if (!ref) {
+      ref = lowerExpression(parseExpression(src));
+      this.lowered.set(src, ref);
     }
-    return ast;
+    return ref;
   }
 
   // --- input resolution -----------------------------------------------------
@@ -813,6 +961,12 @@ export class WorkflowEngine {
     // overrides a binding" rule applies one level up, where a parent wires into a child's inputs
     // (`resolveChildInputs`). A PENDING producer means the operation depends on an async child that
     // has not resolved: a blocked operation rather than a park, since a state's operation runs once.
+    // Run any operation EMBEDDED in a binding first — a lowered call (EXPRESSIONS.md §3). Resolution
+    // is synchronous and re-run every round, so it reads results rather than producing them; this is
+    // the same division of labour a child already has, and the memo below is what stops a guard
+    // paying for the same call twice.
+    const embeddedFailure = await this.runEmbeddedOps(instance, op.input);
+    if (embeddedFailure !== undefined) return fail(embeddedFailure);
     const resolved = resolveInputs(op.input, this.scopeFor(instance));
     if (isPending(resolved)) {
       return fail({ classification: "permanent", reason: "operation inputs depend on a child that has not resolved" });
@@ -823,6 +977,205 @@ export class WorkflowEngine {
     return op.kind === "prompt"
       ? this.runPromptOp(instance, op, opInputs, fail)
       : this.runFunctionOp(instance, op, opInputs, fail);
+  }
+
+  /** A state's guards as parameter-shaped bindings, so one walker serves guards and slots alike. */
+  private static guardParamsOf(def: LoadedState): Record<string, Parameter<InlineFamily>> {
+    const out: Record<string, Parameter<InlineFamily>> = {};
+    (def.transitions ?? []).forEach((t, i) => {
+      if (t.whenRef !== undefined) out[`when${i}`] = { kind: "json", binding: t.whenRef };
+    });
+    return out;
+  }
+
+  /** The cache backing {@link EngineConfig.callCache} when the host supplies none. */
+  private readonly ownCallCache = new Map<string, CallResult>();
+  private get callCache(): CallCache {
+    return this.config.callCache ?? { get: (k: string) => this.ownCallCache.get(k), set: (k: string, v: CallResult) => void this.ownCallCache.set(k, v) };
+  }
+
+  /**
+   * Results of embedded operations, keyed by the RESOLVED op's content hash.
+   *
+   * The hash is `hashOperation`, which is the same identity `withMemoize` keys on — and because a
+   * resolved op embeds its argument values, it IS "this callee with these arguments". So a call
+   * appearing in a guard costs one execution however many rounds the guard is evaluated over, and two
+   * syntactically different expressions that compute the same thing share one result.
+   */
+
+  /**
+   * Run every operation embedded in these bindings, innermost first, recording each result.
+   *
+   * Deliberately NOT `runFunctionOp`: that one belongs to a state's own operation — it emits
+   * `operation.started` against the instance, reads the environment off `instance.def`, and hands its
+   * result to `acceptOpOutputs`, which writes the INSTANCE's outputs. A call has no state, no
+   * declared environment of its own, and a result belonging to a binding. It borrows the enclosing
+   * instance's environment (its session, tools and permissions are the ones in force where the call
+   * is written) and returns its value to the binding, with no identity in the run record.
+   */
+  private async runEmbeddedOps(instance: Instance, input: Record<string, Parameter<InlineFamily>>): Promise<Failure | undefined> {
+    for (const param of Object.values(input)) {
+      if (!param.binding) continue;
+      // HIGHER-ORDER first (§3.5): one application per element, and how many there are is not known
+      // until the array resolves — so this cannot be a static walk like `embeddedOpsOf` is.
+      const higherFailure = await this.runHigherOrder(instance, param.binding);
+      if (higherFailure !== undefined) return higherFailure;
+      for (const { op, parameters } of embeddedOpsOf(param.binding)) {
+        const scope = this.scopeFor(instance);
+        // ONE definition of a call's identity, shared with resolution (`resolveEmbedded`): the op
+        // with its arguments bound in. Two copies of that rule would hash differently and the memo
+        // would never hit.
+        const resolved = resolveEmbedded(op, parameters, scope);
+        if (isPending(resolved)) {
+          return { classification: "permanent", reason: "a call's argument depends on a child that has not resolved" };
+        }
+        if ("error" in resolved) return { classification: "permanent", reason: resolved.error };
+
+        const key = hashOperation(resolved.op);
+        if (this.callCache.get(key) !== undefined) continue;
+        const outcome = await this.runEmbeddedOp(instance, resolved.op);
+        // PENDING is a scheduling state, not an answer — nothing to remember, and nothing a durable
+        // cache could serialize.
+        if (outcome !== PENDING) this.callCache.set(key, outcome);
+      }
+    }
+    return undefined;
+  }
+
+
+  /**
+   * Run the per-element applications a higher-order edge needs (§3.5).
+   *
+   * `Promise.all` over the elements: the expensive case is an LLM call each, and the executor stack
+   * already owns rate limiting and budget, so throttling here would be a second, worse copy of it.
+   * Each element is keyed and memoized independently, so a re-run pays only for elements whose values
+   * changed — and an element's FAILURE is recorded as a result like any other, because a failure is
+   * data (§5) and the consuming slot decides what it means.
+   */
+  private async runHigherOrder(instance: Instance, binding: Ref<InlineFamily>): Promise<Failure | undefined> {
+    for (const node of higherOrderEdgesOf(binding)) {
+      const higher = higherOrderOf(node);
+      if (higher === undefined) continue;
+      const source = resolveRef(higher.value, this.scopeFor(instance));
+      if (isPending(source)) return { classification: "permanent", reason: `'${higher.name}' waits on a child that has not resolved` };
+      if (isResolveError(source)) return { classification: "permanent", reason: `'${higher.name}': ${source.error}` };
+      if (!Array.isArray(source.value)) return { classification: "permanent", reason: `'${higher.name}' expects an array` };
+
+      // A FOLD runs in sequence: each step's argument is the previous step's result, so there is
+      // nothing to parallelize and nothing to dedupe — the chain is the point.
+      if (higher.name === "reduce") {
+        const seedBinding = (node as { op: Operation<InlineFamily> }).op;
+        const seedParam = seedBinding.kind === "function" ? seedBinding.input.initial?.binding : undefined;
+        const seed = seedParam ? resolveRef(seedParam, this.scopeFor(instance)) : { value: null as ResolvedValue };
+        if (isPending(seed)) return { classification: "permanent", reason: "'reduce' waits on a child that has not resolved" };
+        if (isResolveError(seed)) return { classification: "permanent", reason: `'reduce': ${seed.error}` };
+        let acc = seed.value as JsonValue;
+        for (const element of source.value) {
+          const bound = bindElement(higher.op, element as unknown as JsonValue, acc);
+          const key = hashOperation(bound);
+          let outcome = this.callCache.get(key);
+          if (outcome === undefined) {
+            const run = await this.runEmbeddedOp(instance, bound);
+            if (run === PENDING) return { classification: "permanent", reason: "'reduce' step did not resolve" };
+            this.callCache.set(key, run);
+            outcome = run;
+          }
+          // A failed step stops the fold — there is no accumulator to carry forward. The failure
+          // stays recorded, so resolution reports it rather than re-running.
+          if ("error" in outcome) break;
+          acc = outcome.value as JsonValue;
+        }
+        continue;
+      }
+
+      // Deduped BY HASH, not just filtered against the cache: two equal elements produce the same
+      // key and both miss while neither has run yet, so filtering alone would run the identical
+      // application twice — the exact thing the memo exists to prevent.
+      const pending = new Map<string, Operation<InlineFamily>>();
+      for (const element of source.value) {
+        const bound = bindElement(higher.op, element as unknown as JsonValue);
+        const key = hashOperation(bound);
+        if (this.callCache.get(key) === undefined) pending.set(key, bound);
+      }
+      const results = await Promise.all(
+        [...pending].map(async ([key, bound]) => [key, await this.runEmbeddedOp(instance, bound)] as const),
+      );
+      for (const [key, outcome] of results) if (outcome !== PENDING) this.callCache.set(key, outcome);
+    }
+    return undefined;
+  }
+
+  /** Run ONE embedded operation and return what the binding should see. */
+  private async runEmbeddedOp(instance: Instance, op: Operation<InlineFamily>): Promise<Resolved> {
+    const env = instance.def.environment ?? {};
+    const sessionId = env.session ?? DEFAULT_SESSION;
+    // Its arguments are already bound into `op.input` as literals (`resolveEmbedded`), so this reads
+    // them back out as values.
+    const literal = resolveInputs(op.input, this.scopeFor(instance));
+    if (isPending(literal)) return PENDING;
+    if ("error" in literal) return { error: literal.error };
+
+    // A composed stack, when the host wired one: it dispatches BY OP KIND, so one executor covers a
+    // function callee and a prompt callee alike — and brings retry, rate limiting, budget and a
+    // content-addressed memo with it.
+    const composed = this.config.operations;
+    if (composed) {
+      const toolsOrFailure = this.resolveTools(env, sessionId, false);
+      if ("failure" in toolsOrFailure) return { error: toolsOrFailure.failure.reason };
+      const rendered = op.kind === "prompt" ? { ...op, user: this.renderTemplate(op.user, instance, literal.values) } : op;
+      let outcome;
+      try {
+        outcome = await composed.start(rendered, this.servicesFor(sessionId, instance, toolsOrFailure.tools)).result;
+      } catch (e) {
+        return { error: `executor rejected: ${(e as Error).message}` };
+      }
+      this.childLlmCalls += (op.kind === "prompt" ? 1 : 0) + (outcome.metrics.childLlmCalls ?? 0);
+      this.childCost += outcome.metrics.costUsd;
+      return isOk(outcome)
+        ? { value: (outcome.value ?? null) as ResolvedValue }
+        : { error: outcome.error.reason, failure: outcome.error };
+    }
+
+    if (op.kind === "prompt") {
+      const promptExecutor = this.config.prompt;
+      if (!promptExecutor) return { error: "a call names a prompt operation but no prompt executor is wired in" };
+      const toolsOrFailure = this.resolveTools(env, sessionId, false);
+      if ("failure" in toolsOrFailure) return { error: toolsOrFailure.failure.reason };
+      // The callee keeps its OWN output contract. A state's prompt op has its output schema replaced
+      // by the state's produced outputs, which is right for a state — its operation IS what produces
+      // them — and wrong for a call, whose result belongs to one binding.
+      //
+      // No conversation preamble, and no transcript append: a call is a COMPUTATION embedded in a
+      // binding, not a turn in the enclosing state's conversation. Appending would make the state's
+      // own prompt read back a call it never asked about. The callee still runs under the session in
+      // force where it is written, so tools and permissions are the ones the author expects.
+      const resolvedOp = { ...op, user: this.renderTemplate(op.user, instance, literal.values) };
+      let outcome;
+      try {
+        outcome = await promptExecutor.start(resolvedOp, this.servicesFor(sessionId, instance, toolsOrFailure.tools)).result;
+      } catch (e) {
+        return { error: `prompt executor rejected: ${(e as Error).message}` };
+      }
+      this.childLlmCalls += 1 + (outcome.metrics.childLlmCalls ?? 0);
+      this.childCost += outcome.metrics.costUsd;
+      return isOk(outcome)
+        ? { value: (outcome.value ?? null) as ResolvedValue }
+        : { error: outcome.error.reason, failure: outcome.error };
+    }
+
+    const entry = this.config.registry.functions.get(op.functionRef);
+    if (!entry) return { error: `no function '${op.functionRef}' is registered` };
+    const delegates = entry.kind === "runtime" && entry.capabilities.policyEnforcement === "callback";
+    const toolsOrFailure = this.resolveTools(env, sessionId, delegates);
+    if ("failure" in toolsOrFailure) return { error: toolsOrFailure.failure.reason };
+    const outcome = await runFunction(entry, { ...instance.inputs, ...literal.values }, this.servicesFor(sessionId, instance, toolsOrFailure.tools));
+    const metrics = outcome.metrics;
+    if (metrics) {
+      this.childLlmCalls += metrics.childLlmCalls ?? 0;
+      this.childCost += metrics.costUsd;
+    }
+    // A failure travels as DATA (§5): the binding decides whether it flows or terminates.
+    return isOk(outcome) ? { value: outcome.value } : { error: outcome.error.reason, failure: outcome.error };
   }
 
   /** Dispatch a `FunctionOp` through the function registry (§7.4). */
@@ -908,16 +1261,10 @@ export class WorkflowEngine {
     // default session, so a plain workflow is ONE shared session (SPEC §4.7 threads across states).
     const sessionId = env.session ?? DEFAULT_SESSION;
 
-    // The `user` slot holds an inline template, or a `skill:` reference resolved through
-    // `registry.skills` (the two authored prompt sources, §7.1).
-    let template = op.user;
-    const skill = skillNameOf(op.user);
-    if (skill !== undefined) {
-      const skillTemplate = this.config.registry.skills.get(skill);
-      if (skillTemplate === undefined) return fail({ classification: "permanent", reason: `skill '${skill}' is not registered` });
-      template = skillTemplate;
-    }
-    const rendered = this.renderTemplate(template, instance, opInputs);
+    // The `user` slot holds the prompt text. A REUSABLE prompt is a reference to a file, resolved
+    // at load time (REFERENCES.md §7.1), so by here there is only ever one kind of prompt — which is
+    // what let `registry.skills` and its half-built resolution path be deleted outright.
+    const rendered = this.renderTemplate(op.user, instance, opInputs);
     const transcript = await this.readTranscript(sessionId);
     const preamble = this.conversationPreamble(env.conversation?.mode ?? "full_history", transcript, env.conversation?.artifacts);
     const prompt = preamble ? `${preamble}\n\n${rendered}` : rendered;
@@ -985,7 +1332,7 @@ export class WorkflowEngine {
    * wrapping there too would double-gate.
    */
   private resolveTools(
-    env: EnvironmentDecl,
+    env: ExecEnvironmentDecl,
     sessionId: string,
     delegatesPermissions: boolean,
   ): { tools?: Record<string, Tool> } | { failure: Failure } {
@@ -1000,7 +1347,13 @@ export class WorkflowEngine {
     if (!approve || delegatesPermissions) return { tools };
 
     if (env.permissions?.profile) this.permissions.seedProfile(sessionId, env.permissions.profile);
-    const authoredMode = (name: string): PermissionMode | undefined => env.permissions?.tools?.[name] ?? env.permissions?.default;
+    // OWN entries only. These are authored/host-supplied maps keyed by TOOL NAME, so a tool called
+    // `constructor` or `toString` used to resolve its permission mode — and its smart-approval rule
+    // — to a prototype member, handing a FUNCTION to a permission decision. Far-fetched input, but
+    // "does it fail open?" is not a question worth leaving open on this path.
+    const authoredTools = env.permissions?.tools;
+    const authoredMode = (name: string): PermissionMode | undefined =>
+      (authoredTools !== undefined && Object.hasOwn(authoredTools, name) ? authoredTools[name] : undefined) ?? env.permissions?.default;
     const smartFor = this.config.permissions?.smart;
     const profiles = this.config.permissions?.profiles;
     const guarded: Record<string, Tool> = {};
@@ -1011,7 +1364,7 @@ export class WorkflowEngine {
         toolName: name,
         approve,
         authoredMode: authoredMode(name),
-        smart: smartFor?.[name],
+        smart: smartFor !== undefined && Object.hasOwn(smartFor, name) ? smartFor[name] : undefined,
         profiles,
       });
     }
@@ -1175,10 +1528,15 @@ export class WorkflowEngine {
     const ctx = opInputs
       ? { ...base, inputs: { ...(base.inputs as Record<string, unknown>), ...opInputs } }
       : base;
+    // The operation's own resolved inputs shadow the instance's for the duration of the render —
+    // which is what makes `{{inputs.style}}` reach a bound render variable rather than a state input.
+    const scope: ResolutionScope = { ...this.scopeFor(instance), exprContext: ctx };
     return template.replace(TEMPLATE_REF, (_m, path: string) => {
       let v: unknown;
       try {
-        v = evaluate(this.parse(path), ctx);
+        const r = resolveRef(this.exprRef(path), scope);
+        if (!isResolvedValue(r)) return "";
+        v = r.value;
       } catch {
         return "";
       }

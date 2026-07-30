@@ -32,7 +32,7 @@ describe("`.length` on arrays and strings (§7.2)", () => {
         config: { schema: { type: "object", properties: { a: { type: "string" } } } },
       },
       outputs: { size: { schema: declared, binding: { expr: leaf } } },
-      operation: { kind: "prompt", config: { model: "m" }, prompt: { template: "go" } },
+      operation: { kind: "prompt", model: "m", prompt: "go" },
       transitions: [{ to: "terminate.success", when: guard }],
     } as StateDef,
   });
@@ -67,8 +67,8 @@ describe("what a producer edge may name (§7.4)", () => {
       outputs: { answer: { schema: { type: "string" } } },
       operation: {
         kind: "prompt",
-        config: { model: "m" },
-        prompt: { template: "go" },
+        model: "m",
+        prompt: "go",
         input: { thing: { kind: "json", binding: binding as never } },
       },
       children: { helper: { state: "root/helper", inputs: { seed: { input: "seed" } } } },
@@ -78,20 +78,39 @@ describe("what a producer edge may name (§7.4)", () => {
       label: "Helper",
       inputs: { seed: { schema: { type: "string" } } },
       outputs: { result: { schema: { type: "string" } } },
-      operation: { kind: "prompt", config: { model: "m" }, prompt: { template: "help" } },
+      operation: { kind: "prompt", model: "m", prompt: "help" },
     } as StateDef,
   });
 
   const embedded = { kind: "function", functionRef: "totally_missing", input: {}, output: { name: "value", kind: "json" } };
 
-  it("rejects an author-embedded operation, which nothing would ever run", () => {
-    expect(messages(withBinding({ op: embedded }), "root")).toMatch(/embedded operation 'totally_missing', which no binding can run/);
+  /**
+   * An author-embedded operation used to be REJECTED here, and that was right at the time: nothing
+   * could run one, so binding to it validated clean and then never resolved — the rejection was the
+   * honest half of that pair.
+   *
+   * It is a lowered CALL now (EXPRESSIONS.md §3): the engine runs it before resolution reads the
+   * result, so the pair is honest the other way round. Keeping the rejection would fail every
+   * workflow that calls anything.
+   */
+  it("accepts an author-embedded operation, which is a lowered call", () => {
+    expect(messages(withBinding({ op: embedded }), "root")).toBe("");
   });
 
-  it("rejects it whether or not a registry is in hand — this is a DOCUMENT error, not a lookup miss", () => {
-    for (const env of [{}, { functions: new Map() }, { functions: new Map(), strict: true }]) {
-      expect(messages(withBinding({ op: embedded }), "root", env)).toMatch(/no binding can run/);
-    }
+  /**
+   * An unregistered CALLEE is reported. The registry check used to run over a state's own
+   * `operation.functionRef` only, so a call to a function nobody registered passed lint and then
+   * failed mid-run — the one place a missing function is fatal to the whole run.
+   */
+  it("reports an unregistered callee", () => {
+    expect(messages(withBinding({ op: embedded }), "root", { functions: new Map(), strict: true })).toMatch(
+      /no function 'totally_missing' is registered/,
+    );
+  });
+
+  /** Without a registry in hand there is nothing to check against, so it stays quiet. */
+  it("says nothing about a callee when no registry was supplied", () => {
+    expect(messages(withBinding({ op: embedded }), "root")).toBe("");
   });
 
   it("rejects an operation input that references a CHILD — the operation runs before any child (§7.4)", () => {

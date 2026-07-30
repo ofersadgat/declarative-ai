@@ -31,8 +31,9 @@ export function specPlanningFiles(): Record<string, StateDef> {
           binding: { expr: "children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'" },
         },
         plan_doc: { ...artifact("markdown"), binding: { child: "context", output: "plan_doc" } },
-        // A "passthrough" output is just an unconstrained slot bound to a producer.
-        critique: { binding: { child: "critique" } },
+        // A "passthrough" output: the whole child result as ONE value. `*` is required now that a
+        // bare `{ child }` selects the slot's own name instead.
+        critique: { binding: { child: "critique", output: "*" } },
       },
       children: {
         goals: { state: "feature/plan/goals", inputs: { issue: { input: "issue" } } },
@@ -63,13 +64,13 @@ export function specPlanningFiles(): Record<string, StateDef> {
       label: "Goals",
       inputs: { issue: artifact("markdown") },
       outputs: { goals: strArray() },
-      operation: { kind: "prompt", prompt: { template: "Extract goals from {{inputs.issue}}." }, config: { model: "planner" } },
+      operation: { kind: "prompt", prompt: "Extract goals from {{inputs.issue}}.", model: "planner" },
     },
     "feature/plan/context": {
       label: "Context",
       inputs: { issue: artifact("markdown"), goals: strArray() },
       outputs: { plan_doc: artifact("markdown") },
-      operation: { kind: "prompt", prompt: { template: "Write the plan for {{inputs.issue}}." }, config: { model: "planner" } },
+      operation: { kind: "prompt", prompt: "Write the plan for {{inputs.issue}}.", model: "planner" },
     },
     "feature/plan/critique": {
       label: "Critique Plan",
@@ -91,11 +92,8 @@ export function specPlanningFiles(): Record<string, StateDef> {
       environment: { conversation: { mode: "full_history" } },
       operation: {
         kind: "prompt",
-        config: { model: "critic" },
-        prompt: {
-          template:
-            "Review the plan document. Find significant weaknesses at or above the configured severity threshold. Return structured output matching this state's output schema.",
-        },
+        model: "critic",
+        prompt: "Review the plan document. Find significant weaknesses at or above the configured severity threshold. Return structured output matching this state's output schema.",
       },
       children: {
         address_weaknesses: {
@@ -123,7 +121,7 @@ export function specPlanningFiles(): Record<string, StateDef> {
       label: "Address Weaknesses",
       inputs: { plan_doc: artifact("markdown"), weaknesses: strArray(), critique_report: artifact("markdown") },
       outputs: { resolution: str() },
-      operation: { kind: "prompt", prompt: { template: "Fix the listed weaknesses." }, config: { model: "fixer" } },
+      operation: { kind: "prompt", prompt: "Fix the listed weaknesses.", model: "fixer" },
     },
     "feature/plan/critique/human_review": {
       label: "Human Review",
@@ -133,11 +131,11 @@ export function specPlanningFiles(): Record<string, StateDef> {
         comments: { schema: { type: "string", format: "markdown" }, optional: true },
       },
       // An interactive host function — a plain FunctionOp like any other (§3), with its authored
-      // surface bound as the `config` input.
+      // surface bound as the `config` input via `args`.
       operation: {
         kind: "function",
         function: "choose_option",
-        config: { prompt: "Review the critique result.", options: ["approve", "request_changes", "block"] },
+        args: { prompt: "Review the critique result.", options: ["approve", "request_changes", "block"] },
       },
     },
   };
@@ -169,7 +167,7 @@ export function specFanoutFiles(): Record<string, StateDef> {
       label: "Agent Review",
       inputs: { change: str() },
       outputs: { report: str() },
-      operation: { kind: "prompt", prompt: { template: "Review {{inputs.change}}." }, config: { model: "reviewer" } },
+      operation: { kind: "prompt", prompt: "Review {{inputs.change}}.", model: "reviewer" },
     },
     "review/synthesize": {
       label: "Synthesize",
@@ -177,8 +175,8 @@ export function specFanoutFiles(): Record<string, StateDef> {
       outputs: { summary: str() },
       operation: {
         kind: "prompt",
-        prompt: { template: "Combine {{inputs.review_a}} and {{inputs.review_b}}." },
-        config: { model: "synthesizer" },
+        prompt: "Combine {{inputs.review_a}} and {{inputs.review_b}}.",
+        model: "synthesizer",
       },
     },
   };

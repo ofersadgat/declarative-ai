@@ -3,7 +3,19 @@ export * from "./expr";
 // wiring model. Exported because both are reusable against a custom engine or a lint surface, not
 // just from the validator and engine here.
 export * from "./inferExpr";
+// Expression LOWERING (§1) — an expression IS a producer tree, so a host walking bindings needs the
+// same reader the fan-out planner and validator use.
+export * from "./lowerExpr";
+// Failures in the data plane (§5): whether a slot admits one, and what one looks like as a value.
+export * from "./errorValue";
 export * from "./format";
+// Operation inheritance (§5) and the state PATH REFERENCE grammar (§2.1) — both consumed by the
+// loader, both exported because a host resolving workflow locations needs the same rules.
+export * from "./merge";
+export * from "./ref";
+export * from "./reference";
+export * from "./shape";
+export * from "./expand";
 export * from "./loader";
 export * from "./resolve";
 export * from "./materialize";

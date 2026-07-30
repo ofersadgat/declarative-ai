@@ -1,4 +1,4 @@
-import type { ErrorClass } from "./classification";
+import { ERROR_CLASSES, type ErrorClass } from "./classification";
 
 /**
  * Durable, re-derivable error payloads (extracted from findmyprompt
@@ -13,15 +13,7 @@ export interface EncodedError {
   retryAfterMs?: number;
 }
 
-const CLASSES: ReadonlySet<string> = new Set([
-  "network-retriable",
-  "api-retriable",
-  "permanent",
-  "deadline",
-  "out-of-credits",
-  "canceled",
-  "policy-denied",
-] satisfies ErrorClass[]);
+const CLASSES: ReadonlySet<string> = new Set<string>(ERROR_CLASSES);
 
 export function encodeError(err: EncodedError): string {
   return JSON.stringify(err);

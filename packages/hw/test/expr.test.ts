@@ -44,6 +44,28 @@ describe("property access", () => {
     expect(ev("outputs.outcome.length", ctx)).toBe(5);
     expect(ev("outputs.weaknesses.length > 1", ctx)).toBe(true);
   });
+
+  /**
+   * Access is an OWN-property lookup. Native lookup falls through to the prototype, so
+   * `constructor`, `__proto__` and every prototype method were readable — and a `{ expr }` binding
+   * reading one yielded a FUNCTION as a slot value, in a dataflow that is JSON all the way down.
+   * `inferExpr`'s `projectProperty` has always said `.length` is the one property a string or an
+   * array exposes; this is the evaluator agreeing with its own type-checker.
+   */
+  it("reaches nothing off the prototype", () => {
+    for (const src of [
+      "inputs.plan.constructor",
+      "inputs.plan.toString",
+      "inputs.nested.constructor",
+      "inputs.nested.hasOwnProperty",
+      "inputs.nested.__proto__",
+      "outputs.weaknesses.constructor",
+      "outputs.weaknesses.map",
+      "outputs.weaknesses.join",
+    ]) {
+      expect(ev(src, ctx), src).toBe(undefined);
+    }
+  });
 });
 
 describe("operators — JavaScript semantics", () => {
@@ -84,8 +106,100 @@ describe("operators — JavaScript semantics", () => {
   });
 });
 
+/**
+ * Applying an operation (EXPRESSIONS.md §3). The grammar admits a call; the CALLEE is a reference
+ * (a local child key, or one resolved along the `path`), which is why it is kept as a dotted path
+ * rather than an arbitrary sub-expression and why it never enters the data scope.
+ */
+describe("calls", () => {
+  const callOf = (src: string) => parseExpression(src) as { type: string; op: string; args: unknown[] };
+
+  it("parses a bare and a dotted callee, with any number of arguments", () => {
+    expect(callOf("classify()")).toMatchObject({ type: "apply", op: "classify", args: [] });
+    expect(callOf("classify(inputs.issue)").op).toBe("classify");
+    expect(callOf("classify(inputs.issue)").args).toHaveLength(1);
+    expect(callOf("lib.review(a, b, 'c')")).toMatchObject({ type: "apply", op: "lib.review" });
+    expect(callOf("lib.review(a, b, 'c')").args).toHaveLength(3);
+  });
+
+  it("composes with the rest of the language", () => {
+    // A call is an ordinary operand: it nests in operators, conditionals and other calls.
+    expect(() => parseExpression("classify(inputs.issue).severity === 'high'")).not.toThrow();
+    expect(() => parseExpression("f(a) && g(b)")).not.toThrow();
+    expect(() => parseExpression("f(g(h(1)))")).not.toThrow();
+    expect(() => parseExpression("cond ? f(a) : g(b)")).not.toThrow();
+    expect(() => parseExpression("f(a > 1 ? 'x' : 'y')")).not.toThrow();
+  });
+
+  /**
+   * A callee may be a full REFERENCE, not just a bare or dotted name — both spellings of the same
+   * operation resolve, one through the search path and one explicitly rooted.
+   */
+  it("parses a rooted reference as a callee", () => {
+    expect(callOf("$JAIRA/prompts/customPrompt('my input')")).toMatchObject({
+      type: "apply",
+      op: "$JAIRA/prompts/customPrompt",
+    });
+    expect(callOf("$/functions/classify(a)").op).toBe("$/functions/classify");
+    expect(callOf("customPrompt('my input')").op).toBe("customPrompt");
+    // A property path after the file part is the reference grammar, kept intact.
+    expect(callOf("$/lib/ops.review(a)").op).toBe("$/lib/ops.review");
+  });
+
+  it("refuses a rooted path that is not called, and a stray separator", () => {
+    // Reading DATA uses the leading-dot runtime form; a file path is only ever an operation.
+    expect(() => parseExpression("$JAIRA/prompts/customPrompt")).toThrow(/only meaningful called/);
+    expect(() => parseExpression("1 / 2")).toThrow(/only meaningful inside an operation reference/);
+  });
+
+  it("refuses to call something that is not a name", () => {
+    // An operation is NAMED by a reference, so there is no first-class function value to apply.
+    expect(() => parseExpression("(a ? f : g)(x)")).toThrow(/only a name may be called/);
+    expect(() => parseExpression("'literal'(x)")).toThrow(/only a name may be called/);
+  });
+
+  it("reports a malformed argument list", () => {
+    expect(() => parseExpression("f(a,")).toThrow(ExprError);
+    expect(() => parseExpression("f(a b)")).toThrow(ExprError);
+    expect(() => parseExpression("f(")).toThrow(ExprError);
+  });
+
+  /**
+   * The callee is a REFERENCE, not a data path. Reporting it as one would make `classify(x)` look
+   * like a read of an undeclared namespace called `classify` — and the validator would reject it.
+   */
+  it("keeps the callee out of the data references, but not the arguments", () => {
+    const ast = parseExpression("classify(children.review.outputs.plan, inputs.n)");
+    expect(referencesOf(ast)).toEqual([
+      ["children", "review", "outputs", "plan"],
+      ["inputs", "n"],
+    ]);
+  });
+
+  /**
+   * `evaluate` is the reference semantics the lowering is checked against, not a second execution
+   * path — applying an operation needs a resolved callee and a scope, so it is refused rather than
+   * half-implemented.
+   */
+  it("cannot be interpreted, and says so", () => {
+    expect(() => ev("classify(inputs.n)", { inputs: { n: 1 } })).toThrow(/only the lowered form can run/);
+  });
+
+  /**
+   * An operator and a call are the SAME node. `a === b` is an application of `op.strictEq`, and the
+   * only thing that differs is the name — and where that name resolves.
+   */
+  it("is the same node an operator parses to", () => {
+    expect(parseExpression("a === b")).toMatchObject({ type: "apply", op: "op.strictEq" });
+    expect(parseExpression("!a")).toMatchObject({ type: "apply", op: "op.not" });
+    expect(parseExpression("a ? b : c")).toMatchObject({ type: "apply", op: "op.cond" });
+    expect(parseExpression("a && b")).toMatchObject({ type: "apply", op: "op.and" });
+    expect(parseExpression("classify(a)")).toMatchObject({ type: "apply", op: "classify" });
+  });
+});
+
 describe("purity — rejected constructs", () => {
-  const bad = ["f()", "a[0]", "a = 1", "a + b", "a - b", "a * b", "new X", "a; b", "() => 1", "a?.b", "`t`"];
+  const bad = ["a[0]", "a = 1", "a + b", "a - b", "a * b", "new X", "a; b", "() => 1", "a?.b", "`t`"];
   for (const src of bad) {
     it(`rejects: ${src}`, () => {
       expect(() => parseExpression(src)).toThrow(ExprError);
