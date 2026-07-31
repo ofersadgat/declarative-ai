@@ -1,5 +1,5 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
-import type { ExecEvent, ExecHandle, Failure, FunctionInputs, FunctionRegistry, ExecMetrics, ExecResult, ExecServices, Executor, InlineFamily, Operation, ResolvedValue } from "../src/index";
+import type { ExecEvent, ExecHandle, Failure, FunctionInputs, FunctionRegistry, ExecMetrics, ExecResult, ExecServices, Executor, InlineFamily, Operation, Ref, ResolvedValue } from "../src/index";
 import {
   EXEC_METRICS_ALGEBRA,
   isOk,
@@ -111,6 +111,108 @@ describe("OperationExecutor — dispatch by op kind (DESIGN §3.1)", () => {
       {},
     ).result;
     expect(errorOf(out)?.reason).toMatch(/unresolved binding/);
+  });
+});
+
+/**
+ * A nested operation is the one unresolved binding dispatch can settle by itself — it is a whole
+ * document, so running it needs an executor and nothing else. Recursing through THIS executor is what
+ * makes the nested op reach the right place by its own kind, decided in one spot instead of by each
+ * caller. Everything else that can be unresolved (a `{refs}` tree, a producer edge naming a declared
+ * child) is a scope lookup and still has to arrive substituted.
+ */
+describe("OperationExecutor — embedded operations resolve through dispatch", () => {
+  const doubler = (): FunctionRegistry<ExecServices, ExecMetrics> => {
+    const functions: FunctionRegistry<ExecServices, ExecMetrics> = new Map();
+    functions.set("double", pureFunction((inputs: FunctionInputs) => ({ value: Number(inputs.n) * 2 }), PURE_CAPABILITIES));
+    functions.set("inc", pureFunction((inputs: FunctionInputs) => ({ value: Number(inputs.n) + 1 }), PURE_CAPABILITIES));
+    return functions;
+  };
+
+  const call = (fn: string, arg: Ref<InlineFamily>): Operation<InlineFamily> => ({
+    kind: "function",
+    functionRef: fn,
+    input: { n: { kind: "json", binding: arg } },
+    output: { name: "output", kind: "json" },
+  });
+
+  it("runs an embedded operation and substitutes its output", async () => {
+    const exec = new OperationExecutor({ functions: doubler() });
+    const out = await exec.start(call("double", { op: call("inc", { json: 20 }) }), {}).result;
+    expect(out.value).toBe(42);
+  });
+
+  it("recurses, so a tree of calls resolves innermost first", async () => {
+    const exec = new OperationExecutor({ functions: doubler() });
+    const inner = call("inc", { json: 1 }); // 2
+    const middle = call("double", { op: inner }); // 4
+    const out = await exec.start(call("double", { op: middle }), {}).result; // 8
+    expect(out.value).toBe(8);
+  });
+
+  it("sends a nested PROMPT callee to the prompt executor — dispatch is by the nested op's own kind", async () => {
+    const { core, calls } = scripted([ok()]);
+    const functions: FunctionRegistry<ExecServices, ExecMetrics> = new Map();
+    functions.set("id", pureFunction((inputs: FunctionInputs) => ({ value: inputs.n ?? null }), PURE_CAPABILITIES));
+    const exec = new OperationExecutor({ functions, prompt: core });
+    const out = await exec.start(call("id", { op: op("nested") }), {}).result;
+    // The prompt executor ran the NESTED op, and its value became the outer op's input.
+    expect(calls.map((c) => (c.op as { user?: string }).user)).toEqual(["nested"]);
+    expect(out.value).toEqual({ a: 1 });
+  });
+
+  it("carries a nested failure out WHOLE, keeping its classification", async () => {
+    const functions = doubler();
+    functions.set("boom", pureFunction(() => failed("network-retriable", "429 from upstream") as never, PURE_CAPABILITIES));
+    const exec = new OperationExecutor({ functions });
+    const out = await exec.start(call("double", { op: call("boom", { json: 1 }) }), {}).result;
+    // Not restated as "an input failed": a retriable provider error must stay distinguishable from a
+    // wiring mistake, or the retry wrapper above has nothing to act on.
+    expect(errorOf(out)?.classification).toBe("network-retriable");
+    expect(errorOf(out)?.reason).toMatch(/429 from upstream/);
+  });
+
+  it("runs the nested operation but NOT the outer one when the nested fails", async () => {
+    const functions = doubler();
+    let outerRan = 0;
+    let nestedRan = 0;
+    functions.set("count", pureFunction(() => { outerRan++; return { value: 0 }; }, PURE_CAPABILITIES));
+    functions.set("boom", pureFunction(() => { nestedRan++; return failed("permanent", "no") as never; }, PURE_CAPABILITIES));
+    const exec = new OperationExecutor({ functions });
+    await exec.start(call("count", { op: call("boom", { json: 1 }) }), {}).result;
+    // Both halves matter: the nested op has to have been dispatched at all (otherwise this passes for
+    // the wrong reason — an outer op that simply refused an unresolved binding), and the outer op has
+    // to have been skipped once it failed.
+    expect(nestedRan).toBe(1);
+    expect(outerRan).toBe(0);
+  });
+
+  it("rolls nested metrics up, so an embedded call's cost is not lost", async () => {
+    // The nested op is a PROMPT, scripted to report a duration the outer function cannot produce on
+    // its own — so the number can only appear in the outer frame by being merged in.
+    const core: Executor = {
+      capabilities: CAPS,
+      metrics: EXEC_METRICS_ALGEBRA,
+      start: () => ({ events: emptyStream(), result: Promise.resolve({ value: 1 as ResolvedValue, metrics: { durationMs: 500 } }), cancel: async () => {} }),
+    };
+    const exec = new OperationExecutor({ functions: doubler(), prompt: core });
+    const out = await exec.start(call("double", { op: op("nested") }), {}).result;
+    expect(out.value).toBe(2);
+    expect(out.metrics.durationMs).toBeGreaterThanOrEqual(500);
+  });
+
+  it("leaves a HIGHER-ORDER edge alone — the definition IS the value there", async () => {
+    const functions: FunctionRegistry<ExecServices, ExecMetrics> = new Map();
+    let received: unknown;
+    functions.set("apply", pureFunction((inputs: FunctionInputs) => { received = inputs.f; return { value: 1 }; }, PURE_CAPABILITIES));
+    const exec = new OperationExecutor({ functions });
+    const passed = call("inc", { json: 1 });
+    await exec.start(
+      { kind: "function", functionRef: "apply", input: { f: { kind: "function", binding: { op: passed } } }, output: { name: "output", kind: "json" } },
+      {},
+    ).result;
+    // `inc` was handed over as a document, never run: `kind: "function"` means pass the definition.
+    expect(received).toEqual(passed);
   });
 });
 

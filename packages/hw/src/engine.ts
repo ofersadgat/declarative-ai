@@ -34,9 +34,11 @@
 import {
   type CapabilityRegistry,
   type Failure,
+  type ExecMetrics,
   type ExecServices,
   type Executor,
   type FunctionInputs,
+  type FunctionRegistry,
   type SyncOutputValidator,
   type InlineFamily,
   type JsonSchema,
@@ -55,9 +57,10 @@ import {
   type Workspace,
   type Clock,
   MapSessionStore,
+  createOperationExecutor,
   hashOperation,
   isOk,
-  runFunction,
+  resolveCalls,
 } from "@declarative-ai/exec";
 import type { WorkflowMetrics } from "./ports";
 import {
@@ -82,7 +85,7 @@ import type {
   TerminationOutcome,
   WorkflowBundle,
 } from "./format";
-import { bindElement, embeddedOpsOf, higherOrderEdgesOf, higherOrderOf, isResolvedValue, isResolveError, resolveEmbedded, resolveInputs, resolveRef, type ResolutionScope, type Resolved } from "./resolve";
+import { bindElement, bindInputs, embeddedOpsOf, higherOrderEdgesOf, higherOrderOf, isResolvedValue, isResolveError, resolveEmbedded, resolveInputs, resolveRef, type ResolutionScope, type Resolved } from "./resolve";
 import { isByteStream, materialize, MaterializeError } from "./materialize";
 import { isFannedOut } from "./fanout";
 import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, type Persistence } from "./ports";
@@ -988,6 +991,56 @@ export class WorkflowEngine {
     return out;
   }
 
+  /** The dispatcher built when the host supplies no {@link EngineConfig.operations}. */
+  private ownOperations?: Executor<ExecServices, WorkflowMetrics>;
+  /**
+   * The executor an operation dispatches THROUGH — always, whether or not a host supplied one.
+   *
+   * Dispatch by op kind belongs in exactly one place, and `OperationExecutor` is that place
+   * (`prompt` → the prompt executor, `function` → a registry lookup). Calling `runFunction` from
+   * here instead put a second dispatch site in the engine and, worse, put it BELOW the seam a
+   * wrapper composes at: retry, deadline and memoize stopped at the registry boundary and never
+   * reached a function op at all. A host that wants those composes them around the dispatcher and
+   * supplies the result; absent one the engine builds the plain dispatcher, so there is one code
+   * path either way rather than a wrapped path and a raw one.
+   *
+   * The cast is the one `wiring.ts` already uses at this boundary: `OperationExecutor` is generic in
+   * the base `ExecMetrics` while the engine works in `WorkflowMetrics`, which extends it.
+   */
+  private get operations(): Executor<ExecServices, WorkflowMetrics> {
+    if (this.config.operations) return this.config.operations;
+    this.ownOperations ??= createOperationExecutor({
+      functions: this.config.registry.functions as unknown as FunctionRegistry<ExecServices, ExecMetrics>,
+      ...(this.config.prompt !== undefined ? { prompt: this.config.prompt as unknown as Executor } : {}),
+    }) as unknown as Executor<ExecServices, WorkflowMetrics>;
+    return this.ownOperations;
+  }
+
+  /** State operations with their callees already resolved, by state id. */
+  private readonly resolvedOps = new Map<string, Operation<InlineFamily>>();
+  /**
+   * A state's operation with every name in it resolved against the registry — done ONCE per state
+   * rather than on every dispatch.
+   *
+   * The executor can resolve a name itself and always will when nobody did it first, so this is purely
+   * a hoist: the registry cannot change mid-run, and a state that runs many times (or an operation
+   * whose bindings embed calls re-evaluated each round) would otherwise pay the same lookups over and
+   * over.
+   *
+   * An unresolvable name falls back to the UNRESOLVED operation rather than failing here. Reporting it
+   * is the validator's job — it already walks every binding a state carries, guards included — and
+   * dispatch produces the run-fatal error with the message it always did. Turning a hoist into a new
+   * failure point would make an optimization change behaviour.
+   */
+  private operationFor(instance: Instance, op: Operation<InlineFamily>): Operation<InlineFamily> {
+    const cached = this.resolvedOps.get(instance.stateId);
+    if (cached !== undefined) return cached;
+    const out = resolveCalls(op, this.config.registry.functions);
+    const resolved = "error" in out ? op : out.op;
+    this.resolvedOps.set(instance.stateId, resolved);
+    return resolved;
+  }
+
   /** The cache backing {@link EngineConfig.callCache} when the host supplies none. */
   private readonly ownCallCache = new Map<string, CallResult>();
   private get callCache(): CallCache {
@@ -1115,67 +1168,46 @@ export class WorkflowEngine {
     if (isPending(literal)) return PENDING;
     if ("error" in literal) return { error: literal.error };
 
-    // A composed stack, when the host wired one: it dispatches BY OP KIND, so one executor covers a
-    // function callee and a prompt callee alike — and brings retry, rate limiting, budget and a
-    // content-addressed memo with it.
-    const composed = this.config.operations;
-    if (composed) {
-      const toolsOrFailure = this.resolveTools(env, sessionId, false);
-      if ("failure" in toolsOrFailure) return { error: toolsOrFailure.failure.reason };
-      const rendered = op.kind === "prompt" ? { ...op, user: this.renderTemplate(op.user, instance, literal.values) } : op;
-      let outcome;
-      try {
-        outcome = await composed.start(rendered, this.servicesFor(sessionId, instance, toolsOrFailure.tools)).result;
-      } catch (e) {
-        return { error: `executor rejected: ${(e as Error).message}` };
-      }
-      this.childLlmCalls += (op.kind === "prompt" ? 1 : 0) + (outcome.metrics.childLlmCalls ?? 0);
-      this.childCost += outcome.metrics.costUsd;
-      return isOk(outcome)
-        ? { value: (outcome.value ?? null) as ResolvedValue }
-        : { error: outcome.error.reason, failure: outcome.error };
-    }
-
-    if (op.kind === "prompt") {
-      const promptExecutor = this.config.prompt;
-      if (!promptExecutor) return { error: "a call names a prompt operation but no prompt executor is wired in" };
-      const toolsOrFailure = this.resolveTools(env, sessionId, false);
-      if ("failure" in toolsOrFailure) return { error: toolsOrFailure.failure.reason };
-      // The callee keeps its OWN output contract. A state's prompt op has its output schema replaced
-      // by the state's produced outputs, which is right for a state — its operation IS what produces
-      // them — and wrong for a call, whose result belongs to one binding.
-      //
-      // No conversation preamble, and no transcript append: a call is a COMPUTATION embedded in a
-      // binding, not a turn in the enclosing state's conversation. Appending would make the state's
-      // own prompt read back a call it never asked about. The callee still runs under the session in
-      // force where it is written, so tools and permissions are the ones the author expects.
-      const resolvedOp = { ...op, user: this.renderTemplate(op.user, instance, literal.values) };
-      let outcome;
-      try {
-        outcome = await promptExecutor.start(resolvedOp, this.servicesFor(sessionId, instance, toolsOrFailure.tools)).result;
-      } catch (e) {
-        return { error: `prompt executor rejected: ${(e as Error).message}` };
-      }
-      this.childLlmCalls += 1 + (outcome.metrics.childLlmCalls ?? 0);
-      this.childCost += outcome.metrics.costUsd;
-      return isOk(outcome)
-        ? { value: (outcome.value ?? null) as ResolvedValue }
-        : { error: outcome.error.reason, failure: outcome.error };
-    }
-
-    const entry = this.config.registry.functions.get(op.functionRef);
-    if (!entry) return { error: `no function '${op.functionRef}' is registered` };
-    const delegates = entry.kind === "runtime" && entry.capabilities.policyEnforcement === "callback";
+    // ONE dispatch, through the same executor a state's operation uses. This used to be three
+    // branches — a composed stack when the host wired one, else a prompt path, else a registry call —
+    // which is dispatch-by-op-kind written a second time, in the layer above the executor that exists
+    // to do exactly that. Collapsing them also settles two ways the branches had drifted apart:
+    //
+    //  - TOOLS. The composed branch passed `delegates: false` unconditionally, so a delegated agent
+    //    reached through a call got policy-gated tools where the same adapter reached as a state's
+    //    operation got raw ones and enforced through its own callback. The entry's capabilities decide
+    //    it here, as they do everywhere else.
+    //  - FREE SLOTS. The registry branch merged `instance.inputs` into the callee's inputs; the
+    //    composed branch passed the op's own bindings alone. The op's own bindings win, because the
+    //    memo key is `hashOperation` of exactly that op — a merged input the key never saw could
+    //    return a result computed under different values. A callee is its own operation with its own
+    //    parameters, and a lowered call binds every one of them.
+    //
+    // The prompt callee keeps its OWN output contract and gets no conversation preamble and no
+    // transcript append: a call is a COMPUTATION embedded in a binding, not a turn in the enclosing
+    // state's conversation. It still runs under the session in force where it is written, so its tools
+    // and permissions are the ones the author expects.
+    const entry = op.kind === "function" ? this.config.registry.functions.get(op.functionRef) : undefined;
+    if (op.kind === "function" && !entry) return { error: `no function '${op.functionRef}' is registered` };
+    const delegates = entry?.kind === "runtime" && entry.capabilities.policyEnforcement === "callback";
     const toolsOrFailure = this.resolveTools(env, sessionId, delegates);
     if ("failure" in toolsOrFailure) return { error: toolsOrFailure.failure.reason };
-    const outcome = await runFunction(entry, { ...instance.inputs, ...literal.values }, this.servicesFor(sessionId, instance, toolsOrFailure.tools));
-    const metrics = outcome.metrics;
-    if (metrics) {
-      this.childLlmCalls += metrics.childLlmCalls ?? 0;
-      this.childCost += metrics.costUsd;
+    const rendered = op.kind === "prompt" ? { ...op, user: this.renderTemplate(op.user, instance, literal.values) } : op;
+    let outcome;
+    try {
+      outcome = await this.operations.start(rendered, this.servicesFor(sessionId, instance, toolsOrFailure.tools)).result;
+    } catch (e) {
+      return { error: `executor rejected: ${(e as Error).message}` };
     }
+    this.childLlmCalls += (op.kind === "prompt" ? 1 : 0) + (outcome.metrics.childLlmCalls ?? 0);
+    // `?? 0` for the same reason the state path needs it: the dispatcher frames every execution with
+    // its own timing and always reports metrics, so an impl that costs nothing arrives without a
+    // `costUsd` and adding `undefined` would make the run total NaN.
+    this.childCost += outcome.metrics.costUsd ?? 0;
     // A failure travels as DATA (§5): the binding decides whether it flows or terminates.
-    return isOk(outcome) ? { value: outcome.value } : { error: outcome.error.reason, failure: outcome.error };
+    return isOk(outcome)
+      ? { value: (outcome.value ?? null) as ResolvedValue }
+      : { error: outcome.error.reason, failure: outcome.error };
   }
 
   /** Dispatch a `FunctionOp` through the function registry (§7.4). */
@@ -1212,7 +1244,10 @@ export class WorkflowEngine {
     // Errors are DATA (§4.2): the impl RESOLVES value-or-failure, so a 429 raised inside a registered
     // function keeps its classification instead of being reconstructed from `err.name` — which is what
     // made every non-`AbortError` permanently failed, retry machinery and all.
-    const outcome = await runFunction(entry, opInputs, services);
+    //
+    // `bindInputs` writes the resolved inputs onto the op first: the executor reads them off the op
+    // and has no view of the instance they were resolved against.
+    const outcome = await this.operations.start(bindInputs(this.operationFor(instance, op), opInputs), services).result;
     // An impl that reports what it cost (a delegated agent bills inside its own loop) rolls up here,
     // exactly as a prompt op's outcome does — otherwise the spend of the most expensive thing in the
     // graph is the one thing the run's metrics never see. `childLlmCalls` counts LLM calls: a prompt op
@@ -1223,7 +1258,12 @@ export class WorkflowEngine {
     const metrics = outcome.metrics;
     if (metrics) {
       this.childLlmCalls += metrics.childLlmCalls ?? 0;
-      this.childCost += metrics.costUsd;
+      // `?? 0` because the dispatcher ALWAYS reports metrics — it frames every execution with its own
+      // `startMs`/`durationMs` — where the impl called directly reported none at all. An impl that
+      // costs nothing therefore now arrives as timing without a `costUsd`, and adding `undefined`
+      // would turn the run's rollup into NaN. `WorkflowMetrics` types the field as required, which is
+      // true of a metrics record an impl BUILDS and not of one the dispatcher frames around it.
+      this.childCost += metrics.costUsd ?? 0;
     }
     if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
     if (!isOk(outcome)) return fail(outcome.error);

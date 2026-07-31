@@ -11,6 +11,7 @@
 export * from "./contract";
 export * from "./handles";
 export * from "./operationExecutor";
+export * from "./resolvedOperation";
 export * from "./memo";
 export * from "./hydrate";
 export * from "./wrappers";

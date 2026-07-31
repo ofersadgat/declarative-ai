@@ -391,18 +391,19 @@ describe("the call memo is content-addressed and injectable", () => {
 });
 
 /**
- * A call dispatches through the composed executor when the host wires one — which is how it gets the
- * wrapper stack (retry, rate limiting, budget, a content-addressed memo). Without it the engine
- * invokes the registry entry directly, which runs the operation but skips every wrapper.
+ * EVERY operation dispatches through the operation executor — a call and a state's own operation
+ * alike. Supplying one is how a host gets the wrapper stack (retry, rate limiting, budget, a
+ * content-addressed memo) around dispatch; absent one the engine builds the plain dispatcher, so the
+ * path is the same shape either way rather than a wrapped path and a raw `runFunction` call.
  */
-describe("calls dispatch through a composed executor when one is supplied", () => {
+describe("operations dispatch through the operation executor", () => {
   const def = {
     inputs: { issue: { kind: "text", schema: { type: "string" } } },
     outputs: { loud: { schema: { type: "string" }, binding: { expr: "shout(inputs.issue)" } } },
     operation: { kind: "function", function: "noop" },
   };
 
-  it("routes a FUNCTION callee through it, so wrappers apply", async () => {
+  it("routes a FUNCTION callee AND the state's own operation through it, so wrappers apply to both", async () => {
     const seen: string[] = [];
     const calls = { n: 0 };
     const operations = {
@@ -426,9 +427,45 @@ describe("calls dispatch through a composed executor when one is supplied", () =
     });
     const result = await engine.run({ inputs: { issue: "x" } });
     expect(result.outputs?.loud).toBe("WRAPPED");
-    expect(seen).toEqual(["shout"]);
+    // `noop` is the STATE's operation and `shout` the callee in its output binding — both arrive here,
+    // in that order. A wrapper that only saw callees would leave every state operation unwrapped,
+    // which is the gap this closes: `noop` used to reach `runFunction` from the engine directly.
+    expect(seen).toEqual(["noop", "shout"]);
     // The registry entry was never invoked directly — the stack owns dispatch now.
     expect(calls.n).toBe(0);
+  });
+
+  it("resolves a state's operation ONCE, not on every dispatch", async () => {
+    const registry = registryWithShout({ n: 0 });
+    let lookups = 0;
+    const counting = new Map(registry.functions);
+    registry.functions = Object.assign(counting, {
+      get(name: string) {
+        lookups += 1;
+        return Map.prototype.get.call(counting, name);
+      },
+    }) as never;
+
+    const engine = new WorkflowEngine({
+      bundle: bundleFor({
+        inputs: { issue: { kind: "text", schema: { type: "string" } } },
+        outputs: { out: { schema: { type: "object" } } },
+        operation: { kind: "function", function: "noop" },
+      }),
+      registry,
+      validator: new SchemaValidator(),
+    });
+    await engine.run({ inputs: { issue: "x" } });
+    const first = lookups;
+    lookups = 0;
+    await engine.run({ inputs: { issue: "y" } });
+    const second = lookups;
+
+    // The second run reuses the first's resolution: the operation carries its entry, so dispatch reads
+    // it off the op instead of asking the registry again. A few lookups remain either way — the engine
+    // reads an entry's capabilities to decide tool gating — so the claim is the DELTA, which is
+    // precisely what the hoist removes. Without it the two runs cost the same.
+    expect(second).toBeLessThan(first);
   });
 });
 

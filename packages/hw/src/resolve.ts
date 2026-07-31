@@ -14,7 +14,7 @@
  * special cases.
  */
 import type { InlineFamily, JsonValue, Operation, Parameter, Ref, RefTree, ResolvedValue } from "@declarative-ai/exec";
-import { isOk } from "@declarative-ai/exec";
+import { carryCall, isOk } from "@declarative-ai/exec";
 import { applyBinary, evaluate, isPending, memberOf, parseExpression, PENDING, type BinaryOp, type Pending } from "./expr";
 import type { Failure } from "@declarative-ai/json";
 import { admitsError, errorValueSchemaFor, resolutionFailure } from "./errorValue";
@@ -475,6 +475,33 @@ export function resolveEmbedded(
     }),
   );
   return { op: { ...op, input } as Operation<InlineFamily> };
+}
+
+/**
+ * An operation with already-resolved values bound into its input slots as literals.
+ *
+ * The precondition at the dispatch boundary: an operation handed to an `Executor` is READY TO RUN,
+ * which means everything it takes is a literal on the op itself. An executor reads inputs off the op
+ * (`resolveLiteralInputs`) and cannot see the instance the engine resolved them against, so the
+ * engine has to write them down before dispatching. `resolveEmbedded` is the same move for a call's
+ * arguments; this is it for a state's own operation.
+ *
+ * A name the op does not DECLARE is added as a `json` slot rather than dropped, which preserves what
+ * the impl was handed when the engine called it directly: `{...instance.inputs, ...resolved.values}`
+ * — the state's inputs merged under the operation's own bound ones. Narrowing that to declared slots
+ * only is a separate decision, and a breaking one: it would stop a function impl reading a state
+ * input its operation never declared.
+ */
+export function bindInputs(op: Operation<InlineFamily>, values: Record<string, ResolvedValue>): Operation<InlineFamily> {
+  const input: Record<string, Parameter<InlineFamily>> = { ...op.input };
+  for (const [name, value] of Object.entries(values)) {
+    const binding = { json: value as JsonValue };
+    const declared = input[name];
+    input[name] = declared ? { ...declared, binding } : { kind: "json", binding };
+  }
+  // `carryCall` because the spread drops a pre-resolved entry, and this runs immediately before the
+  // dispatch that would have used it — the one place losing it costs the most.
+  return carryCall(op, { ...op, input } as Operation<InlineFamily>);
 }
 
 /**

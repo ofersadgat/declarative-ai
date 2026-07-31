@@ -19,6 +19,7 @@ import type {
   FunctionInputs,
   FunctionRegistry,
   InlineFamily,
+  JsonValue,
   Operation,
   Parameter,
   Ref,
@@ -30,7 +31,8 @@ import type {
 import { RUNTIME_CAPABILITIES, failureOf, isOk, runFunction } from "@declarative-ai/ops";
 import type { ExecHandle, ExecMetrics, ExecServices, Executor, ExecResult } from "./contract";
 import { EXEC_METRICS_ALGEBRA } from "./contract";
-import { EventQueue, canceledFailure, failure, finishedHandle, linkAbort, raceWork } from "./handles";
+import { carryCall, isResolvedCall } from "./resolvedOperation";
+import { EventQueue, canceledFailure, failure, finishedHandle, linkAbort, raceWork, withMetrics, wrapHandle } from "./handles";
 import { systemClock } from "./deadline";
 
 export interface OperationExecutorOptions {
@@ -93,6 +95,9 @@ function resolveBinding(name: string, param: Parameter<InlineFamily>, binding: R
     // op kinds pass the definition through untouched.
     if (param.kind !== "prompt" && param.kind !== "function") {
       return {
+        // Unreachable for an EMBEDDED operation — `start` runs those and substitutes their outputs
+        // before this walk. What is left is the case it cannot run: a producer edge naming a declared
+        // CHILD, which is a lookup in the enclosing family's scope.
         error: `input '${name}' still carries an unresolved binding — a producer edge on a '${param.kind}' parameter must be RUN and its output substituted before dispatching the operation`,
       };
     }
@@ -109,6 +114,21 @@ function resolveBinding(name: string, param: Parameter<InlineFamily>, binding: R
   return {
     error: `input '${name}' is bound to a ref TREE ({refs}) — resolving a tree is the ref family's job (hw's engine walks its own scope); dispatch the operation with the tree already resolved to a value`,
   };
+}
+
+/**
+ * True when any input binds a producer edge carrying a whole operation on a DATA kind — the edges
+ * `start` resolves by running them. An edge on a `prompt`/`function` kind is higher-order (the
+ * definition itself is the value) and a string names a declared child, so neither counts.
+ *
+ * The check keeps the common case free: an operation whose inputs are already literals takes the
+ * same path it always did, straight to `dispatch`.
+ */
+export function hasEmbeddedOperation(op: Operation<InlineFamily>): boolean {
+  return Object.values(op.input).some((p) => {
+    const b = p.binding;
+    return b !== undefined && "op" in b && typeof b.op !== "string" && p.kind !== "prompt" && p.kind !== "function";
+  });
 }
 
 /** The capability floor for a registry-dispatched function op, and the fallback when a `functionRef`
@@ -145,11 +165,59 @@ export class OperationExecutor implements Executor {
       const prompt = this.options.prompt;
       return prompt ? (prompt.capabilitiesFor?.(op) ?? prompt.capabilities) : this.capabilities;
     }
-    const fn = this.options.functions.get(op.functionRef);
+    const fn = isResolvedCall(op) ? op.call : this.options.functions.get(op.functionRef);
     return fn ? entryCapabilities(fn) : this.capabilities;
   }
 
+  /**
+   * Run every operation EMBEDDED in this one's inputs, then dispatch it with their outputs substituted.
+   *
+   * A nested operation is the one unresolved binding dispatch can settle by itself: it is a whole
+   * operation document, so running it needs nothing but an executor — and the executor to use is
+   * THIS one, recursively, so the nested op reaches the right place by its own kind. A prompt callee
+   * goes to the prompt executor and a function callee to the registry, decided in one spot rather
+   * than by each caller guessing.
+   *
+   * Everything else that can be unresolved belongs to the ref family and must arrive already
+   * substituted — a `{refs}` tree, or a producer edge naming a declared CHILD, both of which are
+   * lookups against a scope this layer cannot see. That is the whole contract at this boundary: an
+   * operation handed to an executor is READY TO RUN, meaning literals and embedded operations only.
+   */
   start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue> {
+    if (!hasEmbeddedOperation(op)) return this.dispatch(op, ctx);
+    return wrapHandle(
+      async (ctl): Promise<ExecResult<ResolvedValue, ExecMetrics>> => {
+        if (ctl.canceled()) return canceledFailure("canceled before the operation started");
+        const input: Record<string, Parameter<InlineFamily>> = { ...op.input };
+        // Nested metrics roll up rather than being discarded: an embedded operation can be the
+        // expensive half of the work, and a caller reading only the outer frame would never see it.
+        let nested: ExecMetrics | undefined;
+        for (const [name, param] of Object.entries(op.input)) {
+          const binding = param.binding;
+          if (binding === undefined || !("op" in binding) || typeof binding.op === "string") continue;
+          if (param.kind === "prompt" || param.kind === "function") continue; // higher-order: the definition IS the value
+          const outcome = await ctl.started(this.start(binding.op, ctx)).result;
+          nested = nested === undefined ? outcome.metrics : this.metrics.merge(nested, outcome.metrics);
+          if (!isOk(outcome)) {
+            // The nested failure travels WHOLE. Restating it as "an input failed" would drop the
+            // classification, so a retriable provider error inside a nested call would arrive
+            // indistinguishable from a wiring mistake.
+            return { error: outcome.error, metrics: nested };
+          }
+          input[name] = { ...param, binding: { json: outcome.value as JsonValue } };
+        }
+        // `carryCall` because the spread would otherwise drop a pre-resolved entry right before the
+        // dispatch that would have used it.
+        const resolved = carryCall(op, { ...op, input } as Operation<InlineFamily>);
+        const result = await ctl.started(this.dispatch(resolved, ctx)).result;
+        return nested === undefined ? result : withMetrics(result, this.metrics.merge(nested, result.metrics));
+      },
+      { signal: ctx.abortSignal, canceledReason: "canceled while an embedded operation was in flight" },
+    );
+  }
+
+  /** Dispatch a READY operation by kind — the one place `prompt` and `function` part ways. */
+  private dispatch(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue> {
     // Cancellation is checked BEFORE any work starts, on every path: an already-aborted caller must not
     // get one more provider call out of a dispatch that happened to be in flight.
     if (ctx.abortSignal?.aborted) return finishedHandle(canceledFailure("canceled before the operation started"));
@@ -164,7 +232,10 @@ export class OperationExecutor implements Executor {
       return prompt.start(op, ctx);
     }
 
-    const fn = this.options.functions.get(op.functionRef);
+    // A caller that resolved this op ahead of time carries the entry on it; anyone else gets the
+    // lookup. Both paths exist on purpose — resolution is an optimization a holder may have done, so
+    // the executor can always do it itself and never requires anyone to have done it first.
+    const fn = isResolvedCall(op) ? op.call : this.options.functions.get(op.functionRef);
     if (!fn) {
       return finishedHandle(failure("permanent", `no function '${op.functionRef}' is registered`));
     }
