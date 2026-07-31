@@ -71,16 +71,26 @@ function bytesToBase64(bytes: Uint8Array): string {
  * collided on identical ops and served each other's results. It is the caller's identity string;
  * `withMemoize` supplies one automatically (see {@link MemoizeOptions.namespace}).
  *
+ * `sessionRef` is the conversation POSITION the call runs at, folded in for exactly the reason
+ * `workspaceTreeHash` is: the answer depends on it. It used to be covered by ACCIDENT — the session
+ * layer inlined the whole transcript into the op's config, so the op hash was taken over real
+ * conversation content — and it stopped being covered the moment messages moved onto the services
+ * bundle. Without it, "summarise the discussion so far" asked at turn 3 and again at turn 40 is ONE
+ * cache entry and the second call is served the first one's answer. A position is a sound content
+ * proxy because the store commits it to content with a digest, which is why the messages themselves
+ * do not have to be hashed here.
+ *
  * Nondeterminism (draw indices, retry scopes) is the caller's concern via unhashed scope tokens — this
  * key deliberately has no place for them.
  */
-export function memoKey(params: { operationHash: string; workspaceTreeHash?: string; executorId?: string }): string {
-  const { operationHash, workspaceTreeHash, executorId } = params;
+export function memoKey(params: { operationHash: string; workspaceTreeHash?: string; executorId?: string; sessionRef?: string }): string {
+  const { operationHash, workspaceTreeHash, executorId, sessionRef } = params;
   return sha256Hex(
     canonicalize({
       operationHash,
       ...(workspaceTreeHash !== undefined ? { workspaceTreeHash } : {}),
       ...(executorId !== undefined ? { executorId } : {}),
+      ...(sessionRef !== undefined ? { sessionRef } : {}),
     }),
   );
 }
@@ -268,6 +278,10 @@ export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>, Out 
               operationHash: identify ? identify(op) : hashOperation(op as unknown as Operation<InlineFamily>),
               ...(treeHash !== undefined ? { workspaceTreeHash: treeHash } : {}),
               executorId: namespace,
+              // The conversation this call runs at. An OUTER memoize refuses to wrap a session layer
+              // outright (`sessionResume`), but one composed INSIDE it sees the resolved session here
+              // and must key on it — the same op text at two positions is two different questions.
+              ...(ctx.session?.id !== undefined ? { sessionRef: ctx.session.id } : {}),
             });
             const hit = await cache.get(key);
             if (hit) return withMetrics(hit, cacheHitMetrics(hit.metrics, clock.now()));
