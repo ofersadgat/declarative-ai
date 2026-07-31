@@ -991,6 +991,76 @@ describe("per-session workspace overlay (DESIGN §5.1, \"Sessions: the run-scope
 });
 
 /**
+ * The `operation.*` namespace at run time (SESSIONS.md §8). The lint is covered in
+ * `operationNode.test.ts`; what matters here is that the values actually arrive.
+ */
+describe("operation.* resolves during a run", () => {
+  /** One prompt child, and a parent output bound to some part of its operation node. */
+  const reading = (expr: string, schema: JsonValue = {}): Record<string, StateDef> => ({
+    root: {
+      environment: { session: "planning" },
+      children: { call: { state: "leaf" } },
+      sequence: ["call"],
+      outputs: { read: { schema: schema as never, binding: { expr } } },
+    },
+    leaf: {
+      outputs: { r: { schema: { type: "string" } } },
+      operation: { kind: "prompt", prompt: "go", model: "reviewer" },
+    },
+  });
+
+  it("carries a child's cost up to its parent", async () => {
+    // Previously reachable only through the events journal, which no expression can read.
+    const { engine } = makeEngine(reading("children.call.operation.cost", { type: "number" }), "root", () =>
+      ok({ r: "done" }, 0.25),
+    );
+    expect((await engine.run({ inputs: {} })).outputs?.read).toBe(0.25);
+  });
+
+  it("carries the outcome and the model the call was actually made with", async () => {
+    const outcome = await makeEngine(reading("children.call.operation.outcome"), "root", () => ok({ r: "done" })).engine.run({
+      inputs: {},
+    });
+    expect(outcome.outputs?.read).toBe("success");
+    const model = await makeEngine(reading("children.call.operation.model"), "root", () => ok({ r: "done" })).engine.run({
+      inputs: {},
+    });
+    expect(model.outputs?.read).toBe("reviewer");
+  });
+
+  it("exposes the conversation position the call ENDED at, as a bare `{ id }`", async () => {
+    const { engine } = makeEngine(reading("children.call.operation.outputs.session"), "root", () => ok({ r: "done" }));
+    const result = await engine.run({ inputs: {} });
+    // ONLY an id: the enumerable shape the events journal and `inputs_json` see. Everything else a
+    // resolved session carries is non-enumerable by construction.
+    expect(result.outputs?.read).toEqual({ id: "planning" });
+  });
+
+  it("records a FAILED call too, which is when its cost is most worth reading", async () => {
+    // A node written only on the happy path would be missing exactly here — and a failed call still
+    // costs money.
+    const files = reading("children.call.operation.cost", { type: "number" });
+    files["root"]!.outputs!["read"]!.optional = true;
+    // The guard reads the FAILED child's node. It can only fire if the node was recorded despite the
+    // call failing — and `terminate.success` keeps the transition from re-firing forever.
+    files["root"]!.transitions = [{ to: "terminate.success", when: "children.call.operation.cost === 0.05" }];
+    const { engine } = makeEngine(files, "root", () => ({
+      error: { classification: "permanent" as const, reason: "model exploded" },
+      metrics: { durationMs: 1, costUsd: 0.05, costSource: "unknown" as const },
+    }));
+    expect((await engine.run({ inputs: {} })).outcome).toBe("success");
+  });
+
+  it("is an empty object before the operation has run, not a throw", async () => {
+    // A guard evaluated before the call reads `undefined`, exactly as a never-entered child does.
+    const files = reading("children.call.operation.outcome");
+    files["root"]!.outputs!["read"]!.optional = true;
+    files["root"]!.transitions = [{ to: "terminate.success", when: "children.call.operation.outcome === 'success'" }];
+    expect((await makeEngine(files, "root", () => ok({ r: "done" })).engine.run({ inputs: {} })).outcome).toBe("success");
+  });
+});
+
+/**
  * SESSIONS.md §4/§13. One `sessionId` used to key two unrelated things — which transcript a call
  * joins, and which workspace / permission ledger it runs in. They have to separate once a session is
  * a POSITION, because a position moves on every call.

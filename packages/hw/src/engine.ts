@@ -88,6 +88,7 @@ import type {
 import { bindElement, bindInputs, embeddedOpsOf, higherOrderEdgesOf, higherOrderOf, isResolvedValue, isResolveError, resolveEmbedded, resolveInputs, resolveRef, type ResolutionScope, type Resolved } from "./resolve";
 import { isByteStream, materialize, MaterializeError } from "./materialize";
 import { RUN_RESOURCE_KEY, resolveSession, type SessionBinding } from "./session";
+import type { OperationNode } from "./operationNode";
 import { isFannedOut } from "./fanout";
 import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, type Persistence } from "./ports";
 
@@ -187,6 +188,8 @@ interface TerminationRecord {
   outcome: TerminationOutcome;
   outputs?: Record<string, ResolvedValue>;
   failure?: Failure;
+  /** What the state's operation reported, carried up so a parent can read it (SESSIONS.md §8). */
+  operation?: OperationNode;
 }
 
 interface ChildRecord {
@@ -194,6 +197,8 @@ interface ChildRecord {
   status: "running" | "done";
   outcome?: TerminationOutcome;
   outputs?: Record<string, ResolvedValue>;
+  /** The child's own operation node — what `children.<key>.operation.*` reads (SESSIONS.md §8). */
+  operation?: OperationNode;
   abort: AbortController;
   promise: Promise<void>;
 }
@@ -218,6 +223,13 @@ interface Instance {
    * a loop iteration, neither of which changes what the author DECLARED (SESSIONS.md §13).
    */
   resourceKey: string;
+  /**
+   * What this instance's own operation reported — `operation.*` in an expression (SESSIONS.md §8).
+   *
+   * Accumulated on the instance rather than derived from the events journal, because an expression
+   * cannot read a journal: that inaccessibility is the whole reason this namespace exists.
+   */
+  operation?: OperationNode;
   iteration: number;
   /** Whether the state's single operation has run (§7.1: a state has ONE operation). */
   opRun: boolean;
@@ -279,6 +291,43 @@ type Turn = { role: "user" | "assistant"; content: string };
  * This is what makes the bundle survive replay: a retry and a loop iteration are new instances, but
  * neither changes what the author DECLARED, so both land on the same key their predecessor did.
  */
+/**
+ * The engine's view of a finished call, for the `operation.*` namespace (SESSIONS.md §8).
+ *
+ * `usage` is passed through as the measurement record rather than re-shaped, so a metric an executor
+ * starts reporting reaches expressions without a second mapping to keep in sync. `cost` is lifted out
+ * of it because money is the field everyone asks for by name.
+ *
+ * `provider` and `attempts` are NOT here yet, deliberately. Neither reaches hw's seam today — they
+ * are things the executor knows and does not report — so declaring them would give the lint a field
+ * it could never resolve. They arrive with the executor-reported delta (SESSIONS.md §12), and
+ * {@link operationNodeSchema} gains them at the same time, so the type never promises more than the
+ * engine fills.
+ */
+function operationNodeOf(
+  outcome: TerminationOutcome,
+  metrics: WorkflowMetrics | undefined,
+  model: string | undefined,
+  session?: SessionBinding,
+): OperationNode {
+  return {
+    outcome,
+    ...(metrics !== undefined ? { usage: metrics as unknown as Record<string, JsonValue>, cost: metrics.costUsd ?? 0 } : {}),
+    ...(model !== undefined ? { model } : {}),
+    // The END position, not the start: you append AT a position but do not know where the call
+    // finished until the provider resolves, and "append after me" / "fork after me" both want the end.
+    ...(session !== undefined ? { outputs: { session: { id: session.id } } } : {}),
+  };
+}
+
+/** The model an operation resolved to — read off the config the call was actually made with. */
+function modelOfOp(op: Operation<InlineFamily>): string | undefined {
+  const config = (op as { config?: unknown }).config;
+  if (config === null || typeof config !== "object" || Array.isArray(config)) return undefined;
+  const model = (config as { model?: unknown }).model;
+  return typeof model === "string" ? model : undefined;
+}
+
 function resourceKeyFor(def: LoadedState, parent: Instance | undefined): string {
   // `scopeSession` rather than `environment.session`: the latter exists only on a state that declares
   // an operation, and declaring a session on a composite ROOT is the ordinary way to give a whole
@@ -422,7 +471,12 @@ export class WorkflowEngine {
     }
 
     try {
-      const record = await this.evaluationLoop(instance);
+      const loopRecord = await this.evaluationLoop(instance);
+      // Attached HERE, at the one place a record leaves this instance, rather than at each of the
+      // dozen `{ outcome: … }` returns inside the loop — every one of which would otherwise have to
+      // remember, and a forgotten one is a `children.<key>.operation` that is silently empty.
+      const record: TerminationRecord =
+        instance.operation !== undefined ? { ...loopRecord, operation: instance.operation } : loopRecord;
       this.emit({
         type: "instance.terminated",
         instanceId: instance.id,
@@ -678,6 +732,9 @@ export class WorkflowEngine {
       record.status = "done";
       record.outcome = term.outcome;
       record.outputs = term.outputs;
+      // The child's operation node, so `children.<key>.operation.*` reads what its call reported —
+      // including, for a prompt op, the conversation position it ended at (SESSIONS.md §8).
+      record.operation = term.operation;
       if ((term.outcome === "error" || term.outcome === "timeout") && instance.children.get(key) === record) {
         instance.unhandledFailures.add(key);
       }
@@ -782,14 +839,18 @@ export class WorkflowEngine {
     for (const key of Object.keys(instance.def.children ?? {})) {
       const rec = instance.children.get(key);
       if (!rec) children[key] = {};
-      else if (rec.status === "running") children[key] = { outputs: PENDING, outcome: PENDING };
-      else children[key] = { outputs: rec.outputs ?? {}, outcome: rec.outcome };
+      else if (rec.status === "running") children[key] = { outputs: PENDING, outcome: PENDING, operation: PENDING };
+      else children[key] = { outputs: rec.outputs ?? {}, outcome: rec.outcome, operation: rec.operation ?? {} };
     }
     const artifacts: Record<string, unknown> = {};
     for (const a of this.artifacts) artifacts[a.name] = a;
     return {
       inputs: instance.inputs,
       outputs: instance.outputs,
+      // The state's own call as a value (SESSIONS.md §8). `{}` before it has run, so a guard reading
+      // `operation.outcome` gets `undefined` rather than throwing — the same shape a never-entered
+      // child gets.
+      operation: instance.operation ?? {},
       children,
       // `run.cursor` is the child the cursor is ON: the one most recently ENTERED, not the one about
       // to be. Transitions are evaluated after an operation completes or a child terminates, so "we
@@ -1299,6 +1360,10 @@ export class WorkflowEngine {
       // true of a metrics record an impl BUILDS and not of one the dispatcher frames around it.
       this.childCost += metrics.costUsd ?? 0;
     }
+    // A function op has no conversation, so its node carries no `session` — which is the same fact
+    // `operationNodeSchema` states in the type, where `operation.outputs.session` on a `ui` gate is
+    // an authoring error rather than a runtime undefined.
+    instance.operation = operationNodeOf(isOk(outcome) ? "success" : "error", metrics, modelOfOp(op));
     if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
     if (!isOk(outcome)) return fail(outcome.error);
     // The op's declared output KIND decides how its value is read — a `blob` output IS the value
@@ -1383,6 +1448,15 @@ export class WorkflowEngine {
     }
     this.childLlmCalls += 1 + (outcome.metrics.childLlmCalls ?? 0);
     this.childCost += outcome.metrics.costUsd;
+    // Recorded whether the call SUCCEEDED or not, and before the checks below can return: a failed
+    // call is exactly when a guard most wants to read what it cost and where the conversation ended
+    // up, and a node written only on the happy path would be missing then.
+    instance.operation = operationNodeOf(
+      isOk(outcome) ? "success" : "error",
+      outcome.metrics,
+      modelOfOp(resolvedOp),
+      session,
+    );
     if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
 
     // A FAILED call contributes nothing to the transcript. It ran before this check and a failure

@@ -16,6 +16,9 @@ export * from "./merge";
 // the conversation and the resource bundle the one string used to conflate. Exported because a host
 // wiring its own session store resolves the same declaration.
 export * from "./session";
+// The `operation.*` expression namespace (SESSIONS.md §8) — a state's own call as an addressable
+// node, which is where engine metadata about it finally has somewhere to live.
+export * from "./operationNode";
 export * from "./ref";
 export * from "./reference";
 export * from "./shape";

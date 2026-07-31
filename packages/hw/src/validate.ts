@@ -26,6 +26,7 @@ import { parseExpression, referencesOf, type Expr } from "./expr";
 import { EXPRESSION_REFS, pathOfRef, referencePathsOf } from "./lowerExpr";
 import { embeddedOpsOf } from "./resolve";
 import { validateSessionDecl } from "./session";
+import { operationNodeSchema } from "./operationNode";
 import { ANY_SCHEMA, inferExpression, inferRef, isBooleanSchema, isUniversalSchema, type ExprScope } from "./inferExpr";
 import {
   GUARD_NAMESPACES,
@@ -750,14 +751,30 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle): ExprScope {
   for (const [key, child] of Object.entries(def.children ?? {})) {
     const childState = bundle.states[child.state];
     const outputs = childState ? (outputsObjectSchema(childState) ?? ANY_SCHEMA) : ANY_SCHEMA;
-    childrenProps[key] = { type: "object", properties: { outputs: outputs as JsonValue, outcome: outcomeSchema } } as JsonValue;
+    // A child's own operation node, typed by ITS operation's kind — so
+    // `children.plan.operation.outputs.session` is checked against what `plan` actually runs, and
+    // pointing it at a `ui` gate is a load-time error rather than a runtime undefined.
+    const childOperation = childState ? operationNodeSchema(childState.operation?.kind) : undefined;
+    childrenProps[key] = {
+      type: "object",
+      properties: {
+        outputs: outputs as JsonValue,
+        outcome: outcomeSchema,
+        ...(childOperation !== undefined ? { operation: childOperation as JsonValue } : {}),
+      },
+    } as JsonValue;
   }
+
+  // The state's OWN operation node (SESSIONS.md §8). Absent for a pure composite, so
+  // `operation.cost` there is an unresolved reference rather than an object of unknowns.
+  const operation = operationNodeSchema(def.operation?.kind);
 
   const sequenceKeys = def.sequence ?? [];
 
   return {
     inputs: objectOf(def.inputs),
     outputs: objectOf(def.outputs),
+    ...(operation !== undefined ? { operation } : {}),
     children: { type: "object", properties: childrenProps },
     // Session-owned resources: addressable, contents known only at run time.
     artifacts: { type: "object" },

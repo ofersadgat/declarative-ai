@@ -532,9 +532,14 @@ export interface WorkflowBundle {
  *  - REF vocabulary — the data namespaces authored bindings point into. They are reachable from
  *    `{ expr }` leaves too, since an expr leaf IS a producer over the same data.
  *  - GUARD-ONLY scalars — control-flow state (`run`, `limits`), never a reference binding.
+ *
+ * `operation` is the state's OWN call as an addressable node (SESSIONS.md §8) — its outcome, what it
+ * cost, which model served it, and for a prompt op the conversation position it ended at. It is a
+ * namespace rather than a child on purpose: a child would perturb the instance tree, which is what
+ * `run.cursor`, `run.position` and `sequence` are defined against.
  * The old `function.*` namespace is GONE: a function state's result is an ordinary state output,
  * so guards read `outputs.*` / `children.<key>.outputs.*` uniformly.
  */
-export const REF_NAMESPACES = ["inputs", "outputs", "children", "artifacts", "conversations"] as const;
+export const REF_NAMESPACES = ["inputs", "outputs", "operation", "children", "artifacts", "conversations"] as const;
 export const GUARD_NAMESPACES = ["run", "limits"] as const;
 export const CONTEXT_NAMESPACES = [...REF_NAMESPACES, ...GUARD_NAMESPACES] as const;
