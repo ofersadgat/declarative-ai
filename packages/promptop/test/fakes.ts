@@ -31,7 +31,15 @@ const FAKE_METRICS = { inputTokens: 10, outputTokens: 5, costUsd: 0.001, costSou
  *  patch the envelope. */
 export function okOutcome(over: Partial<LlmOutput> & { error?: Failure; metrics?: Partial<LlmMetrics> } = {}): LlmCallResult {
   const { error, metrics: metricsOver, ...payload } = over;
-  const value: LlmOutput = { value: { answer: "4" }, finishReason: "stop", ...payload };
+  // A real provider reports what it APPENDED, and the session layer mirrors exactly that — so the
+  // fake reports it too. A runner returning no `messages` is claiming the call added nothing to the
+  // conversation, which is a different scenario and worth having to spell out.
+  const value: LlmOutput = {
+    value: { answer: "4" },
+    finishReason: "stop",
+    messages: [{ role: "assistant", content: '{"answer":"4"}' }],
+    ...payload,
+  };
   const metrics: LlmMetrics = { ...FAKE_METRICS, ...metricsOver };
   return error ? { error, value, metrics } : { value, metrics };
 }

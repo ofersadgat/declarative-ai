@@ -21,6 +21,7 @@ import type {
   MetricsAlgebra,
   Operation,
   PromptOp,
+  ResolvedSession,
   ResolvedValue,
   Tool,
 } from "@declarative-ai/exec";
@@ -35,6 +36,7 @@ import {
   type LlmOutput,
   type LlmCallDefinition,
   type LlmCallEnvironment,
+  type ModelMessage,
   type ModelRouter,
   type ToolExecutor,
 } from "@declarative-ai/llm";
@@ -115,6 +117,20 @@ const CAPABILITIES: Capabilities = {
   memoizable: true,
   runtime: "edge-safe",
 };
+
+/**
+ * The turns a lowered call sends, as messages — its `messages` preamble, or its `prompt` read as the
+ * single user turn the lowering would have made of it.
+ *
+ * This is the request half of a session delta. The response half comes back on the output, because
+ * only the provider knows what it actually appended.
+ */
+function requestTurns(def: LlmCallDefinition): ModelMessage[] {
+  if (def.messages !== undefined) return [...def.messages];
+  const prompt = def.prompt;
+  if (prompt === undefined) return [];
+  return typeof prompt === "string" ? [{ role: "user", content: prompt }] : [...prompt];
+}
 
 /** Adapt core {@link Tool}s (`run(input, ctx)`) into llm {@link ToolExecutor}s (`(input, options)`),
  *  closing over the call ctx. The tool's `run` IS its `execute`; the SDK's per-call `options` are
@@ -226,6 +242,42 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
       );
     }
 
+    /**
+     * THE SESSION, resolved to a position and reserved by the wrapper (SESSIONS.md §6).
+     *
+     * This is the executor's half of the split: the wrapper decided WHETHER this appends or forks;
+     * shaping the request for that decision is the executor's business, and it is deliberately not
+     * something a rewritten op config could express.
+     *
+     * Replay is the strategy here — the Messages API and everything reached through the AI SDK are
+     * stateless, so history goes on the wire every call and a fork costs nothing but a different key
+     * on the way out. `messages()` is the lazy accessor; a native-fork adapter would read zero
+     * messages and pass a handle instead.
+     *
+     * The handle is threaded only on an APPEND. A fork must never inherit its parent's handle unless
+     * the adapter declares native fork, or two branches write into one remote session.
+     */
+    const session = ctx.session as ResolvedSession<ModelMessage> | undefined;
+    /** The request turns this call ADDS beyond the stream it started from — its half of the delta. */
+    let sent: ModelMessage[] = [];
+    if (session !== undefined) {
+      // Resolved from `id` through the store when the accessor is missing: non-enumerable properties
+      // do not survive a spread or a structured clone, and `{ ...session, fork: true }` is a thing
+      // people write. Losing the accessor must cost a store read, never correctness.
+      const prior =
+        typeof session.messages === "function"
+          ? await session.messages()
+          : (((await ctx.sessions?.read?.(session.id)) ?? []) as ModelMessage[]);
+      // Whatever the lowering produced IS the request beyond the stream: the wrapper no longer
+      // injects history into the config, so nothing here is already in `prior`.
+      sent = requestTurns(definition);
+      definition = { ...definition, messages: [...prior, ...sent] };
+      delete (definition as { prompt?: unknown }).prompt; // the SDK rejects both
+      if (session.mode === "append" && session.providerSessionId !== undefined) {
+        definition = { ...definition, providerSessionId: session.providerSessionId };
+      }
+    }
+
     const runner = this.options.runner;
     const router = this.resolveRouter(ctx);
     // Only the DEFAULT runner needs a provider: a custom runner (a test fake, a recorded transport)
@@ -245,8 +297,26 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
     try {
       call = await (runner ?? defaultRunner)(definition, env, ctx.timeoutMs);
     } catch (err) {
-      // The runner contract is never-throw; a throw here is a wiring error. Normalize it.
+      // A throw means we do not know what the provider saw, so nothing is reported: an invented delta
+      // is worse than an absent one, because the mirror would then disagree with the remote silently.
+      // The wrapper still releases its reservation.
       return lostMetrics(err instanceof Error ? err.message : String(err));
+    }
+
+    // REPORT THE DELTA — before any of the return paths below, and whether the call succeeded or not.
+    // A call that appended turns and then failed still appended them remotely; not recording those
+    // entries means the next append-by-handle meets a head we do not mirror, which is divergence on
+    // the very next call (SESSIONS.md §7).
+    //
+    // Repair turns are in here too, because the provider genuinely saw them — that is the same rule,
+    // not a second one. A retry, by contrast, resolves to an already-appended position and forks;
+    // neither behaviour is a policy switch.
+    if (session !== undefined) {
+      const appended = call.value?.messages ?? [];
+      session.report({
+        messages: [...sent, ...appended].map((message) => ({ message })),
+        ...(call.value?.providerSessionId !== undefined ? { providerSessionId: call.value.providerSessionId } : {}),
+      });
     }
 
     // THE PROJECTION (DESIGN §3.1). An `LlmOutput` — output value, thinking, tool calls, finish

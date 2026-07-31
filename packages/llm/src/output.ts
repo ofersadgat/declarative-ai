@@ -12,6 +12,7 @@
  * record — `CallOutcome` had its own `CallFailure` (field-for-field identical to `Failure`) and its own
  * metrics, so a provider failure had to be re-classified on its way anywhere useful.
  */
+import type { ModelMessage } from "ai";
 import type { Failure, JsonValue, ResultWithMetrics } from "@declarative-ai/json";
 import type { GeneratedFile } from "./files";
 
@@ -93,6 +94,14 @@ export interface LlmMetrics extends TokenCounts {
   /** Provider's exact usage object (ground truth) — kept so `costUsd` is always recomputable. Open by
    *  nature but JSON by construction (§2.2). */
   rawUsage?: JsonValue;
+  /**
+   * The session position this call ENDED at, when a session layer was in play. Opaque.
+   *
+   * Restated here rather than inherited, exactly as `durationMs` and `startMs` are: llm does not
+   * import exec, and these two measurement records are kept structurally compatible by hand so that
+   * neither package has to know the other exists.
+   */
+  sessionRef?: string;
 }
 
 /** How much a cost figure can be trusted: the provider's own charge beats our price table, which beats
@@ -157,6 +166,19 @@ export interface LlmOutput<T = JsonValue> {
    *  session field: it is something the call PRODUCED. The execution envelope used to carry a
    *  `session.id` that was just the caller's own logical key echoed back, read by nobody. */
   providerSessionId?: string;
+  /**
+   * The messages this call APPENDED to the conversation, verbatim — assistant turns, tool calls and
+   * tool results, in the order the provider produced them.
+   *
+   * The provider's own log rather than a reconstruction. `value` / `thinking` / `toolCalls` above are
+   * a PROJECTION for a consumer that wants one field; this is what has to go back on the wire next
+   * turn, and a lossier round-trip breaks it — an Anthropic reasoning part carries a signature that
+   * must come back byte-identical, and `providerOptions` is where every provider keeps that sort of
+   * thing.
+   *
+   * Absent when the call produced nothing, e.g. an error before the model responded.
+   */
+  messages?: ModelMessage[];
 }
 
 /**

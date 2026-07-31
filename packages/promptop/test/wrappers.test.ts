@@ -1,10 +1,21 @@
 import { describe, expect, it } from "vitest";
-import type { BudgetMeter, BudgetMetrics, BudgetReservation, CallEstimate, Capabilities, ExecMetrics, ExecServices, Executor, MetricsAlgebra, Operation, InlineFamily, RateLimiter, SessionState } from "@declarative-ai/exec";
+import type { BudgetMeter, BudgetMetrics, BudgetReservation, CallEstimate, Capabilities, ExecMetrics, ExecServices, Executor, MapSessionStore, MetricsAlgebra, Operation, InlineFamily, RateLimiter, SessionStore } from "@declarative-ai/exec";
 import { EXEC_METRICS_ALGEBRA, MapMemoCache, RUNTIME_CAPABILITIES, compose, withMemoize, wrapHandle } from "@declarative-ai/exec";
 import type { ModelMessage } from "ai";
 import { createPromptExecutor } from "../src/executor";
 import { withBudget, withRateLimit, withSession } from "../src/wrappers";
 import { fakeRunner, okOutcome, promptOp, transcripts, errorOf } from "./fakes";
+
+/**
+ * Put a stream in a known state and return the ref for its HEAD.
+ *
+ * Streams are append-only, so seeding one means appending to it — and the caller needs the resulting
+ * position back, because continuing from a stale one is a fork, not a continuation.
+ */
+async function seed(store: SessionStore, id: string, ...messages: ModelMessage[]): Promise<string> {
+  const lease = await store.begin({ ref: `${id}@0` });
+  return await lease.release({ messages: messages.map((message) => ({ message: message as never })) });
+}
 
 /** An inner executor whose STATIC record says `memoizable`, but whose PER-OP record says the opposite —
  *  exactly the shape `OperationExecutor` has (static `FUNCTION_CAPABILITIES`, per-op the registry entry).
@@ -106,11 +117,12 @@ describe("withRateLimit", () => {
   });
 
   it("counts the FULL message set that will be sent, not just system + user", async () => {
-    // `withSession` threads the transcript in as config-layer `messages`; pricing `op.system + op.user`
-    // made a 20k-char conversation declare ~7 input tokens, so the limiter under-declared by three
-    // orders of magnitude on any multi-turn call.
-    const { store: sessions, seam } = transcripts();
-    await sessions.put("chat-1", { messages: [{ role: "user", content: "x".repeat(8000) }] });
+    // Pricing `op.system + op.user` made a 20k-char conversation declare ~7 input tokens, so the
+    // limiter under-declared by three orders of magnitude on any multi-turn call. The transcript used
+    // to be visible because `withSession` inlined it into the op's config; it no longer does, so this
+    // wrapper reads the resolved session directly — otherwise the same bug comes straight back.
+    const { seam } = transcripts();
+    const head = await seed(seam, "chat-1", { role: "user", content: "x".repeat(8000) });
     const est: CallEstimate[] = [];
     const limiter: RateLimiter = {
       schedule: (e, run) => {
@@ -121,7 +133,7 @@ describe("withRateLimit", () => {
     };
     const { runner, calls } = fakeRunner([okOutcome()]);
     const stack = withSession({ sessions: seam }, withRateLimit({ limiter }, createPromptExecutor({ runner })));
-    await stack.start(promptOp({}, { sessionId: "chat-1" }), {}).result;
+    await stack.start(promptOp({}, { sessionId: head }), {}).result;
     // The transcript really is on the wire (chars/4 ⇒ ≳2000 tokens), and the estimate says so.
     expect(JSON.stringify(calls[0]!.def.messages).length).toBeGreaterThan(8000);
     expect(est[0]!.inputTokens).toBeGreaterThan(2000);
@@ -244,11 +256,11 @@ describe("withBudget — per-call reserve → settle", () => {
 
   it("reserves against the FULL transcript, not just system + user", async () => {
     const { meter, reserved } = meterOf([1]);
-    const { store: sessions, seam } = transcripts();
-    await sessions.put("chat-1", { messages: [{ role: "user", content: "y".repeat(5000) }] });
+    const { seam } = transcripts();
+    const head = await seed(seam, "chat-1", { role: "user", content: "y".repeat(5000) });
     const { runner } = fakeRunner([okOutcome()]);
     const stack = withSession({ sessions: seam }, withBudget({ meter, pricing }, createPromptExecutor({ runner })));
-    await stack.start(promptOp({}, { sessionId: "chat-1" }), {}).result;
+    await stack.start(promptOp({}, { sessionId: head }), {}).result;
     // `pricing` charges (input + output)/1000. Blind to the transcript the reserve was priced on ~107
     // tokens (~$0.107); the 5000 chars actually sent are ~1250 input tokens, so a correct reserve is >$1.
     expect(reserved[0]!).toBeGreaterThan(1);
@@ -262,71 +274,161 @@ describe("withBudget — per-call reserve → settle", () => {
   });
 });
 
-describe("withSession — client-managed conversation", () => {
-  it("no session id → passthrough (op unchanged, store untouched)", async () => {
-    const { store: sessions, seam } = transcripts();
+/**
+ * `withSession` — the wrapper keeps the POLICY, the executor owns the MECHANISM (SESSIONS.md §6).
+ *
+ * What these pin, in the order the model depends on them: the reservation is taken before the call
+ * and released whatever happens; the transcript is what the EXECUTOR reported rather than something
+ * the wrapper synthesized; a failed call still folds; and the outcome carries the EFFECTIVE position,
+ * which is the only channel a caller has for learning that its call was forked.
+ */
+describe("withSession — append-only conversation", () => {
+  /** Everything a session stream ends up holding, flattened for assertion. */
+  const contentsOf = (store: MapSessionStore<ModelMessage>, ref: string): ModelMessage[] => store.read(`${ref}@99`);
+
+  it("no session named anywhere → passthrough, store untouched", async () => {
+    const { store, seam } = transcripts();
     const { runner, calls } = fakeRunner([okOutcome()]);
     await withSession({ sessions: seam }, createPromptExecutor({ runner })).start(promptOp(), {}).result;
     expect(calls[0]!.def.prompt).toBe("What is 2+2?");
-    expect(await sessions.get("chat-1")).toBeUndefined();
+    expect(contentsOf(store, "s_chat-1")).toEqual([]);
   });
 
-  it("a fresh session seeds the transcript with the turn + the assistant reply", async () => {
-    const { store: sessions, seam } = transcripts();
+  it("folds the turn the call SENT plus what the provider said it appended", async () => {
+    const { store, seam } = transcripts();
     const { runner } = fakeRunner([okOutcome()]);
-    // No `session` field on the result: it used to echo back the caller's own logical key, which
-    // nothing read. What the wrapper actually DOES is write the transcript, so that is what is asserted.
-    await withSession({ sessions: seam }, createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1" }), {}).result;
-    expect(await sessions.get("chat-1")).toEqual({
-      messages: [
-        { role: "user", content: "What is 2+2?" },
-        { role: "assistant", content: '{"answer":"4"}' },
-      ],
-    });
+    await withSession({ sessions: seam }, createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
+    expect(contentsOf(store, "chat-1")).toEqual([
+      { role: "user", content: "What is 2+2?" },
+      { role: "assistant", content: '{"answer":"4"}' },
+    ]);
   });
 
-  it("resuming prepends the stored transcript, and STRIPS the session fields the core would refuse", async () => {
-    const { store: sessions, seam } = transcripts();
-    await sessions.put("chat-1", { messages: [{ role: "user", content: "earlier" }] });
-    const { runner, calls } = fakeRunner([okOutcome()]);
-    await withSession({ sessions: seam }, createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1" }), {}).result;
-    expect(calls[0]!.def.messages).toEqual([
-      { role: "user", content: "earlier" },
+  it("mirrors the provider's log VERBATIM — tool calls, results and provider options survive", async () => {
+    // The old wrapper synthesized one stringified assistant turn from the output value, which threw
+    // away everything in between. A reasoning part's signature has to come back byte-identical.
+    const { store, seam } = transcripts();
+    const appended: ModelMessage[] = [
+      {
+        role: "assistant",
+        content: [
+          { type: "reasoning", text: "think", providerOptions: { anthropic: { signature: "sig-abc" } } },
+          { type: "tool-call", toolCallId: "t1", toolName: "lookup", input: { q: "2+2" } },
+        ],
+      },
+      { role: "tool", content: [{ type: "tool-result", toolCallId: "t1", toolName: "lookup", output: { type: "json", value: 4 } }] },
+      { role: "assistant", content: [{ type: "text", text: '{"answer":"4"}' }] },
+    ];
+    const { runner } = fakeRunner([okOutcome({ messages: appended })]);
+    await withSession({ sessions: seam }, createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
+    expect(contentsOf(store, "chat-1").slice(1)).toEqual(appended);
+  });
+
+  it("replays the stored stream, and STRIPS the session fields the core would refuse", async () => {
+    const { store, seam } = transcripts();
+    const { runner, calls } = fakeRunner([okOutcome(), okOutcome()]);
+    const stack = withSession({ sessions: seam }, createPromptExecutor({ runner }));
+    await stack.start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
+    await stack.start(promptOp({}, { sessionId: "chat-1@2" }), {}).result;
+    // The second call carried the first exchange on the wire — replay, because the Messages API and
+    // everything through the AI SDK are stateless.
+    expect(calls[1]!.def.messages).toEqual([
+      { role: "user", content: "What is 2+2?" },
+      { role: "assistant", content: '{"answer":"4"}' },
       { role: "user", content: "What is 2+2?" },
     ]);
-    expect(calls[0]!.def.sessionId).toBeUndefined();
+    expect(calls[1]!.def.sessionId).toBeUndefined();
+    expect(contentsOf(store, "chat-1")).toHaveLength(4);
   });
 
-  it("the fold PRESERVES other stored SessionState fields", async () => {
-    const { store: sessions, seam } = transcripts();
-    const prior: SessionState<ModelMessage> = { messages: [], providerSessionId: "keep-me" };
-    await sessions.put("chat-1", prior);
+  it("FOLDS ON FAILURE — turns the provider appended before it failed still exist remotely", async () => {
+    // Not recording them means the next append-by-handle meets a head we do not mirror, which is
+    // divergence on the very next call.
+    const { store, seam } = transcripts();
+    const { runner } = fakeRunner([okOutcome({ error: { classification: "permanent", reason: "model exploded" } })]);
+    const out = await withSession({ sessions: seam }, createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1@0" }), {})
+      .result;
+    expect(errorOf(out)?.reason).toMatch(/model exploded/);
+    expect(contentsOf(store, "chat-1")).toHaveLength(2);
+  });
+
+  it("reports the EFFECTIVE position on the outcome, not the key it was handed", async () => {
+    const { seam } = transcripts();
     const { runner } = fakeRunner([okOutcome()]);
-    await withSession({ sessions: seam }, createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1" }), {}).result;
-    expect((await sessions.get("chat-1"))!.providerSessionId).toBe("keep-me");
+    const out = await withSession({ sessions: seam }, createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1@0" }), {})
+      .result;
+    // Two entries went in, so the call ENDED at position 2 — "append after me" needs that, and the
+    // caller has no other way to learn it.
+    expect(out.metrics.sessionRef).toBe("chat-1@2");
   });
 
-  it("REFUSES providerSessionId — provider-side resume is not supported yet", async () => {
-    const { store: sessions, seam } = transcripts();
+  it("FORKS when the position is no longer the head, leaving the original untouched", async () => {
+    const { store, seam } = transcripts();
+    const { runner } = fakeRunner([okOutcome(), okOutcome()]);
+    const stack = withSession({ sessions: seam }, createPromptExecutor({ runner }));
+    await stack.start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
+    // The same position again: it has since been appended to, so forking is the only answer that
+    // means anything — and nothing had to ask for it.
+    const forked = await stack.start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
+    expect(forked.metrics.sessionRef).not.toBe("chat-1@2");
+    expect(contentsOf(store, "chat-1")).toHaveLength(2);
+  });
+
+  it("`fork: true` branches even when the position IS still the head", async () => {
+    // Deliberate divergence — fan variants out of one point — cannot be inferred from stream state.
+    const { store, seam } = transcripts();
+    const { runner } = fakeRunner([okOutcome(), okOutcome()]);
+    const stack = withSession({ sessions: seam }, createPromptExecutor({ runner }));
+    await stack.start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
+    const forked = await stack.start(promptOp({}, { sessionId: "chat-1@2", fork: true }), {}).result;
+    expect(forked.metrics.sessionRef).not.toMatch(/^chat-1@/);
+    expect(contentsOf(store, "chat-1")).toHaveLength(2);
+  });
+
+  it("hands the executor a session whose ONLY enumerable property is `id`", async () => {
+    // Everything else is non-enumerable, so the journal and any serialized inputs/outputs see `{ id }`.
+    const { seam } = transcripts();
+    let seen: ExecServices["session"];
     const { runner } = fakeRunner([okOutcome()]);
-    const out = await withSession({ sessions: seam }, createPromptExecutor({ runner })).start(promptOp({}, { providerSessionId: "p1" }), {}).result;
-    expect(errorOf(out)?.reason).toMatch(/provider-side session resume is not supported/);
+    const spy: Executor<ExecServices, ExecMetrics> = {
+      capabilities: { ...RUNTIME_CAPABILITIES },
+      metrics: EXEC_METRICS_ALGEBRA,
+      start: (op, ctx) => {
+        seen = ctx.session;
+        return createPromptExecutor({ runner }).start(op, ctx) as never;
+      },
+    };
+    await withSession({ sessions: seam }, spy).start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
+    expect(Object.keys(seen!)).toEqual(["id"]);
+    expect(JSON.parse(JSON.stringify(seen))).toEqual({ id: "chat-1@0" });
+    expect(seen!.mode).toBe("append");
   });
 
-  it("REFUSES a sessionId with no SessionStore available — the seam is REQUIRED at start when unconstructed", async () => {
+  it("ACCEPTS providerSessionId — a stateful adapter can be told to resume", async () => {
+    // It used to be refused outright, because the wrapper rewrote the config with inline messages and
+    // there was no way to say "resume this handle" instead of "here is the transcript again".
+    const { seam } = transcripts();
+    const { runner } = fakeRunner([okOutcome()]);
+    const out = await withSession({ sessions: seam }, createPromptExecutor({ runner })).start(promptOp({}, { providerSessionId: "p1" }), {})
+      .result;
+    expect(errorOf(out)).toBeUndefined();
+  });
+
+  it("REFUSES a session with no SessionStore available — the seam is REQUIRED at start when unconstructed", async () => {
     const { runner } = fakeRunner([okOutcome()]);
     // Composing without a store makes `sessions` part of what `.start` demands; passing `undefined`
     // is the only way to reach the runtime refusal, which is itself the point of the typed requirement.
-    const out = await withSession(createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1" }), { sessions: undefined as never })
-      .result;
+    const out = await withSession(createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1@0" }), {
+      sessions: undefined as never,
+    }).result;
     expect(errorOf(out)?.reason).toMatch(/no SessionStore is available/);
   });
 
   it("falls back to the run-scoped ctx.sessions store when none was constructed", async () => {
-    const { store: sessions, seam } = transcripts();
+    const { store, seam } = transcripts();
     const { runner } = fakeRunner([okOutcome()]);
-    await withSession(createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1" }), { sessions: seam }).result;
-    expect((await sessions.get("chat-1"))!.messages).toHaveLength(2);
+    await withSession(createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1@0" }), { sessions: seam }).result;
+    expect(contentsOf(store, "chat-1")).toHaveLength(2);
   });
 
   it("declares sessionResume capability", () => {

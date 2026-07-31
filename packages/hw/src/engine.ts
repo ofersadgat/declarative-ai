@@ -1737,22 +1737,39 @@ export class WorkflowEngine {
     return this.config.services?.sessions ?? this.sessionStore;
   }
 
-  /** Read `sessionId`'s transcript from the session store (`SessionState.messages`), mirroring it for
-   *  synchronous `{ conversation }` binding resolution (§7.5 — a transcript is addressable DATA). */
-  private async readTranscript(sessionId: string): Promise<Turn[]> {
-    const state = await this.sessions().get(sessionId);
-    const turns = Array.isArray(state?.messages) ? (state.messages as Turn[]) : [];
-    this.transcripts.set(sessionId, turns);
+  /**
+   * Read a session's transcript, mirroring it for synchronous `{ conversation }` binding resolution
+   * (§7.5 — a transcript is addressable DATA).
+   *
+   * `read` is optional on the store because not every store can serve one; an absent reader is an
+   * empty transcript, which is what a session nobody has written to looks like anyway.
+   */
+  private async readTranscript(sessionRef: string): Promise<Turn[]> {
+    const messages = (await this.sessions().read?.(sessionRef)) ?? [];
+    const turns = messages as Turn[];
+    this.transcripts.set(sessionRef, turns);
     return turns;
   }
 
-  /** Append turns to `sessionId`'s transcript in the session store, preserving any other `SessionState`. */
-  private async appendTranscript(sessionId: string, turns: Turn[]): Promise<void> {
-    const store = this.sessions();
-    const state = (await store.get(sessionId)) ?? {};
-    const messages = [...(Array.isArray(state.messages) ? state.messages : []), ...turns];
-    await store.put(sessionId, { ...state, messages });
-    this.transcripts.set(sessionId, messages as Turn[]);
+  /**
+   * Append the built-in `conversation.mode` turns to a session.
+   *
+   * Goes through the same RESERVE-then-release protocol every other writer uses (SESSIONS.md §5),
+   * rather than a read-modify-write: two writers that both read the head and then both write is
+   * exactly the race the lease exists to close, and the engine is not exempt from it.
+   *
+   * NB this is the engine's OWN transcript mechanism, distinct from what a composed session layer
+   * folds from an executor-reported delta. They share one store on purpose — one transcript home —
+   * but a stack running both writes both, which is a de-duplication the replay strategy owns.
+   */
+  private async appendTranscript(sessionRef: string, turns: Turn[]): Promise<void> {
+    const lease = await this.sessions().begin({ ref: sessionRef, seed: sessionRef });
+    try {
+      await lease.release({ messages: turns.map((message) => ({ message: message as unknown as JsonValue })) });
+    } finally {
+      const messages = (await this.sessions().read?.(lease.session.id)) ?? [];
+      this.transcripts.set(sessionRef, messages as Turn[]);
+    }
   }
 
   private conversationPreamble(mode: ConversationMode, transcript: Turn[], artifactNames?: string[]): string {

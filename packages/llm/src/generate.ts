@@ -213,6 +213,15 @@ export async function generateStructured<T = JsonValue>(
   const toolResults: ToolResult[] = [];
   // Files the model generated (image/audio/…) — a parallel output channel.
   const producedFiles: GeneratedFile[] = [];
+  /**
+   * The messages the call APPENDED, as the SDK reports them — what a caller mirroring the
+   * conversation has to store and send back next turn (SESSIONS.md §7).
+   *
+   * Read off `result.response` rather than rebuilt from the projections above, because a rebuild is
+   * exactly the lossy round-trip that breaks replay: `providerOptions` rides at both message and part
+   * level, and an Anthropic reasoning part's signature must come back byte-identical.
+   */
+  let responseMessages: ModelMessage[] = [];
   let salvage: TokenCounts | undefined;
   // Provider's exact usage object (ground truth). NB the SDK's cross-step aggregate
   // (`finish.totalUsage`) DROPS `raw`; it survives only on the per-step `finish-step.usage`
@@ -284,6 +293,8 @@ export async function generateStructured<T = JsonValue>(
       toolResults: toolResults.length > 0 ? toolResults : undefined,
       files: producedFiles.length > 0 ? producedFiles : undefined,
       finishReason: args.finishReason,
+      // What the call APPENDED, verbatim, for a caller mirroring the conversation (SESSIONS.md §7).
+      ...(responseMessages.length > 0 ? { messages: responseMessages } : {}),
     };
     const metrics = metricsOf(args.tokens);
     if (args.failure) {
@@ -557,6 +568,15 @@ export async function generateStructured<T = JsonValue>(
     finishReason = await result.finishReason;
   } catch {
     // a remapped/unavailable finish reason is non-fatal; the parse below is the gate.
+  }
+
+  // The conversation delta. Swallowed on rejection for the same reason as `finishReason` above: an
+  // errored call rejects every lazy promise on the result, and a caller with no transcript to mirror
+  // must not be handed a failure about one. An absent delta is honest — an invented one is not.
+  try {
+    responseMessages = (await result.response).messages ?? [];
+  } catch {
+    responseMessages = [];
   }
 
   // Text output (no schema, §3.14): the accumulated raw text IS the value. A "length" finish just

@@ -595,7 +595,7 @@ describe("conversation modes (SPEC §4.7)", () => {
     );
     const result = await engine.run({ inputs: { issue: "the issue" } });
     expect(result.outcome).toBe("error");
-    expect((await store.get("planning"))?.messages ?? []).toEqual([]);
+    expect(store.read("planning@0")).toEqual([]);
   });
 
   it("records the transcript into the shared session store (unified with the withSession path)", async () => {
@@ -603,7 +603,7 @@ describe("conversation modes (SPEC §4.7)", () => {
     const { engine } = makeEngine(specPlanningFiles(), PLAN_ID, planningScript(), { extra: { services: { sessions: store } } });
     await engine.run({ inputs: { issue: "the issue" } });
     // The built-in transcript lives in the SAME store a runtime's withSession reads — one source of truth.
-    const messages = (await store.get("planning"))?.messages as Array<{ role: string; content: string }> | undefined;
+    const messages = store.read("planning@99") as unknown as Array<{ role: string; content: string }>;
     expect(messages?.length).toBeGreaterThan(0);
     expect(messages!.some((m) => m.role === "assistant")).toBe(true);
     expect(messages!.some((m) => m.role === "user" && m.content.includes("Extract goals"))).toBe(true);

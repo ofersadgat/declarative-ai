@@ -30,10 +30,12 @@ import type {
   ResolvedValue,
   PromptOp,
   RateLimiter,
+  ResolvedSession,
+  SessionDelta,
   SessionStore,
   CallEstimate,
 } from "@declarative-ai/exec";
-import { canceledFailure, curryOrApply, forwardCapabilitiesFor, isExecutor, isOk, wrapHandle } from "@declarative-ai/exec";
+import { canceledFailure, curryOrApply, forwardCapabilitiesFor, isExecutor, isOk, resolveSessionRef, wrapHandle } from "@declarative-ai/exec";
 import {
   DEFAULT_HOLD_OUTPUT_MULTIPLIER,
   MIN_USEFUL_OUTPUT_TOKENS,
@@ -58,6 +60,50 @@ type BudgetReadable = ExecMetrics & BudgetMetrics & { outputTokens?: number };
 
 /** The ctx seam `withSession` consumes. */
 type SessionSeams = { sessions: SessionStore };
+
+/** Construction-time knobs, distinct from the ctx seam above. */
+interface SessionOptions {
+  /**
+   * A STABLE discriminator for any stream a call mints, derived from the op.
+   *
+   * Stable rather than random because lineage names change between runs otherwise, and observability
+   * is the reason durable sessions exist. Absent ⇒ the store picks, which is fine for an in-memory
+   * one and not for a durable one.
+   */
+  seedFor?: (op: PromptOp<InlineFamily>) => string;
+  /** Which adapter is about to serve the call, so the store hands back THAT provider's handle. The
+   *  same stream replayed against two providers has two unrelated handles and both are worth keeping. */
+  provider?: string;
+}
+
+/**
+ * The text a resolved session will put on the wire, for the two PRICING wrappers.
+ *
+ * They price the call the core will actually make, and the transcript stopped being visible in the
+ * op's config the moment `withSession` stopped inlining it there. Without this a 20k-char conversation
+ * declares ~7 input tokens again — budgets under-reserve and the limiter under-declares by orders of
+ * magnitude on any multi-turn call, which is the exact regression the inlining was covering up.
+ *
+ * It materializes, and for a replay strategy that costs nothing extra: the executor is about to
+ * materialize the same messages. For a native-fork adapter it is a read that the call itself would
+ * skip — and pricing a branch by the history the provider will process is still the right answer.
+ */
+async function sessionText(ctx: ExecServices): Promise<string> {
+  const session = ctx.session as ResolvedSession<ModelMessage> | undefined;
+  if (session === undefined || typeof session.messages !== "function") return "";
+  try {
+    return promptText({ messages: await session.messages() } as never);
+  } catch {
+    // Pricing must never be the thing that fails a call. An unreadable transcript prices as empty,
+    // which under-reserves — the same failure mode as before, but no worse, and it does not throw.
+    return "";
+  }
+}
+
+/** Record the EFFECTIVE session position on the outcome — see {@link ExecMetrics.sessionRef}. */
+function withSessionOutcome<M extends ExecMetrics>(result: ExecResult<ResolvedValue, M>, sessionRef: string): ExecResult<ResolvedValue, M> {
+  return { ...result, metrics: { ...result.metrics, sessionRef } };
+}
 
 /** A prompt op's `config` slot read as a plain record — the `LlmConfiguration` surface. */
 function configOf(op: PromptOp<InlineFamily>): Record<string, JsonValue> {
@@ -181,6 +227,10 @@ export function withRateLimit<R = ExecServices, M extends ExecMetrics = ExecMetr
           est = { ...estimateCallTokens(priced.text, undefined, priced.maxOutputTokens), modelId: priced.model };
           estimateCache.set(op, est);
         }
+        // Added OUTSIDE the cache: the op is the same object across repair attempts and retries, but
+        // the session it runs against has moved on, so a cached transcript size would be stale.
+        const prior = estimateInputTokens(await sessionText(ctx));
+        if (prior > 0) est = { ...est, inputTokens: est.inputTokens + prior };
         const modelId = est.modelId;
         let ran = false;
         const result = await limiter.schedule(est, () => {
@@ -313,7 +363,9 @@ export function withBudget<R = ExecServices, M extends BudgetReadable = BudgetRe
       const declaredMax = priced.maxOutputTokens;
       const stats = config?.stats;
       return wrapHandle<BudgetReadable>(async (ctl): Promise<ExecResult<ResolvedValue, BudgetReadable>> => {
-        const inputTokens = estimateInputTokens(priced.text);
+        // The transcript counts. It is no longer inlined into the op's config, so a reserve priced on
+        // `priced.text` alone would be blind to every prior turn the call is about to resend.
+        const inputTokens = estimateInputTokens(priced.text) + estimateInputTokens(await sessionText(ctx));
         const estOut = estimateOutputTokens(model, inputTokens, declaredMax, stats, headroom);
         let hold = await meter.reserve(estCost(model, inputTokens, estOut));
         let sentOp: Operation<InlineFamily> = op;
@@ -359,44 +411,56 @@ export function withBudget<R = ExecServices, M extends BudgetReadable = BudgetRe
 // --- Sessions ------------------------------------------------------------------
 
 /**
- * Fold a successful result into an assistant turn for the transcript.
+ * Sessions: RESERVE a position, run the call with the resolved session on the services bundle, fold
+ * what the executor says it appended, release.
  *
- * Reads the op's OUTPUT VALUE. It used to prefer the model's raw text, but that stops at the prompt
- * executor — and for a text-output op the output value IS that text, so the two agree wherever it
- * mattered.
- */
-function foldResultToAssistant(result: ExecResult<ResolvedValue, ExecMetrics>): ModelMessage[] {
-  if (!isOk(result) || result.value === undefined) return [];
-  const text = typeof result.value === "string" ? result.value : JSON.stringify(result.value);
-  return text.length > 0 ? [{ role: "assistant", content: text }] : [];
-}
-
-/**
- * Client-managed conversations: resolve the op's LOGICAL `sessionId` against the injected
- * {@link SessionStore}, PREPEND the stored transcript to this call's turn, run the inner call, then
- * FOLD the outcome back into the transcript (only on success — other stored fields are preserved,
- * never clobbered). The session fields are CONSUMED (stripped from the op sent inward — the bare core
- * refuses leftovers); the sent op carries the full transcript as config-layer `messages`, so an inner
- * memoize keys on the real content, and the outcome carries `session.id` (the logical id).
+ * ## What changed, and why each half of it is load-bearing
  *
- * LOUD failures instead of silent degradation: a `sessionId` with NO store available is an error, and
- * `providerSessionId` is refused entirely — no current executor can thread a provider-side handle, and
- * resuming "by handle" through the transcript store would silently do the wrong thing. Sits OUTSIDE
- * `withMemoize` (which refuses to wrap it).
+ * **The wrapper no longer rewrites the op's config.** It used to do `withConfig(op, { messages })`,
+ * which hardcoded replay — that is precisely why `providerSessionId` had to be refused outright:
+ * there was no way for a stateful adapter to be told "resume this handle" rather than "here is the
+ * whole transcript again". The resolved session now rides on `ExecServices`, and the executor shapes
+ * its own request. The wrapper keeps the POLICY (resolve, reserve, decide, fold, release); the
+ * executor owns the MECHANISM (build the request, perform the fork, report what it appended).
+ *
+ * **The wrapper no longer synthesizes the transcript.** It only ever saw `op.user` and a final result
+ * value, so it wrote one user turn and one stringified assistant turn and threw away every tool call,
+ * tool result and reasoning part in between. The executor reports the real delta instead.
+ *
+ * **The fold runs on failure too.** If the provider appended turns and the call then failed, those
+ * entries exist remotely. Not recording them means the next append-by-handle meets a remote head we
+ * do not mirror — which is divergence on the very next call.
+ *
+ * **The outcome carries the EFFECTIVE id.** A store that had to fork reports a different id than the
+ * one it was asked for, and echoing the input key back would hand the caller a position its own call
+ * did not end at.
+ *
+ * ## Reserve, don't observe
+ *
+ * The reservation is taken BEFORE the call and released unconditionally — success, failure, cancel
+ * and throw. A peek would leave a window the length of the whole model call, during which two calls
+ * both read head == 14 and both decide "linear append". That is survivable if both replay, since the
+ * loser forks on the way out; it is NOT survivable if the winner took a resume-by-handle fast path,
+ * because by the time it loses it has already appended remotely.
+ *
+ * A leaked reservation is the other failure worth naming: it pins the stream forever and silently
+ * forks everything downstream, which looks like the system working.
+ *
+ * Still sits OUTSIDE `withMemoize`, which refuses to wrap it.
  */
 export function withSession<R = ExecServices, M extends ExecMetrics = ExecMetrics>(inner: Executor<R, M>): Executor<R & SessionSeams, M>;
-export function withSession<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<SessionSeams> = {}>(
+export function withSession<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<SessionSeams> & SessionOptions = {}>(
   config?: P,
 ): ExecutorWrapper<R, R & Omit<SessionSeams, keyof P>, M>;
-export function withSession<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<SessionSeams> = {}>(
+export function withSession<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<SessionSeams> & SessionOptions = {}>(
   config: P,
   inner: Executor<R, M>,
 ): Executor<R & Omit<SessionSeams, keyof P>, M>;
 export function withSession<R = ExecServices, M extends ExecMetrics = ExecMetrics>(
-  configOrInner?: Partial<SessionSeams> | Executor<R, M>,
+  configOrInner?: (Partial<SessionSeams> & SessionOptions) | Executor<R, M>,
   maybeInner?: Executor<R, M>,
 ): ExecutorWrapper<R, R, M> | Executor<R, M> {
-  const config = (isExecutor(configOrInner) ? undefined : configOrInner) as Partial<SessionSeams> | undefined;
+  const config = (isExecutor(configOrInner) ? undefined : configOrInner) as (Partial<SessionSeams> & SessionOptions) | undefined;
   const inner = (isExecutor(configOrInner) ? configOrInner : maybeInner) as Executor<R, M> | undefined;
   const wrap = ((innerExec: Executor): Executor => ({
     capabilities: { ...innerExec.capabilities, sessionResume: true },
@@ -412,40 +476,61 @@ export function withSession<R = ExecServices, M extends ExecMetrics = ExecMetric
     start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue> {
       if (!isPrompt(op)) return innerExec.start(op, ctx);
       // Store from construction (standalone) OR the run-scoped `ctx.sessions` (e.g. a workflow run).
-      // One transcript store is shared across consumers that pin different message shapes (hw stores
-      // `Turn`s, promptop `ModelMessage`s), so `ExecServices` declares it at the JSON base and this is
-      // the llm-side view of it — the messages this wrapper reads are exactly the ones it wrote.
+      // One store is shared across consumers that pin different message shapes, so `ExecServices`
+      // declares it at the JSON base and this is the llm-side view of it — the messages this wrapper
+      // reads are exactly the ones its executor wrote.
       const sessions = (config?.sessions ?? ctx.sessions) as SessionStore<ModelMessage> | undefined;
       const cfg = configOf(op);
-      if (cfg.providerSessionId !== undefined) {
-        return finished(
-          "providerSessionId is set, but provider-side session resume is not supported yet (no executor threads a provider handle) — use a logical sessionId with a SessionStore",
-        );
-      }
-      const key = stringField(cfg, "sessionId");
-      if (key === undefined) return innerExec.start(op, ctx);
+      const ref = stringField(cfg, "sessionId");
+      const providerHandle = stringField(cfg, "providerSessionId");
+      const fork = cfg.fork === true;
+      // No session named anywhere ⇒ nothing to do. `fork` alone is meaningless — it says how to
+      // consume a position, and there is no position.
+      if (ref === undefined && providerHandle === undefined) return innerExec.start(op, ctx);
       if (sessions === undefined) {
         return finished(
-          `the declaration carries sessionId "${key}" but no SessionStore is available — provide it via withSession({ sessions }) or ctx.sessions`,
+          `the declaration carries session "${ref ?? providerHandle}" but no SessionStore is available — provide it via withSession({ sessions }) or ctx.sessions`,
         );
       }
       return wrapHandle(async (ctl) => {
-        const priorState = await sessions.get(key);
-        const prior = priorState?.messages ?? [];
-        // Rewrite the call to carry the history as config-layer `messages`; the lowering appends the
-        // op's own `user` text as the final turn, which is exactly the preamble contract.
-        const sentOp = withConfig(op, {
-          sessionId: undefined,
-          providerSessionId: undefined,
-          messages: prior as unknown as JsonValue,
+        // RESERVE before the call. `fork` skips the reservation inside the store — the answer is
+        // already known — but everything else needs the position held for the call's whole duration.
+        const lease = await sessions.begin({
+          ...(ref !== undefined ? { ref } : {}),
+          ...(fork ? { fork: true } : {}),
+          ...(config?.seedFor !== undefined ? { seed: config.seedFor(op) } : {}),
+          ...(config?.provider !== undefined ? { provider: config.provider } : {}),
         });
-        if (ctl.canceled()) return canceledFailure("canceled before the call started");
-        const result = await ctl.started(innerExec.start(sentOp, ctx)).result;
-        if (isOk(result)) {
-          const current: ModelMessage[] = [{ role: "user", content: op.user }];
-          await sessions.put(key, { ...priorState, messages: [...prior, ...current, ...foldResultToAssistant(result)] });
+        const session = lease.session;
+        // What the executor reports it appended. Collected rather than returned so that a call which
+        // appended and THEN failed still folds — the entries exist remotely either way.
+        let delta: SessionDelta<ModelMessage> | undefined;
+        const reporting = resolveSessionRef<ModelMessage>(session.id, {
+          mode: session.mode,
+          ...(session.providerSessionId !== undefined ? { providerSessionId: session.providerSessionId } : {}),
+          messages: () => session.messages(),
+          report: (reported) => {
+            delta = reported;
+          },
+        });
+        // The session fields are CONSUMED — the bare core refuses leftovers, which is what stops a
+        // declaration quietly relying on a layer that is not composed in.
+        const sentOp = withConfig(op, { sessionId: undefined, providerSessionId: undefined, fork: undefined });
+        let released = false;
+        try {
+          if (ctl.canceled()) return canceledFailure("canceled before the call started");
+          const result = await ctl.started(innerExec.start(sentOp, { ...ctx, session: reporting as never })).result;
+          // Released HERE, on the way out, because the end position is what the outcome carries — and
+          // it is not knowable until the delta has been folded.
+          const endRef = await lease.release(delta);
+          released = true;
+          // The EFFECTIVE position, not the key that was asked for: a store that had to fork ended the
+          // call somewhere the caller has no other way to learn.
+          return withSessionOutcome(result, endRef);
+        } finally {
+          // Unconditional. A leaked reservation pins the stream and silently forks everything after it.
+          if (!released) await lease.release(delta);
         }
-        return result;
       });
     },
   })) as unknown as ExecutorWrapper<R, R, M>;

@@ -58,6 +58,15 @@ export interface ExecMetrics {
   /** LLM calls made by children, rolled up by a composite. A prompt op IS one such call; a non-LLM
    *  function (a pure helper, a sub-workflow that made none) contributes zero. */
   childLlmCalls?: number;
+  /**
+   * The session position this execution ENDED at, when a session was in play. Opaque.
+   *
+   * It rides the measurement record because that is the one channel every layer already forwards
+   * unchanged — and because it has to be the EFFECTIVE position, which only the session layer knows:
+   * a store that had to fork ended the call somewhere the caller cannot otherwise learn. Folding two
+   * attempts keeps the later one, which is correct — the last attempt is the one that appended.
+   */
+  sessionRef?: string;
 }
 
 /** Merge two executions' timing/counts: duration sums, the start is the FIRST observation, child LLM
@@ -286,9 +295,24 @@ export interface ExecServices {
   executor?: Executor;
   /** Executable tools the current operation may call mid-loop, keyed by name. */
   tools?: Record<string, Tool>;
-  /** Mutable, logical-id-keyed session store — e.g. a workflow run injects a RUN-SCOPED one so ops
-   *  sharing a `sessionId` continue the same conversation. Absent ⇒ sessions unavailable. */
+  /** The append-only session store — a workflow run injects one so ops naming the same stream
+   *  continue one conversation. Absent ⇒ sessions unavailable. */
   sessions?: SessionStore;
+  /**
+   * The session this call runs in, already resolved to a position and RESERVED (see
+   * {@link SessionLease}).
+   *
+   * It arrives on the services bundle rather than by rewriting the op's config, and that is the whole
+   * layering change: the wrapper owns the POLICY (resolve, reserve, decide append-vs-fork, fold,
+   * release) and the executor owns the MECHANISM (shape the request, perform the fork, report what it
+   * appended). Rewriting the config hardcoded replay, which is why a provider handle could not be
+   * threaded at all.
+   *
+   * Declared at the JSON base, like {@link ExecServices.sessions} itself, and narrowed by whichever
+   * consumer pins the message shape — promptop reads it as `ResolvedSession<ModelMessage>`, which are
+   * exactly the messages it wrote.
+   */
+  session?: ResolvedSession;
   /** The workspace the current operation acts within — a Session-owned resource. */
   workspace?: Workspace;
   /** Per-call wall-clock budget (ms). Was `PromptOpEnvironment.timeoutMs`. */
@@ -302,35 +326,269 @@ export interface ExecServices {
 // --- Sessions -----------------------------------------------------------------
 
 /**
- * The state a session accumulates, keyed by a LOGICAL session id. Client-managed conversations store
- * the `messages` transcript; a provider-side (stateful) executor instead stores the opaque
- * `providerSessionId` handle it resumes. A logical id NEVER carries the provider handle in the
- * portable declaration — it lives here, mapped from the logical id.
+ * A session is an APPEND-ONLY stream of messages, and a session ref names one AT a position — which
+ * is what makes "continue from here" and "branch from here" the same primitive.
+ *
+ * `id` is OPAQUE. Nothing outside the store parses it: not this package, not the wrapper, not any
+ * executor. That is what lets the spelling change — including the human-readable lineage label a
+ * store may keep alongside — without touching a consumer.
+ *
+ * It is also the ONLY enumerable property, so `JSON.stringify`, an events journal, and any serialized
+ * inputs/outputs see `{ id }` and nothing else.
  */
-export interface SessionState<Msg = JsonValue> {
-  /** Client-managed conversation transcript (prior turns). Generic in the message shape so each
-   *  consumer pins it (promptop: the AI-SDK `ModelMessage`; hw: a `Turn`); the default is plain JSON,
-   *  since a stored transcript is serializable by construction. */
-  messages?: Msg[];
-  /** Provider-assigned session handle to resume (for a stateful executor). */
+export interface SessionRef {
+  readonly id: string;
+}
+
+/** One entry in a stream: a message verbatim, plus what the provider called it. */
+export interface SessionMessage<Msg = JsonValue> {
+  message: Msg;
+  /** The provider's own id for this entry, when it has one. */
+  providerRef?: string;
+}
+
+/**
+ * What an executor REPORTS it appended.
+ *
+ * The wrapper cannot synthesize this. It sees only the op's prompt text and a final result value,
+ * which is exactly the lossy behaviour this replaces: tool calls, tool results and reasoning parts
+ * are all discarded by a wrapper-side fold. The executor is the only layer that knows what actually
+ * went over the wire, so it is the layer that says so.
+ *
+ * Reported on FAILURE as well as success. If the provider appended turns and the call then failed,
+ * those entries exist remotely; not recording them means the next append-by-handle meets a remote
+ * head we do not mirror, which is divergence on the very next call.
+ */
+export interface SessionDelta<Msg = JsonValue> {
+  /** Every entry the call added, in order — the request turns AND everything that came back. */
+  messages: readonly SessionMessage<Msg>[];
+  /** The provider's own session handle, when the provider is stateful. */
   providerSessionId?: string;
 }
 
-/** A mutable, logical-id-keyed session store. Both methods may be sync or async. */
-export interface SessionStore<Msg = JsonValue> {
-  get(logicalId: string): SessionState<Msg> | undefined | Promise<SessionState<Msg> | undefined>;
-  put(logicalId: string, state: SessionState<Msg>): void | Promise<void>;
+/**
+ * The session an executor was handed, resolved to a concrete position.
+ *
+ * Everything but `id` is NON-ENUMERABLE — the same technique as the resolved-definition snapshot —
+ * so the value that flows through the data plane stays `{ id }`.
+ *
+ * That has a consequence worth stating plainly: **`messages` is a cache, never the source of truth.**
+ * Non-enumerable properties are dropped by object spread, by `JSON.parse(JSON.stringify(x))`, by
+ * deep-clone helpers, and across a structured-clone IPC boundary. Since forking is expressed at the
+ * CONSUMPTION site, somebody will eventually write `{ ...session, fork: true }`. An executor must
+ * therefore be able to resolve messages from `id` alone and use the accessor only when it is there:
+ * losing it must cost a store read, never correctness.
+ */
+export interface ResolvedSession<Msg = JsonValue> extends SessionRef {
+  /** Whether this call continues the stream or branched off it. Decided BEFORE the call, because
+   *  "is this a fork" and "how do I shape the request" are the same question — a fork must replay and
+   *  must NOT pass a resume handle, or it appends to the wrong remote stream. */
+  readonly mode: "append" | "fork";
+  /** The provider handle to resume from, when the adapter can and the mode allows it. */
+  readonly providerSessionId?: string;
+  /** The stream's contents at this position. LAZY because the cheap path never needs them: an adapter
+   *  that branches server-side reads zero messages. Only replay strategies materialize. */
+  messages(): Promise<Msg[]>;
+  /**
+   * Report what this call actually appended.
+   *
+   * The channel exists here rather than on the execution result because a result is shared by every
+   * op kind, and because a session is the one thing that is already present exactly when there is a
+   * delta to report. It also makes append-on-error fall out for free: an executor reports before it
+   * returns, whichever way it returns.
+   */
+  report(delta: SessionDelta<Msg>): void;
 }
 
-/** A plain in-memory session store. */
+/**
+ * Attach the non-enumerable half of a {@link ResolvedSession} to a bare ref.
+ *
+ * One helper so the non-enumerability is stated once. Defining these as ordinary properties is the
+ * mistake this exists to prevent — it would put a function and a mode flag into every journal entry
+ * and every `inputs_json`.
+ */
+export function resolveSessionRef<Msg = JsonValue>(
+  id: string,
+  rest: Omit<ResolvedSession<Msg>, "id">,
+): ResolvedSession<Msg> {
+  const session = { id } as ResolvedSession<Msg>;
+  for (const [key, value] of Object.entries(rest)) {
+    Object.defineProperty(session, key, { value, enumerable: false, writable: false, configurable: true });
+  }
+  return session;
+}
+
+/** What a caller asks for when it opens a session for one call. */
+export interface SessionRequest {
+  /** The position to continue or branch from. Absent ⇒ a new stream. */
+  ref?: string;
+  /** Always branch, rather than continuing when the position is still the head. */
+  fork?: boolean;
+  /**
+   * A stable discriminator for any stream this call MINTS — a state id, a child key plus iteration.
+   *
+   * Stable rather than random on purpose: a fan-out that mints random ids produces different lineage
+   * on every run, which degrades exactly the observability durable sessions exist for.
+   */
+  seed?: string;
+  /** Which provider is about to be used, so the store can hand back that adapter's handle and only
+   *  that one. The same stream replayed against two providers has two unrelated handles. */
+  provider?: string;
+}
+
+/**
+ * A RESERVED position, held for the duration of one call.
+ *
+ * Reserving rather than observing is the whole point. A peek leaves a window the length of the entire
+ * model call: two calls both see head == 14, both conclude "linear append", and one clobbers the
+ * other. That is survivable if both replay — the loser forks on the way out — and NOT survivable if
+ * the winner took a resume-by-handle fast path, because by the time it loses it has already appended
+ * remotely and there is nothing left to retroactively fork.
+ */
+export interface SessionLease<Msg = JsonValue> {
+  /**
+   * The EFFECTIVE id to write under, which may not be the one that was asked for: a store that had
+   * to fork says so here. Without this channel a store can decide a fork and has no way to report it.
+   */
+  readonly session: ResolvedSession<Msg>;
+  /**
+   * Fold the reported delta, drop the reservation, and return the position the call ENDED at.
+   *
+   * The END position, because that is the only one that can exist by the time anyone reads it: you
+   * append AT a position but do not know where you finished until the provider resolves. It is also
+   * what consumers want — "append after me" and "fork after me" both mean *after*.
+   *
+   * Must run on success, on failure, on cancel and on throw; a leaked reservation pins the stream
+   * forever and silently forks everything downstream. IDEMPOTENT, so a caller can release on the
+   * happy path to read the end position and still release unconditionally in a `finally`.
+   */
+  release(delta?: SessionDelta<Msg>): string | Promise<string>;
+}
+
+/**
+ * An append-only session store.
+ *
+ * `begin` RESERVES; `release` folds and frees. There is deliberately no `get`/`put` pair: an
+ * observe-then-write API cannot express the reservation above, and a store that decides a fork has
+ * nowhere to say so.
+ */
+export interface SessionStore<Msg = JsonValue> {
+  begin(request: SessionRequest): SessionLease<Msg> | Promise<SessionLease<Msg>>;
+  /** The stream's contents at a position, for a consumer that only wants to READ one. */
+  read?(ref: string): Msg[] | Promise<Msg[]>;
+  /**
+   * Replace a stream's older entries with a summary, as a NEW stream, and return its head.
+   *
+   * A new stream rather than a rewrite, and NOT a fork. A fork's prefix is byte-identical to its
+   * origin's — that is the whole claim a position makes — whereas a compacted stream begins with a
+   * summary that appears nowhere in the origin. Rewriting in place would be worse still: it would
+   * silently change what every existing ref refers to, and it invalidates the provider's prompt cache
+   * (a strict prefix match) on every compaction.
+   *
+   * Optional, because not every store can express lineage. A store without it simply never compacts.
+   */
+  compact?(originRef: string, entries: readonly SessionMessage<Msg>[]): string | Promise<string>;
+}
+
+/**
+ * A plain in-memory append-only store — the default when no durable one is injected.
+ *
+ * Small, but it implements the real semantics rather than approximating them: a reserved position is
+ * held, a second reservation at the same position forks, and a fork's prefix is copied at the cursor
+ * so the origin is never mutated.
+ */
 export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
-  private readonly map = new Map<string, SessionState<Msg>>();
-  get(logicalId: string): SessionState<Msg> | undefined {
-    return this.map.get(logicalId);
+  private readonly streams = new Map<string, SessionMessage<Msg>[]>();
+  private readonly handles = new Map<string, string>();
+  private readonly held = new Set<string>();
+  private minted = 0;
+
+  read(ref: string): Msg[] {
+    const [id, position] = split(ref);
+    const stream = this.streams.get(id) ?? [];
+    return stream.slice(0, position ?? stream.length).map((entry) => entry.message);
   }
-  put(logicalId: string, state: SessionState<Msg>): void {
-    this.map.set(logicalId, state);
+
+  begin(request: SessionRequest): SessionLease<Msg> {
+    const asked = request.ref !== undefined ? split(request.ref) : undefined;
+    let [id, at] = asked ?? [this.mint(request.seed), undefined];
+    if (asked === undefined) this.streams.set(id, []);
+    const head = (): number => (this.streams.get(id) ?? []).length;
+    // A bare id — no position — names the stream AT ITS HEAD, which is what "continue this
+    // conversation" means when you hold a name rather than a position. Reading it as 0 instead would
+    // make every second call fork, and the first turn would be replayed forever as the only history.
+    let position = at ?? head();
+
+    // `fork: true` skips the reservation entirely — the answer is already known. Otherwise a position
+    // that is still the head and not held is an append, and anything else forks.
+    let mode: "append" | "fork" = "append";
+    if (request.fork === true || position !== head() || this.held.has(key(id, position))) {
+      mode = "fork";
+      const forked = this.mint(request.seed);
+      this.streams.set(forked, (this.streams.get(id) ?? []).slice(0, position));
+      id = forked;
+      position = this.streams.get(forked)!.length;
+    }
+    this.held.add(key(id, position));
+
+    const handle = mode === "append" && request.provider !== undefined ? this.handles.get(key(id, request.provider)) : undefined;
+    const session = resolveSessionRef<Msg>(join(id, position), {
+      mode,
+      ...(handle !== undefined ? { providerSessionId: handle } : {}),
+      messages: async () => (this.streams.get(id) ?? []).slice(0, position).map((entry) => entry.message),
+      report: () => {
+        /* the lease folds on release; nothing to buffer for an in-memory store */
+      },
+    });
+
+    const heldKey = key(id, position);
+    let released = false;
+    return {
+      session,
+      release: (delta) => {
+        // Idempotent: the caller releases on the happy path to read the end position, and again in a
+        // `finally` that cannot know whether it already ran.
+        if (released) return join(id, this.streams.get(id)?.length ?? position);
+        released = true;
+        this.held.delete(heldKey);
+        if (delta !== undefined) {
+          const stream = this.streams.get(id) ?? [];
+          stream.push(...delta.messages);
+          this.streams.set(id, stream);
+          if (delta.providerSessionId !== undefined && request.provider !== undefined) {
+            this.handles.set(key(id, request.provider), delta.providerSessionId);
+          }
+        }
+        return join(id, this.streams.get(id)?.length ?? position);
+      },
+    };
   }
+
+  compact(originRef: string, entries: readonly SessionMessage<Msg>[]): string {
+    const [origin] = split(originRef);
+    // A distinct stream, so the origin keeps meaning exactly what every ref into it already meant.
+    const id = `${origin}~compact${++this.compactions}`;
+    this.streams.set(id, [...entries]);
+    return join(id, entries.length);
+  }
+
+  private compactions = 0;
+
+  private mint(seed: string | undefined): string {
+    // Seeded ids stay stable across a replayed run; an unseeded one only has to be unique.
+    return seed !== undefined ? `s_${seed}` : `s_${++this.minted}`;
+  }
+}
+
+const key = (a: string, b: string | number): string => `${a} ${b}`;
+const join = (id: string, position: number): string => `${id}@${position}`;
+
+/** `<id>@<position>`, or a bare id — which means the stream at whatever its head currently is. */
+function split(ref: string): [string, number | undefined] {
+  const at = ref.lastIndexOf("@");
+  if (at <= 0) return [ref, undefined];
+  const position = Number(ref.slice(at + 1));
+  return Number.isInteger(position) && position >= 0 ? [ref.slice(0, at), position] : [ref, undefined];
 }
 
 // --- Composition --------------------------------------------------------------
