@@ -111,17 +111,39 @@ const KIND_SPECIFIC = ["args", "prompt", "system", "function"] as const;
  * two keys they would be two independent fields to the merge below, so a child writing `sessionId`
  * would sit alongside an ancestor's `session` rather than overriding it — and the operation would
  * then carry both, tripping the conflict check on a document that is perfectly well-formed.
+ *
+ * The `null` case is the one that bites hardest, and it is why the guard tests `undefined` rather
+ * than falsiness: `sessionId: null` means "start a fresh session, whatever the chain says"
+ * (SESSIONS.md §4), so it has to reach the merge as a VALUE that overrides. Treated as absence it
+ * would sit next to an ancestor's `session: "planning"` and the operation would quietly join the
+ * shared conversation the author was explicitly opting out of.
  */
 export function normalizeSynonyms<T extends OperationFields>(fields: T): T {
   if (fields.sessionId === undefined) return fields;
-  if (fields.session !== undefined && fields.session !== fields.sessionId) {
+  if (fields.session !== undefined && !sameSession(fields.session, fields.sessionId)) {
     throw new Error(
-      `operation declares both session '${fields.session}' and sessionId '${fields.sessionId}' — ` +
-        `they are the same field, so one of them has to go`,
+      `operation declares both session '${describeSession(fields.session)}' and ` +
+        `sessionId '${describeSession(fields.sessionId)}' — they are the same field, so one of them has to go`,
     );
   }
   const { sessionId, ...rest } = fields;
   return { ...rest, session: sessionId } as T;
+}
+
+type SessionDeclValue = OperationFields["session"];
+
+/** Two session declarations are the same if they name the same stream — refs compare by id. */
+function sameSession(a: SessionDeclValue, b: SessionDeclValue): boolean {
+  if (a === b) return true;
+  const idOf = (v: SessionDeclValue): string | undefined =>
+    v !== null && typeof v === "object" ? v.id : undefined;
+  const [left, right] = [idOf(a), idOf(b)];
+  return left !== undefined && left === right;
+}
+
+function describeSession(value: SessionDeclValue): string {
+  if (value === null) return "null";
+  return typeof value === "object" ? value.id : String(value);
 }
 
 /** Merge `over` onto `base`, field by field. `over` is the NEARER layer and wins. */
@@ -212,7 +234,7 @@ export function mergeOperationChain(layers: ReadonlyArray<OperationFields | unde
 }
 
 /** The fields `LoadedState.environment` keeps — the execution environment, split off after merging. */
-export const EXEC_ENVIRONMENT_FIELDS = ["session", "tools", "conversation", "permissions"] as const;
+export const EXEC_ENVIRONMENT_FIELDS = ["session", "fork", "tools", "conversation", "permissions"] as const;
 
 /**
  * A stable identity for one merged environment, so the loader can tell whether a state mounted under

@@ -87,6 +87,7 @@ import type {
 } from "./format";
 import { bindElement, bindInputs, embeddedOpsOf, higherOrderEdgesOf, higherOrderOf, isResolvedValue, isResolveError, resolveEmbedded, resolveInputs, resolveRef, type ResolutionScope, type Resolved } from "./resolve";
 import { isByteStream, materialize, MaterializeError } from "./materialize";
+import { RUN_RESOURCE_KEY, resolveSession, type SessionBinding } from "./session";
 import { isFannedOut } from "./fanout";
 import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, type Persistence } from "./ports";
 
@@ -207,6 +208,16 @@ interface Instance {
   inputs: Record<string, ResolvedValue>;
   /** Operation-produced outputs accumulated so far. */
   outputs: Record<string, ResolvedValue>;
+  /**
+   * The resource bundle this instance's subtree runs in — workspace, permission ledger, and the
+   * scope a `"session"` approval covers (DESIGN §5.1).
+   *
+   * Carried on the INSTANCE rather than recomputed per operation because it is inherited: an
+   * operation that declares no session runs in whatever bundle encloses it, all the way up to the
+   * run's own. That inheritance is what keeps a worktree and its approvals alive across a retry or
+   * a loop iteration, neither of which changes what the author DECLARED (SESSIONS.md §13).
+   */
+  resourceKey: string;
   iteration: number;
   /** Whether the state's single operation has run (§7.1: a state has ONE operation). */
   opRun: boolean;
@@ -252,13 +263,30 @@ class Notifier {
 
 const TEMPLATE_REF = /\{\{\s*([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)\s*\}\}/g;
 
-/** The logical session a runtime op falls back to when its state declares no `runtime.session` — so a plain
- *  workflow behaves as ONE shared session (transcript, workspace, permissions) across all its states. */
-const DEFAULT_SESSION = "default";
 
 /** One conversation turn — a `ModelMessage`-compatible shape, so the built-in `conversationMode` transcript
  *  and the llm `withSession` path share ONE representation in `SessionState.messages`. */
 type Turn = { role: "user" | "assistant"; content: string };
+
+/**
+ * The resource bundle an instance runs in — workspace, permission ledger, approval scope.
+ *
+ * Only a NAME names a bundle. A session REF arrived through data flow from an operation that may
+ * live anywhere in the tree, so it says nothing about which workspace this state should act in; and
+ * `null` / absent say nothing about resources at all. In every one of those cases the enclosing
+ * instance's bundle is inherited, bottoming out at the run's own.
+ *
+ * This is what makes the bundle survive replay: a retry and a loop iteration are new instances, but
+ * neither changes what the author DECLARED, so both land on the same key their predecessor did.
+ */
+function resourceKeyFor(def: LoadedState, parent: Instance | undefined): string {
+  // `scopeSession` rather than `environment.session`: the latter exists only on a state that declares
+  // an operation, and declaring a session on a composite ROOT is the ordinary way to give a whole
+  // subtree one bundle.
+  const declared = def.scopeSession;
+  if (typeof declared === "string" && declared !== "") return declared;
+  return parent?.resourceKey ?? RUN_RESOURCE_KEY;
+}
 
 export class WorkflowEngine {
   private readonly validator: SyncOutputValidator;
@@ -356,6 +384,9 @@ export class WorkflowEngine {
       parent,
       inputs,
       outputs: {},
+      // Resolved once, on entry, from the parent's bundle and this state's own declaration — so a
+      // subtree that declares nothing shares its enclosing bundle rather than minting one per state.
+      resourceKey: resourceKeyFor(def, parent),
       iteration: 0,
       opRun: false,
       children: new Map(),
@@ -1161,7 +1192,7 @@ export class WorkflowEngine {
   /** Run ONE embedded operation and return what the binding should see. */
   private async runEmbeddedOp(instance: Instance, op: Operation<InlineFamily>): Promise<Resolved> {
     const env = instance.def.environment ?? {};
-    const sessionId = env.session ?? DEFAULT_SESSION;
+    const resourceKey = instance.resourceKey;
     // Its arguments are already bound into `op.input` as literals (`resolveEmbedded`), so this reads
     // them back out as values.
     const literal = resolveInputs(op.input, this.scopeFor(instance));
@@ -1190,12 +1221,12 @@ export class WorkflowEngine {
     const entry = op.kind === "function" ? this.config.registry.functions.get(op.functionRef) : undefined;
     if (op.kind === "function" && !entry) return { error: `no function '${op.functionRef}' is registered` };
     const delegates = entry?.kind === "runtime" && entry.capabilities.policyEnforcement === "callback";
-    const toolsOrFailure = this.resolveTools(env, sessionId, delegates);
+    const toolsOrFailure = this.resolveTools(env, resourceKey, delegates);
     if ("failure" in toolsOrFailure) return { error: toolsOrFailure.failure.reason };
     const rendered = op.kind === "prompt" ? { ...op, user: this.renderTemplate(op.user, instance, literal.values) } : op;
     let outcome;
     try {
-      outcome = await this.operations.start(rendered, this.servicesFor(sessionId, instance, toolsOrFailure.tools)).result;
+      outcome = await this.operations.start(rendered, this.servicesFor(resourceKey, instance, toolsOrFailure.tools)).result;
     } catch (e) {
       return { error: `executor rejected: ${(e as Error).message}` };
     }
@@ -1233,14 +1264,17 @@ export class WorkflowEngine {
     // The execution ENVIRONMENT (session, tools, permissions) is a sibling of the op, never part of
     // it (§7.1). A delegated adapter enforces policy through its own callback, so its tools stay raw.
     const env = instance.def.environment ?? {};
-    const sessionId = env.session ?? DEFAULT_SESSION;
+    // Tools, workspace and permissions key on the RESOURCE bundle, never on the conversation
+    // position — a position moves on every call, and a `"session"`-scoped approval that moved with
+    // it would cover exactly one operation (SESSIONS.md §13).
+    const resourceKey = instance.resourceKey;
     // The entry's capabilities are REQUIRED and total per variant (§2), so this reads a definite value
     // instead of falling through an `undefined` and silently defaulting the permission gate.
     const delegates = entry.kind === "runtime" && entry.capabilities.policyEnforcement === "callback";
-    const toolsOrFailure = this.resolveTools(env, sessionId, delegates);
+    const toolsOrFailure = this.resolveTools(env, resourceKey, delegates);
     if ("failure" in toolsOrFailure) return fail(toolsOrFailure.failure);
 
-    const services = this.servicesFor(sessionId, instance, toolsOrFailure.tools);
+    const services = this.servicesFor(resourceKey, instance, toolsOrFailure.tools);
     // Errors are DATA (§4.2): the impl RESOLVES value-or-failure, so a 429 raised inside a registered
     // function keeps its classification instead of being reconstructed from `err.name` — which is what
     // made every non-`AbortError` permanently failed, retry machinery and all.
@@ -1296,20 +1330,28 @@ export class WorkflowEngine {
     }
 
     const env = instance.def.environment ?? {};
-    // The logical SESSION this operation runs under (DESIGN §5.1, "Sessions: the run-scoped resource bundle"): the sharing key
-    // for its owned resources — conversation transcript, workspace, permissions. Absent ⇒ the run's
-    // default session, so a plain workflow is ONE shared session (SPEC §4.7 threads across states).
-    const sessionId = env.session ?? DEFAULT_SESSION;
+    // The two halves one `sessionId` used to be (SESSIONS.md §3/§4).
+    //
+    // `session.id` is the CONVERSATION — which transcript this call joins. A declared name joins that
+    // stream; `null` and absent each start a fresh one. Absent no longer falls back to a shared
+    // "default", because an implicit process-wide transcript is what drove unbounded context growth:
+    // the SPEC §4.7 "threads across states" behaviour is now something an author asks for by naming a
+    // session, not something every undeclared state opts into.
+    //
+    // `session.resourceKey` is the RESOURCE BUNDLE — workspace, permission ledger, approval scope. It
+    // is inherited from the enclosing instance and does not move when the conversation does, which is
+    // what keeps one worktree and one set of approvals across a retry, a loop iteration or a fork.
+    const session = this.sessionFor(instance);
 
     // The `user` slot holds the prompt text. A REUSABLE prompt is a reference to a file, resolved
     // at load time (REFERENCES.md §7.1), so by here there is only ever one kind of prompt — which is
     // what let `registry.skills` and its half-built resolution path be deleted outright.
     const rendered = this.renderTemplate(op.user, instance, opInputs);
-    const transcript = await this.readTranscript(sessionId);
+    const transcript = await this.readTranscript(session.id);
     const preamble = this.conversationPreamble(env.conversation?.mode ?? "full_history", transcript, env.conversation?.artifacts);
     const prompt = preamble ? `${preamble}\n\n${rendered}` : rendered;
 
-    const toolsOrFailure = this.resolveTools(env, sessionId, false);
+    const toolsOrFailure = this.resolveTools(env, session.resourceKey, false);
     if ("failure" in toolsOrFailure) return fail(toolsOrFailure.failure);
     const tools = toolsOrFailure.tools;
 
@@ -1329,7 +1371,7 @@ export class WorkflowEngine {
 
     // The per-call ENVIRONMENT the old `PromptOpEnvironment` carried — tools, the time budget,
     // cancellation — are `ExecServices` fields now, which is why that type could be deleted outright.
-    const services = this.servicesFor(sessionId, instance, tools);
+    const services = this.servicesFor(session.resourceKey, instance, tools);
     if (instance.def.limits?.timeout !== undefined) services.timeoutMs = instance.def.limits.timeout * 1000;
     let outcome;
     try {
@@ -1352,7 +1394,7 @@ export class WorkflowEngine {
     // session. The assistant turn is the op's OUTPUT VALUE. It used to prefer the model's raw text, but
     // that stops at the prompt executor — and for a text-output op the output value IS that text, so
     // the two agree wherever it mattered.
-    await this.appendTranscript(sessionId, [
+    await this.appendTranscript(session.id, [
       { role: "user", content: prompt },
       { role: "assistant", content: typeof outcome.value === "string" ? outcome.value : JSON.stringify(outcome.value ?? null) },
     ]);
@@ -1414,18 +1456,46 @@ export class WorkflowEngine {
     return { tools: guarded };
   }
 
-  /** The services one operation runs with: its session's workspace, its tools, its cancellation. */
-  private servicesFor(sessionId: string, instance: Instance, tools?: Record<string, Tool>): ExecServices {
+  /** The services one operation runs with: its resource bundle's workspace, its tools, its cancellation. */
+  private servicesFor(resourceKey: string, instance: Instance, tools?: Record<string, Tool>): ExecServices {
     const services = this.childServices();
-    // Per-session workspace (DESIGN §5.1, "Sessions: the run-scoped resource bundle"): states sharing a `sessionId` share one; a
-    // fan-out can isolate each branch (e.g. its own worktree) via `workspaceFor`. Falls back to the
-    // run-level `services.workspace` when the host provides none for this id.
-    const workspace = this.config.workspaceFor?.(sessionId) ?? services.workspace;
+    // Per-BUNDLE workspace (DESIGN §5.1, "Sessions: the run-scoped resource bundle"): states sharing a
+    // resource key share one; a fan-out can isolate each branch (e.g. its own worktree) via
+    // `workspaceFor`. Falls back to the run-level `services.workspace` when the host provides none.
+    //
+    // Keyed on the resource bundle rather than the conversation, deliberately: a conversation position
+    // changes on every call, so keying a workspace on it would hand each operation its own worktree —
+    // which SESSIONS.md §13 rules out ("forks share a worktree; JaiRA does not fork worktrees").
+    const workspace = this.config.workspaceFor?.(resourceKey) ?? services.workspace;
     if (workspace !== services.workspace) services.workspace = workspace;
     if (tools !== undefined) services.tools = tools;
     // A registered async function's only channel to the caller is the ctx, so cancellation rides here.
     services.abortSignal = instance.abort.signal;
     return services;
+  }
+
+  /**
+   * What one operation's `session` declaration resolves to for THIS instance (SESSIONS.md §4).
+   *
+   * The four-way order in the document collapses to the three cases {@link resolveSession} handles,
+   * because the environment merge has already run: an ancestor's `environment.session` arrives as
+   * this operation's own `session`, and a nearer `null` has already beaten it.
+   *
+   * `positionOf` is the seam SESSIONS.md §4's instance-scoped invariant lives behind. It answers
+   * "where does THIS instance think that named stream currently is", and it must never become a
+   * global name → head map: a restarted state has to re-resolve to the position it started from, so
+   * that the append the failed attempt made turns the retry into a fork from the right place rather
+   * than stacking it on top of the failure. Until positions exist (step 5), a name IS its own
+   * position and every instance agrees — which is exactly today's behaviour, and the reason this step
+   * can land before the store does.
+   */
+  private sessionFor(instance: Instance): SessionBinding {
+    const env = instance.def.environment ?? {};
+    return resolveSession(env.session, env.fork === true, {
+      instanceId: instance.id,
+      inheritedResourceKey: instance.resourceKey,
+      positionOf: () => undefined,
+    });
   }
 
   /** The `ExecServices` operations run with: caller services + engine validator + the run's session

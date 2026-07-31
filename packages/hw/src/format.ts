@@ -183,14 +183,39 @@ export type ConversationMode = "full_history" | "summary" | "fresh" | "selected_
  * was then free for what authors actually kept asking for: DEFAULTS (see {@link EnvironmentDecl}).
  */
 export interface ExecEnvironmentDecl {
-  /** Logical session id this operation runs under — owns its conversation transcript, workspace, and
-   *  permissions. Same id across states ⇒ a shared session; absent ⇒ the run's default session.
+  /**
+   * The conversation this operation runs under (SESSIONS.md §3, §4). Three spellings:
    *
-   *  `sessionId` is accepted as a SYNONYM, so an `LlmConfiguration`-shaped block pastes in
-   *  unchanged; the loader normalizes it to this field before anything else reads the document. */
-  session?: string;
+   *  - a **name** — same name across states ⇒ one shared stream, and the name is also the
+   *    resource-bundle key (workspace, permissions);
+   *  - a **session ref** (`{ id }`, normally from an expression over `operation.outputs.session`) —
+   *    an exact position to continue or branch from. Opaque: nothing outside the session store
+   *    parses it;
+   *  - **`null`** — start a fresh stream, overriding whatever the environment chain supplied.
+   *
+   * ABSENT no longer means a shared default. An undeclared operation gets its own stream, because
+   * an implicit process-wide transcript is the thing that drives unbounded context growth; the
+   * run's shared WORKSPACE is unaffected, being a separate concern (see {@link fork}'s neighbours
+   * in `session.ts`). `""` is an error, never "fresh" — a template interpolating a bad reference
+   * would otherwise silently produce an isolated conversation that looks like it worked.
+   *
+   * `sessionId` is accepted as a SYNONYM, so an `LlmConfiguration`-shaped block pastes in
+   * unchanged; the loader normalizes it to this field before anything else reads the document.
+   */
+  session?: string | null | { id: string };
   /** @see session — normalized away at parse; never present on a loaded state. */
-  sessionId?: string;
+  sessionId?: string | null | { id: string };
+  /**
+   * Always branch, rather than appending when the position is still the head (SESSIONS.md §3).
+   *
+   * Declared where a session is CONSUMED, not carried on the value produced: a position marker
+   * should not encode an intent about how a later caller will use it. Absent and `false` mean the
+   * SAME thing — append if the position is still the head, fork automatically if it is not — because
+   * the stricter reading ("append, or fail") would be an exclusivity claim on the position, and
+   * holding that claim is state the prompt executor must not carry. `true` stays useful because
+   * deliberate divergence (fan three variants out of one point) cannot be inferred from stream state.
+   */
+  fork?: boolean;
   /** Logical names of tools the operation may call mid-loop — resolved through `registry.tools`. */
   tools?: string[];
   /** Conversation preamble injected into THIS call (distinct from a `{ conversation }` wire, which
@@ -296,6 +321,7 @@ export const OPERATION_OWN_FIELDS: ReadonlySet<string> = new Set([
   "path",
   "session",
   "sessionId",
+  "fork",
   "tools",
   "conversation",
   "permissions",
@@ -425,6 +451,19 @@ export interface LoadedState
   operation?: Operation<InlineFamily>;
   /** The merged execution environment this state's operation runs under. */
   environment?: ExecEnvironmentDecl;
+  /**
+   * The session this state's SUBTREE resolves in — its own `environment.session` merged over what the
+   * chain supplied, whether or not this state declares an operation.
+   *
+   * Distinct from `environment.session`, which is the merged view for this state's OWN operation and
+   * is therefore absent on a pure composite. That gap matters: declaring `environment.session` on a
+   * composite root is the ordinary way to give a whole subtree one session, and the engine needs to
+   * see it there to key the subtree's resource bundle — workspace, permission ledger, approval scope
+   * — on the name the author actually wrote (SESSIONS.md §4).
+   *
+   * Present-but-`null` is meaningful: it is an explicit "start fresh", not an absent declaration.
+   */
+  scopeSession?: string | null | { id: string };
   children?: Record<string, LoadedChild>;
   /**
    * Why this state's `operation` could not be built — an incomplete merge (§5), reported by the

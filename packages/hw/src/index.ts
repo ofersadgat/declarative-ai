@@ -12,6 +12,10 @@ export * from "./format";
 // Operation inheritance (§5) and the state PATH REFERENCE grammar (§2.1) — both consumed by the
 // loader, both exported because a host resolving workflow locations needs the same rules.
 export * from "./merge";
+// What an operation's `session` declaration means (SESSIONS.md §3/§4), including the split between
+// the conversation and the resource bundle the one string used to conflate. Exported because a host
+// wiring its own session store resolves the same declaration.
+export * from "./session";
 export * from "./ref";
 export * from "./reference";
 export * from "./shape";

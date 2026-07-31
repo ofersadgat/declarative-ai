@@ -25,6 +25,7 @@ import { checkBinding as checkBindingGeneric, isSubschema, producerSchemaOf, typ
 import { parseExpression, referencesOf, type Expr } from "./expr";
 import { EXPRESSION_REFS, pathOfRef, referencePathsOf } from "./lowerExpr";
 import { embeddedOpsOf } from "./resolve";
+import { validateSessionDecl } from "./session";
 import { ANY_SCHEMA, inferExpression, inferRef, isBooleanSchema, isUniversalSchema, type ExprScope } from "./inferExpr";
 import {
   GUARD_NAMESPACES,
@@ -154,6 +155,14 @@ function validateState(
   // An operation the environment chain never completed (§5) — carried from the loader as data so it
   // is reported here with everything else, instead of aborting the load.
   if (def.operationError !== undefined) err("operation", def.operationError);
+
+  // A `session` that cannot mean anything (SESSIONS.md §4). Statically checkable because the merge
+  // has already run, so what is tested is the EFFECTIVE declaration — including one an ancestor's
+  // `environment` supplied. The empty string is the case worth catching at load time: `""` would
+  // otherwise start an isolated conversation and report success, which is the failure mode that
+  // makes `null` the only explicit "fresh" marker.
+  const sessionComplaint = validateSessionDecl(def.environment?.session);
+  if (sessionComplaint !== undefined) err("operation.session", sessionComplaint);
 
   // --- sequence ---------------------------------------------------------------
   const sequence = def.sequence ?? [];

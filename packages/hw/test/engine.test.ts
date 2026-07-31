@@ -552,7 +552,7 @@ describe("conversation modes (SPEC §4.7)", () => {
       // An operation's bound input slots render under `{{inputs.*}}` — the one namespace a template
       // sees, the operation's resolved inputs (state inputs plus the op's own bound inputs).
       prompt: "Summarize this transcript: {{inputs.history}}",
-      input: { history: { kind: "json", binding: { conversation: "default" } } },
+      input: { history: { kind: "json", binding: { conversation: "planning" } } },
     };
     const { engine, fake } = makeEngine(files, PLAN_ID, planningScript());
     await engine.run({ inputs: { issue: "the issue" } });
@@ -572,7 +572,7 @@ describe("conversation modes (SPEC §4.7)", () => {
       kind: "prompt",
       model: "critic",
       prompt: "First turn was: {{inputs.first}}",
-      input: { first: { kind: "json", binding: { conversation: "default", message: 0 } } },
+      input: { first: { kind: "json", binding: { conversation: "planning", message: 0 } } },
     };
     const { engine, fake } = makeEngine(files, PLAN_ID, planningScript());
     await engine.run({ inputs: { issue: "the issue" } });
@@ -595,7 +595,7 @@ describe("conversation modes (SPEC §4.7)", () => {
     );
     const result = await engine.run({ inputs: { issue: "the issue" } });
     expect(result.outcome).toBe("error");
-    expect((await store.get("default"))?.messages ?? []).toEqual([]);
+    expect((await store.get("planning"))?.messages ?? []).toEqual([]);
   });
 
   it("records the transcript into the shared session store (unified with the withSession path)", async () => {
@@ -603,7 +603,7 @@ describe("conversation modes (SPEC §4.7)", () => {
     const { engine } = makeEngine(specPlanningFiles(), PLAN_ID, planningScript(), { extra: { services: { sessions: store } } });
     await engine.run({ inputs: { issue: "the issue" } });
     // The built-in transcript lives in the SAME store a runtime's withSession reads — one source of truth.
-    const messages = (await store.get("default"))?.messages as Array<{ role: string; content: string }> | undefined;
+    const messages = (await store.get("planning"))?.messages as Array<{ role: string; content: string }> | undefined;
     expect(messages?.length).toBeGreaterThan(0);
     expect(messages!.some((m) => m.role === "assistant")).toBe(true);
     expect(messages!.some((m) => m.role === "user" && m.content.includes("Extract goals"))).toBe(true);
@@ -988,4 +988,99 @@ describe("per-session workspace overlay (DESIGN §5.1, \"Sessions: the run-scope
     await engine.run({ inputs: {} });
     expect(fake.calls.map((c: FakeCall) => c.ctx)[0]!.workspace?.root).toBe("/default");
   });
+});
+
+/**
+ * SESSIONS.md §4/§13. One `sessionId` used to key two unrelated things — which transcript a call
+ * joins, and which workspace / permission ledger it runs in. They have to separate once a session is
+ * a POSITION, because a position moves on every call.
+ */
+describe("the conversation and the resource bundle are different keys", () => {
+  const twoStates = (leafSession?: string | null): Record<string, StateDef> => ({
+    root: {
+      environment: { session: "shared" },
+      children: { first: { state: "leaf" }, second: { state: "leaf2" } },
+      sequence: ["first", "second"],
+      outputs: { r: { binding: { child: "second", output: "r" } } },
+    },
+    leaf: {
+      outputs: { r: { schema: { type: "string" } } },
+      operation: { kind: "prompt", prompt: "first call", model: "reviewer" },
+    },
+    leaf2: {
+      outputs: { r: { schema: { type: "string" } } },
+      operation: { kind: "prompt", prompt: "second call", model: "reviewer" },
+      ...(leafSession !== undefined ? { environment: { session: leafSession } } : {}),
+    },
+  });
+
+  it("a state that declares no session INHERITS the enclosing workspace", async () => {
+    // Inherited, not minted per state — otherwise every undeclared operation would ask for its own
+    // worktree, which SESSIONS.md §13 rules out ("JaiRA does not fork worktrees").
+    const { engine, fake } = makeEngine(twoStates(), "root", () => ok({ r: "done" }), {
+      extra: { workspaceFor: (key) => (key === "shared" ? { root: "/ws/shared" } : undefined) },
+    });
+    await engine.run({ inputs: {} });
+    expect(fake.calls).toHaveLength(2);
+    for (const call of fake.calls) expect((call as FakeCall).ctx.workspace?.root).toBe("/ws/shared");
+  });
+
+  it("`session: null` starts a fresh CONVERSATION but keeps the enclosing workspace", async () => {
+    // The split stated as one test: the author opted out of the transcript, not the worktree.
+    const { engine, fake } = makeEngine(twoStates(null), "root", () => ok({ r: "done" }), {
+      extra: { workspaceFor: (key) => (key === "shared" ? { root: "/ws/shared" } : undefined) },
+    });
+    await engine.run({ inputs: {} });
+    expect((fake.calls[1] as FakeCall).ctx.workspace?.root).toBe("/ws/shared");
+    expect(promptOf(fake.calls[1]!)).not.toContain("first call");
+  });
+
+  it("declaring a session names a NEW bundle, which is how a subtree isolates its workspace", async () => {
+    const { engine, fake } = makeEngine(twoStates("other"), "root", () => ok({ r: "done" }), {
+      extra: {
+        services: { workspace: { root: "/run" } },
+        workspaceFor: (key) => (key === "other" ? { root: "/ws/other" } : { root: "/ws/shared" }),
+      },
+    });
+    await engine.run({ inputs: {} });
+    expect((fake.calls[0] as FakeCall).ctx.workspace?.root).toBe("/ws/shared");
+    expect((fake.calls[1] as FakeCall).ctx.workspace?.root).toBe("/ws/other");
+  });
+
+  it("two UNDECLARED states no longer share a transcript", async () => {
+    // The behaviour SESSIONS.md §4 removes. `full_history` on the second state used to replay the
+    // first's exchange, because both fell back to one implicit "default" session.
+    const { engine, fake } = makeEngine(undeclaredPair(), "root", () => ok({ r: "done" }));
+    await engine.run({ inputs: {} });
+    expect(promptOf(fake.calls[1]!)).not.toContain("<conversation-history>");
+    expect(promptOf(fake.calls[1]!)).not.toContain("first call");
+  });
+
+  it("...and naming a session is how an author asks for that threading back", async () => {
+    const files = undeclaredPair();
+    files["root"]!.environment = { session: "planning" };
+    const { engine, fake } = makeEngine(files, "root", () => ok({ r: "done" }));
+    await engine.run({ inputs: {} });
+    expect(promptOf(fake.calls[1]!)).toContain("first call");
+  });
+
+  /** Two sequential prompt states, the second reading `full_history`, neither declaring a session. */
+  function undeclaredPair(): Record<string, StateDef> {
+    return {
+      root: {
+        children: { first: { state: "leaf" }, second: { state: "leaf2" } },
+        sequence: ["first", "second"],
+        outputs: { r: { binding: { child: "second", output: "r" } } },
+      },
+      leaf: {
+        outputs: { r: { schema: { type: "string" } } },
+        operation: { kind: "prompt", prompt: "first call", model: "reviewer" },
+      },
+      leaf2: {
+        outputs: { r: { schema: { type: "string" } } },
+        environment: { conversation: { mode: "full_history" } },
+        operation: { kind: "prompt", prompt: "second call", model: "reviewer" },
+      },
+    };
+  }
 });

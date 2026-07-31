@@ -285,9 +285,13 @@ function defaultOutput(): NamedParameter<InlineFamily> {
  * set and the permission baseline — so the loader hands each consumer only what it needs.
  */
 export function splitExecEnvironment(fields: OperationFields): { op: OperationFields; env: ExecEnvironmentDecl } {
-  const { session, tools, conversation, permissions, ...op } = fields;
+  const { session, fork, tools, conversation, permissions, ...op } = fields;
   const env: ExecEnvironmentDecl = {};
+  // `session` is tested against `undefined` rather than for truthiness because `null` is a REAL
+  // declaration — "start fresh, whatever the chain said" — and dropping it here would silently
+  // restore the inherited session the author was opting out of.
   if (session !== undefined) env.session = session;
+  if (fork !== undefined) env.fork = fork;
   if (tools !== undefined) env.tools = tools;
   if (conversation !== undefined) env.conversation = conversation;
   if (permissions !== undefined) env.permissions = permissions;
@@ -500,6 +504,12 @@ export function desugarState(
     ...(operationOrError.operation !== undefined ? { operation: operationOrError.operation } : {}),
     ...(operationOrError.error !== undefined ? { operationError: operationOrError.error } : {}),
     ...(split && Object.keys(split.env).length > 0 ? { environment: split.env } : {}),
+    // The session this state's SUBTREE resolves in, recorded separately from `environment` because
+    // `environment` exists only on a state that declares an OPERATION. A pure composite that
+    // declares `environment.session` — the ordinary way to give a whole subtree one session — would
+    // otherwise carry no trace of it, and the engine would key its children's resource bundle on the
+    // run instead of on the name the author wrote (SESSIONS.md §4).
+    ...("session" in environment ? { scopeSession: environment.session } : {}),
     ...(spreads.length > 0 ? { outputSpreads: spreads } : {}),
     ...(Object.keys(slotMeta).length > 0 ? { slotMeta } : {}),
   };
