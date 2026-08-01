@@ -40,7 +40,7 @@ describe("what may be declared", () => {
   });
 
   it("rejects the empty string, and says to write null instead", () => {
-    // The failure this exists for: `"session": "{{inputs.thread}}"` with `thread` absent. An empty
+    // The failure this exists for: `"session": "{{.inputs.thread}}"` with `thread` absent. An empty
     // string would start an isolated conversation and report success.
     expect(validateSessionDecl("")).toMatch(/write null/);
   });
@@ -54,7 +54,7 @@ describe("what may be declared", () => {
   });
 
   it("accepts an expression, whose value can only be checked once it has one", () => {
-    expect(validateSessionDecl({ expr: "inputs.thread" })).toBeUndefined();
+    expect(validateSessionDecl({ expr: ".inputs.thread" })).toBeUndefined();
     expect(validateSessionDecl({ expr: "  " })).toMatch(/empty/);
   });
 
@@ -215,20 +215,20 @@ describe("the load-time lint", () => {
  */
 describe("an expression's resolved value", () => {
   it("takes a ref, and a string as a name", () => {
-    expect(sessionFromExpr("inputs.t", { id: "ses_abc@14" })).toEqual({ session: { id: "ses_abc@14" } });
-    expect(sessionFromExpr("inputs.t", "planning")).toEqual({ session: "planning" });
+    expect(sessionFromExpr(".inputs.t", { id: "ses_abc@14" })).toEqual({ session: { id: "ses_abc@14" } });
+    expect(sessionFromExpr(".inputs.t", "planning")).toEqual({ session: "planning" });
   });
 
   it("REFUSES nothing, naming the expression so the wiring is findable", () => {
     for (const value of [undefined, null]) {
-      const outcome = sessionFromExpr("inputs.thread", value);
+      const outcome = sessionFromExpr(".inputs.thread", value);
       expect(outcome).toHaveProperty("error");
-      expect((outcome as { error: string }).error).toContain("inputs.thread");
+      expect((outcome as { error: string }).error).toContain(".inputs.thread");
     }
   });
 
   it("REFUSES an empty id and an empty name, for the same reason", () => {
-    expect(sessionFromExpr("inputs.t", { id: "" })).toHaveProperty("error");
-    expect(sessionFromExpr("inputs.t", "")).toHaveProperty("error");
+    expect(sessionFromExpr(".inputs.t", { id: "" })).toHaveProperty("error");
+    expect(sessionFromExpr(".inputs.t", "")).toHaveProperty("error");
   });
 });

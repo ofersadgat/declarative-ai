@@ -366,7 +366,7 @@ cases.
 | `{ "child": "context", "output": "plan_doc" }` | One named output of the child. | the same, projecting `plan_doc` |
 | `{ "child": "context", "output": "*" }` | The child's whole outputs object, as one value. | `{ "op": "context" }` |
 | `{ "input": "issue" }` | This state's declared input, by name. | a `scope.get` producer |
-| `{ "expr": "outputs.weaknesses" }` | A small computation in the expression DSL (§6). | an `expr.eval` producer whose output schema is the inferred type |
+| `{ "expr": ".outputs.weaknesses" }` | A small computation in the expression DSL (§6). | an `expr.eval` producer whose output schema is the inferred type |
 | `{ "artifact": "design_doc" }` | A session-owned artifact, by name. | an `artifact.get` producer |
 | `{ "conversation": "review", "message": 3 }` | A session's transcript, or one message of it. | a `conversation.get` producer |
 
@@ -404,7 +404,7 @@ terminates.
     },
     "outcome": {
       "schema": { "type": "string", "enum": ["complete", "blocked"] },
-      "binding": { "expr": "children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'" }
+      "binding": { "expr": ".children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'" }
     }
   }
 }
@@ -482,7 +482,7 @@ Example:
 
 A configuration input is read exactly like any other input: by a binding
 (`{ "input": "severity_threshold" }`), by an expression (`inputs.severity_threshold`), or by
-prompt interpolation (`{{inputs.severity_threshold}}`).
+prompt interpolation (`{{.inputs.severity_threshold}}`).
 
 ### 4.6 Artifacts
 
@@ -811,11 +811,11 @@ A **prompt operation** is one structured model call:
 ```text
 kind        "prompt"
 prompt      { "template": "…" } or { "skill": "<name>" } — exactly one. Both render with
-            {{inputs.*}} interpolation; a skill resolves through registry.skills.
+            {{.inputs.*}} interpolation; a skill resolves through registry.skills.
 system      Optional system prompt.
 config      The model-configuration surface (model, sampling, configRef, …).
 input       Slots (§4.1) feeding the call; a bound slot is resolved before the call runs. The op's
-            resolved inputs ARE the template's {{inputs.*}} scope, so a render variable (e.g. a
+            resolved inputs ARE the template's {{.inputs.*}} scope, so a render variable (e.g. a
             skill invocation's arguments) is just a bound input.
 output      The operation's output slot. Defaults to one object slot built from the state's
             declared outputs — which is what a `{ "child", "output" }` binding projects against.
@@ -965,38 +965,38 @@ An agent operation may not:
       "state": "feature/plan/critique/address_weaknesses",
       "inputs": {
         "plan_doc": { "input": "plan_doc" },
-        "weaknesses": { "expr": "outputs.weaknesses" },
-        "critique_report": { "expr": "outputs.critique_report" }
+        "weaknesses": { "expr": ".outputs.weaknesses" },
+        "critique_report": { "expr": ".outputs.critique_report" }
       }
     },
     "human_review": {
       "state": "feature/plan/critique/human_review",
       "inputs": {
         "plan_doc": { "input": "plan_doc" },
-        "critique_report": { "expr": "outputs.critique_report" }
+        "critique_report": { "expr": ".outputs.critique_report" }
       }
     }
   },
   "transitions": [
     {
       "to": "terminate.success",
-      "when": "children.human_review.outcome === 'success'"
+      "when": ".children.human_review.outcome === 'success'"
     },
     {
       "to": "terminate.success",
-      "when": "children.address_weaknesses.outcome === 'success'"
+      "when": ".children.address_weaknesses.outcome === 'success'"
     },
     {
       "to": "terminate.success",
-      "when": "outputs.outcome === 'clean'"
+      "when": ".outputs.outcome === 'clean'"
     },
     {
       "to": "human_review",
-      "when": "outputs.outcome === 'blocked'"
+      "when": ".outputs.outcome === 'blocked'"
     },
     {
       "to": "address_weaknesses",
-      "when": "outputs.outcome === 'needs_changes'"
+      "when": ".outputs.outcome === 'needs_changes'"
     }
   ]
 }
@@ -1140,7 +1140,7 @@ validated outputs. The parent branches on `outputs.decision`.
         "enum": ["complete", "blocked"]
       },
       "binding": {
-        "expr": "children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'"
+        "expr": ".children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'"
       }
     },
     "plan_doc": {
@@ -1178,15 +1178,15 @@ validated outputs. The parent branches on `outputs.decision`.
   "transitions": [
     {
       "to": "terminate.success",
-      "when": "children.critique.outputs.outcome === 'clean'"
+      "when": ".children.critique.outputs.outcome === 'clean'"
     },
     {
       "to": "goals",
-      "when": "children.critique.outputs.outcome === 'needs_changes' && run.iteration < limits.max_iterations"
+      "when": ".children.critique.outputs.outcome === 'needs_changes' && .run.iteration < .limits.max_iterations"
     },
     {
       "to": "terminate.success",
-      "when": "children.critique.outcome === 'success'"
+      "when": ".children.critique.outcome === 'success'"
     }
   ],
   "limits": {

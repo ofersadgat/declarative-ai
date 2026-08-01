@@ -61,7 +61,7 @@ describe("the load-time lint", () => {
     operation: { kind: "prompt", prompt: "go", model: "m" },
   });
 
-  it("accepts `children.<key>.operation.outputs.session` when the child is a prompt op", () => {
+  it("accepts `.children.<key>.operation.outputs.session` when the child is a prompt op", () => {
     const files: Record<string, StateDef> = {
       root: {
         children: { plan: { state: "leaf" }, review: { state: "leaf" } },
@@ -71,7 +71,7 @@ describe("the load-time lint", () => {
       leaf: promptLeaf(),
     };
     files["root"]!.children!["review"]!.state = "consumer";
-    files["root"]!.children!["review"]!.inputs = { s: { expr: "children.plan.operation.outputs.session" } };
+    files["root"]!.children!["review"]!.inputs = { s: { expr: ".children.plan.operation.outputs.session" } };
     files["consumer"] = { ...promptLeaf(), inputs: { s: { schema: {} } } };
     expect(errorsFor(files, "root")).toEqual([]);
   });
@@ -87,7 +87,7 @@ describe("the load-time lint", () => {
       leaf: { ...promptLeaf(), inputs: { s: { schema: {} } } },
     };
     files["root"]!.children!["review"]!.state = "leaf";
-    files["root"]!.children!["review"]!.inputs = { s: { expr: "children.gate.operation.outputs.session" } };
+    files["root"]!.children!["review"]!.inputs = { s: { expr: ".children.gate.operation.outputs.session" } };
     const errors = errorsFor(files, "root");
     expect(errors.some((e) => /operation.*outputs/.test(e) || /resolves to no declared value/.test(e))).toBe(true);
   });
@@ -105,7 +105,7 @@ describe("the load-time lint", () => {
       consumer: { ...promptLeaf(), inputs: { s: { schema: {} } } },
     };
     files["root"]!.children!["review"]!.state = "consumer";
-    files["root"]!.children!["review"]!.inputs = { s: { expr: "children.plan.operation.attempts" } };
+    files["root"]!.children!["review"]!.inputs = { s: { expr: ".children.plan.operation.attempts" } };
     expect(errorsFor(files, "root").some((e) => /resolves to no declared value/.test(e))).toBe(true);
   });
 
@@ -113,7 +113,7 @@ describe("the load-time lint", () => {
     const files: Record<string, StateDef> = {
       root: {
         children: { gate: { state: "gate" } },
-        outputs: { r: { schema: { type: "number" }, binding: { expr: "children.gate.operation.cost" } } },
+        outputs: { r: { schema: { type: "number" }, binding: { expr: ".children.gate.operation.cost" } } },
       },
       gate: { outputs: { decision: { schema: { type: "string" } } }, operation: { kind: "function", function: "choose_option" } },
     };

@@ -110,8 +110,8 @@ describe("a transition is a jump in the sequence", () => {
       operation: { kind: "function", function: "choose", args: { answer } },
       children: { a: { state: "root/a" }, b: { state: "root/b" }, c: { state: "root/c" } },
       transitions: [
-        { to: "terminate.success", when: "children.b.outcome === 'success'" },
-        { to: "b", when: "outputs.pick === 'b'" },
+        { to: "terminate.success", when: ".children.b.outcome === 'success'" },
+        { to: "b", when: ".outputs.pick === 'b'" },
       ],
     },
     "root/a": marker("a"),
@@ -163,8 +163,8 @@ describe("a transition is a jump in the sequence", () => {
         operation: { kind: "function", function: "choose", args: { answer: "none" } },
         children: { a: { state: "root/a" }, b: { state: "root/b" }, c: { state: "root/c" } },
         transitions: [
-          { to: "terminate.success", when: "run.cursor === 'c'" },
-          { to: "c", when: "run.cursor === 'a' && outputs.pick === 'none'" },
+          { to: "terminate.success", when: ".run.cursor === 'c'" },
+          { to: "c", when: ".run.cursor === 'a' && .outputs.pick === 'none'" },
         ],
       },
       "root/a": marker("a"),

@@ -187,7 +187,10 @@ function validateState(
         // A guard must INFER to boolean — strict, no truthiness coercion (§7.2): a `when` that
         // infers to `number` is a validation error, not a falsy surprise at run time.
         const { schema, unresolved } = inferExpression(ast, scope);
-        for (const ref of unresolved) err(path, `references '${ref.join(".")}', which resolves to no declared value`);
+        // Quoted with the leading dot the author had to write: `unresolved` carries the path with
+        // its self root already dropped, and a message spelling an internal path sends the reader
+        // looking for a name that appears nowhere in their file.
+        for (const ref of unresolved) err(path, `references '.${ref.join(".")}', which resolves to no declared value`);
         if (!isBooleanSchema(schema) && !isUniversalSchema(schema)) {
           err(path, `guard must infer to boolean, but infers to ${describeSchema(schema)} — compare explicitly`);
         }
@@ -534,7 +537,7 @@ function resolverSchema(
   if (EXPRESSION_REFS.has(op.functionRef)) {
     const asRef: Ref<InlineFamily> = { op };
     const { schema, unresolved } = inferRef(asRef, scope);
-    for (const unres of unresolved) err(`expression references '${unres.join(".")}', which resolves to no declared value`);
+    for (const unres of unresolved) err(`expression references '.${unres.join(".")}', which resolves to no declared value`);
     // Reachability applies to expressions too: reading a child's outputs from an expression is the
     // same edge as wiring it, so it carries the same proof obligation.
     for (const reference of referencePathsOf(asRef)) {

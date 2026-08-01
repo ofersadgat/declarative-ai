@@ -33,6 +33,28 @@ export function isPending(v: unknown): v is Pending {
 
 export type Expr =
   | { type: "lit"; value: string | number | boolean | null }
+  /**
+   * THIS STATE — the root a leading `.` names, and the only route to runtime data.
+   *
+   * `.inputs.issue` is `member(member(self, "inputs"), "issue")`. The dot is what separates the two
+   * things a name can mean, uniformly in every position (REFERENCES.md §5): a leading dot reads a
+   * property of the current state, and a BARE name is resolved along the search `path` to a
+   * document. There is no third rule for expressions, which is why `add(.inputs.n, 1)` and
+   * `"binding": ".inputs.n"` say the same thing about `.inputs.n`.
+   *
+   * `self` never stands alone — `pathOf` returns `undefined` for a chain rooted here, so runtime
+   * data can reach neither callee position nor a `/` path segment. EXPRESSIONS.md §10's open
+   * question about the callee sandbox is answered structurally rather than by a rule to remember.
+   */
+  | { type: "self" }
+  /**
+   * A BARE name — resolved along the search `path`, never against this instance's data.
+   *
+   * This is the half of the grammar that used to read the expression context: `inputs.issue` meant
+   * the `inputs` namespace. It now means a document called `inputs`, and the runtime read is spelled
+   * `.inputs.issue`. One rule for a bare name in every position is worth the migration; two rules
+   * that differ by position is what made `{ expr }` need its own explanation.
+   */
   | { type: "ident"; name: string }
   | { type: "member"; obj: Expr; prop: string }
   /**
@@ -354,6 +376,11 @@ class Parser {
   }
 
   private primary(): Expr {
+    // A leading `.` roots the chain at THIS STATE. The dot is deliberately NOT consumed here: the
+    // member loop reads it as the first property access, so `.inputs.n` and `x.inputs.n` take one
+    // code path and cannot drift. A lone `.`, or `.5`, therefore fails in that loop with
+    // "expected property name after '.'", which is the accurate complaint.
+    if (this.atPunct(".")) return { type: "self" };
     const t = this.next();
     if (t.kind === "num") return { type: "lit", value: t.value };
     if (t.kind === "str") return { type: "lit", value: t.value };
@@ -370,6 +397,23 @@ class Parser {
     }
     throw new ExprError("unexpected token", t.pos);
   }
+}
+
+/**
+ * The RUNTIME path a self-rooted chain reads — `.inputs.n` → `["inputs","n"]`, `undefined` when the
+ * expression is not rooted at this state.
+ *
+ * The counterpart of {@link pathOf}, and the two are deliberately disjoint: exactly one of them
+ * answers for any given chain, because the dot is what decides whether a path names instance data or
+ * a document. Callers that used to get a runtime path out of `pathOf` want this one.
+ */
+export function selfPathOf(expr: Expr): string[] | undefined {
+  if (expr.type === "self") return [];
+  if (expr.type === "member") {
+    const base = selfPathOf(expr.obj);
+    return base === undefined ? undefined : [...base, expr.prop];
+  }
+  return undefined;
 }
 
 /** The dotted path an expression names, or `undefined` when it is a computation rather than a name. */
@@ -453,8 +497,16 @@ export function evaluate(expr: Expr, context: Record<string, unknown>): ExprValu
   switch (expr.type) {
     case "lit":
       return expr.value;
+    case "self":
+      // The context IS this state's runtime data, so the self root is the context object and
+      // `.inputs.n` walks into it by ordinary member access.
+      return context;
     case "ident":
-      return context[expr.name];
+      // A bare name is a document on the search `path`, and resolving one needs a filesystem and a
+      // referring state — the loader's knowledge, not a walk over a context. Refused for the same
+      // reason `applyOperator` refuses a non-built-in: this is the reference semantics the lowering
+      // is checked against, not a second execution path.
+      throw new ExprError(`'${expr.name}' is a reference, which only the lowered form can resolve`, 0);
     case "member": {
       const obj = evaluate(expr.obj, context);
       if (isPending(obj)) return PENDING;
@@ -532,8 +584,15 @@ export function referencesOf(expr: Expr): string[][] {
   const out: string[][] = [];
   const walk = (e: Expr): string[] | undefined => {
     switch (e.type) {
+      case "self":
+        // The root of every runtime path, contributing no segment of its own: `.inputs.n` is the
+        // reference `["inputs","n"]`, exactly as `inputs.n` used to be.
+        return [];
       case "ident":
-        return [e.name];
+        // A bare name reads no instance data — it is resolved along the `path` at load. Reporting it
+        // would make `classify` look like a read of an undeclared namespace, which is the same
+        // mistake the `apply` case below avoids for a callee.
+        return undefined;
       case "member": {
         const base = walk(e.obj);
         if (base) return [...base, e.prop];

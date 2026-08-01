@@ -2323,7 +2323,7 @@ interface PromptOpDecl {
   prompt?: { template?: string; skill?: string };   // exactly one — both fill the PromptOp `user` slot
   system?: string;
   config?: Record<string, JsonValue>;               // the LlmConfiguration surface (model, sampling, configRef)
-  input?: Record<string, ParameterDecl>;            // render variables are bound inputs → `{{inputs.*}}`
+  input?: Record<string, ParameterDecl>;            // render variables are bound inputs → `{{.inputs.*}}`
   output?: NamedParameterDecl;
 }
 interface FunctionOpDecl {
@@ -2459,7 +2459,7 @@ const RESOLVER_REF_VALUES: readonly string[];     // all of them, for registry s
 | `{ artifact: n }` / `{ conversation: s, message? }` | an `artifact.get` / `conversation.get` producer reading session-owned resources. |
 
 A `PromptOpDecl`'s render variables are authored directly as **bound input slots** (the operation's
-resolved inputs ARE the template's `{{inputs.*}}` scope — there is no separate `params`), and a
+resolved inputs ARE the template's `{{.inputs.*}}` scope — there is no separate `params`), and a
 `FunctionOpDecl`'s `config` lowers into a bound `config` input — the "authored surface rides bound inputs"
 move that keeps the op shape exactly findmyprompt's. A `skill` prompt is marked in the same `user` slot
 with a prefix rather than an extra op field:

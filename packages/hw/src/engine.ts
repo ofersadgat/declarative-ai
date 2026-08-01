@@ -273,7 +273,14 @@ class Notifier {
   }
 }
 
-const TEMPLATE_REF = /\{\{\s*([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)\s*\}\}/g;
+/**
+ * A template hole. The leading dot is optional HERE and required by the grammar — deliberately.
+ *
+ * Recognizing `{{inputs.x}}` and then failing to lower it is what turns an unmigrated hole into a
+ * load-time error naming the fix. A regex that demanded the dot would leave the hole unrecognized
+ * and render it as literal text into the prompt, which is the same mistake silently.
+ */
+const TEMPLATE_REF = /\{\{\s*(\.?[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)\s*\}\}/g;
 
 
 /** One conversation turn — a `ModelMessage`-compatible shape, so the built-in `conversationMode` transcript
@@ -1737,7 +1744,7 @@ export class WorkflowEngine {
    * content; arrays/objects as JSON.
    *
    * `opInputs` is the operation's RESOLVED inputs (the state's inputs plus the op's own bound inputs).
-   * They become the template's `{{inputs.*}}` scope — authored render variables ride bound input slots
+   * They become the template's `{{.inputs.*}}` scope — authored render variables ride bound input slots
    * (loader §3.1), so a prompt sees exactly the inputs its operation resolved, nothing more.
    */
   private renderTemplate(template: string, instance: Instance, opInputs?: Record<string, ResolvedValue>): string {
@@ -1746,12 +1753,17 @@ export class WorkflowEngine {
       ? { ...base, inputs: { ...(base.inputs as Record<string, unknown>), ...opInputs } }
       : base;
     // The operation's own resolved inputs shadow the instance's for the duration of the render —
-    // which is what makes `{{inputs.style}}` reach a bound render variable rather than a state input.
+    // which is what makes `{{.inputs.style}}` reach a bound render variable rather than a state input.
     const scope: ResolutionScope = { ...this.scopeFor(instance), exprContext: ctx };
     return template.replace(TEMPLATE_REF, (_m, path: string) => {
+      // Lowering happens OUTSIDE the catch: a hole that cannot be lowered is an authoring error
+      // (`{{inputs.x}}` missing its dot, a name that resolves nowhere), while a hole that lowers and
+      // does not resolve is legitimately empty for this render. Swallowing both made the first look
+      // like the second — an empty substitution where the prompt silently lost a variable.
+      const ref = this.exprRef(path);
       let v: unknown;
       try {
-        const r = resolveRef(this.exprRef(path), scope);
+        const r = resolveRef(ref, scope);
         if (!isResolvedValue(r)) return "";
         v = r.value;
       } catch {

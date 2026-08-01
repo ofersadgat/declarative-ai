@@ -358,13 +358,13 @@ describe("SPEC §10.4 — async children and the dataflow join", () => {
         inputs: {},
         // `slow` is ASYNC, so the reachability rule (§7.2) forbids a `{ child }` binding here —
         // the pending-tolerant `{ expr }` leaf is the async equivalent.
-        outputs: { got: { schema: { type: "string" }, binding: { expr: "children.slow.outputs.val" } } },
+        outputs: { got: { schema: { type: "string" }, binding: { expr: ".children.slow.outputs.val" } } },
         children: {
           slow: { state: "parent/slow", async: true, inputs: {} },
           quick: { state: "parent/quick", inputs: {} },
         },
         sequence: ["slow", "quick"],
-        transitions: [{ to: "terminate.success", when: "children.slow.outputs.val === 'done'" }],
+        transitions: [{ to: "terminate.success", when: ".children.slow.outputs.val === 'done'" }],
       },
       "parent/slow": {
         inputs: {},
@@ -401,7 +401,7 @@ describe("SPEC §10.4 — async children and the dataflow join", () => {
         outputs: {},
         children: {
           never: { state: "parent/never", async: true, inputs: {} },
-          waiting: { state: "parent/waiting", inputs: { x: { expr: "children.never.outputs.v" } } },
+          waiting: { state: "parent/waiting", inputs: { x: { expr: ".children.never.outputs.v" } } },
         },
         sequence: ["never", "waiting"],
       },
@@ -436,7 +436,7 @@ describe("SPEC §10.4 — async children and the dataflow join", () => {
 });
 
 describe("timeout, cancellation, and unhandled child failures", () => {
-  it("limits.timeout terminates the state (and its running ops) with terminate.timeout", async () => {
+  it(".limits.timeout terminates the state (and its running ops) with terminate.timeout", async () => {
     const files: Record<string, StateDef> = {
       slowroot: {
         inputs: {},
@@ -480,7 +480,7 @@ describe("timeout, cancellation, and unhandled child failures", () => {
           slow: { state: "parent/slow", inputs: {} },
         },
         sequence: ["slow"],
-        transitions: [{ to: "terminate.success", when: "children.slow.outcome === 'timeout'" }],
+        transitions: [{ to: "terminate.success", when: ".children.slow.outcome === 'timeout'" }],
       },
       "parent/slow": {
         inputs: {},
@@ -557,9 +557,9 @@ describe("conversation modes (SPEC §4.7)", () => {
     critique.operation = {
       kind: "prompt",
       model: "critic",
-      // An operation's bound input slots render under `{{inputs.*}}` — the one namespace a template
+      // An operation's bound input slots render under `{{.inputs.*}}` — the one namespace a template
       // sees, the operation's resolved inputs (state inputs plus the op's own bound inputs).
-      prompt: "Summarize this transcript: {{inputs.history}}",
+      prompt: "Summarize this transcript: {{.inputs.history}}",
       input: { history: { kind: "json", binding: { conversation: "planning" } } },
     };
     const { engine, fake } = makeEngine(files, PLAN_ID, planningScript());
@@ -579,7 +579,7 @@ describe("conversation modes (SPEC §4.7)", () => {
     critique.operation = {
       kind: "prompt",
       model: "critic",
-      prompt: "First turn was: {{inputs.first}}",
+      prompt: "First turn was: {{.inputs.first}}",
       input: { first: { kind: "json", binding: { conversation: "planning", message: 0 } } },
     };
     const { engine, fake } = makeEngine(files, PLAN_ID, planningScript());
@@ -618,7 +618,7 @@ describe("conversation modes (SPEC §4.7)", () => {
   });
 });
 
-describe("template rendering: `{{inputs.*}}` is the operation's resolved inputs", () => {
+describe("template rendering: `{{.inputs.*}}` is the operation's resolved inputs", () => {
   // There is ONE namespace now (params is gone): a prompt template sees exactly the inputs its
   // operation resolved — the state's inputs, with the op's own bound inputs overlaid, a bound input
   // of the same name winning (resolveInputs: an explicit binding overrides the by-name fill).
@@ -627,23 +627,23 @@ describe("template rendering: `{{inputs.*}}` is the operation's resolved inputs"
       label: "Solo",
       inputs: { tone: { schema: { type: "string" } } },
       outputs: { answer: { schema: { type: "string" } } },
-      operation: { kind: "prompt", model: "writer", prompt: "tone={{inputs.tone}}" },
+      operation: { kind: "prompt", model: "writer", prompt: "tone={{.inputs.tone}}" },
     } as StateDef,
   });
 
-  it("renders a state input under {{inputs.*}}", async () => {
+  it("renders a state input under {{.inputs.*}}", async () => {
     const { engine, fake } = makeEngine(files(), "solo", () => ok({ answer: "a" }));
     const result = await engine.run({ inputs: { tone: "casual" } });
     expect(result.outcome).toBe("success");
     expect(promptOf(fake.calls[0]!)).toBe("tone=casual");
   });
 
-  it("an operation's own bound input renders under {{inputs.*}} and wins over a same-named state input", async () => {
+  it("an operation's own bound input renders under {{.inputs.*}} and wins over a same-named state input", async () => {
     const f = files();
     // A render variable is authored as an operation input with a literal binding — the successor to
     // the removed `operation.params` sugar. It resolves and overlays onto the template's inputs.
     (f["solo"]!.operation as { input?: Record<string, unknown> }).input = { tone: { kind: "text", binding: { text: "terse" } } };
-    (f["solo"]!.operation as { prompt?: string }).prompt = "tone={{inputs.tone}}";
+    (f["solo"]!.operation as { prompt?: string }).prompt = "tone={{.inputs.tone}}";
     const { engine, fake } = makeEngine(f, "solo", () => ok({ answer: "a" }));
     await engine.run({ inputs: { tone: "casual" } });
     expect(promptOf(fake.calls[0]!)).toBe("tone=terse");
@@ -777,16 +777,16 @@ describe("run records (SPEC §10.2)", () => {
 });
 
 describe("a prompt op's render variables", () => {
-  it("renders the state's inputs and the op's own bound inputs under one {{inputs.*}} namespace", async () => {
+  it("renders the state's inputs and the op's own bound inputs under one {{.inputs.*}} namespace", async () => {
     const files: Record<string, StateDef> = {
       s: {
         inputs: { topic: { schema: { type: "string" } } },
         outputs: { summary: { schema: { type: "string" } } },
-        // A render variable is a bound operation input; it reaches the template under `{{inputs.*}}`
+        // A render variable is a bound operation input; it reaches the template under `{{.inputs.*}}`
         // alongside the state's own inputs — one namespace, the op's resolved inputs.
         operation: {
           kind: "prompt",
-          prompt: "Summarize {{inputs.topic}} ({{inputs.style}}).",
+          prompt: "Summarize {{.inputs.topic}} ({{.inputs.style}}).",
           input: { style: { schema: { type: "string" }, binding: { text: "terse" } } },
           model: "reviewer",
         },
@@ -1019,25 +1019,25 @@ describe("operation.* resolves during a run", () => {
 
   it("carries a child's cost up to its parent", async () => {
     // Previously reachable only through the events journal, which no expression can read.
-    const { engine } = makeEngine(reading("children.call.operation.cost", { type: "number" }), "root", () =>
+    const { engine } = makeEngine(reading(".children.call.operation.cost", { type: "number" }), "root", () =>
       ok({ r: "done" }, 0.25),
     );
     expect((await engine.run({ inputs: {} })).outputs?.read).toBe(0.25);
   });
 
   it("carries the outcome and the model the call was actually made with", async () => {
-    const outcome = await makeEngine(reading("children.call.operation.outcome"), "root", () => ok({ r: "done" })).engine.run({
+    const outcome = await makeEngine(reading(".children.call.operation.outcome"), "root", () => ok({ r: "done" })).engine.run({
       inputs: {},
     });
     expect(outcome.outputs?.read).toBe("success");
-    const model = await makeEngine(reading("children.call.operation.model"), "root", () => ok({ r: "done" })).engine.run({
+    const model = await makeEngine(reading(".children.call.operation.model"), "root", () => ok({ r: "done" })).engine.run({
       inputs: {},
     });
     expect(model.outputs?.read).toBe("reviewer");
   });
 
   it("exposes the conversation position the call ENDED at, as a bare `{ id }`", async () => {
-    const { engine } = makeEngine(reading("children.call.operation.outputs.session"), "root", () => ok({ r: "done" }));
+    const { engine } = makeEngine(reading(".children.call.operation.outputs.session"), "root", () => ok({ r: "done" }));
     const result = await engine.run({ inputs: {} });
     // ONLY an id: the enumerable shape the events journal and `inputs_json` see. Everything else a
     // resolved session carries is non-enumerable by construction.
@@ -1047,11 +1047,11 @@ describe("operation.* resolves during a run", () => {
   it("records a FAILED call too, which is when its cost is most worth reading", async () => {
     // A node written only on the happy path would be missing exactly here — and a failed call still
     // costs money.
-    const files = reading("children.call.operation.cost", { type: "number" });
+    const files = reading(".children.call.operation.cost", { type: "number" });
     files["root"]!.outputs!["read"]!.optional = true;
     // The guard reads the FAILED child's node. It can only fire if the node was recorded despite the
     // call failing — and `terminate.success` keeps the transition from re-firing forever.
-    files["root"]!.transitions = [{ to: "terminate.success", when: "children.call.operation.cost === 0.05" }];
+    files["root"]!.transitions = [{ to: "terminate.success", when: ".children.call.operation.cost === 0.05" }];
     const { engine } = makeEngine(files, "root", () => ({
       error: { classification: "permanent" as const, reason: "model exploded" },
       metrics: { durationMs: 1, costUsd: 0.05, costSource: "unknown" as const },
@@ -1061,9 +1061,9 @@ describe("operation.* resolves during a run", () => {
 
   it("is an empty object before the operation has run, not a throw", async () => {
     // A guard evaluated before the call reads `undefined`, exactly as a never-entered child does.
-    const files = reading("children.call.operation.outcome");
+    const files = reading(".children.call.operation.outcome");
     files["root"]!.outputs!["read"]!.optional = true;
-    files["root"]!.transitions = [{ to: "terminate.success", when: "children.call.operation.outcome === 'success'" }];
+    files["root"]!.transitions = [{ to: "terminate.success", when: ".children.call.operation.outcome === 'success'" }];
     expect((await makeEngine(files, "root", () => ok({ r: "done" })).engine.run({ inputs: {} })).outcome).toBe("success");
   });
 });
@@ -1156,7 +1156,7 @@ describe("the conversation and the resource bundle are different keys", () => {
       root: {
         children: {
           plan: { state: "planner" },
-          review: { state: "reviewer", inputs: { thread: { expr: "children.plan.operation.outputs.session" } } },
+          review: { state: "reviewer", inputs: { thread: { expr: ".children.plan.operation.outputs.session" } } },
         },
         sequence: ["plan", "review"],
         outputs: { r: { binding: { child: "review", output: "r" } } },
@@ -1177,13 +1177,13 @@ describe("the conversation and the resource bundle are different keys", () => {
   it("continues a conversation named by an EXPRESSION, not by a shared name", async () => {
     // Neither state declares a session name, so nothing is shared by declaration. The reviewer joins
     // the planner's stream purely because it was handed the position the planner ended at.
-    const { engine, fake } = makeEngine(explicitPair({ expr: "inputs.thread" }), "root", () => ok({ r: "done" }));
+    const { engine, fake } = makeEngine(explicitPair({ expr: ".inputs.thread" }), "root", () => ok({ r: "done" }));
     await engine.run({ inputs: {} });
     expect(promptOf(fake.calls[1]!)).toContain("first call");
   });
 
   it("...and the same ref with `fork` branches instead of continuing", async () => {
-    const files = explicitPair({ expr: "inputs.thread" }, { environment: { fork: true } });
+    const files = explicitPair({ expr: ".inputs.thread" }, { environment: { fork: true } });
     const { engine, fake } = makeEngine(files, "root", () => ok({ r: "done" }));
     await engine.run({ inputs: {} });
     // A fork still SEES the prefix — that is what makes it a branch of this conversation rather
@@ -1194,7 +1194,7 @@ describe("the conversation and the resource bundle are different keys", () => {
   it("an expression that resolves to nothing FAILS, rather than quietly running in isolation", async () => {
     // The whole reason `""` is rejected: the author asked to continue a specific conversation, and
     // silently starting a different one produces a run that looks successful and remembers nothing.
-    const files = explicitPair({ expr: "inputs.missing" });
+    const files = explicitPair({ expr: ".inputs.missing" });
     files["reviewer"]!.inputs = { thread: { schema: {} }, missing: { schema: {}, optional: true } as never };
     const { engine } = makeEngine(files, "root", () => ok({ r: "done" }));
     const result = await engine.run({ inputs: {} });

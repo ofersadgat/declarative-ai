@@ -59,7 +59,7 @@ export interface SessionRef {
 export type SessionDecl = string | null | SessionRef | SessionExpr;
 
 /**
- * A `session` computed at run time — `{"expr": "children.plan.operation.outputs.session"}`.
+ * A `session` computed at run time — `{"expr": ".children.plan.operation.outputs.session"}`.
  *
  * The other three spellings are STATIC: the loader reads them off the merged document, and they
  * mean the same thing on every instance. That is right for a name and useless for a ref, because
@@ -137,7 +137,7 @@ export function validateSessionDecl(value: unknown): string | undefined {
     return `session must be a name, a session ref, {"expr": …}, or null — got ${Array.isArray(value) ? "an array" : typeof value}`;
   }
   if (value === "") {
-    // The failure this catches: `"session": "{{inputs.thread}}"` where `thread` is
+    // The failure this catches: `"session": "{{.inputs.thread}}"` where `thread` is
     // absent. An empty string would start an isolated conversation and report success.
     return "session is an empty string — write null to start a fresh session, or fix the reference that produced it";
   }

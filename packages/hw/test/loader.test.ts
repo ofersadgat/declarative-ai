@@ -49,10 +49,10 @@ describe("desugaring (API.md, \"Binding desugaring\")", () => {
   it("a prompt op's render variable is an ordinary bound input slot", () => {
     const files = specPlanningFiles();
     // A render variable (the successor to the removed `operation.params` sugar) is authored as an
-    // operation input with a literal binding, and reaches the template under `{{inputs.style}}`.
+    // operation input with a literal binding, and reaches the template under `{{.inputs.style}}`.
     files["feature/plan/goals"]!.operation = {
       kind: "prompt",
-      prompt: "Extract goals ({{inputs.style}}).",
+      prompt: "Extract goals ({{.inputs.style}}).",
       model: "planner",
       input: { style: { kind: "text", binding: { text: "terse" } } },
     };
@@ -144,14 +144,27 @@ describe("validateBundle failure modes", () => {
 
   it("flags unparseable and undeclared-reference expressions", () => {
     const files = specPlanningFiles();
-    files[PLAN_ID]!.transitions![0]!.when = "children.critique.outputs.outcome ===";
-    files[PLAN_ID]!.transitions![2]!.when = "children.nonchild.outcome === 'success'";
-    files[PLAN_ID]!.outputs!["outcome"]!.binding = { expr: "bogusroot.x" };
+    files[PLAN_ID]!.transitions![0]!.when = ".children.critique.outputs.outcome ===";
+    files[PLAN_ID]!.transitions![2]!.when = ".children.nonchild.outcome === 'success'";
+    files[PLAN_ID]!.outputs!["outcome"]!.binding = { expr: ".bogusroot.x" };
     const report = validateBundle(loadBundle(files, PLAN_ID));
     const messages = report.errors.map((e) => e.message).join("\n");
     expect(messages).toMatch(/does not parse/);
     expect(messages).toMatch(/undeclared child 'nonchild'/);
     expect(messages).toMatch(/unknown reference root 'bogusroot'/);
+  });
+
+  /**
+   * The same typo without the dot fails one layer earlier, and that is what the dot buys.
+   *
+   * `.bogusroot.x` is a runtime read of a namespace that does not exist — a type error, which the
+   * validator reports. `bogusroot.x` is a reference to a document that does not exist, which the
+   * loader cannot finish lowering at all. Two spellings, two failures, neither of them silent.
+   */
+  it("fails at LOAD for a bare name that resolves nowhere, naming the missing dot", () => {
+    const files = specPlanningFiles();
+    files[PLAN_ID]!.outputs!["outcome"]!.binding = { expr: "children.critique.outputs.outcome" };
+    expect(() => loadBundle(files, PLAN_ID)).toThrow(/did you mean '\.children\.critique\.outputs\.outcome'/);
   });
 
   it("flags unwired required child inputs and unknown wired names", () => {
@@ -169,16 +182,16 @@ describe("validateBundle failure modes", () => {
     const files = specPlanningFiles();
     const plan = files[PLAN_ID]!;
     delete plan.limits;
-    plan.transitions = [{ to: "goals", when: "children.critique.outputs.outcome === 'needs_changes'" }];
+    plan.transitions = [{ to: "goals", when: ".children.critique.outputs.outcome === 'needs_changes'" }];
     const report = validateBundle(loadBundle(files, PLAN_ID));
     expect(report.warnings.map((w) => w.message).join("\n")).toMatch(/can cycle/);
   });
 
-  it("does not warn when the cycle is guarded by run.iteration", () => {
+  it("does not warn when the cycle is guarded by .run.iteration", () => {
     const files = specPlanningFiles();
     const plan = files[PLAN_ID]!;
     delete plan.limits;
-    plan.transitions = [{ to: "goals", when: "children.critique.outputs.outcome === 'needs_changes' && run.iteration < 3" }];
+    plan.transitions = [{ to: "goals", when: ".children.critique.outputs.outcome === 'needs_changes' && .run.iteration < 3" }];
     const report = validateBundle(loadBundle(files, PLAN_ID));
     expect(report.warnings.filter((w) => /can cycle/.test(w.message))).toEqual([]);
   });
@@ -200,7 +213,7 @@ describe("validateBundle failure modes", () => {
 
   it("requires a guard to infer to boolean (§7.2, no truthiness coercion)", () => {
     const files = specPlanningFiles();
-    files[PLAN_ID]!.transitions![0]!.when = "run.iteration";
+    files[PLAN_ID]!.transitions![0]!.when = ".run.iteration";
     const report = validateBundle(loadBundle(files, PLAN_ID));
     expect(report.errors.map((e) => e.message).join("\n")).toMatch(/guard must infer to boolean/);
   });
@@ -239,12 +252,12 @@ describe("a resolved definition is plain JSON", () => {
       inputs: { issue: { schema: { type: "string" }, default: "significant", optional: true, description: "d" } },
       outputs: {
         "ctx_*": { binding: ".children.ctx.outputs" },
-        verdict: { binding: { expr: "children.ctx.outputs.n > 1" } },
+        verdict: { binding: { expr: ".children.ctx.outputs.n > 1" } },
         whole: { binding: ".children.ctx.outputs" },
       },
       children: { ctx: { state: "root/ctx", inputs: { seed: ".inputs.issue" } } },
       sequence: ["ctx"],
-      transitions: [{ to: "terminate.success", when: "run.cursor === 'ctx'" }],
+      transitions: [{ to: "terminate.success", when: ".run.cursor === 'ctx'" }],
       limits: { max_iterations: 3 },
     },
     "root/ctx": {

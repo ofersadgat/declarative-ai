@@ -148,6 +148,42 @@ export type BindingDecl =
   /** A previous conversation, or one message of it. Lowers to a `conversation.get` producer. */
   | { conversation: string; message?: number };
 
+/** Every key that tags an authored binding form — the base `Ref` cases plus the sugar. */
+const BINDING_TAGS: readonly string[] = ["text", "json", "result", "refs", "op", "child", "input", "expr", "artifact", "conversation"];
+
+/**
+ * True when a value is spelled as a BINDING rather than as data.
+ *
+ * A reference in a binding position can point at anything, and what it points at decides how it
+ * reads: a binding form is a binding, an operation document is an operation, and anything else is
+ * data. This is the test expansion applies to what it spliced — which is the shape-mismatch rule of
+ * REFERENCES.md §3 turned on the target instead of the position.
+ *
+ * An operation document counts, because it lowers to the `{ op }` producer edge that §3.1 calls the
+ * higher-order value of a named operation.
+ */
+export function isBindingDecl(value: unknown): boolean {
+  if (typeof value === "string") return true;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const o = value as Record<string, unknown>;
+  return BINDING_TAGS.some((k) => k in o) || o.kind === "prompt" || o.kind === "function";
+}
+
+/**
+ * How a RESOLVED document reads in binding position — the one definition of that dispatch.
+ *
+ * Two callers reach it from opposite directions and must agree: expansion, splicing a path written
+ * as a whole binding, and lowering, resolving a bare name inside an expression. `"binding": "lib/x"`
+ * and `"binding": "id(lib/x)"` have to see the same `lib/x`, so the rule lives in one place.
+ *
+ * `fromDataFile` is what separates a `.md`'s TEXT from a JSON string: both are strings in hand, and
+ * only the file type says whether the author wrote prose or a binding.
+ */
+export function bindingForDocument(value: unknown, fromDataFile: boolean): BindingDecl {
+  if (typeof value === "string" && !fromDataFile) return { text: value };
+  return isBindingDecl(value) ? (value as BindingDecl) : { json: value as JsonValue };
+}
+
 /** A `Parameter` as AUTHORED: the binding may still be sugar. */
 export interface ParameterDecl {
   kind?: RefKind;
@@ -191,7 +227,7 @@ export interface ExecEnvironmentDecl {
    *  - a **session ref** (`{ id }`) — an exact position to continue or branch from. Opaque: nothing
    *    outside the session store parses it. Normally reached through the fourth spelling rather than
    *    written literally, since a ref is a run-time value;
-   *  - an **expression** (`{ expr }`, e.g. `{"expr": "children.plan.operation.outputs.session"}`) —
+   *  - an **expression** (`{ expr }`, e.g. `{"expr": ".children.plan.operation.outputs.session"}`) —
    *    the same thing computed per instance. This is the one form EVALUATED rather than read, and
    *    the only practical way to name an exact position, because `operation.outputs.session` does
    *    not exist until that operation has run;
@@ -245,7 +281,7 @@ export interface ExecEnvironmentDecl {
 export interface OperationFields extends ExecEnvironmentDecl {
   kind?: "prompt" | "function";
   /**
-   * The prompt, as text. `{{inputs.x}}` interpolation applies.
+   * The prompt, as text. `{{.inputs.x}}` interpolation applies.
    *
    * A reusable prompt is a REFERENCE to a file — `{"$ref": "$/prompts/review.md"}` — which is what
    * replaced the old `prompt.skill` and `registry.skills` (REFERENCES.md §7.1). A referenced `.md`

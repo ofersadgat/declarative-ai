@@ -128,7 +128,7 @@ describe("ref TREES — primitives, and what a tree cannot contain", () => {
   // The loader lowers sugar at a parameter's `binding` and does not walk into `refs`, so sugar written
   // inside a tree arrives here unlowered.
   it("refuses unlowered binding sugar nested in a tree, naming the keyword", () => {
-    expect(error({ refs: { a: { expr: "inputs.n" } } })).toMatch(/'expr' binding sugar cannot be nested/);
+    expect(error({ refs: { a: { expr: ".inputs.n" } } })).toMatch(/'expr' binding sugar cannot be nested/);
     expect(error({ refs: { a: { child: "c" } } })).toMatch(/'child' binding sugar/);
     expect(error({ refs: { a: { child: "c", output: "o" } } })).toMatch(/'child' binding sugar/);
     expect(error({ refs: { a: { input: "n" } } })).toMatch(/'input' binding sugar/);

@@ -13,7 +13,11 @@
  * binding, it addresses this instance's data, and the desugarer lowers it like any other binding.
  */
 import { mergeOperationFields } from "./merge";
+import { bindingForDocument } from "./format";
 import {
+  isDataFile,
+  isPathSpelling,
+  isRuntimeReference,
   parseReferencedFile,
   ReferenceError,
   resolveReference,
@@ -102,6 +106,29 @@ function expandReferenced(
   return expandNode(value, shape, nested, path, new Set([...active, key]));
 }
 
+/**
+ * Resolve a path in BINDING position, and say what the target is rather than assuming.
+ *
+ * Three answers, decided by the target itself:
+ *
+ *  - a binding form (`{child}`, `{expr}`, `.inputs.x`, an operation document) is spliced as-is and
+ *    behaves as though typed — including re-entering the desugarer, so a fragment may itself be a
+ *    reference;
+ *  - TEXT (a `.md`) is a text literal. This is the distinction that needs the file type to make:
+ *    the text of a prompt fragment is a string, and so is a binding, and reading one as the other
+ *    would parse a prompt as an expression;
+ *  - anything else is data, wrapped as a JSON literal.
+ *
+ * Wrapping here rather than in the desugarer is deliberate. Only this pass knows a value arrived
+ * from a FILE, and that is exactly what licenses reading an unrecognized object as data: an
+ * unrecognized object typed inline is a misspelled binding tag, and should still be the error it
+ * has always been.
+ */
+function expandBinding(reference: string, shape: Shape, options: ExpandOptions, path: string[], active: Set<string>): unknown {
+  const resolved = expandReferenced(reference, shape, options, path, active, undefined);
+  return bindingForDocument(resolved, isDataFile(resolveReference(reference, refOptions(options)).file));
+}
+
 function expandNode(value: unknown, shape: Shape, options: ExpandOptions, path: string[], active: Set<string>): unknown {
   // A reference-typed string is a path we RESOLVE elsewhere (naming a state), never transcluded.
   if (shape.t === "ref") return value;
@@ -111,12 +138,19 @@ function expandNode(value: unknown, shape: Shape, options: ExpandOptions, path: 
   if (shape.t === "schema") return expandSchema(value, options, path, active);
 
   if (typeof value === "string") {
-    // A leading-dot string in a binding is a RUNTIME reference: it addresses this instance's data,
-    // and the desugarer lowers it. `./x` and `../x` are relative FILE paths, so they still resolve.
+    // A binding string is one of three things, and the two predicates below are the whole rule:
+    //
+    //  - a RUNTIME reference (`.inputs.issue`) — this instance's data, which the desugarer lowers;
+    //  - an EXPRESSION (`add(.inputs.n, 1)`) — also the desugarer's, since resolving the names
+    //    inside it is lowering's job, not expansion's;
+    //  - a path — a document reference, resolved and spliced in here.
+    //
+    // A bare path lands in the third case, which is what makes `"binding": "lib/defaults"` mean the
+    // node at that path. What it resolves TO decides how it then reads (an operation, a value,
+    // another binding), and that dispatch is `desugarBinding`'s — it already is exactly that.
     if (shape.t === "binding") {
-      return /^\.\.?(\/|$)/.test(value) || !value.startsWith(".")
-        ? expandReferenced(value, shape, options, path, active, undefined)
-        : value;
+      if (isRuntimeReference(value) || !isPathSpelling(value)) return value;
+      return expandBinding(value, shape, options, path, active);
     }
     // A string where an object or array belongs IS a reference (§3).
     if (shape.t === "object" || shape.t === "array") {

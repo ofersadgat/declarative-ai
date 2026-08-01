@@ -113,12 +113,12 @@ describe("transclusion", () => {
 
   it("loads a prompt from a .md file as text", () => {
     const files = {
-      [`${ROOT}/prompts/goals.md`]: "Extract goals from {{inputs.issue}}.",
+      [`${ROOT}/prompts/goals.md`]: "Extract goals from {{.inputs.issue}}.",
       [`${WF}/g.json`]: "{}",
     };
     const def = { operation: { kind: "prompt", prompt: { $ref: "$/prompts/goals.md" }, model: "m" } };
     const op = loadBundle({ "g.json": def }, "g", opts(files)).states.g!.operation as PromptOp<never>;
-    expect(op.user).toBe("Extract goals from {{inputs.issue}}.");
+    expect(op.user).toBe("Extract goals from {{.inputs.issue}}.");
   });
 
   it("reads a YAML fragment as an object", () => {
@@ -217,12 +217,30 @@ describe("runtime references", () => {
   });
 
   it("insists a binding reference start with a dot", () => {
+    const child = { outputs: { x: { schema: { type: "string" } } }, operation: { kind: "prompt", prompt: "go", model: "m" } };
+    const withBinding = (binding: string) => ({
+      "w.json": { outputs: { x: { binding } }, children: { c: { state: "./c" } } },
+      "w/c.json": child,
+    });
+    // With the dot it reads the child. Without it, the same text is a DOCUMENT reference — resolved
+    // against the filesystem, where nothing of that name exists.
+    expect(bundle(withBinding(".children.c.outputs.x")).states.w!.outputs!.x!.binding).toMatchObject({
+      op: { kind: "function", functionRef: "select" },
+    });
+    expect(() => bundle(withBinding("children.c.outputs.x"))).toThrow(/matches no file/);
+  });
+
+  it("reads a string binding with operators or a call as an expression", () => {
+    // The counterpart: a string expansion cannot read as a path is left for the desugarer, so an
+    // expression needs no `{ expr }` wrapper to be one (EXPRESSIONS.md §1).
     const defs = {
-      "w.json": { outputs: { x: { binding: "children.c.outputs.x" } }, children: { c: { state: "./c" } } },
-      "w/c.json": { outputs: { x: { schema: { type: "string" } } }, operation: { kind: "prompt", prompt: "go", model: "m" } },
+      "w.json": {
+        inputs: { n: { schema: { type: "integer" } } },
+        outputs: { doubled: { binding: "add(.inputs.n, .inputs.n)" } },
+        operation: { kind: "prompt", prompt: "go", model: "m" },
+      },
     };
-    // Without the dot it is a DOCUMENT reference, and expansion resolves it against the filesystem.
-    expect(() => bundle(defs)).toThrow(/matches no file|not a runtime reference/);
+    expect(bundle(defs).states.w!.outputs!.doubled!.binding).toMatchObject({ op: { kind: "function", functionRef: "add" } });
   });
 
   /**
@@ -369,7 +387,7 @@ describe("an expression calls an operation resolved along the path", () => {
     // An operation document, declaring the parameters a positional call binds against (§3.3).
     [`${FUNCTIONS}/classify.json`]: JSON.stringify({
       kind: "prompt",
-      prompt: "Classify {{inputs.text}}",
+      prompt: "Classify {{.inputs.text}}",
       model: "m",
       input: { text: { kind: "text", index: 0 } },
     }),
@@ -384,7 +402,7 @@ describe("an expression calls an operation resolved along the path", () => {
   it("lowers a call to a producer edge on the resolved operation, with the argument bound", () => {
     const state = load({
       inputs: { issue: { schema: { type: "string" } } },
-      outputs: { verdict: { binding: { expr: "classify(inputs.issue)" } } },
+      outputs: { verdict: { binding: { expr: "classify(.inputs.issue)" } } },
       operation: { kind: "prompt", prompt: "go", model: "m" },
     }).states.plan!;
 
@@ -394,7 +412,7 @@ describe("an expression calls an operation resolved along the path", () => {
     };
     // The edge carries the RESOLVED operation, not a name to look up later.
     expect(binding.op.kind).toBe("prompt");
-    expect(binding.op.user).toBe("Classify {{inputs.text}}");
+    expect(binding.op.user).toBe("Classify {{.inputs.text}}");
     // …and the positional argument bound to the parameter the document declared at index 0.
     expect(Object.keys(binding.parameters ?? {})).toEqual(["text"]);
     expect(binding.parameters!.text!.binding).toBeDefined();
@@ -403,7 +421,7 @@ describe("an expression calls an operation resolved along the path", () => {
   it("nests a call inside an operator, since an operator IS an application", () => {
     const state = load({
       inputs: { issue: { schema: { type: "string" } } },
-      outputs: { hot: { binding: { expr: "classify(inputs.issue).severity === 'high'" } } },
+      outputs: { hot: { binding: { expr: "classify(.inputs.issue).severity === 'high'" } } },
       operation: { kind: "prompt", prompt: "go", model: "m" },
     }).states.plan!;
     const binding = state.outputs!.hot!.binding as { op: { functionRef?: string } };

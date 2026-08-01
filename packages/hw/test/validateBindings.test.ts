@@ -7,7 +7,7 @@
  *     op by the generic "its declared output schema is its type" rule and passed it — so the shape was
  *     authorable, validated clean even under `strict`, and then never resolved at run time.
  *  2. **`.length`.** The expression evaluator documents it as the one meaningful property of an array
- *     or a string, and the inferrer had no projection for it — so `when: "inputs.items.length > 0"`
+ *     or a string, and the inferrer had no projection for it — so `when: ".inputs.items.length > 0"`
  *     validated as a reference to nothing and was, in practice, unauthorable.
  */
 import { describe, expect, it } from "vitest";
@@ -38,23 +38,23 @@ describe("`.length` on arrays and strings (§7.2)", () => {
   });
 
   it("infers an integer for an array's length — in a guard AND in an `{ expr }` leaf", () => {
-    expect(messages(files("inputs.items.length > 0", "inputs.items.length"), "root")).toBe("");
+    expect(messages(files(".inputs.items.length > 0", ".inputs.items.length"), "root")).toBe("");
   });
 
   it("does the same for a string", () => {
-    expect(messages(files("inputs.note.length > 3", "inputs.note.length"), "root")).toBe("");
+    expect(messages(files(".inputs.note.length > 3", ".inputs.note.length"), "root")).toBe("");
   });
 
   it("types it precisely enough to be CHECKED against the consuming slot", () => {
     // The point of inferring `integer` rather than shrugging to `any`: the assertion on the leaf is now
     // decidable, so a wrong declared type is caught instead of waved through.
-    expect(messages(files("inputs.items.length > 0", "inputs.items.length", { type: "string" }), "root")).toMatch(
+    expect(messages(files(".inputs.items.length > 0", ".inputs.items.length", { type: "string" }), "root")).toMatch(
       /producer type 'integer' not allowed by consumer string/,
     );
   });
 
   it("does not invent `.length` for an object, which has none", () => {
-    expect(messages(files("inputs.config.length > 0", "inputs.items.length"), "root")).toMatch(/'inputs.config.length', which resolves to no declared value/);
+    expect(messages(files(".inputs.config.length > 0", ".inputs.items.length"), "root")).toMatch(/'.inputs.config.length', which resolves to no declared value/);
   });
 });
 
@@ -130,6 +130,6 @@ describe("what a producer edge may name (§7.4)", () => {
   it("still accepts the ordinary literal and scope forms", () => {
     expect(messages(withBinding({ text: "literal" }), "root")).toBe("");
     expect(messages(withBinding({ input: "seed" }), "root")).toBe("");
-    expect(messages(withBinding({ expr: "inputs.seed" }), "root")).toBe("");
+    expect(messages(withBinding({ expr: ".inputs.seed" }), "root")).toBe("");
   });
 });

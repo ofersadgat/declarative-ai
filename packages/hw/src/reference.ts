@@ -82,6 +82,18 @@ export interface ResolvedReference {
 /** Suffixes an extensionless reference probes, in order, and that a canonical id drops. */
 export const DATA_EXTENSIONS = ["json", "yaml", "yml"] as const;
 
+/**
+ * True when a file deserializes to a VALUE rather than to text (REFERENCES.md §4.3).
+ *
+ * The same split `parseReferencedFile` makes, asked ahead of reading — which a caller needs when the
+ * two produce indistinguishable JavaScript, as a `.md`'s text and a JSON string do.
+ */
+export function isDataFile(file: string | undefined): boolean {
+  if (file === undefined) return true; // a property of the current document is already a value
+  const ext = file.split("/").pop()?.split(".").pop()?.toLowerCase();
+  return ext !== undefined && (DATA_EXTENSIONS as readonly string[]).includes(ext);
+}
+
 const SCHEME = /^([a-zA-Z][a-zA-Z0-9+.-]*):(\/\/)?(.*)$/;
 const ROOT_VAR = /^\$([A-Z_][A-Z0-9_]*)?(?:\/(.*))?$/;
 
@@ -116,6 +128,44 @@ function canonicalAbsolute(path: string): string {
 /** True when a reference's head is a relative FILE path (`./x`, `../x`) rather than a property. */
 function isRelativeFilePath(body: string): boolean {
   return /^\.\.?(\/|$)/.test(body);
+}
+
+/**
+ * Characters the EXPRESSION grammar uses that a reference can never contain.
+ *
+ * Whitespace, the two quotes, parentheses, the comma, and every operator character. Deliberately a
+ * blacklist rather than a whitelist of legal path characters: an unusual filename keeps working,
+ * whereas a whitelist would silently reclassify one as an expression.
+ */
+const EXPRESSION_ONLY = /[\s()'",!?<>=&|]/;
+
+/**
+ * True when a string is spelled entirely within the REFERENCE grammar — a path and nothing else.
+ *
+ * This is the one predicate that decides which pass owns an authored string: expansion resolves a
+ * path against the filesystem, and the loader lowers anything else as an expression. It has to be
+ * shared, because two copies of "is this a path" drifting apart would move the boundary silently.
+ *
+ * It is decidable because the two grammars are disjoint outside the path characters themselves —
+ * an expression that is *also* a well-formed path is precisely a bare dotted path, and that overlap
+ * is settled by rule rather than by guessing: a bare name is a reference, and a leading dot is
+ * runtime data (REFERENCES.md §5). So a string that passes here and names no file gets a reference
+ * error, never a silent reinterpretation.
+ */
+export function isPathSpelling(reference: string): boolean {
+  return reference.length > 0 && !EXPRESSION_ONLY.test(reference);
+}
+
+/**
+ * True when a binding string reads THIS INSTANCE's data — a leading dot that is not `./` or `../`.
+ *
+ * The dot is the whole distinction, so it is tested in exactly one place. `./x` and `../x` are
+ * relative FILE paths and belong to expansion; `.inputs.issue` is runtime and belongs to the
+ * desugarer; `.inputs.n === 1` is neither a path nor a bare reference, so it lowers as an
+ * expression like any other computation.
+ */
+export function isRuntimeReference(reference: string): boolean {
+  return reference.startsWith(".") && !isRelativeFilePath(reference) && isPathSpelling(reference);
 }
 
 /**
