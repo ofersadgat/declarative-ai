@@ -15,6 +15,7 @@ import {
   freshSessionKey,
   isSessionRef,
   resolveSession,
+  sessionFromExpr,
   validateSessionDecl,
   type SessionScope,
 } from "../src/session";
@@ -52,8 +53,13 @@ describe("what may be declared", () => {
     expect(validateSessionDecl("#i3")).toMatch(/reserved/);
   });
 
+  it("accepts an expression, whose value can only be checked once it has one", () => {
+    expect(validateSessionDecl({ expr: "inputs.thread" })).toBeUndefined();
+    expect(validateSessionDecl({ expr: "  " })).toMatch(/empty/);
+  });
+
   it("rejects a shape that is neither", () => {
-    expect(validateSessionDecl(42)).toMatch(/must be a name, a session ref, or null/);
+    expect(validateSessionDecl(42)).toMatch(/must be a name, a session ref/);
     expect(validateSessionDecl(["planning"])).toMatch(/an array/);
   });
 
@@ -197,5 +203,32 @@ describe("the load-time lint", () => {
     };
     const errors = validateBundle(loadBundle(files, "root")).errors;
     expect(errors.some((i) => i.stateId === "leaf" && i.path === "operation.session")).toBe(true);
+  });
+});
+
+/**
+ * What an evaluated `{ expr }` session is allowed to be.
+ *
+ * The case worth naming is absence. "Then start fresh" is the tempting reading and the wrong one:
+ * the author named a conversation to continue, so quietly running in a different one produces a
+ * successful-looking run that has forgotten everything.
+ */
+describe("an expression's resolved value", () => {
+  it("takes a ref, and a string as a name", () => {
+    expect(sessionFromExpr("inputs.t", { id: "ses_abc@14" })).toEqual({ session: { id: "ses_abc@14" } });
+    expect(sessionFromExpr("inputs.t", "planning")).toEqual({ session: "planning" });
+  });
+
+  it("REFUSES nothing, naming the expression so the wiring is findable", () => {
+    for (const value of [undefined, null]) {
+      const outcome = sessionFromExpr("inputs.thread", value);
+      expect(outcome).toHaveProperty("error");
+      expect((outcome as { error: string }).error).toContain("inputs.thread");
+    }
+  });
+
+  it("REFUSES an empty id and an empty name, for the same reason", () => {
+    expect(sessionFromExpr("inputs.t", { id: "" })).toHaveProperty("error");
+    expect(sessionFromExpr("inputs.t", "")).toHaveProperty("error");
   });
 });

@@ -56,7 +56,32 @@ export interface SessionRef {
  * produce `""` and silently run an isolated conversation that looks like it worked.
  * `""` is an error — see {@link validateSessionDecl}.
  */
-export type SessionDecl = string | null | SessionRef;
+export type SessionDecl = string | null | SessionRef | SessionExpr;
+
+/**
+ * A `session` computed at run time — `{"expr": "children.plan.operation.outputs.session"}`.
+ *
+ * The other three spellings are STATIC: the loader reads them off the merged document, and they
+ * mean the same thing on every instance. That is right for a name and useless for a ref, because
+ * the only way to obtain a ref is to read one an operation produced, and `operation.outputs.session`
+ * does not exist until that operation has run.
+ *
+ * So the explicit spelling has to be a BINDING, resolved per instance against the consuming state's
+ * own data. It is the one session form that is evaluated rather than read.
+ */
+export interface SessionExpr {
+  readonly expr: string;
+}
+
+/** True for the `{ expr }` form — a session evaluated against the consuming instance. */
+export function isSessionExpr(value: unknown): value is SessionExpr {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    typeof (value as { expr?: unknown }).expr === "string"
+  );
+}
 
 /**
  * Engine-minted session keys are prefixed, and an authored name may not be.
@@ -103,8 +128,13 @@ export function validateSessionDecl(value: unknown): string | undefined {
       ? "session ref has an empty id — the expression that produced it resolved to nothing"
       : undefined;
   }
+  if (isSessionExpr(value)) {
+    // Only the SHAPE is checkable here. What the expression resolves to is instance data, so a
+    // string or a ref is accepted at run time and anything else fails there, named.
+    return (value as SessionExpr).expr.trim() === "" ? "session expression is empty" : undefined;
+  }
   if (typeof value !== "string") {
-    return `session must be a name, a session ref, or null — got ${Array.isArray(value) ? "an array" : typeof value}`;
+    return `session must be a name, a session ref, {"expr": …}, or null — got ${Array.isArray(value) ? "an array" : typeof value}`;
   }
   if (value === "") {
     // The failure this catches: `"session": "{{inputs.thread}}"` where `thread` is
@@ -115,6 +145,29 @@ export function validateSessionDecl(value: unknown): string | undefined {
     return `session name '${value}' starts with '${RESERVED_SESSION_PREFIX}', which is reserved for engine-minted sessions`;
   }
   return undefined;
+}
+
+/**
+ * What a `{ expr }` session evaluated TO, checked once the instance's data is in hand.
+ *
+ * The interesting case is absence. An expression over a child that has not run yet — or over a
+ * failed one — resolves to nothing, and the tempting reading is "then start fresh". That is exactly
+ * the silent isolation `""` is rejected for: the author asked to continue a specific conversation,
+ * and quietly starting a different one produces a run that looks successful and has forgotten
+ * everything. So absence is an ERROR, and `null` remains the only way to ask for fresh.
+ *
+ * A resolved STRING is treated as a name, matching the static spelling — an author computing a
+ * conversation name is doing the same thing as writing one, and a ref is always an object.
+ */
+export function sessionFromExpr(expr: string, value: unknown): { session: SessionDecl } | { error: string } {
+  if (value === undefined || value === null) {
+    return { error: `session expression '${expr}' resolved to nothing — write null to start a fresh conversation, or wire it to an operation that has run` };
+  }
+  const complaint = validateSessionDecl(value);
+  if (complaint !== undefined) return { error: `session expression '${expr}': ${complaint}` };
+  // A nested `{ expr }` would be an expression producing an expression; nothing evaluates it.
+  if (isSessionExpr(value)) return { error: `session expression '${expr}' resolved to another expression` };
+  return { session: value as SessionDecl };
 }
 
 /** What one operation resolved to. Both halves are needed; neither implies the other. */

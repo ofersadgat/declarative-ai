@@ -87,7 +87,7 @@ import type {
 } from "./format";
 import { bindElement, bindInputs, embeddedOpsOf, higherOrderEdgesOf, higherOrderOf, isResolvedValue, isResolveError, resolveEmbedded, resolveInputs, resolveRef, type ResolutionScope, type Resolved } from "./resolve";
 import { isByteStream, materialize, MaterializeError } from "./materialize";
-import { RUN_RESOURCE_KEY, resolveSession, type SessionBinding } from "./session";
+import { RUN_RESOURCE_KEY, isSessionExpr, resolveSession, sessionFromExpr, type SessionBinding, type SessionDecl } from "./session";
 import type { OperationNode } from "./operationNode";
 import { isFannedOut } from "./fanout";
 import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, type Persistence } from "./ports";
@@ -1408,6 +1408,9 @@ export class WorkflowEngine {
     // is inherited from the enclosing instance and does not move when the conversation does, which is
     // what keeps one worktree and one set of approvals across a retry, a loop iteration or a fork.
     const session = this.sessionFor(instance);
+    // A `{ expr }` session that cannot be read is PERMANENT: retrying re-evaluates the same
+    // expression against the same instance data and fails the same way.
+    if ("error" in session) return fail({ classification: "permanent", reason: session.error });
 
     // The `user` slot holds the prompt text. A REUSABLE prompt is a reference to a file, resolved
     // at load time (REFERENCES.md §7.1), so by here there is only ever one kind of prompt — which is
@@ -1576,9 +1579,26 @@ export class WorkflowEngine {
    * position and every instance agrees — which is exactly today's behaviour, and the reason this step
    * can land before the store does.
    */
-  private sessionFor(instance: Instance): SessionBinding {
+  private sessionFor(instance: Instance): SessionBinding | { error: string } {
     const env = instance.def.environment ?? {};
-    return resolveSession(env.session, env.fork === true, {
+    let declared = env.session as SessionDecl | undefined;
+    // The `{ expr }` spelling is the only one evaluated rather than read, and it has to be, because
+    // a ref is a RUN-TIME value: `children.plan.operation.outputs.session` does not exist until
+    // `plan` has run, so a static field could never carry one. Evaluated against THIS instance, so
+    // a re-entered or looped state re-reads the position its own attempt should continue from.
+    if (isSessionExpr(declared)) {
+      const { expr } = declared;
+      const resolved = resolveRef(this.exprRef(expr), this.scopeFor(instance));
+      // PENDING means the producing operation is still in flight. That is a wiring mistake rather
+      // than something to wait on here: the consumer's own dataflow join is what parks on a running
+      // producer, and by the time an operation is being dispatched its inputs have settled.
+      if (isPending(resolved)) return { error: `session expression '${expr}' reads an operation that has not finished` };
+      if (isResolveError(resolved)) return { error: `session expression '${expr}': ${resolved.error}` };
+      const outcome = sessionFromExpr(expr, resolved.value);
+      if ("error" in outcome) return outcome;
+      declared = outcome.session;
+    }
+    return resolveSession(declared, env.fork === true, {
       instanceId: instance.id,
       inheritedResourceKey: instance.resourceKey,
       positionOf: () => undefined,

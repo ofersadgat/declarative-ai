@@ -188,9 +188,13 @@ export interface ExecEnvironmentDecl {
    *
    *  - a **name** — same name across states ⇒ one shared stream, and the name is also the
    *    resource-bundle key (workspace, permissions);
-   *  - a **session ref** (`{ id }`, normally from an expression over `operation.outputs.session`) —
-   *    an exact position to continue or branch from. Opaque: nothing outside the session store
-   *    parses it;
+   *  - a **session ref** (`{ id }`) — an exact position to continue or branch from. Opaque: nothing
+   *    outside the session store parses it. Normally reached through the fourth spelling rather than
+   *    written literally, since a ref is a run-time value;
+   *  - an **expression** (`{ expr }`, e.g. `{"expr": "children.plan.operation.outputs.session"}`) —
+   *    the same thing computed per instance. This is the one form EVALUATED rather than read, and
+   *    the only practical way to name an exact position, because `operation.outputs.session` does
+   *    not exist until that operation has run;
    *  - **`null`** — start a fresh stream, overriding whatever the environment chain supplied.
    *
    * ABSENT no longer means a shared default. An undeclared operation gets its own stream, because
@@ -202,9 +206,9 @@ export interface ExecEnvironmentDecl {
    * `sessionId` is accepted as a SYNONYM, so an `LlmConfiguration`-shaped block pastes in
    * unchanged; the loader normalizes it to this field before anything else reads the document.
    */
-  session?: string | null | { id: string };
+  session?: string | null | { id: string } | { expr: string };
   /** @see session — normalized away at parse; never present on a loaded state. */
-  sessionId?: string | null | { id: string };
+  sessionId?: string | null | { id: string } | { expr: string };
   /**
    * Always branch, rather than appending when the position is still the head (DESIGN.md §1.6).
    *
@@ -463,7 +467,7 @@ export interface LoadedState
    *
    * Present-but-`null` is meaningful: it is an explicit "start fresh", not an absent declaration.
    */
-  scopeSession?: string | null | { id: string };
+  scopeSession?: string | null | { id: string } | { expr: string };
   children?: Record<string, LoadedChild>;
   /**
    * Why this state's `operation` could not be built — an incomplete merge (§5), reported by the

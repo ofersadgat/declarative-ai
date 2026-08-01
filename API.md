@@ -1238,6 +1238,10 @@ Ready-made workspace tools ship in **[`@declarative-ai/tools`](#declarative-aito
 
 ```ts
 interface SessionRef { readonly id: string }                     // opaque; names a conversation AT a position
+type SessionDecl = string | null | SessionRef | { expr: string } // what an operation's `session` may hold.
+                                                                 // `{ expr }` is EVALUATED per instance: a ref
+                                                                 // does not exist until its producer has run,
+                                                                 // so a static field could never carry one
 interface SessionRequest { ref?: string; fork?: boolean; seed?: string; provider?: string }
 interface ResolvedSession<Msg = JsonValue> extends SessionRef {  // everything but `id` is NON-enumerable
   readonly mode: "append" | "fork";
@@ -2331,9 +2335,10 @@ interface FunctionOpDecl {
 }
 
 interface EnvironmentDecl {
-  session?: SessionDecl;                            // a ref, or null for "start fresh"; absent => this
-                                                    // state gets its OWN conversation (there is no run
-                                                    // default) and INHERITS the enclosing resource bundle
+  session?: SessionDecl;                            // a name, a computed ref, or null for "start
+                                                    // fresh"; absent => this state gets its OWN
+                                                    // conversation (there is no run default) and
+                                                    // INHERITS the enclosing resource bundle
   tools?: string[];                                 // logical names resolved through registry.tools
   conversation?: { mode: ConversationMode; artifacts?: string[] };
   permissions?: { profile?: PermissionProfile; default?: PermissionMode; tools?: Record<string, PermissionMode> };

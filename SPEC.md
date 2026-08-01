@@ -847,10 +847,12 @@ Everything about *how* an operation runs — as opposed to what it is — is wri
 alongside the rest, because each of these is a per-CALL decision:
 
 ```text
-session       A session ref — an append-only conversation AT a position (DESIGN.md §1.6).
-              Same ref across states ⇒ one conversation; absent ⇒ this state gets its own,
-              and `null` says so explicitly. The DECLARED name separately keys the state's
-              workspace and permissions, which are inherited when nothing is declared.
+session       The conversation this call joins (DESIGN.md §1.6). A NAME shares an
+              append-only stream by declaration; {"expr": …} names an exact position
+              computed at run time, normally from `operation.outputs.session`; `null`
+              starts a fresh one, and absent means this state gets its own. The DECLARED
+              name separately keys the state's workspace and permissions, which are
+              inherited when nothing is declared.
 tools         Logical names of tools the operation may call mid-loop, resolved through
               registry.tools. A composed prompt operation runs them in a bounded loop; a
               delegated agent is handed the allow-list.

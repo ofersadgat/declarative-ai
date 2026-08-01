@@ -1142,6 +1142,65 @@ describe("the conversation and the resource bundle are different keys", () => {
     expect(promptOf(fake.calls[1]!)).toContain("first call");
   });
 
+  /**
+   * The EXPLICIT spelling: a ref carried through data flow, rather than a name shared by declaration.
+   *
+   * The parent wires `children.plan.operation.outputs.session` into the consumer's declared input —
+   * an expression only the parent can evaluate, since only the parent can see both children — and
+   * the consumer names that input in its `session`. Two scopes, which is why the field has to accept
+   * an expression at all: a static value could never carry a position that does not exist until the
+   * producer has run.
+   */
+  function explicitPair(consumerSession: JsonValue, extra: Partial<StateDef> = {}): Record<string, StateDef> {
+    return {
+      root: {
+        children: {
+          plan: { state: "planner" },
+          review: { state: "reviewer", inputs: { thread: { expr: "children.plan.operation.outputs.session" } } },
+        },
+        sequence: ["plan", "review"],
+        outputs: { r: { binding: { child: "review", output: "r" } } },
+      },
+      planner: {
+        outputs: { r: { schema: { type: "string" } } },
+        operation: { kind: "prompt", prompt: "first call", model: "reviewer" },
+      },
+      reviewer: {
+        inputs: { thread: { schema: {} } },
+        outputs: { r: { schema: { type: "string" } } },
+        environment: { conversation: { mode: "full_history" }, session: consumerSession as never, ...extra.environment },
+        operation: { kind: "prompt", prompt: "second call", model: "reviewer" },
+      },
+    };
+  }
+
+  it("continues a conversation named by an EXPRESSION, not by a shared name", async () => {
+    // Neither state declares a session name, so nothing is shared by declaration. The reviewer joins
+    // the planner's stream purely because it was handed the position the planner ended at.
+    const { engine, fake } = makeEngine(explicitPair({ expr: "inputs.thread" }), "root", () => ok({ r: "done" }));
+    await engine.run({ inputs: {} });
+    expect(promptOf(fake.calls[1]!)).toContain("first call");
+  });
+
+  it("...and the same ref with `fork` branches instead of continuing", async () => {
+    const files = explicitPair({ expr: "inputs.thread" }, { environment: { fork: true } });
+    const { engine, fake } = makeEngine(files, "root", () => ok({ r: "done" }));
+    await engine.run({ inputs: {} });
+    // A fork still SEES the prefix — that is what makes it a branch of this conversation rather
+    // than a fresh one. What it must not do is write back into the trunk.
+    expect(promptOf(fake.calls[1]!)).toContain("first call");
+  });
+
+  it("an expression that resolves to nothing FAILS, rather than quietly running in isolation", async () => {
+    // The whole reason `""` is rejected: the author asked to continue a specific conversation, and
+    // silently starting a different one produces a run that looks successful and remembers nothing.
+    const files = explicitPair({ expr: "inputs.missing" });
+    files["reviewer"]!.inputs = { thread: { schema: {} }, missing: { schema: {}, optional: true } as never };
+    const { engine } = makeEngine(files, "root", () => ok({ r: "done" }));
+    const result = await engine.run({ inputs: {} });
+    expect(result.outcome).toBe("error");
+  });
+
   /** Two sequential prompt states, the second reading `full_history`, neither declaring a session. */
   function undeclaredPair(): Record<string, StateDef> {
     return {

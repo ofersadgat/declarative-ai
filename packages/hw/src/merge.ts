@@ -132,18 +132,25 @@ export function normalizeSynonyms<T extends OperationFields>(fields: T): T {
 
 type SessionDeclValue = OperationFields["session"];
 
-/** Two session declarations are the same if they name the same stream — refs compare by id. */
+/**
+ * Two session declarations are the same if they name the same stream.
+ *
+ * Refs compare by id and expressions by source text. Comparing expressions textually is exact in the
+ * direction that matters: two DIFFERENT spellings of the same position compare unequal, which costs
+ * a spurious variant id, while two identical spellings can only mean the same thing.
+ */
 function sameSession(a: SessionDeclValue, b: SessionDeclValue): boolean {
   if (a === b) return true;
-  const idOf = (v: SessionDeclValue): string | undefined =>
-    v !== null && typeof v === "object" ? v.id : undefined;
-  const [left, right] = [idOf(a), idOf(b)];
+  const keyOf = (v: SessionDeclValue): string | undefined =>
+    v !== null && typeof v === "object" ? ("id" in v ? v.id : `expr:${v.expr}`) : undefined;
+  const [left, right] = [keyOf(a), keyOf(b)];
   return left !== undefined && left === right;
 }
 
 function describeSession(value: SessionDeclValue): string {
   if (value === null) return "null";
-  return typeof value === "object" ? value.id : String(value);
+  if (typeof value !== "object") return String(value);
+  return "id" in value ? value.id : `{expr: ${value.expr}}`;
 }
 
 /** Merge `over` onto `base`, field by field. `over` is the NEARER layer and wins. */
