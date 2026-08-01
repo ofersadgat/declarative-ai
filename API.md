@@ -2331,7 +2331,9 @@ interface FunctionOpDecl {
 }
 
 interface EnvironmentDecl {
-  session?: string;                                 // logical session id; absent => the run's default session
+  session?: SessionDecl;                            // a ref, or null for "start fresh"; absent => this
+                                                    // state gets its OWN conversation (there is no run
+                                                    // default) and INHERITS the enclosing resource bundle
   tools?: string[];                                 // logical names resolved through registry.tools
   conversation?: { mode: ConversationMode; artifacts?: string[] };
   permissions?: { profile?: PermissionProfile; default?: PermissionMode; tools?: Record<string, PermissionMode> };
