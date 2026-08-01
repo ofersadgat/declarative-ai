@@ -277,8 +277,12 @@ const TEMPLATE_REF = /\{\{\s*([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_
 
 
 /** One conversation turn — a `ModelMessage`-compatible shape, so the built-in `conversationMode` transcript
- *  and the llm `withSession` path share ONE representation in `SessionState.messages`. */
+ *  and the llm session path share ONE representation in a record's payload. */
 type Turn = { role: "user" | "assistant"; content: string };
+
+/** The operation named by a record the ENGINE wrote for its own `conversation.mode` preamble, rather
+ *  than one an executor ran. Named so the two are tellable apart when reading a conversation back. */
+const TRANSCRIPT_SOURCE = { kind: "function", functionRef: "hw.transcript", input: {}, output: { kind: "json" } } as unknown as Operation<InlineFamily>;
 
 /**
  * The resource bundle an instance runs in — workspace, permission ledger, approval scope.
@@ -1741,11 +1745,12 @@ export class WorkflowEngine {
    * Read a session's transcript, mirroring it for synchronous `{ conversation }` binding resolution
    * (§7.5 — a transcript is addressable DATA).
    *
-   * `read` is optional on the store because not every store can serve one; an absent reader is an
-   * empty transcript, which is what a session nobody has written to looks like anyway.
+   * Messages are DERIVED from the session's records — a session is not a separate store, it is the
+   * records sharing a `session.id`. With no store wired, an empty transcript, which is what a session
+   * nobody has written to looks like anyway.
    */
   private async readTranscript(sessionRef: string): Promise<Turn[]> {
-    const messages = (await this.sessions().read?.(sessionRef)) ?? [];
+    const messages = (await this.sessions().messages(sessionRef)) ?? [];
     const turns = messages as Turn[];
     this.transcripts.set(sessionRef, turns);
     return turns;
@@ -1754,22 +1759,28 @@ export class WorkflowEngine {
   /**
    * Append the built-in `conversation.mode` turns to a session.
    *
-   * Goes through the same RESERVE-then-release protocol every other writer uses (SESSIONS.md §5),
-   * rather than a read-modify-write: two writers that both read the head and then both write is
-   * exactly the race the lease exists to close, and the engine is not exempt from it.
+   * Written as a RECORD, through the same two-phase path every other writer uses — the stub claims the
+   * position, the fill carries the payload. That is not ceremony: uniqueness on `(session, seq)` is the
+   * only thing that stops two writers landing on one position, and the engine is not exempt from it.
    *
-   * NB this is the engine's OWN transcript mechanism, distinct from what a composed session layer
-   * folds from an executor-reported delta. They share one store on purpose — one transcript home —
-   * but a stack running both writes both, which is a de-duplication the replay strategy owns.
+   * NB this is the engine's own `conversation.mode` mechanism, distinct from what a composed session
+   * layer records for the call itself. Both write records to one store, which is the point — one home
+   * for a conversation — but a stack running both writes both.
    */
   private async appendTranscript(sessionRef: string, turns: Turn[]): Promise<void> {
-    const lease = await this.sessions().begin({ ref: sessionRef, seed: sessionRef });
-    try {
-      await lease.release({ messages: turns.map((message) => ({ message: message as unknown as JsonValue })) });
-    } finally {
-      const messages = (await this.sessions().read?.(lease.session.id)) ?? [];
-      this.transcripts.set(sessionRef, messages as Turn[]);
+    // Falls back to the session store itself, which is honest rather than convenient: a conversation
+    // IS its records, so any store that can serve a conversation can hold one. The run's default
+    // in-memory store implements both halves for exactly that reason.
+    const store = this.sessions() as unknown as { open?: unknown };
+    const records = this.config.services?.records ?? (typeof store.open === "function" ? (store as never) : undefined);
+    const resolved = await this.sessions().resolve({ ref: sessionRef, seed: sessionRef });
+    if (records !== undefined) {
+      const id = `${resolved.at.id}:${resolved.at.seq}`;
+      // The payload shape a prompt op's record has, so one `messagesOf` reads both.
+      await records.open({ id, source: TRANSCRIPT_SOURCE, session: resolved.at, startMs: this.clock.now() });
+      await records.close(id, { result: { value: { messages: turns } as unknown as ResolvedValue } });
     }
+    this.transcripts.set(sessionRef, ((await this.sessions().messages(resolved.id)) ?? []) as Turn[]);
   }
 
   private conversationPreamble(mode: ConversationMode, transcript: Turn[], artifactNames?: string[]): string {

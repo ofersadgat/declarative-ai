@@ -31,11 +31,11 @@ import type {
   PromptOp,
   RateLimiter,
   ResolvedSession,
-  SessionDelta,
+
   SessionStore,
   CallEstimate,
 } from "@declarative-ai/exec";
-import { canceledFailure, curryOrApply, forwardCapabilitiesFor, isExecutor, isOk, resolveSessionRef, wrapHandle } from "@declarative-ai/exec";
+import { canceledFailure, curryOrApply, forwardCapabilitiesFor, isExecutor, isOk, isPositionTaken, wrapHandle } from "@declarative-ai/exec";
 import {
   DEFAULT_HOLD_OUTPUT_MULTIPLIER,
   MIN_USEFUL_OUTPUT_TOKENS,
@@ -47,8 +47,9 @@ import {
   promptText,
   type OutputTokenStats,
 } from "@declarative-ai/llm";
-import type { ModelMessage } from "@declarative-ai/llm";
+import type { LlmOutput, ModelMessage } from "@declarative-ai/llm";
 import { lowerPromptOp, type LoweringOptions } from "./lowering";
+import { projectLlmOutput } from "./executor";
 
 /**
  * What `withBudget` reads off a measurement: money (its job), plus the observed output size it prices
@@ -98,6 +99,22 @@ async function sessionText(ctx: ExecServices): Promise<string> {
     // which under-reserves — the same failure mode as before, but no worse, and it does not throw.
     return "";
   }
+}
+
+/**
+ * Narrow a record-mode result to the op's output-parameter value.
+ *
+ * A result whose value is not an `LlmOutput` passes through untouched, so composing this over a
+ * VALUE-mode core is a no-op rather than a corruption — which matters, because the composition order
+ * is the caller's to get right and a silent mangling would be the worst way to find out.
+ */
+function project<M extends ExecMetrics>(op: PromptOp<InlineFamily>, result: ExecResult<ResolvedValue, M>): ExecResult<ResolvedValue, M> {
+  const payload = result.value as LlmOutput | undefined;
+  if (payload === undefined || typeof payload !== "object" || !("finishReason" in payload)) return result;
+  const value = projectLlmOutput(op, payload);
+  return "error" in result && result.error !== undefined
+    ? { ...result, ...(value !== undefined ? { value } : { value: undefined }) }
+    : ({ ...result, value: value as ResolvedValue } as ExecResult<ResolvedValue, M>);
 }
 
 /** Record the EFFECTIVE session position on the outcome — see {@link ExecMetrics.sessionRef}. */
@@ -492,45 +509,42 @@ export function withSession<R = ExecServices, M extends ExecMetrics = ExecMetric
           `the declaration carries session "${ref ?? providerHandle}" but no SessionStore is available — provide it via withSession({ sessions }) or ctx.sessions`,
         );
       }
+      // The session fields are CONSUMED — the bare core refuses leftovers, which is what stops a
+      // declaration quietly relying on a layer that is not composed in.
+      const sentOp = withConfig(op, { sessionId: undefined, providerSessionId: undefined, fork: undefined });
       return wrapHandle(async (ctl) => {
-        // RESERVE before the call. `fork` skips the reservation inside the store — the answer is
-        // already known — but everything else needs the position held for the call's whole duration.
-        const lease = await sessions.begin({
+        /** One attempt at a resolved position. `withRecord` below claims it by writing its stub. */
+        const attempt = async (session: ResolvedSession<ModelMessage>): Promise<ExecResult<ResolvedValue, ExecMetrics>> => {
+          const result = await ctl.started(innerExec.start(sentOp, { ...ctx, session: session as never })).result;
+          // PROJECT HERE, not below. The core runs in record mode so that the layers between it and
+          // this one — `withRecord` above all — see the payload the provider produced, which is what a
+          // conversation is made of. Narrowing to the output-parameter value any earlier destroys it,
+          // and the layer that needed it then has to smuggle it back down some side channel. This is
+          // the last layer that wants the payload, so this is where it stops.
+          const projected = project(sentOp, result);
+          // The END position, and the EFFECTIVE one. `+ 1` because a call is exactly one record, which
+          // is what makes a position a record index rather than a message index — one call may add
+          // several messages, and forking is per-operation anyway. It has to be the end because
+          // "append after me" and "fork after me" both mean AFTER; and it has to be effective because
+          // a call that had to fork ended up somewhere the caller has no other way to learn.
+          return withSessionOutcome(projected, `${session.at.id}@${session.at.seq + 1}`);
+        };
+        if (ctl.canceled()) return canceledFailure("canceled before the call started");
+        const resolved = await sessions.resolve({
           ...(ref !== undefined ? { ref } : {}),
           ...(fork ? { fork: true } : {}),
           ...(config?.seedFor !== undefined ? { seed: config.seedFor(op) } : {}),
           ...(config?.provider !== undefined ? { provider: config.provider } : {}),
         });
-        const session = lease.session;
-        // What the executor reports it appended. Collected rather than returned so that a call which
-        // appended and THEN failed still folds — the entries exist remotely either way.
-        let delta: SessionDelta<ModelMessage> | undefined;
-        const reporting = resolveSessionRef<ModelMessage>(session.id, {
-          mode: session.mode,
-          ...(session.providerSessionId !== undefined ? { providerSessionId: session.providerSessionId } : {}),
-          messages: () => session.messages(),
-          report: (reported) => {
-            delta = reported;
-          },
-        });
-        // The session fields are CONSUMED — the bare core refuses leftovers, which is what stops a
-        // declaration quietly relying on a layer that is not composed in.
-        const sentOp = withConfig(op, { sessionId: undefined, providerSessionId: undefined, fork: undefined });
-        let released = false;
-        try {
-          if (ctl.canceled()) return canceledFailure("canceled before the call started");
-          const result = await ctl.started(innerExec.start(sentOp, { ...ctx, session: reporting as never })).result;
-          // Released HERE, on the way out, because the end position is what the outcome carries — and
-          // it is not knowable until the delta has been folded.
-          const endRef = await lease.release(delta);
-          released = true;
-          // The EFFECTIVE position, not the key that was asked for: a store that had to fork ended the
-          // call somewhere the caller has no other way to learn.
-          return withSessionOutcome(result, endRef);
-        } finally {
-          // Unconditional. A leaked reservation pins the stream and silently forks everything after it.
-          if (!released) await lease.release(delta);
-        }
+        const first = await attempt(resolved);
+        if (!isPositionTaken(first)) return first;
+        // FORK, not retry-at-the-next-slot. Something already claimed this position, so continuing
+        // here would mean continuing a conversation containing a turn this call never saw. Branching
+        // from where we started is the only answer that means anything — and nothing had to ask for
+        // it. (findmyprompt's `appendDraw` answers the same conflict by retrying at the next index,
+        // which is right for a draw list and wrong for a conversation.)
+        const forked = await sessions.fork(resolved.id, config?.seedFor?.(op));
+        return await attempt(await sessions.resolve({ ref: forked }));
       });
     },
   })) as unknown as ExecutorWrapper<R, R, M>;

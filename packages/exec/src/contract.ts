@@ -295,9 +295,12 @@ export interface ExecServices {
   executor?: Executor;
   /** Executable tools the current operation may call mid-loop, keyed by name. */
   tools?: Record<string, Tool>;
-  /** The append-only session store — a workflow run injects one so ops naming the same stream
-   *  continue one conversation. Absent ⇒ sessions unavailable. */
+  /** Conversation lineage and resolution — a workflow run injects one so ops naming the same
+   *  conversation continue it. Absent ⇒ sessions unavailable. */
   sessions?: SessionStore;
+  /** Where executions are RECORDED (`withRecord`). Also where a session's messages come from, since a
+   *  session is the records sharing a `session.id`. Absent ⇒ nothing is recorded. */
+  records?: import("./record").RecordStore;
   /**
    * The session this call runs in, already resolved to a position and RESERVED (see
    * {@link SessionLease}).
@@ -326,51 +329,51 @@ export interface ExecServices {
 // --- Sessions -----------------------------------------------------------------
 
 /**
- * A session is an APPEND-ONLY stream of messages, and a session ref names one AT a position — which
- * is what makes "continue from here" and "branch from here" the same primitive.
+ * A session is an APPEND-ONLY conversation, and a session ref names one AT a position — which is what
+ * makes "continue from here" and "branch from here" the same primitive.
  *
- * `id` is OPAQUE. Nothing outside the store parses it: not this package, not the wrapper, not any
- * executor. That is what lets the spelling change — including the human-readable lineage label a
- * store may keep alongside — without touching a consumer.
+ * **There is no message store.** A session IS the {@link OperationRecord}s sharing a `session.id`,
+ * ordered by `seq`; a record already holds what its call produced, and for a prompt op that payload
+ * carries the messages verbatim. Appending a turn and recording a call are one write (see
+ * `withRecord`), which is also why the position reservation is just uniqueness on `(session, seq)`.
  *
- * It is also the ONLY enumerable property, so `JSON.stringify`, an events journal, and any serialized
- * inputs/outputs see `{ id }` and nothing else.
+ * `id` is OPAQUE. Nothing outside the store parses it — not this package, not the wrapper, not any
+ * executor — which is what lets the spelling change without touching a consumer. It is also the ONLY
+ * enumerable property, so `JSON.stringify`, an events journal and any serialized inputs/outputs see
+ * `{ id }` and nothing else.
  */
 export interface SessionRef {
   readonly id: string;
 }
 
-/** One entry in a stream: a message verbatim, plus what the provider called it. */
-export interface SessionMessage<Msg = JsonValue> {
-  message: Msg;
-  /** The provider's own id for this entry, when it has one. */
-  providerRef?: string;
+/** What a caller asks for when it opens a session for one call. */
+export interface SessionRequest {
+  /** The position to continue or branch from. Absent ⇒ a new conversation. */
+  ref?: string;
+  /** Always branch, rather than continuing when the position is still the head. */
+  fork?: boolean;
+  /**
+   * A stable discriminator for any conversation this MINTS — a state id, a child key plus iteration.
+   *
+   * Stable rather than random on purpose: a fan-out that mints random ids produces different lineage
+   * every run, which degrades exactly the observability durable sessions exist for.
+   */
+  seed?: string;
+  /**
+   * The provider about to serve the call.
+   *
+   * A conversation is LOCKED to the provider it was used with, so asking for one under a different
+   * provider is a fork — enforced by resolution rather than by a rule anyone has to remember. The
+   * provider a conversation belongs to is read off its latest record, not stored separately.
+   */
+  provider?: string;
 }
 
 /**
- * What an executor REPORTS it appended.
- *
- * The wrapper cannot synthesize this. It sees only the op's prompt text and a final result value,
- * which is exactly the lossy behaviour this replaces: tool calls, tool results and reasoning parts
- * are all discarded by a wrapper-side fold. The executor is the only layer that knows what actually
- * went over the wire, so it is the layer that says so.
- *
- * Reported on FAILURE as well as success. If the provider appended turns and the call then failed,
- * those entries exist remotely; not recording them means the next append-by-handle meets a remote
- * head we do not mirror, which is divergence on the very next call.
- */
-export interface SessionDelta<Msg = JsonValue> {
-  /** Every entry the call added, in order — the request turns AND everything that came back. */
-  messages: readonly SessionMessage<Msg>[];
-  /** The provider's own session handle, when the provider is stateful. */
-  providerSessionId?: string;
-}
-
-/**
- * The session an executor was handed, resolved to a concrete position.
+ * A session resolved to the concrete position a call will claim.
  *
  * Everything but `id` is NON-ENUMERABLE — the same technique as the resolved-definition snapshot —
- * so the value that flows through the data plane stays `{ id }`.
+ * so the value flowing through the data plane stays `{ id }`.
  *
  * That has a consequence worth stating plainly: **`messages` is a cache, never the source of truth.**
  * Non-enumerable properties are dropped by object spread, by `JSON.parse(JSON.stringify(x))`, by
@@ -380,37 +383,28 @@ export interface SessionDelta<Msg = JsonValue> {
  * losing it must cost a store read, never correctness.
  */
 export interface ResolvedSession<Msg = JsonValue> extends SessionRef {
-  /** Whether this call continues the stream or branched off it. Decided BEFORE the call, because
-   *  "is this a fork" and "how do I shape the request" are the same question — a fork must replay and
-   *  must NOT pass a resume handle, or it appends to the wrong remote stream. */
+  /** Whether this call continues the conversation or branched off it. Decided BEFORE the call,
+   *  because "is this a fork" and "how do I shape the request" are the same question — a fork must
+   *  replay and must NOT pass a resume handle, or it appends to the wrong remote conversation. */
   readonly mode: "append" | "fork";
+  /** The record slot this call claims. `withRecord` stamps its stub here; the store's uniqueness on
+   *  this pair is the reservation. */
+  readonly at: { id: string; seq: number };
   /** The provider handle to resume from, when the adapter can and the mode allows it. */
   readonly providerSessionId?: string;
-  /** The stream's contents at this position. LAZY because the cheap path never needs them: an adapter
-   *  that branches server-side reads zero messages. Only replay strategies materialize. */
+  /** The conversation's contents at this position. LAZY because the cheap path never needs them: an
+   *  adapter that branches server-side reads zero messages. Only replay strategies materialize. */
   messages(): Promise<Msg[]>;
-  /**
-   * Report what this call actually appended.
-   *
-   * The channel exists here rather than on the execution result because a result is shared by every
-   * op kind, and because a session is the one thing that is already present exactly when there is a
-   * delta to report. It also makes append-on-error fall out for free: an executor reports before it
-   * returns, whichever way it returns.
-   */
-  report(delta: SessionDelta<Msg>): void;
 }
 
 /**
  * Attach the non-enumerable half of a {@link ResolvedSession} to a bare ref.
  *
- * One helper so the non-enumerability is stated once. Defining these as ordinary properties is the
- * mistake this exists to prevent — it would put a function and a mode flag into every journal entry
- * and every `inputs_json`.
+ * One helper so the non-enumerability is stated once. Declaring these as ordinary properties is the
+ * mistake it exists to prevent — it would put a function and a position into every journal entry and
+ * every `inputs_json`.
  */
-export function resolveSessionRef<Msg = JsonValue>(
-  id: string,
-  rest: Omit<ResolvedSession<Msg>, "id">,
-): ResolvedSession<Msg> {
+export function resolveSessionRef<Msg = JsonValue>(id: string, rest: Omit<ResolvedSession<Msg>, "id">): ResolvedSession<Msg> {
   const session = { id } as ResolvedSession<Msg>;
   for (const [key, value] of Object.entries(rest)) {
     Object.defineProperty(session, key, { value, enumerable: false, writable: false, configurable: true });
@@ -418,177 +412,215 @@ export function resolveSessionRef<Msg = JsonValue>(
   return session;
 }
 
-/** What a caller asks for when it opens a session for one call. */
-export interface SessionRequest {
-  /** The position to continue or branch from. Absent ⇒ a new stream. */
-  ref?: string;
-  /** Always branch, rather than continuing when the position is still the head. */
-  fork?: boolean;
-  /**
-   * A stable discriminator for any stream this call MINTS — a state id, a child key plus iteration.
-   *
-   * Stable rather than random on purpose: a fan-out that mints random ids produces different lineage
-   * on every run, which degrades exactly the observability durable sessions exist for.
-   */
-  seed?: string;
-  /** Which provider is about to be used, so the store can hand back that adapter's handle and only
-   *  that one. The same stream replayed against two providers has two unrelated handles. */
-  provider?: string;
-}
-
 /**
- * A RESERVED position, held for the duration of one call.
- *
- * Reserving rather than observing is the whole point. A peek leaves a window the length of the entire
- * model call: two calls both see head == 14, both conclude "linear append", and one clobbers the
- * other. That is survivable if both replay — the loser forks on the way out — and NOT survivable if
- * the winner took a resume-by-handle fast path, because by the time it loses it has already appended
- * remotely and there is nothing left to retroactively fork.
- */
-export interface SessionLease<Msg = JsonValue> {
-  /**
-   * The EFFECTIVE id to write under, which may not be the one that was asked for: a store that had
-   * to fork says so here. Without this channel a store can decide a fork and has no way to report it.
-   */
-  readonly session: ResolvedSession<Msg>;
-  /**
-   * Fold the reported delta, drop the reservation, and return the position the call ENDED at.
-   *
-   * The END position, because that is the only one that can exist by the time anyone reads it: you
-   * append AT a position but do not know where you finished until the provider resolves. It is also
-   * what consumers want — "append after me" and "fork after me" both mean *after*.
-   *
-   * Must run on success, on failure, on cancel and on throw; a leaked reservation pins the stream
-   * forever and silently forks everything downstream. IDEMPOTENT, so a caller can release on the
-   * happy path to read the end position and still release unconditionally in a `finally`.
-   */
-  release(delta?: SessionDelta<Msg>): string | Promise<string>;
-}
-
-/**
- * An append-only session store.
- *
- * `begin` RESERVES; `release` folds and frees. There is deliberately no `get`/`put` pair: an
- * observe-then-write API cannot express the reservation above, and a store that decides a fork has
- * nowhere to say so.
+ * Conversation lineage and resolution. The RECORDS are written through `RecordStore`; this store owns
+ * which conversation a ref names, where it sits, and how a new one comes into being.
  */
 export interface SessionStore<Msg = JsonValue> {
-  begin(request: SessionRequest): SessionLease<Msg> | Promise<SessionLease<Msg>>;
-  /** The stream's contents at a position, for a consumer that only wants to READ one. */
-  read?(ref: string): Msg[] | Promise<Msg[]>;
+  /** Resolve a request to the position a call should claim. */
+  resolve(request: SessionRequest): ResolvedSession<Msg> | Promise<ResolvedSession<Msg>>;
   /**
-   * Replace a stream's older entries with a summary, as a NEW stream, and return its head.
+   * Branch `ref`, returning a ref to the new conversation at the same content.
    *
-   * A new stream rather than a rewrite, and NOT a fork. A fork's prefix is byte-identical to its
-   * origin's — that is the whole claim a position makes — whereas a compacted stream begins with a
-   * summary that appears nowhere in the origin. Rewriting in place would be worse still: it would
-   * silently change what every existing ref refers to, and it invalidates the provider's prompt cache
-   * (a strict prefix match) on every compaction.
-   *
-   * Optional, because not every store can express lineage. A store without it simply never compacts.
+   * What a caller does when a position turns out to be taken. Not a retry at the next slot: appending
+   * at 15 instead of 14 would continue a conversation containing a turn this call never saw.
    */
-  compact?(originRef: string, entries: readonly SessionMessage<Msg>[]): string | Promise<string>;
+  fork(ref: string, seed?: string): string | Promise<string>;
+  /** The conversation's contents at a position. */
+  messages(ref: string): Msg[] | Promise<Msg[]>;
+  /**
+   * A NEW conversation whose older messages are replaced by a summary.
+   *
+   * Not a fork: a fork's prefix is byte-identical to its origin's, which is the whole claim a position
+   * makes, whereas a compacted conversation opens with a summary appearing nowhere in the origin.
+   * Rewriting in place would be worse still — it silently changes what every existing ref refers to,
+   * and invalidates the provider's prompt cache (a strict prefix match) on every compaction.
+   */
+  compact?(ref: string, messages: readonly Msg[]): string | Promise<string>;
+  /** A NEW conversation re-read from the provider after the remote diverged from our mirror. Where an
+   *  adapter has no read API the caller passes nothing and it starts EMPTY — visible on the edge
+   *  rather than silent, which is the point of it being a distinct kind. */
+  resync?(ref: string, messages: readonly Msg[]): string | Promise<string>;
 }
 
 /**
- * A plain in-memory append-only store — the default when no durable one is injected.
+ * Raised when a stub cannot claim its position because something already holds it.
  *
- * Small, but it implements the real semantics rather than approximating them: a reserved position is
- * held, a second reservation at the same position forks, and a fork's prefix is copied at the cursor
- * so the origin is never mutated.
+ * A distinct class on purpose: "someone got there first" is routine and has a correct answer, whereas
+ * a broken database does not. The correct answer is NOT the one findmyprompt's `appendDraw` takes for
+ * a draw list — it recomputes `MAX(index)` and retries at the next slot, which is right there because
+ * a draw's order commits to nothing. A session must FORK instead: appending at 15 rather than 14 would
+ * continue a conversation containing a turn this call never saw.
+ */
+export class PositionTaken extends Error {
+  constructor(
+    readonly session: string,
+    readonly seq: number,
+  ) {
+    super(`session ${session}: position ${seq} is already claimed`);
+    this.name = "PositionTaken";
+  }
+}
+
+/** How a stored record yields conversation messages. Injected because only the llm layer knows that a
+ *  prompt op's payload is an `LlmOutput` with a `messages` field; the store stays generic. */
+export type MessagesOf<Msg> = (record: { result?: { value?: unknown } }) => readonly Msg[];
+
+/** The default: a payload carrying `messages`, which is what a prompt op's `LlmOutput` does. */
+export const defaultMessagesOf = <Msg>(record: { result?: { value?: unknown } }): readonly Msg[] => {
+  const value = record.result?.value as { messages?: readonly Msg[] } | undefined;
+  return value?.messages ?? [];
+};
+
+/**
+ * The in-memory default: conversation lineage plus the records themselves.
+ *
+ * One class rather than two because the two are inseparable in the small — a conversation's messages
+ * ARE its records — and a durable implementation splits them across tables in the same database
+ * anyway. It implements the real semantics rather than approximating them: a claimed position is held
+ * by the record occupying it, a second claim throws {@link PositionTaken}, and a fork shares its
+ * origin's prefix by lineage rather than by copying.
  */
 export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
-  private readonly streams = new Map<string, SessionMessage<Msg>[]>();
-  private readonly handles = new Map<string, string>();
-  private readonly held = new Set<string>();
+  /** Lineage only. A branch's own records live in `rows`; its prefix is its parent's. */
+  private readonly branches = new Map<string, { parent?: string; cursor: number }>();
+  private readonly rows = new Map<string, Map<number, { id: string; result?: { value?: unknown } }>>();
   private minted = 0;
 
-  read(ref: string): Msg[] {
-    const [id, position] = split(ref);
-    const stream = this.streams.get(id) ?? [];
-    return stream.slice(0, position ?? stream.length).map((entry) => entry.message);
-  }
+  constructor(private readonly messagesOf: MessagesOf<Msg> = defaultMessagesOf) {}
 
-  begin(request: SessionRequest): SessionLease<Msg> {
+  resolve(request: SessionRequest): ResolvedSession<Msg> {
     const asked = request.ref !== undefined ? split(request.ref) : undefined;
-    let [id, at] = asked ?? [this.mint(request.seed), undefined];
-    if (asked === undefined) this.streams.set(id, []);
-    const head = (): number => (this.streams.get(id) ?? []).length;
-    // A bare id — no position — names the stream AT ITS HEAD, which is what "continue this
-    // conversation" means when you hold a name rather than a position. Reading it as 0 instead would
-    // make every second call fork, and the first turn would be replayed forever as the only history.
-    let position = at ?? head();
-
-    // `fork: true` skips the reservation entirely — the answer is already known. Otherwise a position
-    // that is still the head and not held is an append, and anything else forks.
+    let id = asked?.[0] ?? this.mint(request.seed);
+    if (asked === undefined) this.branches.set(id, { cursor: 0 });
+    let seq = asked?.[1] ?? this.head(id);
     let mode: "append" | "fork" = "append";
-    if (request.fork === true || position !== head() || this.held.has(key(id, position))) {
+    // `fork: true` skips any check — the answer is already known. Everything else is decided by the
+    // record write itself, which is the only place that can decide it without a race.
+    if (request.fork === true) {
+      id = this.branchFrom(id, seq, request.seed);
+      seq = this.head(id);
       mode = "fork";
-      const forked = this.mint(request.seed);
-      this.streams.set(forked, (this.streams.get(id) ?? []).slice(0, position));
-      id = forked;
-      position = this.streams.get(forked)!.length;
     }
-    this.held.add(key(id, position));
-
-    const handle = mode === "append" && request.provider !== undefined ? this.handles.get(key(id, request.provider)) : undefined;
-    const session = resolveSessionRef<Msg>(join(id, position), {
+    return resolveSessionRef<Msg>(join(id, seq), {
       mode,
-      ...(handle !== undefined ? { providerSessionId: handle } : {}),
-      messages: async () => (this.streams.get(id) ?? []).slice(0, position).map((entry) => entry.message),
-      report: () => {
-        /* the lease folds on release; nothing to buffer for an in-memory store */
-      },
+      at: { id, seq },
+      messages: async () => this.materialize(id, seq),
     });
+  }
 
-    const heldKey = key(id, position);
-    let released = false;
-    return {
-      session,
-      release: (delta) => {
-        // Idempotent: the caller releases on the happy path to read the end position, and again in a
-        // `finally` that cannot know whether it already ran.
-        if (released) return join(id, this.streams.get(id)?.length ?? position);
-        released = true;
-        this.held.delete(heldKey);
-        if (delta !== undefined) {
-          const stream = this.streams.get(id) ?? [];
-          stream.push(...delta.messages);
-          this.streams.set(id, stream);
-          if (delta.providerSessionId !== undefined && request.provider !== undefined) {
-            this.handles.set(key(id, request.provider), delta.providerSessionId);
-          }
+  fork(ref: string, seed?: string): string {
+    const [id, seq] = split(ref);
+    const forked = this.branchFrom(id, seq ?? this.head(id), seed);
+    return join(forked, this.head(forked));
+  }
+
+  messages(ref: string): Msg[] {
+    const [id, seq] = split(ref);
+    return this.materialize(id, seq ?? this.head(id));
+  }
+
+  compact(ref: string, messages: readonly Msg[]): string {
+    return this.derive(ref, "compact", messages);
+  }
+
+  resync(ref: string, messages: readonly Msg[]): string {
+    return this.derive(ref, "resync", messages);
+  }
+
+  // --- The record half ----------------------------------------------------------
+
+  open(stub: { id: string; session?: { id: string; seq: number } }): void {
+    const at = stub.session;
+    if (at === undefined) return; // a record outside any conversation is not this store's business
+    const rows = this.rows.get(at.id) ?? new Map();
+    if (rows.has(at.seq)) throw new PositionTaken(at.id, at.seq);
+    rows.set(at.seq, { id: stub.id });
+    this.rows.set(at.id, rows);
+  }
+
+  close(id: string, settled: { result?: { value?: unknown } }): void {
+    for (const rows of this.rows.values()) {
+      for (const row of rows.values()) {
+        if (row.id === id) {
+          row.result = settled.result;
+          return;
         }
-        return join(id, this.streams.get(id)?.length ?? position);
-      },
-    };
+      }
+    }
   }
 
-  compact(originRef: string, entries: readonly SessionMessage<Msg>[]): string {
-    const [origin] = split(originRef);
-    // A distinct stream, so the origin keeps meaning exactly what every ref into it already meant.
-    const id = `${origin}~compact${++this.compactions}`;
-    this.streams.set(id, [...entries]);
-    return join(id, entries.length);
+  bySession(session: string, upTo?: number): Array<{ id: string; result?: { value?: unknown } }> {
+    const rows = this.rows.get(session) ?? new Map();
+    return [...rows.entries()]
+      .filter(([seq]) => upTo === undefined || seq < upTo)
+      .sort(([a], [b]) => a - b)
+      .map(([, row]) => row);
   }
 
-  private compactions = 0;
+  // --- Internals ----------------------------------------------------------------
+
+  /** Walk the lineage, taking each ancestor's records below the cursor its child took. Copy-on-write:
+   *  a branch stores only what it appended, so cost is proportional to divergence. */
+  private materialize(id: string, upTo: number): Msg[] {
+    const out: Msg[] = [];
+    let at: string | undefined = id;
+    let limit = upTo;
+    const chain: Array<[string, number]> = [];
+    while (at !== undefined) {
+      chain.unshift([at, limit]);
+      const branch: { parent?: string; cursor: number } | undefined = this.branches.get(at);
+      if (branch?.parent === undefined) break;
+      limit = branch.cursor;
+      at = branch.parent;
+    }
+    for (const [branch, bound] of chain) {
+      const start = this.branches.get(branch)?.cursor ?? 0;
+      for (const [seq, row] of [...(this.rows.get(branch) ?? new Map()).entries()].sort(([a], [b]) => a - b)) {
+        if (seq >= start && seq < bound) out.push(...this.messagesOf(row));
+      }
+    }
+    return out;
+  }
+
+  /** The next position an append would occupy. A branch's own records begin at its cursor. */
+  private head(id: string): number {
+    const rows = this.rows.get(id);
+    const max = rows === undefined || rows.size === 0 ? undefined : Math.max(...rows.keys());
+    return max === undefined ? (this.branches.get(id)?.cursor ?? 0) : max + 1;
+  }
+
+  private branchFrom(id: string, cursor: number, seed?: string): string {
+    const forked = this.mint(seed !== undefined ? `${seed}@${id}:${cursor}` : undefined);
+    // `seq` CONTINUES from the cursor, so a position is one integer across a whole lineage.
+    this.branches.set(forked, { parent: id, cursor });
+    return forked;
+  }
+
+  private derive(ref: string, word: string, messages: readonly Msg[]): string {
+    const [id] = split(ref);
+    // A distinct conversation, so the origin keeps meaning exactly what every ref into it meant.
+    const derived = `${id}~${word}${++this.minted}`;
+    this.branches.set(derived, { cursor: 0 });
+    const rows = new Map<number, { id: string; result?: { value?: unknown } }>();
+    rows.set(0, { id: `${derived}:0`, result: { value: { messages } } });
+    this.rows.set(derived, rows);
+    return join(derived, 1);
+  }
 
   private mint(seed: string | undefined): string {
-    // Seeded ids stay stable across a replayed run; an unseeded one only has to be unique.
     return seed !== undefined ? `s_${seed}` : `s_${++this.minted}`;
   }
 }
 
-const key = (a: string, b: string | number): string => `${a} ${b}`;
-const join = (id: string, position: number): string => `${id}@${position}`;
+const join = (id: string, seq: number): string => `${id}@${seq}`;
 
-/** `<id>@<position>`, or a bare id — which means the stream at whatever its head currently is. */
+/** `<id>@<position>`, or a bare id — which names the conversation at whatever its head currently is. */
 function split(ref: string): [string, number | undefined] {
   const at = ref.lastIndexOf("@");
   if (at <= 0) return [ref, undefined];
-  const position = Number(ref.slice(at + 1));
-  return Number.isInteger(position) && position >= 0 ? [ref.slice(0, at), position] : [ref, undefined];
+  const seq = Number(ref.slice(at + 1));
+  return Number.isInteger(seq) && seq >= 0 ? [ref.slice(0, at), seq] : [ref, undefined];
 }
 
 // --- Composition --------------------------------------------------------------

@@ -18,3 +18,6 @@ export * from "./wrappers";
 export * from "./concurrency";
 export * from "./deadline";
 export * from "./retry";
+// Recording what ran (SESSIONS.md) — the two-phase write, split out of the memo store where
+// findmyprompt fused it. A session IS the records sharing a `session.id`.
+export * from "./record";

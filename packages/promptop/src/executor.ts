@@ -132,6 +132,26 @@ function requestTurns(def: LlmCallDefinition): ModelMessage[] {
   return typeof prompt === "string" ? [{ role: "user", content: prompt }] : [...prompt];
 }
 
+/**
+ * THE PROJECTION (DESIGN §3.1): an `LlmOutput` narrowed to the op's output-PARAMETER value.
+ *
+ * It exists so everything above the executor speaks one vocabulary regardless of op kind — a state's
+ * `outputs.answer` is the answer, not an envelope, and hw never learns what `thinking` is.
+ *
+ * Exported because WHERE it happens matters. Applied to the whole result, it destroys the payload that
+ * a session needs to record, and the layer that wanted it then has to smuggle it back down through a
+ * side channel. Applied by whichever layer is the last to need the payload, it narrows only the value
+ * slot — which is what `withSession` does, projecting on its way out over a record-mode core.
+ *
+ * A generated FILE lands in a `blob`-kind output parameter — that is §7.1's "a produced artifact is an
+ * output parameter, not a parallel channel". A json/text parameter ignores it.
+ */
+export function projectLlmOutput(op: PromptOp<InlineFamily>, output: LlmOutput | undefined): ResolvedValue | undefined {
+  return op.output.kind === "blob" && output?.files && output.files.length > 0
+    ? (output.files[0]!.bytes as ResolvedValue)
+    : (output?.value as ResolvedValue | undefined);
+}
+
 /** Adapt core {@link Tool}s (`run(input, ctx)`) into llm {@link ToolExecutor}s (`(input, options)`),
  *  closing over the call ctx. The tool's `run` IS its `execute`; the SDK's per-call `options` are
  *  dropped (a v1 tool needs only its input + the shared services). */
@@ -267,7 +287,7 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
       const prior =
         typeof session.messages === "function"
           ? await session.messages()
-          : (((await ctx.sessions?.read?.(session.id)) ?? []) as ModelMessage[]);
+          : (((await ctx.sessions?.messages(session.id)) ?? []) as ModelMessage[]);
       // Whatever the lowering produced IS the request beyond the stream: the wrapper no longer
       // injects history into the config, so nothing here is already in `prior`.
       sent = requestTurns(definition);
@@ -303,20 +323,20 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
       return lostMetrics(err instanceof Error ? err.message : String(err));
     }
 
-    // REPORT THE DELTA — before any of the return paths below, and whether the call succeeded or not.
-    // A call that appended turns and then failed still appended them remotely; not recording those
-    // entries means the next append-by-handle meets a head we do not mirror, which is divergence on
-    // the very next call (SESSIONS.md §7).
+    // NOTHING to report. The delta is already on `call.value` — an `LlmOutput` carrying `messages`
+    // verbatim — and `withRecord` writes that payload into the record occupying this session position.
+    // A session is the records sharing a `session.id`, so appending the turn and recording the call are
+    // one write; there is no separate transcript to fold and no channel to fold it through.
     //
-    // Repair turns are in here too, because the provider genuinely saw them — that is the same rule,
-    // not a second one. A retry, by contrast, resolves to an already-appended position and forks;
-    // neither behaviour is a policy switch.
-    if (session !== undefined) {
-      const appended = call.value?.messages ?? [];
-      session.report({
-        messages: [...sent, ...appended].map((message) => ({ message })),
-        ...(call.value?.providerSessionId !== undefined ? { providerSessionId: call.value.providerSessionId } : {}),
-      });
+    // That covers the awkward cases without special-casing them. Repair turns are in the payload
+    // because the provider genuinely produced them. A call that appended and THEN failed is recorded
+    // too, because `withRecord` fills its stub either way — which matters, since those turns exist
+    // remotely whether or not we kept them.
+    //
+    // What the executor DOES owe the delta is the request half: `sent` is prepended below so the
+    // stored payload is the whole exchange rather than only what came back.
+    if (session !== undefined && call.value !== undefined && sent.length > 0) {
+      call = { ...call, value: { ...call.value, messages: [...sent, ...(call.value.messages ?? [])] } };
     }
 
     // THE PROJECTION (DESIGN §3.1). An `LlmOutput` — output value, thinking, tool calls, finish
@@ -335,12 +355,7 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
       const recordError = canceledCall ? { ...call.error, classification: "canceled" as const } : call.error;
       return { error: recordError, value: payload, metrics: recordMetrics };
     }
-    // A generated FILE lands in a `blob`-kind output parameter — that is what §7.1 means by "a produced
-    // artifact is an output parameter, not a parallel channel". A json/text parameter ignores it.
-    const value: ResolvedValue | undefined =
-      op.output.kind === "blob" && output?.files && output.files.length > 0
-        ? output.files[0]!.bytes
-        : (output?.value as ResolvedValue | undefined);
+    const value = projectLlmOutput(op, output);
 
     const metrics: LlmMetrics = { ...call.metrics, startMs };
     if (isOk(call)) return { value: value as ResolvedValue, metrics };

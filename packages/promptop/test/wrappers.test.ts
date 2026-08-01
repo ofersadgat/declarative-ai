@@ -4,7 +4,7 @@ import { EXEC_METRICS_ALGEBRA, MapMemoCache, RUNTIME_CAPABILITIES, compose, with
 import type { ModelMessage } from "ai";
 import { createPromptExecutor } from "../src/executor";
 import { withBudget, withRateLimit, withSession } from "../src/wrappers";
-import { fakeRunner, okOutcome, promptOp, transcripts, errorOf } from "./fakes";
+import { fakeRunner, okOutcome, promptOp, sessionStack, transcripts, errorOf } from "./fakes";
 
 /**
  * Put a stream in a known state and return the ref for its HEAD.
@@ -13,8 +13,11 @@ import { fakeRunner, okOutcome, promptOp, transcripts, errorOf } from "./fakes";
  * position back, because continuing from a stale one is a fork, not a continuation.
  */
 async function seed(store: SessionStore, id: string, ...messages: ModelMessage[]): Promise<string> {
-  const lease = await store.begin({ ref: `${id}@0` });
-  return await lease.release({ messages: messages.map((message) => ({ message: message as never })) });
+  const rec = store as unknown as MapSessionStore<ModelMessage>;
+  const at = await rec.resolve({ ref: `${id}@0` });
+  rec.open({ id: `seed:${id}`, session: at.at });
+  rec.close(`seed:${id}`, { result: { value: { messages } } });
+  return `${at.at.id}@${at.at.seq + 1}`;
 }
 
 /** An inner executor whose STATIC record says `memoizable`, but whose PER-OP record says the opposite —
@@ -132,7 +135,7 @@ describe("withRateLimit", () => {
       reportOutcome: () => {},
     };
     const { runner, calls } = fakeRunner([okOutcome()]);
-    const stack = withSession({ sessions: seam }, withRateLimit({ limiter }, createPromptExecutor({ runner })));
+    const stack = sessionStack(seam, withRateLimit({ limiter }, createPromptExecutor({ runner, record: true })));
     await stack.start(promptOp({}, { sessionId: head }), {}).result;
     // The transcript really is on the wire (chars/4 ⇒ ≳2000 tokens), and the estimate says so.
     expect(JSON.stringify(calls[0]!.def.messages).length).toBeGreaterThan(8000);
@@ -259,7 +262,7 @@ describe("withBudget — per-call reserve → settle", () => {
     const { seam } = transcripts();
     const head = await seed(seam, "chat-1", { role: "user", content: "y".repeat(5000) });
     const { runner } = fakeRunner([okOutcome()]);
-    const stack = withSession({ sessions: seam }, withBudget({ meter, pricing }, createPromptExecutor({ runner })));
+    const stack = sessionStack(seam, withBudget({ meter, pricing }, createPromptExecutor({ runner, record: true })));
     await stack.start(promptOp({}, { sessionId: head }), {}).result;
     // `pricing` charges (input + output)/1000. Blind to the transcript the reserve was priced on ~107
     // tokens (~$0.107); the 5000 chars actually sent are ~1250 input tokens, so a correct reserve is >$1.
@@ -284,12 +287,12 @@ describe("withBudget — per-call reserve → settle", () => {
  */
 describe("withSession — append-only conversation", () => {
   /** Everything a session stream ends up holding, flattened for assertion. */
-  const contentsOf = (store: MapSessionStore<ModelMessage>, ref: string): ModelMessage[] => store.read(`${ref}@99`);
+  const contentsOf = (store: MapSessionStore<ModelMessage>, ref: string): ModelMessage[] => store.messages(`${ref}@99`);
 
   it("no session named anywhere → passthrough, store untouched", async () => {
     const { store, seam } = transcripts();
     const { runner, calls } = fakeRunner([okOutcome()]);
-    await withSession({ sessions: seam }, createPromptExecutor({ runner })).start(promptOp(), {}).result;
+    await sessionStack(seam, createPromptExecutor({ runner, record: true })).start(promptOp(), {}).result;
     expect(calls[0]!.def.prompt).toBe("What is 2+2?");
     expect(contentsOf(store, "s_chat-1")).toEqual([]);
   });
@@ -297,7 +300,7 @@ describe("withSession — append-only conversation", () => {
   it("folds the turn the call SENT plus what the provider said it appended", async () => {
     const { store, seam } = transcripts();
     const { runner } = fakeRunner([okOutcome()]);
-    await withSession({ sessions: seam }, createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
+    await sessionStack(seam, createPromptExecutor({ runner, record: true })).start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
     expect(contentsOf(store, "chat-1")).toEqual([
       { role: "user", content: "What is 2+2?" },
       { role: "assistant", content: '{"answer":"4"}' },
@@ -320,16 +323,16 @@ describe("withSession — append-only conversation", () => {
       { role: "assistant", content: [{ type: "text", text: '{"answer":"4"}' }] },
     ];
     const { runner } = fakeRunner([okOutcome({ messages: appended })]);
-    await withSession({ sessions: seam }, createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
+    await sessionStack(seam, createPromptExecutor({ runner, record: true })).start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
     expect(contentsOf(store, "chat-1").slice(1)).toEqual(appended);
   });
 
   it("replays the stored stream, and STRIPS the session fields the core would refuse", async () => {
     const { store, seam } = transcripts();
     const { runner, calls } = fakeRunner([okOutcome(), okOutcome()]);
-    const stack = withSession({ sessions: seam }, createPromptExecutor({ runner }));
+    const stack = sessionStack(seam, createPromptExecutor({ runner, record: true }));
     await stack.start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
-    await stack.start(promptOp({}, { sessionId: "chat-1@2" }), {}).result;
+    await stack.start(promptOp({}, { sessionId: "chat-1@1" }), {}).result;
     // The second call carried the first exchange on the wire — replay, because the Messages API and
     // everything through the AI SDK are stateless.
     expect(calls[1]!.def.messages).toEqual([
@@ -346,7 +349,7 @@ describe("withSession — append-only conversation", () => {
     // divergence on the very next call.
     const { store, seam } = transcripts();
     const { runner } = fakeRunner([okOutcome({ error: { classification: "permanent", reason: "model exploded" } })]);
-    const out = await withSession({ sessions: seam }, createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1@0" }), {})
+    const out = await sessionStack(seam, createPromptExecutor({ runner, record: true })).start(promptOp({}, { sessionId: "chat-1@0" }), {})
       .result;
     expect(errorOf(out)?.reason).toMatch(/model exploded/);
     expect(contentsOf(store, "chat-1")).toHaveLength(2);
@@ -355,22 +358,22 @@ describe("withSession — append-only conversation", () => {
   it("reports the EFFECTIVE position on the outcome, not the key it was handed", async () => {
     const { seam } = transcripts();
     const { runner } = fakeRunner([okOutcome()]);
-    const out = await withSession({ sessions: seam }, createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1@0" }), {})
+    const out = await sessionStack(seam, createPromptExecutor({ runner, record: true })).start(promptOp({}, { sessionId: "chat-1@0" }), {})
       .result;
     // Two entries went in, so the call ENDED at position 2 — "append after me" needs that, and the
     // caller has no other way to learn it.
-    expect(out.metrics.sessionRef).toBe("chat-1@2");
+    expect(out.metrics.sessionRef).toBe("chat-1@1");
   });
 
   it("FORKS when the position is no longer the head, leaving the original untouched", async () => {
     const { store, seam } = transcripts();
     const { runner } = fakeRunner([okOutcome(), okOutcome()]);
-    const stack = withSession({ sessions: seam }, createPromptExecutor({ runner }));
+    const stack = sessionStack(seam, createPromptExecutor({ runner, record: true }));
     await stack.start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
     // The same position again: it has since been appended to, so forking is the only answer that
     // means anything — and nothing had to ask for it.
     const forked = await stack.start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
-    expect(forked.metrics.sessionRef).not.toBe("chat-1@2");
+    expect(forked.metrics.sessionRef).not.toBe("chat-1@1");
     expect(contentsOf(store, "chat-1")).toHaveLength(2);
   });
 
@@ -378,9 +381,9 @@ describe("withSession — append-only conversation", () => {
     // Deliberate divergence — fan variants out of one point — cannot be inferred from stream state.
     const { store, seam } = transcripts();
     const { runner } = fakeRunner([okOutcome(), okOutcome()]);
-    const stack = withSession({ sessions: seam }, createPromptExecutor({ runner }));
+    const stack = sessionStack(seam, createPromptExecutor({ runner, record: true }));
     await stack.start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
-    const forked = await stack.start(promptOp({}, { sessionId: "chat-1@2", fork: true }), {}).result;
+    const forked = await stack.start(promptOp({}, { sessionId: "chat-1@1", fork: true }), {}).result;
     expect(forked.metrics.sessionRef).not.toMatch(/^chat-1@/);
     expect(contentsOf(store, "chat-1")).toHaveLength(2);
   });
@@ -398,7 +401,7 @@ describe("withSession — append-only conversation", () => {
         return createPromptExecutor({ runner }).start(op, ctx) as never;
       },
     };
-    await withSession({ sessions: seam }, spy).start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
+    await sessionStack(seam, spy).start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
     expect(Object.keys(seen!)).toEqual(["id"]);
     expect(JSON.parse(JSON.stringify(seen))).toEqual({ id: "chat-1@0" });
     expect(seen!.mode).toBe("append");
@@ -409,7 +412,7 @@ describe("withSession — append-only conversation", () => {
     // there was no way to say "resume this handle" instead of "here is the transcript again".
     const { seam } = transcripts();
     const { runner } = fakeRunner([okOutcome()]);
-    const out = await withSession({ sessions: seam }, createPromptExecutor({ runner })).start(promptOp({}, { providerSessionId: "p1" }), {})
+    const out = await sessionStack(seam, createPromptExecutor({ runner, record: true })).start(promptOp({}, { providerSessionId: "p1" }), {})
       .result;
     expect(errorOf(out)).toBeUndefined();
   });
@@ -427,7 +430,12 @@ describe("withSession — append-only conversation", () => {
   it("falls back to the run-scoped ctx.sessions store when none was constructed", async () => {
     const { store, seam } = transcripts();
     const { runner } = fakeRunner([okOutcome()]);
-    await withSession(createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1@0" }), { sessions: seam }).result;
+    // Both seams from ctx rather than construction — the store AND the record sink, since recording
+    // is what a session append IS.
+    await sessionStack(seam, createPromptExecutor({ runner, record: true }) as never).start(promptOp({}, { sessionId: "chat-1@0" }), {
+      sessions: seam,
+      records: seam as never,
+    }).result;
     expect(contentsOf(store, "chat-1")).toHaveLength(2);
   });
 
