@@ -35,31 +35,31 @@ const CONTEXTS: Record<string, Record<string, unknown>> = {
 const EXPRESSIONS = [
   // literals and identifiers
   "42", "'significant'", "true", "null", "3.25",
-  "inputs", "missing",
+  ".inputs", ".missing",
   // property access, including the optional-chaining cases
-  "inputs.issue", "inputs.nested.deep", "inputs.gone.deeper.still",
-  "outputs.severity", "outputs.count",
-  "inputs.list.length", "inputs.issue.length",
+  ".inputs.issue", ".inputs.nested.deep", ".inputs.gone.deeper.still",
+  ".outputs.severity", ".outputs.count",
+  ".inputs.list.length", ".inputs.issue.length",
   // prototype must stay unreachable through both paths
-  "inputs.issue.constructor", "inputs.nested.toString", "inputs.list.map",
+  ".inputs.issue.constructor", ".inputs.nested.toString", ".inputs.list.map",
   // children, in all four shapes §1.3 distinguishes
-  "children.done.outputs.plan", "children.done.outputs", "children.done", "children.done.outcome",
-  "children.unstarted.outputs.plan", "children.unstarted.outcome",
-  "children.failed.outcome", "children.missing.outputs.x",
+  ".children.done.outputs.plan", ".children.done.outputs", ".children.done", ".children.done.outcome",
+  ".children.unstarted.outputs.plan", ".children.unstarted.outcome",
+  ".children.failed.outcome", ".children.missing.outputs.x",
   // operators
-  "inputs.n === 2", "inputs.n == '2'", "inputs.n !== 2", "inputs.n != '2'",
-  "inputs.n < 3", "inputs.n <= 2", "inputs.n > 3", "inputs.n >= 2",
-  "!inputs.flag", "!!inputs.issue",
-  "run.iteration < limits.max_iterations",
+  ".inputs.n === 2", ".inputs.n == '2'", ".inputs.n !== 2", ".inputs.n != '2'",
+  ".inputs.n < 3", ".inputs.n <= 2", ".inputs.n > 3", ".inputs.n >= 2",
+  "!.inputs.flag", "!!.inputs.issue",
+  ".run.iteration < .limits.max_iterations",
   // truthiness and short-circuit results
-  "inputs.flag && inputs.issue", "inputs.flag || inputs.issue", "outputs.count || 'fallback'",
-  "inputs.issue && outputs.severity",
+  ".inputs.flag && .inputs.issue", ".inputs.flag || .inputs.issue", ".outputs.count || 'fallback'",
+  ".inputs.issue && .outputs.severity",
   // ternary
-  "outputs.severity === 'high' ? 'escalate' : 'continue'",
-  "inputs.flag ? 1 : inputs.n > 1 ? 2 : 3",
+  ".outputs.severity === 'high' ? 'escalate' : 'continue'",
+  ".inputs.flag ? 1 : .inputs.n > 1 ? 2 : 3",
   // combinations
-  "run.cursor === 'done' && outputs.severity === 'high'",
-  "children.done.outcome === 'success' && children.done.outputs.n > 2",
+  ".run.cursor === 'done' && .outputs.severity === 'high'",
+  ".children.done.outcome === 'success' && .children.done.outputs.n > 2",
 ];
 
 function scopeFor(context: Record<string, unknown>): ResolutionScope {
@@ -98,15 +98,15 @@ describe("lowering preserves the interpreter's semantics", () => {
 describe("PENDING propagates through a lowered tree exactly as it does through the interpreter", () => {
   const ctx = CONTEXTS.populated!;
   for (const src of [
-    "children.running.outputs",
-    "children.running.outputs.plan",
-    "children.running.outcome === 'success'",
-    "!children.running.outcome",
+    ".children.running.outputs",
+    ".children.running.outputs.plan",
+    ".children.running.outcome === 'success'",
+    "!.children.running.outcome",
     // The short-circuit cases: a determinate side decides, past a pending one.
-    "false && children.running.outcome",
-    "true || children.running.outcome",
-    "true && children.running.outcome",
-    "children.running.outcome ? 'a' : 'b'",
+    "false && .children.running.outcome",
+    "true || .children.running.outcome",
+    "true && .children.running.outcome",
+    ".children.running.outcome ? 'a' : 'b'",
   ]) {
     it(`${src}`, () => {
       const ast = parseExpression(src);
@@ -119,17 +119,17 @@ describe("pathOfRef recovers the reference a lowered sub-tree reads", () => {
   const pathOf = (src: string): string[] | undefined => pathOfRef(lowerExpression(parseExpression(src)));
 
   it("reads back a root-anchored path", () => {
-    expect(pathOf("children.done.outputs.plan")).toEqual(["children", "done", "outputs", "plan"]);
-    expect(pathOf("children.done.outputs")).toEqual(["children", "done", "outputs"]);
-    expect(pathOf("children.done")).toEqual(["children", "done"]);
-    expect(pathOf("children.done.outcome")).toEqual(["children", "done", "outcome"]);
-    expect(pathOf("inputs")).toEqual(["inputs"]);
+    expect(pathOf(".children.done.outputs.plan")).toEqual(["children", "done", "outputs", "plan"]);
+    expect(pathOf(".children.done.outputs")).toEqual(["children", "done", "outputs"]);
+    expect(pathOf(".children.done")).toEqual(["children", "done"]);
+    expect(pathOf(".children.done.outcome")).toEqual(["children", "done", "outcome"]);
+    expect(pathOf(".inputs")).toEqual(["inputs"]);
   });
 
   it("is undefined for anything that is not a path", () => {
     expect(pathOf("42")).toBeUndefined();
-    expect(pathOf("inputs.n === 2")).toBeUndefined();
-    expect(pathOf("!inputs.flag")).toBeUndefined();
+    expect(pathOf(".inputs.n === 2")).toBeUndefined();
+    expect(pathOf("!.inputs.flag")).toBeUndefined();
   });
 });
 
@@ -169,18 +169,18 @@ describe("inference over the tree agrees with inference over the AST", () => {
 
   const SOURCES = [
     "42", "'high'", "true", "null",
-    "inputs", "inputs.issue", "inputs.n", "inputs.flag",
-    "inputs.list.length", "inputs.issue.length", "inputs.nested.deep",
-    "outputs.severity",
-    "children.done.outputs.plan", "children.done.outcome", "children.done.outputs",
-    "inputs.n === 2", "inputs.n < 3", "!inputs.flag",
-    "run.iteration < limits.max_iterations",
-    "inputs.flag && inputs.issue", "inputs.flag || inputs.issue",
-    "outputs.severity === 'high' ? 'escalate' : 'continue'",
-    "inputs.flag ? inputs.n : 3",
-    "run.cursor === 'done' && outputs.severity === 'high'",
+    ".inputs", ".inputs.issue", ".inputs.n", ".inputs.flag",
+    ".inputs.list.length", ".inputs.issue.length", ".inputs.nested.deep",
+    ".outputs.severity",
+    ".children.done.outputs.plan", ".children.done.outcome", ".children.done.outputs",
+    ".inputs.n === 2", ".inputs.n < 3", "!.inputs.flag",
+    ".run.iteration < .limits.max_iterations",
+    ".inputs.flag && .inputs.issue", ".inputs.flag || .inputs.issue",
+    ".outputs.severity === 'high' ? 'escalate' : 'continue'",
+    ".inputs.flag ? .inputs.n : 3",
+    ".run.cursor === 'done' && .outputs.severity === 'high'",
     // the mistakes the validator has to keep catching
-    "nope", "inputs.missing", "inputs.nested.gone", "children.done.outputs.absent",
+    ".nope", ".inputs.missing", ".inputs.nested.gone", ".children.done.outputs.absent",
   ];
 
   for (const src of SOURCES) {

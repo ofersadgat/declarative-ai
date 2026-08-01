@@ -198,6 +198,30 @@ describe("memoKey — the executor is part of the identity", () => {
     expect((await stackB.start(op(), {}).result).value).toBe("from A");
     expect(b.calls).toBe(0);
   });
+
+  it("the conversation POSITION is part of the identity too", async () => {
+    // This used to be covered by accident: the session layer inlined the whole transcript into the
+    // op's config, so the op hash was taken over real conversation content. Once messages moved onto
+    // the services bundle, "summarise the discussion so far" at turn 3 and at turn 40 became ONE
+    // entry, and the second call would be served the first one's answer.
+    const cache = new MapMemoCache();
+    const s = scripted([ok("at turn 3"), ok("at turn 40")]);
+    const stack = withMemoize({ cache }, s.core);
+    const at = (id: string): ExecServices => ({ session: { id } as ExecServices["session"] });
+    expect((await stack.start(op(), at("chat@3")).result).value).toBe("at turn 3");
+    expect((await stack.start(op(), at("chat@40")).result).value).toBe("at turn 40");
+    expect(s.calls).toBe(2);
+  });
+
+  it("...while the SAME position is still a hit", async () => {
+    const cache = new MapMemoCache();
+    const s = scripted([ok("once")]);
+    const stack = withMemoize({ cache }, s.core);
+    const at = { session: { id: "chat@3" } } as ExecServices;
+    await stack.start(op(), at).result;
+    expect((await stack.start(op(), at).result).value).toBe("once");
+    expect(s.calls).toBe(1);
+  });
 });
 
 describe("withMemoize — the fan-out case, and what a hit costs", () => {

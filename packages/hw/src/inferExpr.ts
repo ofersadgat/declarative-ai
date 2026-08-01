@@ -15,7 +15,7 @@
  * type, not the only source of typing.
  */
 import type { InlineFamily, JsonSchema, JsonValue, Ref } from "@declarative-ai/exec";
-import type { Expr } from "./expr";
+import { pathOf, selfPathOf, type Expr } from "./expr";
 import { RESOLVER_REFS } from "./format";
 import { pathOfRef } from "./lowerExpr";
 
@@ -148,21 +148,28 @@ function infer(expr: Expr, scope: ExprScope, unresolved: string[][]): JsonSchema
   switch (expr.type) {
     case "lit":
       return literalSchema(expr.value);
-    case "ident": {
-      const s = scope[expr.name];
-      if (s === undefined) {
-        unresolved.push([expr.name]);
-        return ANY_SCHEMA;
-      }
-      return s;
-    }
+    case "self":
+      // The scope IS this state's runtime data, so the self root types as an object over it and
+      // `.inputs.n` is ordinary property projection from there. Reporting an unknown namespace stays
+      // the `member` case's job, which is where it always was — `inputs` used to be an `ident`, and
+      // it is now the first projection off this.
+      return { type: "object", properties: { ...scope } };
+    case "ident":
+      // A bare name is a reference to a document, whose declared output is not in this scope. Its
+      // type is knowable only once the loader has resolved it, so it is unknown here rather than
+      // wrong — the same answer §3 gives a call's result.
+      return ANY_SCHEMA;
     case "member": {
-      const path = pathOf(expr);
+      // A bare dotted path is one NAME, not a projection: `lib.helpers.trim` is a reference the
+      // loader resolves whole. Projecting into it here would report a missing property on a document
+      // this scope has never heard of.
+      if (expr.obj.type !== "self" && pathOf(expr) !== undefined) return ANY_SCHEMA;
       const base = infer(expr.obj, scope, unresolved);
       const projected = projectProperty(base, expr.prop);
       if (projected === undefined) {
         // Only report a MISSING property when the base was actually typed — projecting off an
         // already-universal schema is legitimately unknown, not a mistake.
+        const path = selfPathOf(expr);
         if (!isUniversalSchema(base) && path) unresolved.push(path);
         return ANY_SCHEMA;
       }
@@ -198,16 +205,6 @@ function infer(expr: Expr, scope: ExprScope, unresolved: string[][]): JsonSchema
       }
     }
   }
-}
-
-/** The dotted path of a pure member chain, or undefined when the base isn't an identifier chain. */
-function pathOf(expr: Expr): string[] | undefined {
-  if (expr.type === "ident") return [expr.name];
-  if (expr.type === "member") {
-    const base = pathOf(expr.obj);
-    return base ? [...base, expr.prop] : undefined;
-  }
-  return undefined;
 }
 
 /**

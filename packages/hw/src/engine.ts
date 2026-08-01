@@ -87,6 +87,8 @@ import type {
 } from "./format";
 import { bindElement, bindInputs, embeddedOpsOf, higherOrderEdgesOf, higherOrderOf, isResolvedValue, isResolveError, resolveEmbedded, resolveInputs, resolveRef, type ResolutionScope, type Resolved } from "./resolve";
 import { isByteStream, materialize, MaterializeError } from "./materialize";
+import { RUN_RESOURCE_KEY, isSessionExpr, resolveSession, sessionFromExpr, type SessionBinding, type SessionDecl } from "./session";
+import type { OperationNode } from "./operationNode";
 import { isFannedOut } from "./fanout";
 import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, type Persistence } from "./ports";
 
@@ -186,6 +188,8 @@ interface TerminationRecord {
   outcome: TerminationOutcome;
   outputs?: Record<string, ResolvedValue>;
   failure?: Failure;
+  /** What the state's operation reported, carried up so a parent can read it (SPEC.md §6.1). */
+  operation?: OperationNode;
 }
 
 interface ChildRecord {
@@ -193,6 +197,8 @@ interface ChildRecord {
   status: "running" | "done";
   outcome?: TerminationOutcome;
   outputs?: Record<string, ResolvedValue>;
+  /** The child's own operation node — what `children.<key>.operation.*` reads (SPEC.md §6.1). */
+  operation?: OperationNode;
   abort: AbortController;
   promise: Promise<void>;
 }
@@ -207,6 +213,23 @@ interface Instance {
   inputs: Record<string, ResolvedValue>;
   /** Operation-produced outputs accumulated so far. */
   outputs: Record<string, ResolvedValue>;
+  /**
+   * The resource bundle this instance's subtree runs in — workspace, permission ledger, and the
+   * scope a `"session"` approval covers (DESIGN §5.1).
+   *
+   * Carried on the INSTANCE rather than recomputed per operation because it is inherited: an
+   * operation that declares no session runs in whatever bundle encloses it, all the way up to the
+   * run's own. That inheritance is what keeps a worktree and its approvals alive across a retry or
+   * a loop iteration, neither of which changes what the author DECLARED (DESIGN.md §5.1).
+   */
+  resourceKey: string;
+  /**
+   * What this instance's own operation reported — `operation.*` in an expression (SPEC.md §6.1).
+   *
+   * Accumulated on the instance rather than derived from the events journal, because an expression
+   * cannot read a journal: that inaccessibility is the whole reason this namespace exists.
+   */
+  operation?: OperationNode;
   iteration: number;
   /** Whether the state's single operation has run (§7.1: a state has ONE operation). */
   opRun: boolean;
@@ -250,15 +273,77 @@ class Notifier {
   }
 }
 
-const TEMPLATE_REF = /\{\{\s*([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)\s*\}\}/g;
+/**
+ * A template hole. The leading dot is optional HERE and required by the grammar — deliberately.
+ *
+ * Recognizing `{{inputs.x}}` and then failing to lower it is what turns an unmigrated hole into a
+ * load-time error naming the fix. A regex that demanded the dot would leave the hole unrecognized
+ * and render it as literal text into the prompt, which is the same mistake silently.
+ */
+const TEMPLATE_REF = /\{\{\s*(\.?[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)\s*\}\}/g;
 
-/** The logical session a runtime op falls back to when its state declares no `runtime.session` — so a plain
- *  workflow behaves as ONE shared session (transcript, workspace, permissions) across all its states. */
-const DEFAULT_SESSION = "default";
 
 /** One conversation turn — a `ModelMessage`-compatible shape, so the built-in `conversationMode` transcript
- *  and the llm `withSession` path share ONE representation in `SessionState.messages`. */
+ *  and the llm session path share ONE representation in a record's payload. */
 type Turn = { role: "user" | "assistant"; content: string };
+
+
+/**
+ * The resource bundle an instance runs in — workspace, permission ledger, approval scope.
+ *
+ * Only a NAME names a bundle. A session REF arrived through data flow from an operation that may
+ * live anywhere in the tree, so it says nothing about which workspace this state should act in; and
+ * `null` / absent say nothing about resources at all. In every one of those cases the enclosing
+ * instance's bundle is inherited, bottoming out at the run's own.
+ *
+ * This is what makes the bundle survive replay: a retry and a loop iteration are new instances, but
+ * neither changes what the author DECLARED, so both land on the same key their predecessor did.
+ */
+/**
+ * The engine's view of a finished call, for the `operation.*` namespace (SPEC.md §6.1).
+ *
+ * `usage` is passed through as the measurement record rather than re-shaped, so a metric an executor
+ * starts reporting reaches expressions without a second mapping to keep in sync. `cost` is lifted out
+ * of it because money is the field everyone asks for by name.
+ *
+ * `provider` and `attempts` are NOT here yet, deliberately. Neither reaches hw's seam today — they
+ * are things the executor knows and does not report — so declaring them would give the lint a field
+ * it could never resolve. They arrive with the executor-reported delta (DESIGN.md §1.6), and
+ * {@link operationNodeSchema} gains them at the same time, so the type never promises more than the
+ * engine fills.
+ */
+function operationNodeOf(
+  outcome: TerminationOutcome,
+  metrics: WorkflowMetrics | undefined,
+  model: string | undefined,
+  session?: SessionBinding,
+): OperationNode {
+  return {
+    outcome,
+    ...(metrics !== undefined ? { usage: metrics as unknown as Record<string, JsonValue>, cost: metrics.costUsd ?? 0 } : {}),
+    ...(model !== undefined ? { model } : {}),
+    // The END position, not the start: you append AT a position but do not know where the call
+    // finished until the provider resolves, and "append after me" / "fork after me" both want the end.
+    ...(session !== undefined ? { outputs: { session: { id: session.id } } } : {}),
+  };
+}
+
+/** The model an operation resolved to — read off the config the call was actually made with. */
+function modelOfOp(op: Operation<InlineFamily>): string | undefined {
+  const config = (op as { config?: unknown }).config;
+  if (config === null || typeof config !== "object" || Array.isArray(config)) return undefined;
+  const model = (config as { model?: unknown }).model;
+  return typeof model === "string" ? model : undefined;
+}
+
+function resourceKeyFor(def: LoadedState, parent: Instance | undefined): string {
+  // `scopeSession` rather than `environment.session`: the latter exists only on a state that declares
+  // an operation, and declaring a session on a composite ROOT is the ordinary way to give a whole
+  // subtree one bundle.
+  const declared = def.scopeSession;
+  if (typeof declared === "string" && declared !== "") return declared;
+  return parent?.resourceKey ?? RUN_RESOURCE_KEY;
+}
 
 export class WorkflowEngine {
   private readonly validator: SyncOutputValidator;
@@ -356,6 +441,9 @@ export class WorkflowEngine {
       parent,
       inputs,
       outputs: {},
+      // Resolved once, on entry, from the parent's bundle and this state's own declaration — so a
+      // subtree that declares nothing shares its enclosing bundle rather than minting one per state.
+      resourceKey: resourceKeyFor(def, parent),
       iteration: 0,
       opRun: false,
       children: new Map(),
@@ -391,7 +479,12 @@ export class WorkflowEngine {
     }
 
     try {
-      const record = await this.evaluationLoop(instance);
+      const loopRecord = await this.evaluationLoop(instance);
+      // Attached HERE, at the one place a record leaves this instance, rather than at each of the
+      // dozen `{ outcome: … }` returns inside the loop — every one of which would otherwise have to
+      // remember, and a forgotten one is a `children.<key>.operation` that is silently empty.
+      const record: TerminationRecord =
+        instance.operation !== undefined ? { ...loopRecord, operation: instance.operation } : loopRecord;
       this.emit({
         type: "instance.terminated",
         instanceId: instance.id,
@@ -647,6 +740,9 @@ export class WorkflowEngine {
       record.status = "done";
       record.outcome = term.outcome;
       record.outputs = term.outputs;
+      // The child's operation node, so `children.<key>.operation.*` reads what its call reported —
+      // including, for a prompt op, the conversation position it ended at (SPEC.md §6.1).
+      record.operation = term.operation;
       if ((term.outcome === "error" || term.outcome === "timeout") && instance.children.get(key) === record) {
         instance.unhandledFailures.add(key);
       }
@@ -751,14 +847,18 @@ export class WorkflowEngine {
     for (const key of Object.keys(instance.def.children ?? {})) {
       const rec = instance.children.get(key);
       if (!rec) children[key] = {};
-      else if (rec.status === "running") children[key] = { outputs: PENDING, outcome: PENDING };
-      else children[key] = { outputs: rec.outputs ?? {}, outcome: rec.outcome };
+      else if (rec.status === "running") children[key] = { outputs: PENDING, outcome: PENDING, operation: PENDING };
+      else children[key] = { outputs: rec.outputs ?? {}, outcome: rec.outcome, operation: rec.operation ?? {} };
     }
     const artifacts: Record<string, unknown> = {};
     for (const a of this.artifacts) artifacts[a.name] = a;
     return {
       inputs: instance.inputs,
       outputs: instance.outputs,
+      // The state's own call as a value (SPEC.md §6.1). `{}` before it has run, so a guard reading
+      // `operation.outcome` gets `undefined` rather than throwing — the same shape a never-entered
+      // child gets.
+      operation: instance.operation ?? {},
       children,
       // `run.cursor` is the child the cursor is ON: the one most recently ENTERED, not the one about
       // to be. Transitions are evaluated after an operation completes or a child terminates, so "we
@@ -1161,7 +1261,7 @@ export class WorkflowEngine {
   /** Run ONE embedded operation and return what the binding should see. */
   private async runEmbeddedOp(instance: Instance, op: Operation<InlineFamily>): Promise<Resolved> {
     const env = instance.def.environment ?? {};
-    const sessionId = env.session ?? DEFAULT_SESSION;
+    const resourceKey = instance.resourceKey;
     // Its arguments are already bound into `op.input` as literals (`resolveEmbedded`), so this reads
     // them back out as values.
     const literal = resolveInputs(op.input, this.scopeFor(instance));
@@ -1190,12 +1290,12 @@ export class WorkflowEngine {
     const entry = op.kind === "function" ? this.config.registry.functions.get(op.functionRef) : undefined;
     if (op.kind === "function" && !entry) return { error: `no function '${op.functionRef}' is registered` };
     const delegates = entry?.kind === "runtime" && entry.capabilities.policyEnforcement === "callback";
-    const toolsOrFailure = this.resolveTools(env, sessionId, delegates);
+    const toolsOrFailure = this.resolveTools(env, resourceKey, delegates);
     if ("failure" in toolsOrFailure) return { error: toolsOrFailure.failure.reason };
     const rendered = op.kind === "prompt" ? { ...op, user: this.renderTemplate(op.user, instance, literal.values) } : op;
     let outcome;
     try {
-      outcome = await this.operations.start(rendered, this.servicesFor(sessionId, instance, toolsOrFailure.tools)).result;
+      outcome = await this.operations.start(rendered, this.servicesFor(resourceKey, instance, toolsOrFailure.tools)).result;
     } catch (e) {
       return { error: `executor rejected: ${(e as Error).message}` };
     }
@@ -1233,14 +1333,17 @@ export class WorkflowEngine {
     // The execution ENVIRONMENT (session, tools, permissions) is a sibling of the op, never part of
     // it (§7.1). A delegated adapter enforces policy through its own callback, so its tools stay raw.
     const env = instance.def.environment ?? {};
-    const sessionId = env.session ?? DEFAULT_SESSION;
+    // Tools, workspace and permissions key on the RESOURCE bundle, never on the conversation
+    // position — a position moves on every call, and a `"session"`-scoped approval that moved with
+    // it would cover exactly one operation (DESIGN.md §5.1).
+    const resourceKey = instance.resourceKey;
     // The entry's capabilities are REQUIRED and total per variant (§2), so this reads a definite value
     // instead of falling through an `undefined` and silently defaulting the permission gate.
     const delegates = entry.kind === "runtime" && entry.capabilities.policyEnforcement === "callback";
-    const toolsOrFailure = this.resolveTools(env, sessionId, delegates);
+    const toolsOrFailure = this.resolveTools(env, resourceKey, delegates);
     if ("failure" in toolsOrFailure) return fail(toolsOrFailure.failure);
 
-    const services = this.servicesFor(sessionId, instance, toolsOrFailure.tools);
+    const services = this.servicesFor(resourceKey, instance, toolsOrFailure.tools);
     // Errors are DATA (§4.2): the impl RESOLVES value-or-failure, so a 429 raised inside a registered
     // function keeps its classification instead of being reconstructed from `err.name` — which is what
     // made every non-`AbortError` permanently failed, retry machinery and all.
@@ -1265,6 +1368,10 @@ export class WorkflowEngine {
       // true of a metrics record an impl BUILDS and not of one the dispatcher frames around it.
       this.childCost += metrics.costUsd ?? 0;
     }
+    // A function op has no conversation, so its node carries no `session` — which is the same fact
+    // `operationNodeSchema` states in the type, where `operation.outputs.session` on a `ui` gate is
+    // an authoring error rather than a runtime undefined.
+    instance.operation = operationNodeOf(isOk(outcome) ? "success" : "error", metrics, modelOfOp(op));
     if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
     if (!isOk(outcome)) return fail(outcome.error);
     // The op's declared output KIND decides how its value is read — a `blob` output IS the value
@@ -1296,20 +1403,31 @@ export class WorkflowEngine {
     }
 
     const env = instance.def.environment ?? {};
-    // The logical SESSION this operation runs under (DESIGN §5.1, "Sessions: the run-scoped resource bundle"): the sharing key
-    // for its owned resources — conversation transcript, workspace, permissions. Absent ⇒ the run's
-    // default session, so a plain workflow is ONE shared session (SPEC §4.7 threads across states).
-    const sessionId = env.session ?? DEFAULT_SESSION;
+    // The two halves one `sessionId` used to be (DESIGN.md §1.6).
+    //
+    // `session.id` is the CONVERSATION — which transcript this call joins. A declared name joins that
+    // stream; `null` and absent each start a fresh one. Absent no longer falls back to a shared
+    // "default", because an implicit process-wide transcript is what drove unbounded context growth:
+    // the SPEC §4.7 "threads across states" behaviour is now something an author asks for by naming a
+    // session, not something every undeclared state opts into.
+    //
+    // `session.resourceKey` is the RESOURCE BUNDLE — workspace, permission ledger, approval scope. It
+    // is inherited from the enclosing instance and does not move when the conversation does, which is
+    // what keeps one worktree and one set of approvals across a retry, a loop iteration or a fork.
+    const session = this.sessionFor(instance);
+    // A `{ expr }` session that cannot be read is PERMANENT: retrying re-evaluates the same
+    // expression against the same instance data and fails the same way.
+    if ("error" in session) return fail({ classification: "permanent", reason: session.error });
 
     // The `user` slot holds the prompt text. A REUSABLE prompt is a reference to a file, resolved
     // at load time (REFERENCES.md §7.1), so by here there is only ever one kind of prompt — which is
     // what let `registry.skills` and its half-built resolution path be deleted outright.
     const rendered = this.renderTemplate(op.user, instance, opInputs);
-    const transcript = await this.readTranscript(sessionId);
+    const transcript = await this.readTranscript(session.id);
     const preamble = this.conversationPreamble(env.conversation?.mode ?? "full_history", transcript, env.conversation?.artifacts);
     const prompt = preamble ? `${preamble}\n\n${rendered}` : rendered;
 
-    const toolsOrFailure = this.resolveTools(env, sessionId, false);
+    const toolsOrFailure = this.resolveTools(env, session.resourceKey, false);
     if ("failure" in toolsOrFailure) return fail(toolsOrFailure.failure);
     const tools = toolsOrFailure.tools;
 
@@ -1329,7 +1447,7 @@ export class WorkflowEngine {
 
     // The per-call ENVIRONMENT the old `PromptOpEnvironment` carried — tools, the time budget,
     // cancellation — are `ExecServices` fields now, which is why that type could be deleted outright.
-    const services = this.servicesFor(sessionId, instance, tools);
+    const services = this.servicesFor(session.resourceKey, instance, tools, session);
     if (instance.def.limits?.timeout !== undefined) services.timeoutMs = instance.def.limits.timeout * 1000;
     let outcome;
     try {
@@ -1341,6 +1459,15 @@ export class WorkflowEngine {
     }
     this.childLlmCalls += 1 + (outcome.metrics.childLlmCalls ?? 0);
     this.childCost += outcome.metrics.costUsd;
+    // Recorded whether the call SUCCEEDED or not, and before the checks below can return: a failed
+    // call is exactly when a guard most wants to read what it cost and where the conversation ended
+    // up, and a node written only on the happy path would be missing then.
+    instance.operation = operationNodeOf(
+      isOk(outcome) ? "success" : "error",
+      outcome.metrics,
+      modelOfOp(resolvedOp),
+      session,
+    );
     if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
 
     // A FAILED call contributes nothing to the transcript. It ran before this check and a failure
@@ -1348,14 +1475,12 @@ export class WorkflowEngine {
     // `full_history` mode every later state in the session then read that back in its preamble.
     if (!isOk(outcome)) return fail(outcome.error);
 
-    // Conversation artifact (SPEC §4.7): every SUCCEEDED prompt operation appends its exchange to the
-    // session. The assistant turn is the op's OUTPUT VALUE. It used to prefer the model's raw text, but
-    // that stops at the prompt executor — and for a text-output op the output value IS that text, so
-    // the two agree wherever it mattered.
-    await this.appendTranscript(sessionId, [
-      { role: "user", content: prompt },
-      { role: "assistant", content: typeof outcome.value === "string" ? outcome.value : JSON.stringify(outcome.value ?? null) },
-    ]);
+    // Conversation artifact (SPEC §4.7): the exchange is already in the session, because the session
+    // layer RECORDED the call — one write, not two. The engine used to synthesize a user turn and a
+    // stringified assistant turn here, which threw away every tool call and reasoning part in between
+    // and is exactly what the append-only model replaced. All that remains is re-reading, so a
+    // `{ conversation }` binding in this state's outputs sees what the call just added.
+    await this.refreshTranscript(session.id);
 
     const failure = this.acceptOpOutputs(instance, "prompt", (outcome.value ?? null) as ResolvedValue, op.output.kind);
     if (failure) return fail(failure);
@@ -1414,18 +1539,77 @@ export class WorkflowEngine {
     return { tools: guarded };
   }
 
-  /** The services one operation runs with: its session's workspace, its tools, its cancellation. */
-  private servicesFor(sessionId: string, instance: Instance, tools?: Record<string, Tool>): ExecServices {
+  /** The services one operation runs with: its resource bundle's workspace, its tools, its cancellation. */
+  private servicesFor(resourceKey: string, instance: Instance, tools?: Record<string, Tool>, session?: SessionBinding): ExecServices {
     const services = this.childServices();
-    // Per-session workspace (DESIGN §5.1, "Sessions: the run-scoped resource bundle"): states sharing a `sessionId` share one; a
-    // fan-out can isolate each branch (e.g. its own worktree) via `workspaceFor`. Falls back to the
-    // run-level `services.workspace` when the host provides none for this id.
-    const workspace = this.config.workspaceFor?.(sessionId) ?? services.workspace;
+    // The conversation this operation was AUTHORED against, stated as a request rather than resolved.
+    // The engine knows which conversation and whether the author asked to branch; it does not know
+    // where that conversation currently is, and must not — only the store does. A composed session
+    // layer turns this into `ctx.session`; with none composed, no session is in play, which is the
+    // honest reading of a run that never wired one.
+    if (session !== undefined) {
+      services.sessionRequest = {
+        ref: session.id,
+        ...(session.fork ? { fork: true } : {}),
+        // Stable across replays, so a re-run lands on the conversation it landed on before rather
+        // than minting a second one beside it (DESIGN.md §5.1).
+        seed: `${instance.stateId}:${session.id}`,
+      };
+    }
+    // Per-BUNDLE workspace (DESIGN §5.1, "Sessions: the run-scoped resource bundle"): states sharing a
+    // resource key share one; a fan-out can isolate each branch (e.g. its own worktree) via
+    // `workspaceFor`. Falls back to the run-level `services.workspace` when the host provides none.
+    //
+    // Keyed on the resource bundle rather than the conversation, deliberately: a conversation position
+    // changes on every call, so keying a workspace on it would hand each operation its own worktree —
+    // which §5.1 rules out: forking branches the CONVERSATION, not the filesystem.
+    const workspace = this.config.workspaceFor?.(resourceKey) ?? services.workspace;
     if (workspace !== services.workspace) services.workspace = workspace;
     if (tools !== undefined) services.tools = tools;
     // A registered async function's only channel to the caller is the ctx, so cancellation rides here.
     services.abortSignal = instance.abort.signal;
     return services;
+  }
+
+  /**
+   * What one operation's `session` declaration resolves to for THIS instance (DESIGN.md §1.6).
+   *
+   * The four-way order in the document collapses to the three cases {@link resolveSession} handles,
+   * because the environment merge has already run: an ancestor's `environment.session` arrives as
+   * this operation's own `session`, and a nearer `null` has already beaten it.
+   *
+   * `positionOf` is the seam the instance-scoped invariant (DESIGN.md §1.6) lives behind. It answers
+   * "where does THIS instance think that named stream currently is", and it must never become a
+   * global name → head map: a restarted state has to re-resolve to the position it started from, so
+   * that the append the failed attempt made turns the retry into a fork from the right place rather
+   * than stacking it on top of the failure. Until positions exist (step 5), a name IS its own
+   * position and every instance agrees — which is exactly today's behaviour, and the reason this step
+   * can land before the store does.
+   */
+  private sessionFor(instance: Instance): SessionBinding | { error: string } {
+    const env = instance.def.environment ?? {};
+    let declared = env.session as SessionDecl | undefined;
+    // The `{ expr }` spelling is the only one evaluated rather than read, and it has to be, because
+    // a ref is a RUN-TIME value: `children.plan.operation.outputs.session` does not exist until
+    // `plan` has run, so a static field could never carry one. Evaluated against THIS instance, so
+    // a re-entered or looped state re-reads the position its own attempt should continue from.
+    if (isSessionExpr(declared)) {
+      const { expr } = declared;
+      const resolved = resolveRef(this.exprRef(expr), this.scopeFor(instance));
+      // PENDING means the producing operation is still in flight. That is a wiring mistake rather
+      // than something to wait on here: the consumer's own dataflow join is what parks on a running
+      // producer, and by the time an operation is being dispatched its inputs have settled.
+      if (isPending(resolved)) return { error: `session expression '${expr}' reads an operation that has not finished` };
+      if (isResolveError(resolved)) return { error: `session expression '${expr}': ${resolved.error}` };
+      const outcome = sessionFromExpr(expr, resolved.value);
+      if ("error" in outcome) return outcome;
+      declared = outcome.session;
+    }
+    return resolveSession(declared, env.fork === true, {
+      instanceId: instance.id,
+      inheritedResourceKey: instance.resourceKey,
+      positionOf: () => undefined,
+    });
   }
 
   /** The `ExecServices` operations run with: caller services + engine validator + the run's session
@@ -1560,7 +1744,7 @@ export class WorkflowEngine {
    * content; arrays/objects as JSON.
    *
    * `opInputs` is the operation's RESOLVED inputs (the state's inputs plus the op's own bound inputs).
-   * They become the template's `{{inputs.*}}` scope — authored render variables ride bound input slots
+   * They become the template's `{{.inputs.*}}` scope — authored render variables ride bound input slots
    * (loader §3.1), so a prompt sees exactly the inputs its operation resolved, nothing more.
    */
   private renderTemplate(template: string, instance: Instance, opInputs?: Record<string, ResolvedValue>): string {
@@ -1569,12 +1753,17 @@ export class WorkflowEngine {
       ? { ...base, inputs: { ...(base.inputs as Record<string, unknown>), ...opInputs } }
       : base;
     // The operation's own resolved inputs shadow the instance's for the duration of the render —
-    // which is what makes `{{inputs.style}}` reach a bound render variable rather than a state input.
+    // which is what makes `{{.inputs.style}}` reach a bound render variable rather than a state input.
     const scope: ResolutionScope = { ...this.scopeFor(instance), exprContext: ctx };
     return template.replace(TEMPLATE_REF, (_m, path: string) => {
+      // Lowering happens OUTSIDE the catch: a hole that cannot be lowered is an authoring error
+      // (`{{inputs.x}}` missing its dot, a name that resolves nowhere), while a hole that lowers and
+      // does not resolve is legitimately empty for this render. Swallowing both made the first look
+      // like the second — an empty substitution where the prompt silently lost a variable.
+      const ref = this.exprRef(path);
       let v: unknown;
       try {
-        const r = resolveRef(this.exprRef(path), scope);
+        const r = resolveRef(ref, scope);
         if (!isResolvedValue(r)) return "";
         v = r.value;
       } catch {
@@ -1593,22 +1782,35 @@ export class WorkflowEngine {
     return this.config.services?.sessions ?? this.sessionStore;
   }
 
-  /** Read `sessionId`'s transcript from the session store (`SessionState.messages`), mirroring it for
-   *  synchronous `{ conversation }` binding resolution (§7.5 — a transcript is addressable DATA). */
-  private async readTranscript(sessionId: string): Promise<Turn[]> {
-    const state = await this.sessions().get(sessionId);
-    const turns = Array.isArray(state?.messages) ? (state.messages as Turn[]) : [];
-    this.transcripts.set(sessionId, turns);
+  /**
+   * Read a session's transcript, mirroring it for synchronous `{ conversation }` binding resolution
+   * (§7.5 — a transcript is addressable DATA).
+   *
+   * Messages are DERIVED from the session's records — a session is not a separate store, it is the
+   * records sharing a `session.id`. With no store wired, an empty transcript, which is what a session
+   * nobody has written to looks like anyway.
+   */
+  private async readTranscript(sessionRef: string): Promise<Turn[]> {
+    const messages = (await this.sessions().messages(sessionRef)) ?? [];
+    const turns = messages as Turn[];
+    this.transcripts.set(sessionRef, turns);
     return turns;
   }
 
-  /** Append turns to `sessionId`'s transcript in the session store, preserving any other `SessionState`. */
-  private async appendTranscript(sessionId: string, turns: Turn[]): Promise<void> {
-    const store = this.sessions();
-    const state = (await store.get(sessionId)) ?? {};
-    const messages = [...(Array.isArray(state.messages) ? state.messages : []), ...turns];
-    await store.put(sessionId, { ...state, messages });
-    this.transcripts.set(sessionId, messages as Turn[]);
+  /**
+   * Re-read a session after a call, so `{ conversation }` bindings see what it just added.
+   *
+   * The engine NO LONGER WRITES the transcript. It used to append its own turns, which was the second
+   * of two mechanisms doing one job — and once a composed session layer records the call, both would
+   * write, land on the same position, and the loser would fork. What the engine keeps is the read: it
+   * mirrors the conversation for synchronous binding resolution (§7.5), because bindings resolve
+   * without awaiting.
+   *
+   * A run with no session layer composed records nothing, and the transcript stays empty. That is
+   * correct rather than a gap: without one there is no conversation.
+   */
+  private async refreshTranscript(sessionRef: string): Promise<void> {
+    await this.readTranscript(sessionRef);
   }
 
   private conversationPreamble(mode: ConversationMode, transcript: Turn[], artifactNames?: string[]): string {

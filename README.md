@@ -44,7 +44,7 @@ executor as a plain `Executor`, which is what keeps the AI SDK out of the workfl
 | --- | --- | --- |
 | `@declarative-ai/json` | The bottom of the graph, and nothing in it can be declined: `JsonValue`/`Jsonify<T>`/`JsonSchema<T>`/`SchemaDocument`/`Serializable`, the codec + type-name registry (`x-type`), schema templates (`$param`), schema inference, `selectType`, RFC 8785 canonicalization + hashing, the classified error vocabulary (`ErrorClass`/`Failure`), and the `Result`/`ResultWithMetrics` envelope all three result types build on | `canonicalize`, `@noble/hashes` |
 | `@declarative-ai/ops` | The typed operation spine: the op model generic over a REF FAMILY (`PromptOp`/`FunctionOp`/`Parameter`/`Ref`, id-addressed or inline), the ONE function registry of discriminated entries (`pure` \| `host` \| `runtime`) with required per-variant capabilities, the `Signature` ⇄ schema bridge, the `Metrics` floor, `OperationRecord`, op metadata, and the `FromSchema` typed layer | `json-schema-to-ts` (types only) |
-| `@declarative-ai/exec` | The ONE execution seam: `Executor.start(op, ctx)`, `ExecHandle`, `ExecResult`, the augmentable `ExecServices`, composition (`compose(...).with(...)`), memoization, AIMD rate limiting + token buckets, deadline arithmetic, retry, `SessionStore` | — |
+| `@declarative-ai/exec` | The ONE execution seam: `Executor.start(op, ctx)`, `ExecHandle`, `ExecResult`, the augmentable `ExecServices`, composition (`compose(...).with(...)`), memoization, AIMD rate limiting + token buckets, deadline arithmetic, retry, append-only sessions (`SessionStore`, `withSessionPosition`, `withRecord`) | — |
 | `@declarative-ai/llm` | One structured LLM call, end to end and `exec`-free: `executeLlmCall(definition, environment)`, the model router (Anthropic/OpenRouter), streaming generation with cache-split cost accounting, `LlmConfiguration` + strict parsing/resolution, schema/reasoning adaptation, tools, files, the model catalog, and `plan` | `ai`, `@ai-sdk/*`, `undici` |
 | `@declarative-ai/promptop` | `PromptOp → LlmCallDefinition` lowering, the prompt `Executor`, and the llm-aware wrappers (`withRateLimit`/`withBudget`/`withSession`) | — |
 | `@declarative-ai/validate` | Structural JSON-Schema subtyping, the ONE generic binding checker (parameterized by ref family), and one ajv wrapper with an injectable `$ref` resolver. The only package carrying a heavy dependency | **ajv** |
@@ -288,43 +288,59 @@ const result = await handle.result;   // resolves; never rejects for a unit fail
 ```
 
 > **Composition rules the types enforce.** `withMemoize` *throws at composition time* if it would wrap a
-> session layer (session state isn't in the memo key, so a hit would replay a stale answer). Compose
-> `withSession` **outside** `withMemoize` instead — sound, because `withSession` rewrites the sent op to
-> carry the full transcript, and `withMemoize` keys on that op.
+> session layer: from outside, the resolved conversation is invisible, so a hit would replay a stale
+> answer and silently skip the append. Compose `withSession` **outside** `withMemoize` instead — sound,
+> because the inner memoize sees `ctx.session` and folds that POSITION into the memo key, exactly as it
+> folds `workspaceTreeHash`. Two calls with identical text at different points in a conversation get
+> different keys, which is the property that used to hold only by accident.
 
-### 4. Sessions — client-managed conversations
+### 4. Sessions — append-only conversations, with forking
 
-A declaration carries a **logical** `sessionId`. `withSession` resolves it against an injected
-`SessionStore`: it prepends the stored transcript to the new turn, runs the call, then folds the reply back
-into the transcript (only on success). The session fields are consumed, the sent definition carries the
-full history (so an inner `withMemoize` keys on the real content), and the conversation continues under
-the same logical `sessionId` the caller passed — the execution result carries no session field.
+A session is an **append-only conversation**, and a session ref names one AT a position — which is what
+makes "continue from here" and "branch from here" the same operation. A declaration carries a ref;
+`withSession` resolves it, and a call whose position has already been taken FORKS rather than clobbering.
+
+**A session is not a separate store.** It IS the `OperationRecord`s sharing a session id — a record
+already holds what its call produced, so appending a turn and recording a call are one write, and
+`PRIMARY KEY (session_id, seq)` is what reserves the position: durable, and across processes.
 
 ```ts
-import { MapSessionStore, composeExecutors, type InlineFamily, type Operation } from "@declarative-ai/exec";
+import { MapSessionStore, composeExecutors, withRecord, type InlineFamily, type Operation } from "@declarative-ai/exec";
 import { createPromptExecutor, withSession } from "@declarative-ai/promptop";
 import { createModelRouter } from "@declarative-ai/llm";
 
 const store = new MapSessionStore();
-const exec = composeExecutors(createPromptExecutor({ router: createModelRouter() }), withSession({ sessions: store }));
+// Recording sits INSIDE the session layer: one resolves the position, the other claims it by writing a
+// stub. The core runs in RECORD mode so the payload — which IS the conversation — survives to be
+// recorded; `withSession` projects it down to the op's output value on the way back out.
+const exec = composeExecutors(
+  withRecord({ records: store }, createPromptExecutor({ router: createModelRouter(), record: true }) as never),
+  withSession({ sessions: store }),
+);
 
-const ask = (user: string): Operation<InlineFamily> => ({
+const ask = (user: string, session: string, fork = false): Operation<InlineFamily> => ({
   kind: "prompt",
   user,
-  config: { model: "anthropic/claude-sonnet-5", sessionId: "chat-1" },
+  config: { model: "anthropic/claude-sonnet-5", sessionId: session, ...(fork ? { fork: true } : {}) },
   input: {},
   output: { name: "output", kind: "json" },
 });
 
-await exec.start(ask("My name is Dana."), {}).result;      // seeds the "chat-1" transcript
-const out = await exec.start(ask("What's my name?"), {}).result; // prior turns are prepended automatically
-// The store now holds the "chat-1" transcript, keyed by the logical id the declaration carries.
-void out;
+const first = await exec.start(ask("My name is Dana.", "chat-1@0"), {}).result;
+// `sessionRef` is the position the call ENDED at — which is what "append after me" needs.
+const next = first.metrics.sessionRef!;                     // "chat-1@1"
+await exec.start(ask("What's my name?", next), {}).result;  // continues; history goes on the wire
+
+// Branching is the SAME primitive, asked for at the consumption site. The original is untouched.
+await exec.start(ask("Try a different tack.", "chat-1@1", true), {}).result;
 ```
 
-> Loud failures, not silent degradation: a `sessionId` with no store available is an error, and
-> `providerSessionId` (a provider-side handle) is refused until the agent-sdk executor lands. A run-scoped
-> store can also be injected via `ctx.sessions` (how a workflow shares one conversation across states).
+> Loud failures, not silent degradation: a session with no store available is an error, and an
+> unresolvable ref — unknown, or pruned — is an error rather than a silently-created conversation. A
+> `providerSessionId` is now honoured rather than refused: an adapter that resumes natively (Claude
+> Code) gets `resume`, and a fork gets `resume + forkSession`, which branches server-side at no replay
+> cost. A run-scoped store is injected via `ctx.sessions`, which is how a workflow shares one
+> conversation across states.
 
 ### 5. Tools — serializable declarations + injected executors
 

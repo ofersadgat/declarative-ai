@@ -4,7 +4,9 @@
  * so building one is the setup step every test shares.
  */
 import type { InlineFamily, JsonValue, ExecResult, ResolvedValue, PromptOp, SessionStore } from "@declarative-ai/exec";
-import { MapSessionStore, isOk } from "@declarative-ai/exec";
+import { MapSessionStore, isOk, withRecord } from "@declarative-ai/exec";
+import type { ExecServices, Executor } from "@declarative-ai/exec";
+import { withSession } from "../src/wrappers";
 import type { Failure } from "@declarative-ai/exec";
 import type { ModelMessage } from "ai";
 import type { LlmCallResult, LlmCallDefinition, LlmMetrics, LlmOutput } from "@declarative-ai/llm";
@@ -31,7 +33,15 @@ const FAKE_METRICS = { inputTokens: 10, outputTokens: 5, costUsd: 0.001, costSou
  *  patch the envelope. */
 export function okOutcome(over: Partial<LlmOutput> & { error?: Failure; metrics?: Partial<LlmMetrics> } = {}): LlmCallResult {
   const { error, metrics: metricsOver, ...payload } = over;
-  const value: LlmOutput = { value: { answer: "4" }, finishReason: "stop", ...payload };
+  // A real provider reports what it APPENDED, and the session layer mirrors exactly that — so the
+  // fake reports it too. A runner returning no `messages` is claiming the call added nothing to the
+  // conversation, which is a different scenario and worth having to spell out.
+  const value: LlmOutput = {
+    value: { answer: "4" },
+    finishReason: "stop",
+    messages: [{ role: "assistant", content: '{"answer":"4"}' }],
+    ...payload,
+  };
   const metrics: LlmMetrics = { ...FAKE_METRICS, ...metricsOver };
   return error ? { error, value, metrics } : { value, metrics };
 }
@@ -77,6 +87,17 @@ export function memoCache(): { cache: Map<string, ExecResult<ResolvedValue>>; ge
 export function transcripts(): { store: MapSessionStore<ModelMessage>; seam: SessionStore } {
   const store = new MapSessionStore<ModelMessage>();
   return { store, seam: store as unknown as SessionStore };
+}
+
+/**
+ * The stack a session actually runs in: resolution above, recording below.
+ *
+ * `withSession` decides WHICH position; `withRecord` claims it and writes what happened. Composing
+ * only the first is what the tests used to do, and it now records nothing — which is the point of the
+ * split, so the tests compose both rather than papering over it.
+ */
+export function sessionStack<M extends { durationMs: number }, O>(seam: SessionStore, core: Executor<ExecServices, M, never, O>): Executor<ExecServices, M> {
+  return withSession({ sessions: seam }, withRecord({ records: seam as never }, core as never)) as unknown as Executor<ExecServices, M>;
 }
 
 /** Read a result's failure, or `undefined` when it succeeded — `error` is not a property of the union. */

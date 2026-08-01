@@ -24,11 +24,16 @@ export function specPlanningFiles(): Record<string, StateDef> {
   return {
     "feature/plan": {
       label: "Planning",
+      // SPEC §4.7's "threads across states" is DECLARED now, not implicit. An undeclared operation
+      // gets its own stream (DESIGN.md §1.6) — an implicit process-wide transcript is what drove
+      // unbounded context growth — so a workflow whose states are meant to share a conversation says
+      // so once, at the root, and the environment chain carries it down.
+      environment: { session: "planning" },
       inputs: { issue: artifact("markdown") },
       outputs: {
         outcome: {
           schema: { type: "string", enum: ["complete", "blocked"] },
-          binding: { expr: "children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'" },
+          binding: { expr: ".children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'" },
         },
         plan_doc: { ...artifact("markdown"), binding: { child: "context", output: "plan_doc" } },
         // A "passthrough" output: the whole child result as ONE value. `*` is required now that a
@@ -51,12 +56,12 @@ export function specPlanningFiles(): Record<string, StateDef> {
       },
       sequence: ["goals", "context", "critique"],
       transitions: [
-        { to: "terminate.success", when: "children.critique.outputs.outcome === 'clean'" },
+        { to: "terminate.success", when: ".children.critique.outputs.outcome === 'clean'" },
         {
           to: "goals",
-          when: "children.critique.outputs.outcome === 'needs_changes' && run.iteration < limits.max_iterations",
+          when: ".children.critique.outputs.outcome === 'needs_changes' && .run.iteration < .limits.max_iterations",
         },
-        { to: "terminate.success", when: "children.critique.outcome === 'success'" },
+        { to: "terminate.success", when: ".children.critique.outcome === 'success'" },
       ],
       limits: { max_iterations: 3 },
     },
@@ -64,13 +69,13 @@ export function specPlanningFiles(): Record<string, StateDef> {
       label: "Goals",
       inputs: { issue: artifact("markdown") },
       outputs: { goals: strArray() },
-      operation: { kind: "prompt", prompt: "Extract goals from {{inputs.issue}}.", model: "planner" },
+      operation: { kind: "prompt", prompt: "Extract goals from {{.inputs.issue}}.", model: "planner" },
     },
     "feature/plan/context": {
       label: "Context",
       inputs: { issue: artifact("markdown"), goals: strArray() },
       outputs: { plan_doc: artifact("markdown") },
-      operation: { kind: "prompt", prompt: "Write the plan for {{inputs.issue}}.", model: "planner" },
+      operation: { kind: "prompt", prompt: "Write the plan for {{.inputs.issue}}.", model: "planner" },
     },
     "feature/plan/critique": {
       label: "Critique Plan",
@@ -100,21 +105,21 @@ export function specPlanningFiles(): Record<string, StateDef> {
           state: "feature/plan/critique/address_weaknesses",
           inputs: {
             plan_doc: { input: "plan_doc" },
-            weaknesses: { expr: "outputs.weaknesses" },
-            critique_report: { expr: "outputs.critique_report" },
+            weaknesses: { expr: ".outputs.weaknesses" },
+            critique_report: { expr: ".outputs.critique_report" },
           },
         },
         human_review: {
           state: "feature/plan/critique/human_review",
-          inputs: { plan_doc: { input: "plan_doc" }, critique_report: { expr: "outputs.critique_report" } },
+          inputs: { plan_doc: { input: "plan_doc" }, critique_report: { expr: ".outputs.critique_report" } },
         },
       },
       transitions: [
-        { to: "terminate.success", when: "children.human_review.outcome === 'success'" },
-        { to: "terminate.success", when: "children.address_weaknesses.outcome === 'success'" },
-        { to: "terminate.success", when: "outputs.outcome === 'clean'" },
-        { to: "human_review", when: "outputs.outcome === 'blocked'" },
-        { to: "address_weaknesses", when: "outputs.outcome === 'needs_changes'" },
+        { to: "terminate.success", when: ".children.human_review.outcome === 'success'" },
+        { to: "terminate.success", when: ".children.address_weaknesses.outcome === 'success'" },
+        { to: "terminate.success", when: ".outputs.outcome === 'clean'" },
+        { to: "human_review", when: ".outputs.outcome === 'blocked'" },
+        { to: "address_weaknesses", when: ".outputs.outcome === 'needs_changes'" },
       ],
     },
     "feature/plan/critique/address_weaknesses": {
@@ -167,7 +172,7 @@ export function specFanoutFiles(): Record<string, StateDef> {
       label: "Agent Review",
       inputs: { change: str() },
       outputs: { report: str() },
-      operation: { kind: "prompt", prompt: "Review {{inputs.change}}.", model: "reviewer" },
+      operation: { kind: "prompt", prompt: "Review {{.inputs.change}}.", model: "reviewer" },
     },
     "review/synthesize": {
       label: "Synthesize",
@@ -175,7 +180,7 @@ export function specFanoutFiles(): Record<string, StateDef> {
       outputs: { summary: str() },
       operation: {
         kind: "prompt",
-        prompt: "Combine {{inputs.review_a}} and {{inputs.review_b}}.",
+        prompt: "Combine {{.inputs.review_a}} and {{.inputs.review_b}}.",
         model: "synthesizer",
       },
     },

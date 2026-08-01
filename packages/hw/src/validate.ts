@@ -25,6 +25,8 @@ import { checkBinding as checkBindingGeneric, isSubschema, producerSchemaOf, typ
 import { parseExpression, referencesOf, type Expr } from "./expr";
 import { EXPRESSION_REFS, pathOfRef, referencePathsOf } from "./lowerExpr";
 import { embeddedOpsOf } from "./resolve";
+import { validateSessionDecl } from "./session";
+import { operationNodeSchema } from "./operationNode";
 import { ANY_SCHEMA, inferExpression, inferRef, isBooleanSchema, isUniversalSchema, type ExprScope } from "./inferExpr";
 import {
   GUARD_NAMESPACES,
@@ -155,6 +157,14 @@ function validateState(
   // is reported here with everything else, instead of aborting the load.
   if (def.operationError !== undefined) err("operation", def.operationError);
 
+  // A `session` that cannot mean anything (DESIGN.md §1.6). Statically checkable because the merge
+  // has already run, so what is tested is the EFFECTIVE declaration — including one an ancestor's
+  // `environment` supplied. The empty string is the case worth catching at load time: `""` would
+  // otherwise start an isolated conversation and report success, which is the failure mode that
+  // makes `null` the only explicit "fresh" marker.
+  const sessionComplaint = validateSessionDecl(def.environment?.session);
+  if (sessionComplaint !== undefined) err("operation.session", sessionComplaint);
+
   // --- sequence ---------------------------------------------------------------
   const sequence = def.sequence ?? [];
   const seen = new Set<string>();
@@ -177,7 +187,10 @@ function validateState(
         // A guard must INFER to boolean — strict, no truthiness coercion (§7.2): a `when` that
         // infers to `number` is a validation error, not a falsy surprise at run time.
         const { schema, unresolved } = inferExpression(ast, scope);
-        for (const ref of unresolved) err(path, `references '${ref.join(".")}', which resolves to no declared value`);
+        // Quoted with the leading dot the author had to write: `unresolved` carries the path with
+        // its self root already dropped, and a message spelling an internal path sends the reader
+        // looking for a name that appears nowhere in their file.
+        for (const ref of unresolved) err(path, `references '.${ref.join(".")}', which resolves to no declared value`);
         if (!isBooleanSchema(schema) && !isUniversalSchema(schema)) {
           err(path, `guard must infer to boolean, but infers to ${describeSchema(schema)} — compare explicitly`);
         }
@@ -524,7 +537,7 @@ function resolverSchema(
   if (EXPRESSION_REFS.has(op.functionRef)) {
     const asRef: Ref<InlineFamily> = { op };
     const { schema, unresolved } = inferRef(asRef, scope);
-    for (const unres of unresolved) err(`expression references '${unres.join(".")}', which resolves to no declared value`);
+    for (const unres of unresolved) err(`expression references '.${unres.join(".")}', which resolves to no declared value`);
     // Reachability applies to expressions too: reading a child's outputs from an expression is the
     // same edge as wiring it, so it carries the same proof obligation.
     for (const reference of referencePathsOf(asRef)) {
@@ -741,14 +754,30 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle): ExprScope {
   for (const [key, child] of Object.entries(def.children ?? {})) {
     const childState = bundle.states[child.state];
     const outputs = childState ? (outputsObjectSchema(childState) ?? ANY_SCHEMA) : ANY_SCHEMA;
-    childrenProps[key] = { type: "object", properties: { outputs: outputs as JsonValue, outcome: outcomeSchema } } as JsonValue;
+    // A child's own operation node, typed by ITS operation's kind — so
+    // `children.plan.operation.outputs.session` is checked against what `plan` actually runs, and
+    // pointing it at a `ui` gate is a load-time error rather than a runtime undefined.
+    const childOperation = childState ? operationNodeSchema(childState.operation?.kind) : undefined;
+    childrenProps[key] = {
+      type: "object",
+      properties: {
+        outputs: outputs as JsonValue,
+        outcome: outcomeSchema,
+        ...(childOperation !== undefined ? { operation: childOperation as JsonValue } : {}),
+      },
+    } as JsonValue;
   }
+
+  // The state's OWN operation node (SPEC.md §6.1). Absent for a pure composite, so
+  // `operation.cost` there is an unresolved reference rather than an object of unknowns.
+  const operation = operationNodeSchema(def.operation?.kind);
 
   const sequenceKeys = def.sequence ?? [];
 
   return {
     inputs: objectOf(def.inputs),
     outputs: objectOf(def.outputs),
+    ...(operation !== undefined ? { operation } : {}),
     children: { type: "object", properties: childrenProps },
     // Session-owned resources: addressable, contents known only at run time.
     artifacts: { type: "object" },

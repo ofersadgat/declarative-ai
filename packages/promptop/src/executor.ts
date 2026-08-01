@@ -21,6 +21,7 @@ import type {
   MetricsAlgebra,
   Operation,
   PromptOp,
+  ResolvedSession,
   ResolvedValue,
   Tool,
 } from "@declarative-ai/exec";
@@ -35,6 +36,7 @@ import {
   type LlmOutput,
   type LlmCallDefinition,
   type LlmCallEnvironment,
+  type ModelMessage,
   type ModelRouter,
   type ToolExecutor,
 } from "@declarative-ai/llm";
@@ -115,6 +117,40 @@ const CAPABILITIES: Capabilities = {
   memoizable: true,
   runtime: "edge-safe",
 };
+
+/**
+ * The turns a lowered call sends, as messages — its `messages` preamble, or its `prompt` read as the
+ * single user turn the lowering would have made of it.
+ *
+ * This is the request half of a session delta. The response half comes back on the output, because
+ * only the provider knows what it actually appended.
+ */
+function requestTurns(def: LlmCallDefinition): ModelMessage[] {
+  if (def.messages !== undefined) return [...def.messages];
+  const prompt = def.prompt;
+  if (prompt === undefined) return [];
+  return typeof prompt === "string" ? [{ role: "user", content: prompt }] : [...prompt];
+}
+
+/**
+ * THE PROJECTION (DESIGN §3.1): an `LlmOutput` narrowed to the op's output-PARAMETER value.
+ *
+ * It exists so everything above the executor speaks one vocabulary regardless of op kind — a state's
+ * `outputs.answer` is the answer, not an envelope, and hw never learns what `thinking` is.
+ *
+ * Exported because WHERE it happens matters. Applied to the whole result, it destroys the payload that
+ * a session needs to record, and the layer that wanted it then has to smuggle it back down through a
+ * side channel. Applied by whichever layer is the last to need the payload, it narrows only the value
+ * slot — which is what `withSession` does, projecting on its way out over a record-mode core.
+ *
+ * A generated FILE lands in a `blob`-kind output parameter — that is §7.1's "a produced artifact is an
+ * output parameter, not a parallel channel". A json/text parameter ignores it.
+ */
+export function projectLlmOutput(op: PromptOp<InlineFamily>, output: LlmOutput | undefined): ResolvedValue | undefined {
+  return op.output.kind === "blob" && output?.files && output.files.length > 0
+    ? (output.files[0]!.bytes as ResolvedValue)
+    : (output?.value as ResolvedValue | undefined);
+}
 
 /** Adapt core {@link Tool}s (`run(input, ctx)`) into llm {@link ToolExecutor}s (`(input, options)`),
  *  closing over the call ctx. The tool's `run` IS its `execute`; the SDK's per-call `options` are
@@ -226,6 +262,42 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
       );
     }
 
+    /**
+     * THE SESSION, resolved to a position and reserved by the wrapper (DESIGN.md §1.6).
+     *
+     * This is the executor's half of the split: the wrapper decided WHETHER this appends or forks;
+     * shaping the request for that decision is the executor's business, and it is deliberately not
+     * something a rewritten op config could express.
+     *
+     * Replay is the strategy here — the Messages API and everything reached through the AI SDK are
+     * stateless, so history goes on the wire every call and a fork costs nothing but a different key
+     * on the way out. `messages()` is the lazy accessor; a native-fork adapter would read zero
+     * messages and pass a handle instead.
+     *
+     * The handle is threaded only on an APPEND. A fork must never inherit its parent's handle unless
+     * the adapter declares native fork, or two branches write into one remote session.
+     */
+    const session = ctx.session as ResolvedSession<ModelMessage> | undefined;
+    /** The request turns this call ADDS beyond the stream it started from — its half of the delta. */
+    let sent: ModelMessage[] = [];
+    if (session !== undefined) {
+      // Resolved from `id` through the store when the accessor is missing: non-enumerable properties
+      // do not survive a spread or a structured clone, and `{ ...session, fork: true }` is a thing
+      // people write. Losing the accessor must cost a store read, never correctness.
+      const prior =
+        typeof session.messages === "function"
+          ? await session.messages()
+          : (((await ctx.sessions?.messages(session.id)) ?? []) as ModelMessage[]);
+      // Whatever the lowering produced IS the request beyond the stream: the wrapper no longer
+      // injects history into the config, so nothing here is already in `prior`.
+      sent = requestTurns(definition);
+      definition = { ...definition, messages: [...prior, ...sent] };
+      delete (definition as { prompt?: unknown }).prompt; // the SDK rejects both
+      if (session.mode === "append" && session.providerSessionId !== undefined) {
+        definition = { ...definition, providerSessionId: session.providerSessionId };
+      }
+    }
+
     const runner = this.options.runner;
     const router = this.resolveRouter(ctx);
     // Only the DEFAULT runner needs a provider: a custom runner (a test fake, a recorded transport)
@@ -245,8 +317,26 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
     try {
       call = await (runner ?? defaultRunner)(definition, env, ctx.timeoutMs);
     } catch (err) {
-      // The runner contract is never-throw; a throw here is a wiring error. Normalize it.
+      // A throw means we do not know what the provider saw, so nothing is reported: an invented delta
+      // is worse than an absent one, because the mirror would then disagree with the remote silently.
+      // The wrapper still releases its reservation.
       return lostMetrics(err instanceof Error ? err.message : String(err));
+    }
+
+    // NOTHING to report. The delta is already on `call.value` — an `LlmOutput` carrying `messages`
+    // verbatim — and `withRecord` writes that payload into the record occupying this session position.
+    // A session is the records sharing a `session.id`, so appending the turn and recording the call are
+    // one write; there is no separate transcript to fold and no channel to fold it through.
+    //
+    // That covers the awkward cases without special-casing them. Repair turns are in the payload
+    // because the provider genuinely produced them. A call that appended and THEN failed is recorded
+    // too, because `withRecord` fills its stub either way — which matters, since those turns exist
+    // remotely whether or not we kept them.
+    //
+    // What the executor DOES owe the delta is the request half: `sent` is prepended below so the
+    // stored payload is the whole exchange rather than only what came back.
+    if (session !== undefined && call.value !== undefined && sent.length > 0) {
+      call = { ...call, value: { ...call.value, messages: [...sent, ...(call.value.messages ?? [])] } };
     }
 
     // THE PROJECTION (DESIGN §3.1). An `LlmOutput` — output value, thinking, tool calls, finish
@@ -265,12 +355,7 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
       const recordError = canceledCall ? { ...call.error, classification: "canceled" as const } : call.error;
       return { error: recordError, value: payload, metrics: recordMetrics };
     }
-    // A generated FILE lands in a `blob`-kind output parameter — that is what §7.1 means by "a produced
-    // artifact is an output parameter, not a parallel channel". A json/text parameter ignores it.
-    const value: ResolvedValue | undefined =
-      op.output.kind === "blob" && output?.files && output.files.length > 0
-        ? output.files[0]!.bytes
-        : (output?.value as ResolvedValue | undefined);
+    const value = projectLlmOutput(op, output);
 
     const metrics: LlmMetrics = { ...call.metrics, startMs };
     if (isOk(call)) return { value: value as ResolvedValue, metrics };

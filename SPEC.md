@@ -366,7 +366,7 @@ cases.
 | `{ "child": "context", "output": "plan_doc" }` | One named output of the child. | the same, projecting `plan_doc` |
 | `{ "child": "context", "output": "*" }` | The child's whole outputs object, as one value. | `{ "op": "context" }` |
 | `{ "input": "issue" }` | This state's declared input, by name. | a `scope.get` producer |
-| `{ "expr": "outputs.weaknesses" }` | A small computation in the expression DSL (§6). | an `expr.eval` producer whose output schema is the inferred type |
+| `{ "expr": ".outputs.weaknesses" }` | A small computation in the expression DSL (§6). | an `expr.eval` producer whose output schema is the inferred type |
 | `{ "artifact": "design_doc" }` | A session-owned artifact, by name. | an `artifact.get` producer |
 | `{ "conversation": "review", "message": 3 }` | A session's transcript, or one message of it. | a `conversation.get` producer |
 
@@ -404,7 +404,7 @@ terminates.
     },
     "outcome": {
       "schema": { "type": "string", "enum": ["complete", "blocked"] },
-      "binding": { "expr": "children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'" }
+      "binding": { "expr": ".children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'" }
     }
   }
 }
@@ -482,7 +482,7 @@ Example:
 
 A configuration input is read exactly like any other input: by a binding
 (`{ "input": "severity_threshold" }`), by an expression (`inputs.severity_threshold`), or by
-prompt interpolation (`{{inputs.severity_threshold}}`).
+prompt interpolation (`{{.inputs.severity_threshold}}`).
 
 ### 4.6 Artifacts
 
@@ -533,10 +533,11 @@ A state selects its mode in `operation.conversation` (§7.1); the selected pream
 into that state's own call. It may be inherited from an ancestor's `environment`, so a subtree can
 be put on one mode in one place.
 
-Transcripts are scoped per **session** (`operation.session`, DESIGN.md §5.1):
-`full_history` threads the prior exchanges of the *same* session. States that declare no session share
-the run's default session (so a plain workflow threads history across all its states); a distinct
-`operation.session` isolates a subtree's conversation.
+Transcripts are scoped per **session** (`operation.session`, DESIGN.md §1.6/§5.1):
+`full_history` threads the prior exchanges of the *same* session. A state that declares no session gets
+its OWN conversation — there is no run-wide default to fall into, since an implicit shared transcript is
+what drives unbounded context growth. Threading across states is asked for, by naming a session once at a
+common ancestor's `environment` and letting the inheritance chain carry it down.
 
 Injecting a preamble and *reading a transcript as data* are different things. The `operation.conversation`
 block is the preamble; a `{ "conversation": "<session>", "message": n }` binding (§4.2) wires a
@@ -680,9 +681,45 @@ inputs.*
 outputs.*
 children.<id>.outputs.*
 children.<id>.outcome
+operation.*
+children.<id>.operation.*
 artifacts.*
 conversations.*
 ```
+
+`operation.*` is the state's **own** call as an addressable node, which is what makes engine metadata
+reachable without going through the events journal. It is a namespace rather than a child on purpose:
+a child would perturb the instance tree and make `run.cursor` / `run.position` / `sequence`
+ambiguous. Its shape is a **typed union** — a common core on every kind plus llm-only extras — so
+`operation.outputs.session` on a `ui` operation is a load-time authoring error rather than a runtime
+`undefined`:
+
+| Field | Kinds | Notes |
+| --- | --- | --- |
+| `outcome` | all | `success` \| `error` \| `timeout` \| `canceled`; mirrors `children.<id>.outcome` |
+| `usage` | all | the measurement record, passed through rather than re-shaped |
+| `cost` | all | USD — lifted out of `usage` because it is the field asked for by name, and a *failed* call still spends money and still reports it |
+| `model` | all | the model the call was actually made with, post-resolution |
+| `outputs.session` | prompt only | a `SessionRef`, i.e. `{ id }` and nothing else |
+
+`provider` and `attempts` are **absent on purpose**. Neither reaches the engine's seam today — they
+are things an executor knows and does not report — so declaring them would hand the lint a field it
+could never resolve and every author a value that is always `undefined`.
+
+The ref schema is closed (`additionalProperties: false`), which is what makes
+`operation.outputs.session.position` — a plausible thing to reach for, given how the notation reads —
+a lint error rather than a runtime `undefined`. A ref is opaque, and the schema says so.
+
+**`operation.outputs.session` is the END position.** A call appends *at* a position but does not know
+its end until the provider resolves, so the end marker is the only value that can exist when the
+engine reads it — and it is what a consumer actually wants ("append after me", "fork after me").
+There is deliberately no start marker: recovery after an error does not need one, since instance-scoped
+resolution (§4.7) forks from the right place on its own.
+
+Note the granularity. **Authored forking is per-operation**: one agentic call that appends forty
+entries cannot be branched at entry twenty from a workflow. A store may address finer positions so a
+human can scrub a transcript in a UI, but the expression language exposes operation boundaries only.
+`{}` before the operation has run, so a guard reading it early sees absence rather than an error.
 
 The **guard-only scalars** — control-flow state, never addressable by a reference binding,
 reachable only from `when` guards and `{ "expr": … }` leaves:
@@ -774,11 +811,11 @@ A **prompt operation** is one structured model call:
 ```text
 kind        "prompt"
 prompt      { "template": "…" } or { "skill": "<name>" } — exactly one. Both render with
-            {{inputs.*}} interpolation; a skill resolves through registry.skills.
+            {{.inputs.*}} interpolation; a skill resolves through registry.skills.
 system      Optional system prompt.
 config      The model-configuration surface (model, sampling, configRef, …).
 input       Slots (§4.1) feeding the call; a bound slot is resolved before the call runs. The op's
-            resolved inputs ARE the template's {{inputs.*}} scope, so a render variable (e.g. a
+            resolved inputs ARE the template's {{.inputs.*}} scope, so a render variable (e.g. a
             skill invocation's arguments) is just a bound input.
 output      The operation's output slot. Defaults to one object slot built from the state's
             declared outputs — which is what a `{ "child", "output" }` binding projects against.
@@ -810,9 +847,12 @@ Everything about *how* an operation runs — as opposed to what it is — is wri
 alongside the rest, because each of these is a per-CALL decision:
 
 ```text
-session       Logical session id this state runs under; owns the conversation transcript,
-              workspace, and permissions. Same id across states ⇒ a shared session; absent ⇒
-              the run's default session.
+session       The conversation this call joins (DESIGN.md §1.6). A NAME shares an
+              append-only stream by declaration; {"expr": …} names an exact position
+              computed at run time, normally from `operation.outputs.session`; `null`
+              starts a fresh one, and absent means this state gets its own. The DECLARED
+              name separately keys the state's workspace and permissions, which are
+              inherited when nothing is declared.
 tools         Logical names of tools the operation may call mid-loop, resolved through
               registry.tools. A composed prompt operation runs them in a bounded loop; a
               delegated agent is handed the allow-list.
@@ -925,38 +965,38 @@ An agent operation may not:
       "state": "feature/plan/critique/address_weaknesses",
       "inputs": {
         "plan_doc": { "input": "plan_doc" },
-        "weaknesses": { "expr": "outputs.weaknesses" },
-        "critique_report": { "expr": "outputs.critique_report" }
+        "weaknesses": { "expr": ".outputs.weaknesses" },
+        "critique_report": { "expr": ".outputs.critique_report" }
       }
     },
     "human_review": {
       "state": "feature/plan/critique/human_review",
       "inputs": {
         "plan_doc": { "input": "plan_doc" },
-        "critique_report": { "expr": "outputs.critique_report" }
+        "critique_report": { "expr": ".outputs.critique_report" }
       }
     }
   },
   "transitions": [
     {
       "to": "terminate.success",
-      "when": "children.human_review.outcome === 'success'"
+      "when": ".children.human_review.outcome === 'success'"
     },
     {
       "to": "terminate.success",
-      "when": "children.address_weaknesses.outcome === 'success'"
+      "when": ".children.address_weaknesses.outcome === 'success'"
     },
     {
       "to": "terminate.success",
-      "when": "outputs.outcome === 'clean'"
+      "when": ".outputs.outcome === 'clean'"
     },
     {
       "to": "human_review",
-      "when": "outputs.outcome === 'blocked'"
+      "when": ".outputs.outcome === 'blocked'"
     },
     {
       "to": "address_weaknesses",
-      "when": "outputs.outcome === 'needs_changes'"
+      "when": ".outputs.outcome === 'needs_changes'"
     }
   ]
 }
@@ -1100,7 +1140,7 @@ validated outputs. The parent branches on `outputs.decision`.
         "enum": ["complete", "blocked"]
       },
       "binding": {
-        "expr": "children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'"
+        "expr": ".children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'"
       }
     },
     "plan_doc": {
@@ -1138,15 +1178,15 @@ validated outputs. The parent branches on `outputs.decision`.
   "transitions": [
     {
       "to": "terminate.success",
-      "when": "children.critique.outputs.outcome === 'clean'"
+      "when": ".children.critique.outputs.outcome === 'clean'"
     },
     {
       "to": "goals",
-      "when": "children.critique.outputs.outcome === 'needs_changes' && run.iteration < limits.max_iterations"
+      "when": ".children.critique.outputs.outcome === 'needs_changes' && .run.iteration < .limits.max_iterations"
     },
     {
       "to": "terminate.success",
-      "when": "children.critique.outcome === 'success'"
+      "when": ".children.critique.outcome === 'success'"
     }
   ],
   "limits": {

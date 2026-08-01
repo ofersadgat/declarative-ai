@@ -18,6 +18,7 @@
 import { canonicalize, hashCanonical, kindFor, sha256Hex, type InlineFamily, type JsonSchema, type JsonValue, type NamedParameter, type Operation, type Parameter, type Ref, type RefKind } from "@declarative-ai/exec";
 import { computeFanOut } from "./fanout";
 import {
+  bindingForDocument,
   RESOLVER_REFS,
   type BindingDecl,
   type ChildDecl,
@@ -38,7 +39,7 @@ import { lowerExpression, type LowerOptions } from "./lowerExpr";
 import { environmentIdentity, mergeOperationFields, resolutionEnvironment } from "./merge";
 import { resolveStateRef, StateRefError, type StateRefOptions } from "./ref";
 import { expandReferences } from "./expand";
-import { parseReferencedFile, resolveReference, selectProperty, type Vfs } from "./reference";
+import { isDataFile, isRuntimeReference, parseReferencedFile, resolveReference, selectProperty, type Vfs } from "./reference";
 
 export class WorkflowLoadError extends Error {
   constructor(
@@ -104,8 +105,17 @@ export function desugarBinding(
   /** How an expression resolves an operation NAME to the operation (§3). */
   lower: LowerOptions = {},
 ): Ref<InlineFamily> {
-  if (typeof binding === "string") return desugarRuntimeReference(binding, where, stateId, slotName);
+  if (typeof binding === "string") {
+    // A leading-dot path is this instance's data and has direct lowerings worth keeping (`.inputs.x`
+    // is `scope.get`, not `context.get` — a missing input REFUSES rather than reading `undefined`).
+    // Everything else is an expression: a bare path cannot reach here, because expansion resolved it.
+    if (isRuntimeReference(binding)) return desugarRuntimeReference(binding, where, stateId, slotName);
+    return desugarExpression(binding, where, stateId, lower);
+  }
   if (isBaseRef(binding)) return binding;
+  // An operation document — what a reference in binding position resolves to when it names an
+  // operation. §3.1's first tier: the operation itself, as a value, with nothing applied to it.
+  if (isOperationDecl(binding)) return { op: desugarOperation(binding as OperationFields, stateId) };
 
   if ("child" in binding) {
     // A producer edge on the declared child, plus a `select` projection for the named output (hw
@@ -119,19 +129,7 @@ export function desugarBinding(
   if ("input" in binding) {
     return resolverEdge(RESOLVER_REFS.scope, { scope: { text: "inputs" }, name: { text: binding.input } });
   }
-  if ("expr" in binding) {
-    // An expression IS a producer — structurally, as a TREE of operator edges rather than a source
-    // string handed to an interpreter at resolution time (EXPRESSIONS.md §1). Its references are
-    // leaves, so the fan-out planner and the validator walk it with the code they already walk every
-    // other binding with, and its type is inferred by `inferRef` rather than by re-parsing.
-    try {
-      return lowerExpression(parseExpression(binding.expr), lower);
-    } catch (e) {
-      // A malformed expression is a binding error like any other here — the same treatment
-      // `'x' is not a runtime reference` and `unrecognized binding form` already get.
-      throw new WorkflowLoadError(`${where}: expression does not parse: ${(e as Error).message}`, stateId);
-    }
-  }
+  if ("expr" in binding) return desugarExpression(binding.expr, where, stateId, lower);
   if ("artifact" in binding) {
     return resolverEdge(RESOLVER_REFS.artifact, { name: { text: binding.artifact } });
   }
@@ -141,6 +139,35 @@ export function desugarBinding(
     return resolverEdge(RESOLVER_REFS.conversation, args);
   }
   throw new WorkflowLoadError(`${where}: unrecognized binding form ${JSON.stringify(binding)}`, stateId);
+}
+
+/**
+ * An operation document, as distinct from a binding: `kind` says which call it is.
+ *
+ * Safe to test by that key alone — no binding form carries a bare `kind`, since a `Parameter`'s
+ * `kind` lives on the slot rather than on the binding inside it.
+ */
+function isOperationDecl(binding: object): boolean {
+  const kind = (binding as { kind?: unknown }).kind;
+  return kind === "prompt" || kind === "function";
+}
+
+/**
+ * Parse and lower one expression — the single place a source string becomes a producer tree.
+ *
+ * An expression IS a producer, structurally, as a TREE of operator edges rather than a source string
+ * handed to an interpreter at resolution time (EXPRESSIONS.md §1). Its references are leaves, so the
+ * fan-out planner and the validator walk it with the code they already walk every other binding
+ * with, and its type is inferred by `inferRef` rather than by re-parsing.
+ */
+function desugarExpression(source: string, where: string, stateId: string, lower: LowerOptions): Ref<InlineFamily> {
+  try {
+    return lowerExpression(parseExpression(source), lower);
+  } catch (e) {
+    // A malformed expression is a binding error like any other here — the same treatment
+    // `unrecognized binding form` already gets.
+    throw new WorkflowLoadError(`${where}: expression does not parse: ${(e as Error).message}`, stateId);
+  }
 }
 
 /** The child a spread republishes, from either spelling of "that child's outputs". */
@@ -164,13 +191,6 @@ function spreadChildOf(binding: BindingDecl | undefined): string | undefined {
  * because both arrive here and leave as the same base `Ref`.
  */
 function desugarRuntimeReference(reference: string, where: string, stateId: string, slotName?: string): Ref<InlineFamily> {
-  if (!reference.startsWith(".")) {
-    throw new WorkflowLoadError(
-      `${where}: '${reference}' is not a runtime reference — a binding reads this instance's data, ` +
-        `so it starts with '.' (as in '.children.x.outputs.y')`,
-      stateId,
-    );
-  }
   const path = reference.slice(1).split(".");
   const [namespace, ...rest] = path;
   const bad = (why: string): never => {
@@ -185,7 +205,7 @@ function desugarRuntimeReference(reference: string, where: string, stateId: stri
     case "outputs": {
       // This state's own outputs are only reachable by evaluation, which is what `expr` is.
       if (rest.length === 0) bad("must name an output");
-      return desugarBinding({ expr: `outputs.${rest.join(".")}` }, where, stateId);
+      return desugarBinding({ expr: `.outputs.${rest.join(".")}` }, where, stateId);
     }
     case "children": {
       const [child, section, ...tail] = rest;
@@ -196,7 +216,7 @@ function desugarRuntimeReference(reference: string, where: string, stateId: stri
         return desugarBinding({ child: child!, output }, where, stateId, slotName);
       }
       // `outcome` and anything else about a child is control-flow state, which guards read.
-      return desugarBinding({ expr: `children.${child}.${[section, ...tail].join(".")}` }, where, stateId);
+      return desugarBinding({ expr: `.children.${child}.${[section, ...tail].join(".")}` }, where, stateId);
     }
     case "artifacts": {
       if (rest.length !== 1) bad("must name exactly one artifact, as '.artifacts.<name>'");
@@ -285,9 +305,13 @@ function defaultOutput(): NamedParameter<InlineFamily> {
  * set and the permission baseline — so the loader hands each consumer only what it needs.
  */
 export function splitExecEnvironment(fields: OperationFields): { op: OperationFields; env: ExecEnvironmentDecl } {
-  const { session, tools, conversation, permissions, ...op } = fields;
+  const { session, fork, tools, conversation, permissions, ...op } = fields;
   const env: ExecEnvironmentDecl = {};
+  // `session` is tested against `undefined` rather than for truthiness because `null` is a REAL
+  // declaration — "start fresh, whatever the chain said" — and dropping it here would silently
+  // restore the inherited session the author was opting out of.
   if (session !== undefined) env.session = session;
+  if (fork !== undefined) env.fork = fork;
   if (tools !== undefined) env.tools = tools;
   if (conversation !== undefined) env.conversation = conversation;
   if (permissions !== undefined) env.permissions = permissions;
@@ -329,7 +353,7 @@ export function desugarOperation(decl: OperationFields, stateId: string, outputs
     : outputSlotFor(outputs);
 
   if (decl.kind === "prompt") {
-    // The template's `{{inputs.*}}` scope IS the operation's resolved inputs (§3.1: authored render
+    // The template's `{{.inputs.*}}` scope IS the operation's resolved inputs (§3.1: authored render
     // variables ride bound input slots, never a field on the op shape), so there is nothing to merge
     // in here — every render variable is just one of `input`.
     const op: Operation<InlineFamily> = {
@@ -500,6 +524,12 @@ export function desugarState(
     ...(operationOrError.operation !== undefined ? { operation: operationOrError.operation } : {}),
     ...(operationOrError.error !== undefined ? { operationError: operationOrError.error } : {}),
     ...(split && Object.keys(split.env).length > 0 ? { environment: split.env } : {}),
+    // The session this state's SUBTREE resolves in, recorded separately from `environment` because
+    // `environment` exists only on a state that declares an OPERATION. A pure composite that
+    // declares `environment.session` — the ordinary way to give a whole subtree one session — would
+    // otherwise carry no trace of it, and the engine would key its children's resource bundle on the
+    // run instead of on the name the author wrote (DESIGN.md §1.6).
+    ...("session" in environment ? { scopeSession: environment.session } : {}),
     ...(spreads.length > 0 ? { outputSpreads: spreads } : {}),
     ...(Object.keys(slotMeta).length > 0 ? { slotMeta } : {}),
   };
@@ -764,11 +794,12 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
    * duplicate what `children[].inputs` and `.children.k.outputs.x` already do, with no clear answer
    * for re-entry or the cursor.
    */
-  const resolveOperationName = (
+  /** Locate a name along the search `path` and read what is there, or `undefined` if nothing is. */
+  const resolveDocument = (
     name: string,
     stateId: string,
     path: readonly string[] | undefined,
-  ): Operation<InlineFamily> | undefined => {
+  ): { document: unknown; file: string } | undefined => {
     if (options.vfs === undefined) return undefined;
     const defaultRoot = path !== undefined && path.length > 0 ? path : options.defaultRoot;
     const located = resolveReference(name, {
@@ -780,16 +811,47 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
     if (located.file === undefined) return undefined;
     const text = options.vfs.read(located.file);
     if (text === undefined) return undefined;
-    const document = selectProperty(parseReferencedFile(located.file, text), located.property, name);
+    return { document: selectProperty(parseReferencedFile(located.file, text), located.property, name), file: located.file };
+  };
+
+  const resolveOperationName = (
+    name: string,
+    stateId: string,
+    path: readonly string[] | undefined,
+  ): Operation<InlineFamily> | undefined => {
+    const found = resolveDocument(name, stateId, path);
+    if (found === undefined) return undefined;
+    const { document } = found;
     if (document === null || typeof document !== "object" || Array.isArray(document)) {
       throw new WorkflowLoadError(`operation '${name}' resolved to ${typeof document}, not an operation document`, stateId);
     }
     return desugarOperation(document as OperationFields, stateId);
   };
 
-    const loaded = desugarState(id, expanded, inherited, refs, childrenByParent.get(id), {
+  /**
+   * Resolve a bare name in VALUE position — inside an expression — to whatever it names.
+   *
+   * The counterpart of `resolveOperationName`, and deliberately wider: a name in callee position
+   * must be an operation, while a name in an argument may be an operation, another binding, or plain
+   * data. `bindingForDocument` makes that call once for both this and expansion, so
+   * `"binding": "lib/x"` and `add(lib/x, 1)` cannot disagree about what `lib/x` is.
+   */
+  const resolveValueName = (
+    name: string,
+    stateId: string,
+    path: readonly string[] | undefined,
+    lower: LowerOptions,
+  ): Ref<InlineFamily> | undefined => {
+    const found = resolveDocument(name, stateId, path);
+    if (found === undefined) return undefined;
+    return desugarBinding(bindingForDocument(found.document, isDataFile(found.file)), `reference '${name}'`, stateId, undefined, lower);
+  };
+
+    const lower: LowerOptions = {
       resolveOperation: (name) => resolveOperationName(name, id, searchPath),
-    });
+      resolveName: (name) => resolveValueName(name, id, searchPath, lower),
+    };
+    const loaded = desugarState(id, expanded, inherited, refs, childrenByParent.get(id), lower);
     loaded.id = variant;
     // Fan-out is a static property of the wiring (§7.3, rule 2): with every consumer of every producer
     // desugared to a base ref, the loader can tally them once here rather than the engine discovering a

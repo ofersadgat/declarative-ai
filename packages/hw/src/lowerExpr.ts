@@ -51,10 +51,31 @@ export function lowerExpression(expr: Expr, options: LowerOptions = {}): Ref<Inl
       // A string literal is a `text` leaf so it reads like every other authored string; everything
       // else — number, boolean, null — is a `json` leaf, which is always a leaf whatever it holds.
       return typeof expr.value === "string" ? { text: expr.value } : { json: expr.value };
+    case "self":
+      // Never lowered on its own: the self root only exists to be walked into. The parser cannot
+      // produce a bare one — a lone `.` fails as "expected property name" — so this is a guard on
+      // hand-built ASTs rather than a reachable authoring error.
+      throw new ExprError("'.' names this state, so it must be followed by a property", 0);
     case "ident":
-      return edge(RESOLVER_REFS.context, { name: { text: expr.name } });
-    case "member":
+      // A bare name is a REFERENCE to a document on the search `path`. Resolving one needs the path,
+      // the referring state and a filesystem — the loader's knowledge — so it arrives injected,
+      // exactly as a callee's does. What comes back may be an operation (the higher-order value of
+      // §3.1) or an ordinary value; both are refs by the time they get here.
+      return resolveName(expr.name, options);
+    case "member": {
+      // `.inputs.n` lowers to precisely the tree `inputs.n` used to lower to — `context.get` at the
+      // root, `op.member` above it. That is what keeps this change confined to the surface syntax:
+      // `fanout.ts`, `pathOfRef`, `referencePathsOf`, `resolve.ts` and the validator's reachability
+      // walk all read the lowered form and need no knowledge of the dot.
+      if (expr.obj.type === "self") return edge(RESOLVER_REFS.context, { name: { text: expr.prop } });
+      // A bare dotted path is ONE name, not a member access on a resolved value: `lib.helpers.trim`
+      // is a reference whose file half the resolver decides by longest match (REFERENCES.md §1.1).
+      // Lowering it property-by-property would resolve `lib` alone and then project, which is a
+      // different question with a different answer.
+      const path = pathOf(expr);
+      if (path !== undefined) return resolveName(path.join("."), options);
       return edge(RESOLVER_REFS.member, { value: down(expr.obj), prop: { text: expr.prop } });
+    }
     case "apply": {
       const builtin = OPERATOR_PARAMS[expr.op];
       if (builtin !== undefined) {
@@ -99,10 +120,42 @@ export function lowerExpression(expr: Expr, options: LowerOptions = {}): Ref<Inl
   }
 }
 
-/** What lowering needs from its caller: how to turn an operation NAME into the operation. */
+/** What lowering needs from its caller: how to turn a NAME into the thing it names. */
 export interface LowerOptions {
-  /** Resolve a non-built-in operation name — a local child key, or a reference along the `path`. */
+  /** Resolve a non-built-in operation name — a reference along the `path`, read as an operation. */
   resolveOperation?: (name: string) => Operation<InlineFamily> | undefined;
+  /**
+   * Resolve a bare name in VALUE position to whatever it names.
+   *
+   * Deliberately wider than {@link resolveOperation}: a reference can point at a string, a JSON
+   * value, another binding, or an operation, and which one it is decides how it reads — the
+   * shape-mismatch principle (REFERENCES.md §3) applied to the target rather than to the position.
+   * The loader owns that dispatch because `desugarBinding` is already exactly it.
+   */
+  resolveName?: (name: string) => Ref<InlineFamily> | undefined;
+}
+
+/** The runtime namespaces, for the one diagnostic that has to survive the dot becoming required. */
+const RUNTIME_ROOTS: ReadonlySet<string> = new Set(["inputs", "outputs", "children", "artifacts", "conversations", "run", "limits"]);
+
+/**
+ * Lower a bare name to what it names, or fail saying so.
+ *
+ * The error carries the migration hint deliberately. `children.a.outputs.n` was the spelling for a
+ * runtime read until the dot became required, so the overwhelmingly likely cause of "no document
+ * called `children.a.outputs.n`" is a missing dot rather than a missing file — and a resolver
+ * message about the filesystem would send the reader looking in the wrong place entirely.
+ */
+function resolveName(name: string, options: LowerOptions): Ref<InlineFamily> {
+  const resolved = options.resolveName?.(name) ?? asRef(options.resolveOperation?.(name));
+  if (resolved !== undefined) return resolved;
+  const root = name.split(".")[0]!;
+  const hint = RUNTIME_ROOTS.has(root) ? ` — did you mean '.${name}', which reads this state's data?` : "";
+  throw new ExprError(`'${name}' resolves to no document on the search path${hint}`, 0);
+}
+
+function asRef(op: Operation<InlineFamily> | undefined): Ref<InlineFamily> | undefined {
+  return op === undefined ? undefined : { op };
 }
 
 /** Bind ordered arguments to ordered parameter names, ignoring any the callee has no slot for. */

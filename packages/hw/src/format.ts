@@ -148,6 +148,42 @@ export type BindingDecl =
   /** A previous conversation, or one message of it. Lowers to a `conversation.get` producer. */
   | { conversation: string; message?: number };
 
+/** Every key that tags an authored binding form — the base `Ref` cases plus the sugar. */
+const BINDING_TAGS: readonly string[] = ["text", "json", "result", "refs", "op", "child", "input", "expr", "artifact", "conversation"];
+
+/**
+ * True when a value is spelled as a BINDING rather than as data.
+ *
+ * A reference in a binding position can point at anything, and what it points at decides how it
+ * reads: a binding form is a binding, an operation document is an operation, and anything else is
+ * data. This is the test expansion applies to what it spliced — which is the shape-mismatch rule of
+ * REFERENCES.md §3 turned on the target instead of the position.
+ *
+ * An operation document counts, because it lowers to the `{ op }` producer edge that §3.1 calls the
+ * higher-order value of a named operation.
+ */
+export function isBindingDecl(value: unknown): boolean {
+  if (typeof value === "string") return true;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const o = value as Record<string, unknown>;
+  return BINDING_TAGS.some((k) => k in o) || o.kind === "prompt" || o.kind === "function";
+}
+
+/**
+ * How a RESOLVED document reads in binding position — the one definition of that dispatch.
+ *
+ * Two callers reach it from opposite directions and must agree: expansion, splicing a path written
+ * as a whole binding, and lowering, resolving a bare name inside an expression. `"binding": "lib/x"`
+ * and `"binding": "id(lib/x)"` have to see the same `lib/x`, so the rule lives in one place.
+ *
+ * `fromDataFile` is what separates a `.md`'s TEXT from a JSON string: both are strings in hand, and
+ * only the file type says whether the author wrote prose or a binding.
+ */
+export function bindingForDocument(value: unknown, fromDataFile: boolean): BindingDecl {
+  if (typeof value === "string" && !fromDataFile) return { text: value };
+  return isBindingDecl(value) ? (value as BindingDecl) : { json: value as JsonValue };
+}
+
 /** A `Parameter` as AUTHORED: the binding may still be sugar. */
 export interface ParameterDecl {
   kind?: RefKind;
@@ -183,14 +219,43 @@ export type ConversationMode = "full_history" | "summary" | "fresh" | "selected_
  * was then free for what authors actually kept asking for: DEFAULTS (see {@link EnvironmentDecl}).
  */
 export interface ExecEnvironmentDecl {
-  /** Logical session id this operation runs under — owns its conversation transcript, workspace, and
-   *  permissions. Same id across states ⇒ a shared session; absent ⇒ the run's default session.
+  /**
+   * The conversation this operation runs under (DESIGN.md §1.6). Three spellings:
    *
-   *  `sessionId` is accepted as a SYNONYM, so an `LlmConfiguration`-shaped block pastes in
-   *  unchanged; the loader normalizes it to this field before anything else reads the document. */
-  session?: string;
+   *  - a **name** — same name across states ⇒ one shared stream, and the name is also the
+   *    resource-bundle key (workspace, permissions);
+   *  - a **session ref** (`{ id }`) — an exact position to continue or branch from. Opaque: nothing
+   *    outside the session store parses it. Normally reached through the fourth spelling rather than
+   *    written literally, since a ref is a run-time value;
+   *  - an **expression** (`{ expr }`, e.g. `{"expr": ".children.plan.operation.outputs.session"}`) —
+   *    the same thing computed per instance. This is the one form EVALUATED rather than read, and
+   *    the only practical way to name an exact position, because `operation.outputs.session` does
+   *    not exist until that operation has run;
+   *  - **`null`** — start a fresh stream, overriding whatever the environment chain supplied.
+   *
+   * ABSENT no longer means a shared default. An undeclared operation gets its own stream, because
+   * an implicit process-wide transcript is the thing that drives unbounded context growth; the
+   * run's shared WORKSPACE is unaffected, being a separate concern (see {@link fork}'s neighbours
+   * in `session.ts`). `""` is an error, never "fresh" — a template interpolating a bad reference
+   * would otherwise silently produce an isolated conversation that looks like it worked.
+   *
+   * `sessionId` is accepted as a SYNONYM, so an `LlmConfiguration`-shaped block pastes in
+   * unchanged; the loader normalizes it to this field before anything else reads the document.
+   */
+  session?: string | null | { id: string } | { expr: string };
   /** @see session — normalized away at parse; never present on a loaded state. */
-  sessionId?: string;
+  sessionId?: string | null | { id: string } | { expr: string };
+  /**
+   * Always branch, rather than appending when the position is still the head (DESIGN.md §1.6).
+   *
+   * Declared where a session is CONSUMED, not carried on the value produced: a position marker
+   * should not encode an intent about how a later caller will use it. Absent and `false` mean the
+   * SAME thing — append if the position is still the head, fork automatically if it is not — because
+   * the stricter reading ("append, or fail") would be an exclusivity claim on the position, and
+   * holding that claim is state the prompt executor must not carry. `true` stays useful because
+   * deliberate divergence (fan three variants out of one point) cannot be inferred from stream state.
+   */
+  fork?: boolean;
   /** Logical names of tools the operation may call mid-loop — resolved through `registry.tools`. */
   tools?: string[];
   /** Conversation preamble injected into THIS call (distinct from a `{ conversation }` wire, which
@@ -216,7 +281,7 @@ export interface ExecEnvironmentDecl {
 export interface OperationFields extends ExecEnvironmentDecl {
   kind?: "prompt" | "function";
   /**
-   * The prompt, as text. `{{inputs.x}}` interpolation applies.
+   * The prompt, as text. `{{.inputs.x}}` interpolation applies.
    *
    * A reusable prompt is a REFERENCE to a file — `{"$ref": "$/prompts/review.md"}` — which is what
    * replaced the old `prompt.skill` and `registry.skills` (REFERENCES.md §7.1). A referenced `.md`
@@ -296,6 +361,7 @@ export const OPERATION_OWN_FIELDS: ReadonlySet<string> = new Set([
   "path",
   "session",
   "sessionId",
+  "fork",
   "tools",
   "conversation",
   "permissions",
@@ -425,6 +491,19 @@ export interface LoadedState
   operation?: Operation<InlineFamily>;
   /** The merged execution environment this state's operation runs under. */
   environment?: ExecEnvironmentDecl;
+  /**
+   * The session this state's SUBTREE resolves in — its own `environment.session` merged over what the
+   * chain supplied, whether or not this state declares an operation.
+   *
+   * Distinct from `environment.session`, which is the merged view for this state's OWN operation and
+   * is therefore absent on a pure composite. That gap matters: declaring `environment.session` on a
+   * composite root is the ordinary way to give a whole subtree one session, and the engine needs to
+   * see it there to key the subtree's resource bundle — workspace, permission ledger, approval scope
+   * — on the name the author actually wrote (DESIGN.md §1.6).
+   *
+   * Present-but-`null` is meaningful: it is an explicit "start fresh", not an absent declaration.
+   */
+  scopeSession?: string | null | { id: string } | { expr: string };
   children?: Record<string, LoadedChild>;
   /**
    * Why this state's `operation` could not be built — an incomplete merge (§5), reported by the
@@ -493,9 +572,14 @@ export interface WorkflowBundle {
  *  - REF vocabulary — the data namespaces authored bindings point into. They are reachable from
  *    `{ expr }` leaves too, since an expr leaf IS a producer over the same data.
  *  - GUARD-ONLY scalars — control-flow state (`run`, `limits`), never a reference binding.
+ *
+ * `operation` is the state's OWN call as an addressable node (SPEC.md §6.1) — its outcome, what it
+ * cost, which model served it, and for a prompt op the conversation position it ended at. It is a
+ * namespace rather than a child on purpose: a child would perturb the instance tree, which is what
+ * `run.cursor`, `run.position` and `sequence` are defined against.
  * The old `function.*` namespace is GONE: a function state's result is an ordinary state output,
  * so guards read `outputs.*` / `children.<key>.outputs.*` uniformly.
  */
-export const REF_NAMESPACES = ["inputs", "outputs", "children", "artifacts", "conversations"] as const;
+export const REF_NAMESPACES = ["inputs", "outputs", "operation", "children", "artifacts", "conversations"] as const;
 export const GUARD_NAMESPACES = ["run", "limits"] as const;
 export const CONTEXT_NAMESPACES = [...REF_NAMESPACES, ...GUARD_NAMESPACES] as const;

@@ -56,12 +56,45 @@ export interface AgentQueryOptions {
    *  documents — the inline family's truth. */
   validator?: SyncOutputValidator;
   abortSignal?: AbortSignal;
+  /**
+   * The agent's own session to continue, when there is one (DESIGN.md §1.6, "Native fork").
+   *
+   * This adapter has the primitive the design wants: `resume` continues a conversation server-side,
+   * reading zero messages — no replay, no transcript on the wire.
+   *
+   * ⚠️ A resumed session is bound to the CWD IT WAS CREATED IN. Transcripts live at
+   * `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`, where `<encoded-cwd>` is the absolute
+   * working directory with every non-alphanumeric character replaced by `-`. Resuming from a
+   * DIFFERENT cwd silently starts a fresh session rather than failing — so a caller that moved the
+   * workspace and kept the handle gets an empty conversation reported as a successful resume.
+   */
+  resume?: string;
+  /**
+   * Branch the resumed session instead of continuing it.
+   *
+   * `resume` + `forkSession` starts a NEW session id seeded with a copy of the original's history and
+   * leaves the original untouched — a fork, done server-side at no replay cost. The new id comes back
+   * on {@link AgentResult.sessionId}, and recording it is NOT optional: a fork that kept its parent's
+   * handle would put two branches into one remote session.
+   *
+   * Forking branches the CONVERSATION, not the filesystem — both branches see one working directory.
+   */
+  forkSession?: boolean;
 }
 
 /** The agent's final answer for a run. */
 export interface AgentResult {
   text: string;
   costUsd?: number;
+  /**
+   * The agent's session id as of this run — its own, not ours.
+   *
+   * Always the id the run ACTUALLY ended in: a new one after a fork, the resumed one otherwise. A
+   * value that differs from the handle we resumed means the remote moved underneath us
+   * (DESIGN.md §1.6), which is the only way to notice server-side compaction or an out-of-band
+   * resume.
+   */
+  sessionId?: string;
 }
 
 /** A normalized message from the agent stream — the adapter only needs the terminal result + any error. */
@@ -72,6 +105,21 @@ export interface AgentStreamMessage {
   /** A run-fatal error the agent reported (mapped to a permanent outcome). */
   error?: string;
 }
+
+/**
+ * Read a provider-side conversation back, for re-syncing after the remote moved (DESIGN.md §1.6).
+ *
+ * Separate from {@link AgentQuery} because it is a genuinely separate capability, and an optional
+ * one: Claude Code has `getSessionMessages()`, Managed Agents has `events.list`, the Messages API has
+ * neither — and needs neither, being stateless and therefore unable to diverge. An adapter without
+ * one leaves a resync EMPTY, which the lineage edge records rather than passing off as a conversation
+ * that happened to be empty.
+ *
+ * ⚠️ Bound to the same cwd the session was created in, for the same reason `resume` is — transcripts
+ * are per-project-directory files. Reading from elsewhere finds nothing, which is indistinguishable
+ * from a conversation with no messages.
+ */
+export type AgentSessionReader = (providerSessionId: string, cwd?: string) => Promise<readonly unknown[]>;
 
 /** The seam: run an agent query and yield its message stream. */
 export type AgentQuery = (opts: AgentQueryOptions) => AsyncIterable<AgentStreamMessage>;

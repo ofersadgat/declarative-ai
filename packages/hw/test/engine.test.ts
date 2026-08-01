@@ -13,6 +13,7 @@ import {
   type FunctionResult,
   type Tool,
 } from "@declarative-ai/exec";
+import { withRecord, withSessionPosition } from "@declarative-ai/exec";
 import { isPermissionDenied, type Approver } from "@declarative-ai/permissions";
 import { WorkflowEngine, type EngineConfig } from "../src/engine";
 import { loadBundle } from "../src/loader";
@@ -67,12 +68,19 @@ function makeEngine(files: Record<string, StateDef>, rootId: string, script: Scr
   }
   for (const [name, t] of Object.entries(opts.tools ?? {})) registry.tools.set(name, t);
   const persistence = new InMemoryPersistence();
+  // The SESSION STACK, composed as a host composes it: resolve the position, claim it, record what
+  // ran. The engine states a REQUEST and never resolves one — it cannot, since only the store knows
+  // where a conversation currently is — so without these wrappers no session is in play and the
+  // transcript stays empty. Composing them here is what makes these tests exercise the real path
+  // rather than an engine-private shortcut production never takes.
+  const store = new MapSessionStore();
+  const extra = { ...opts.extra, services: { records: store as never, ...opts.extra?.services, sessions: opts.extra?.services?.sessions ?? store } };
   const engine = new WorkflowEngine({
     bundle: loadBundle(files, rootId),
     registry,
-    prompt: opts.prompt ?? fake,
+    prompt: withSessionPosition(withRecord(((opts.prompt ?? fake) as never))) as never,
     persistence,
-    ...opts.extra,
+    ...extra,
   });
   return { engine, fake, persistence };
 }
@@ -350,13 +358,13 @@ describe("SPEC §10.4 — async children and the dataflow join", () => {
         inputs: {},
         // `slow` is ASYNC, so the reachability rule (§7.2) forbids a `{ child }` binding here —
         // the pending-tolerant `{ expr }` leaf is the async equivalent.
-        outputs: { got: { schema: { type: "string" }, binding: { expr: "children.slow.outputs.val" } } },
+        outputs: { got: { schema: { type: "string" }, binding: { expr: ".children.slow.outputs.val" } } },
         children: {
           slow: { state: "parent/slow", async: true, inputs: {} },
           quick: { state: "parent/quick", inputs: {} },
         },
         sequence: ["slow", "quick"],
-        transitions: [{ to: "terminate.success", when: "children.slow.outputs.val === 'done'" }],
+        transitions: [{ to: "terminate.success", when: ".children.slow.outputs.val === 'done'" }],
       },
       "parent/slow": {
         inputs: {},
@@ -393,7 +401,7 @@ describe("SPEC §10.4 — async children and the dataflow join", () => {
         outputs: {},
         children: {
           never: { state: "parent/never", async: true, inputs: {} },
-          waiting: { state: "parent/waiting", inputs: { x: { expr: "children.never.outputs.v" } } },
+          waiting: { state: "parent/waiting", inputs: { x: { expr: ".children.never.outputs.v" } } },
         },
         sequence: ["never", "waiting"],
       },
@@ -428,7 +436,7 @@ describe("SPEC §10.4 — async children and the dataflow join", () => {
 });
 
 describe("timeout, cancellation, and unhandled child failures", () => {
-  it("limits.timeout terminates the state (and its running ops) with terminate.timeout", async () => {
+  it(".limits.timeout terminates the state (and its running ops) with terminate.timeout", async () => {
     const files: Record<string, StateDef> = {
       slowroot: {
         inputs: {},
@@ -472,7 +480,7 @@ describe("timeout, cancellation, and unhandled child failures", () => {
           slow: { state: "parent/slow", inputs: {} },
         },
         sequence: ["slow"],
-        transitions: [{ to: "terminate.success", when: "children.slow.outcome === 'timeout'" }],
+        transitions: [{ to: "terminate.success", when: ".children.slow.outcome === 'timeout'" }],
       },
       "parent/slow": {
         inputs: {},
@@ -549,10 +557,10 @@ describe("conversation modes (SPEC §4.7)", () => {
     critique.operation = {
       kind: "prompt",
       model: "critic",
-      // An operation's bound input slots render under `{{inputs.*}}` — the one namespace a template
+      // An operation's bound input slots render under `{{.inputs.*}}` — the one namespace a template
       // sees, the operation's resolved inputs (state inputs plus the op's own bound inputs).
-      prompt: "Summarize this transcript: {{inputs.history}}",
-      input: { history: { kind: "json", binding: { conversation: "default" } } },
+      prompt: "Summarize this transcript: {{.inputs.history}}",
+      input: { history: { kind: "json", binding: { conversation: "planning" } } },
     };
     const { engine, fake } = makeEngine(files, PLAN_ID, planningScript());
     await engine.run({ inputs: { issue: "the issue" } });
@@ -571,8 +579,8 @@ describe("conversation modes (SPEC §4.7)", () => {
     critique.operation = {
       kind: "prompt",
       model: "critic",
-      prompt: "First turn was: {{inputs.first}}",
-      input: { first: { kind: "json", binding: { conversation: "default", message: 0 } } },
+      prompt: "First turn was: {{.inputs.first}}",
+      input: { first: { kind: "json", binding: { conversation: "planning", message: 0 } } },
     };
     const { engine, fake } = makeEngine(files, PLAN_ID, planningScript());
     await engine.run({ inputs: { issue: "the issue" } });
@@ -591,26 +599,26 @@ describe("conversation modes (SPEC §4.7)", () => {
       specPlanningFiles(),
       PLAN_ID,
       () => ({ error: { classification: "permanent", reason: "model exploded" }, metrics: { durationMs: 1, costUsd: 0, costSource: "unknown" } }),
-      { extra: { services: { sessions: store } } },
+      { extra: { services: { sessions: store, records: store as never } } },
     );
     const result = await engine.run({ inputs: { issue: "the issue" } });
     expect(result.outcome).toBe("error");
-    expect((await store.get("default"))?.messages ?? []).toEqual([]);
+    expect(store.messages("planning@0")).toEqual([]);
   });
 
   it("records the transcript into the shared session store (unified with the withSession path)", async () => {
     const store = new MapSessionStore();
-    const { engine } = makeEngine(specPlanningFiles(), PLAN_ID, planningScript(), { extra: { services: { sessions: store } } });
+    const { engine } = makeEngine(specPlanningFiles(), PLAN_ID, planningScript(), { extra: { services: { sessions: store, records: store as never } } });
     await engine.run({ inputs: { issue: "the issue" } });
     // The built-in transcript lives in the SAME store a runtime's withSession reads — one source of truth.
-    const messages = (await store.get("default"))?.messages as Array<{ role: string; content: string }> | undefined;
+    const messages = store.messages("planning@99") as unknown as Array<{ role: string; content: string }>;
     expect(messages?.length).toBeGreaterThan(0);
     expect(messages!.some((m) => m.role === "assistant")).toBe(true);
     expect(messages!.some((m) => m.role === "user" && m.content.includes("Extract goals"))).toBe(true);
   });
 });
 
-describe("template rendering: `{{inputs.*}}` is the operation's resolved inputs", () => {
+describe("template rendering: `{{.inputs.*}}` is the operation's resolved inputs", () => {
   // There is ONE namespace now (params is gone): a prompt template sees exactly the inputs its
   // operation resolved — the state's inputs, with the op's own bound inputs overlaid, a bound input
   // of the same name winning (resolveInputs: an explicit binding overrides the by-name fill).
@@ -619,23 +627,23 @@ describe("template rendering: `{{inputs.*}}` is the operation's resolved inputs"
       label: "Solo",
       inputs: { tone: { schema: { type: "string" } } },
       outputs: { answer: { schema: { type: "string" } } },
-      operation: { kind: "prompt", model: "writer", prompt: "tone={{inputs.tone}}" },
+      operation: { kind: "prompt", model: "writer", prompt: "tone={{.inputs.tone}}" },
     } as StateDef,
   });
 
-  it("renders a state input under {{inputs.*}}", async () => {
+  it("renders a state input under {{.inputs.*}}", async () => {
     const { engine, fake } = makeEngine(files(), "solo", () => ok({ answer: "a" }));
     const result = await engine.run({ inputs: { tone: "casual" } });
     expect(result.outcome).toBe("success");
     expect(promptOf(fake.calls[0]!)).toBe("tone=casual");
   });
 
-  it("an operation's own bound input renders under {{inputs.*}} and wins over a same-named state input", async () => {
+  it("an operation's own bound input renders under {{.inputs.*}} and wins over a same-named state input", async () => {
     const f = files();
     // A render variable is authored as an operation input with a literal binding — the successor to
     // the removed `operation.params` sugar. It resolves and overlays onto the template's inputs.
     (f["solo"]!.operation as { input?: Record<string, unknown> }).input = { tone: { kind: "text", binding: { text: "terse" } } };
-    (f["solo"]!.operation as { prompt?: string }).prompt = "tone={{inputs.tone}}";
+    (f["solo"]!.operation as { prompt?: string }).prompt = "tone={{.inputs.tone}}";
     const { engine, fake } = makeEngine(f, "solo", () => ok({ answer: "a" }));
     await engine.run({ inputs: { tone: "casual" } });
     expect(promptOf(fake.calls[0]!)).toBe("tone=terse");
@@ -769,16 +777,16 @@ describe("run records (SPEC §10.2)", () => {
 });
 
 describe("a prompt op's render variables", () => {
-  it("renders the state's inputs and the op's own bound inputs under one {{inputs.*}} namespace", async () => {
+  it("renders the state's inputs and the op's own bound inputs under one {{.inputs.*}} namespace", async () => {
     const files: Record<string, StateDef> = {
       s: {
         inputs: { topic: { schema: { type: "string" } } },
         outputs: { summary: { schema: { type: "string" } } },
-        // A render variable is a bound operation input; it reaches the template under `{{inputs.*}}`
+        // A render variable is a bound operation input; it reaches the template under `{{.inputs.*}}`
         // alongside the state's own inputs — one namespace, the op's resolved inputs.
         operation: {
           kind: "prompt",
-          prompt: "Summarize {{inputs.topic}} ({{inputs.style}}).",
+          prompt: "Summarize {{.inputs.topic}} ({{.inputs.style}}).",
           input: { style: { schema: { type: "string" }, binding: { text: "terse" } } },
           model: "reviewer",
         },
@@ -988,4 +996,228 @@ describe("per-session workspace overlay (DESIGN §5.1, \"Sessions: the run-scope
     await engine.run({ inputs: {} });
     expect(fake.calls.map((c: FakeCall) => c.ctx)[0]!.workspace?.root).toBe("/default");
   });
+});
+
+/**
+ * The `operation.*` namespace at run time (SPEC.md §6.1). The lint is covered in
+ * `operationNode.test.ts`; what matters here is that the values actually arrive.
+ */
+describe("operation.* resolves during a run", () => {
+  /** One prompt child, and a parent output bound to some part of its operation node. */
+  const reading = (expr: string, schema: JsonValue = {}): Record<string, StateDef> => ({
+    root: {
+      environment: { session: "planning" },
+      children: { call: { state: "leaf" } },
+      sequence: ["call"],
+      outputs: { read: { schema: schema as never, binding: { expr } } },
+    },
+    leaf: {
+      outputs: { r: { schema: { type: "string" } } },
+      operation: { kind: "prompt", prompt: "go", model: "reviewer" },
+    },
+  });
+
+  it("carries a child's cost up to its parent", async () => {
+    // Previously reachable only through the events journal, which no expression can read.
+    const { engine } = makeEngine(reading(".children.call.operation.cost", { type: "number" }), "root", () =>
+      ok({ r: "done" }, 0.25),
+    );
+    expect((await engine.run({ inputs: {} })).outputs?.read).toBe(0.25);
+  });
+
+  it("carries the outcome and the model the call was actually made with", async () => {
+    const outcome = await makeEngine(reading(".children.call.operation.outcome"), "root", () => ok({ r: "done" })).engine.run({
+      inputs: {},
+    });
+    expect(outcome.outputs?.read).toBe("success");
+    const model = await makeEngine(reading(".children.call.operation.model"), "root", () => ok({ r: "done" })).engine.run({
+      inputs: {},
+    });
+    expect(model.outputs?.read).toBe("reviewer");
+  });
+
+  it("exposes the conversation position the call ENDED at, as a bare `{ id }`", async () => {
+    const { engine } = makeEngine(reading(".children.call.operation.outputs.session"), "root", () => ok({ r: "done" }));
+    const result = await engine.run({ inputs: {} });
+    // ONLY an id: the enumerable shape the events journal and `inputs_json` see. Everything else a
+    // resolved session carries is non-enumerable by construction.
+    expect(result.outputs?.read).toEqual({ id: "planning" });
+  });
+
+  it("records a FAILED call too, which is when its cost is most worth reading", async () => {
+    // A node written only on the happy path would be missing exactly here — and a failed call still
+    // costs money.
+    const files = reading(".children.call.operation.cost", { type: "number" });
+    files["root"]!.outputs!["read"]!.optional = true;
+    // The guard reads the FAILED child's node. It can only fire if the node was recorded despite the
+    // call failing — and `terminate.success` keeps the transition from re-firing forever.
+    files["root"]!.transitions = [{ to: "terminate.success", when: ".children.call.operation.cost === 0.05" }];
+    const { engine } = makeEngine(files, "root", () => ({
+      error: { classification: "permanent" as const, reason: "model exploded" },
+      metrics: { durationMs: 1, costUsd: 0.05, costSource: "unknown" as const },
+    }));
+    expect((await engine.run({ inputs: {} })).outcome).toBe("success");
+  });
+
+  it("is an empty object before the operation has run, not a throw", async () => {
+    // A guard evaluated before the call reads `undefined`, exactly as a never-entered child does.
+    const files = reading(".children.call.operation.outcome");
+    files["root"]!.outputs!["read"]!.optional = true;
+    files["root"]!.transitions = [{ to: "terminate.success", when: ".children.call.operation.outcome === 'success'" }];
+    expect((await makeEngine(files, "root", () => ok({ r: "done" })).engine.run({ inputs: {} })).outcome).toBe("success");
+  });
+});
+
+/**
+ * DESIGN.md §1.6. One `sessionId` used to key two unrelated things — which transcript a call
+ * joins, and which workspace / permission ledger it runs in. They have to separate once a session is
+ * a POSITION, because a position moves on every call.
+ */
+describe("the conversation and the resource bundle are different keys", () => {
+  const twoStates = (leafSession?: string | null): Record<string, StateDef> => ({
+    root: {
+      environment: { session: "shared" },
+      children: { first: { state: "leaf" }, second: { state: "leaf2" } },
+      sequence: ["first", "second"],
+      outputs: { r: { binding: { child: "second", output: "r" } } },
+    },
+    leaf: {
+      outputs: { r: { schema: { type: "string" } } },
+      operation: { kind: "prompt", prompt: "first call", model: "reviewer" },
+    },
+    leaf2: {
+      outputs: { r: { schema: { type: "string" } } },
+      operation: { kind: "prompt", prompt: "second call", model: "reviewer" },
+      ...(leafSession !== undefined ? { environment: { session: leafSession } } : {}),
+    },
+  });
+
+  it("a state that declares no session INHERITS the enclosing workspace", async () => {
+    // Inherited, not minted per state — otherwise every undeclared operation would ask for its own
+    // worktree, which §5.1 rules out — a fork branches the conversation, not the filesystem.
+    const { engine, fake } = makeEngine(twoStates(), "root", () => ok({ r: "done" }), {
+      extra: { workspaceFor: (key) => (key === "shared" ? { root: "/ws/shared" } : undefined) },
+    });
+    await engine.run({ inputs: {} });
+    expect(fake.calls).toHaveLength(2);
+    for (const call of fake.calls) expect((call as FakeCall).ctx.workspace?.root).toBe("/ws/shared");
+  });
+
+  it("`session: null` starts a fresh CONVERSATION but keeps the enclosing workspace", async () => {
+    // The split stated as one test: the author opted out of the transcript, not the worktree.
+    const { engine, fake } = makeEngine(twoStates(null), "root", () => ok({ r: "done" }), {
+      extra: { workspaceFor: (key) => (key === "shared" ? { root: "/ws/shared" } : undefined) },
+    });
+    await engine.run({ inputs: {} });
+    expect((fake.calls[1] as FakeCall).ctx.workspace?.root).toBe("/ws/shared");
+    expect(promptOf(fake.calls[1]!)).not.toContain("first call");
+  });
+
+  it("declaring a session names a NEW bundle, which is how a subtree isolates its workspace", async () => {
+    const { engine, fake } = makeEngine(twoStates("other"), "root", () => ok({ r: "done" }), {
+      extra: {
+        services: { workspace: { root: "/run" } },
+        workspaceFor: (key) => (key === "other" ? { root: "/ws/other" } : { root: "/ws/shared" }),
+      },
+    });
+    await engine.run({ inputs: {} });
+    expect((fake.calls[0] as FakeCall).ctx.workspace?.root).toBe("/ws/shared");
+    expect((fake.calls[1] as FakeCall).ctx.workspace?.root).toBe("/ws/other");
+  });
+
+  it("two UNDECLARED states no longer share a transcript", async () => {
+    // The behaviour the append-only model removes. `full_history` on the second state used to replay the
+    // first's exchange, because both fell back to one implicit "default" session.
+    const { engine, fake } = makeEngine(undeclaredPair(), "root", () => ok({ r: "done" }));
+    await engine.run({ inputs: {} });
+    expect(promptOf(fake.calls[1]!)).not.toContain("<conversation-history>");
+    expect(promptOf(fake.calls[1]!)).not.toContain("first call");
+  });
+
+  it("...and naming a session is how an author asks for that threading back", async () => {
+    const files = undeclaredPair();
+    files["root"]!.environment = { session: "planning" };
+    const { engine, fake } = makeEngine(files, "root", () => ok({ r: "done" }));
+    await engine.run({ inputs: {} });
+    expect(promptOf(fake.calls[1]!)).toContain("first call");
+  });
+
+  /**
+   * The EXPLICIT spelling: a ref carried through data flow, rather than a name shared by declaration.
+   *
+   * The parent wires `children.plan.operation.outputs.session` into the consumer's declared input —
+   * an expression only the parent can evaluate, since only the parent can see both children — and
+   * the consumer names that input in its `session`. Two scopes, which is why the field has to accept
+   * an expression at all: a static value could never carry a position that does not exist until the
+   * producer has run.
+   */
+  function explicitPair(consumerSession: JsonValue, extra: Partial<StateDef> = {}): Record<string, StateDef> {
+    return {
+      root: {
+        children: {
+          plan: { state: "planner" },
+          review: { state: "reviewer", inputs: { thread: { expr: ".children.plan.operation.outputs.session" } } },
+        },
+        sequence: ["plan", "review"],
+        outputs: { r: { binding: { child: "review", output: "r" } } },
+      },
+      planner: {
+        outputs: { r: { schema: { type: "string" } } },
+        operation: { kind: "prompt", prompt: "first call", model: "reviewer" },
+      },
+      reviewer: {
+        inputs: { thread: { schema: {} } },
+        outputs: { r: { schema: { type: "string" } } },
+        environment: { conversation: { mode: "full_history" }, session: consumerSession as never, ...extra.environment },
+        operation: { kind: "prompt", prompt: "second call", model: "reviewer" },
+      },
+    };
+  }
+
+  it("continues a conversation named by an EXPRESSION, not by a shared name", async () => {
+    // Neither state declares a session name, so nothing is shared by declaration. The reviewer joins
+    // the planner's stream purely because it was handed the position the planner ended at.
+    const { engine, fake } = makeEngine(explicitPair({ expr: ".inputs.thread" }), "root", () => ok({ r: "done" }));
+    await engine.run({ inputs: {} });
+    expect(promptOf(fake.calls[1]!)).toContain("first call");
+  });
+
+  it("...and the same ref with `fork` branches instead of continuing", async () => {
+    const files = explicitPair({ expr: ".inputs.thread" }, { environment: { fork: true } });
+    const { engine, fake } = makeEngine(files, "root", () => ok({ r: "done" }));
+    await engine.run({ inputs: {} });
+    // A fork still SEES the prefix — that is what makes it a branch of this conversation rather
+    // than a fresh one. What it must not do is write back into the trunk.
+    expect(promptOf(fake.calls[1]!)).toContain("first call");
+  });
+
+  it("an expression that resolves to nothing FAILS, rather than quietly running in isolation", async () => {
+    // The whole reason `""` is rejected: the author asked to continue a specific conversation, and
+    // silently starting a different one produces a run that looks successful and remembers nothing.
+    const files = explicitPair({ expr: ".inputs.missing" });
+    files["reviewer"]!.inputs = { thread: { schema: {} }, missing: { schema: {}, optional: true } as never };
+    const { engine } = makeEngine(files, "root", () => ok({ r: "done" }));
+    const result = await engine.run({ inputs: {} });
+    expect(result.outcome).toBe("error");
+  });
+
+  /** Two sequential prompt states, the second reading `full_history`, neither declaring a session. */
+  function undeclaredPair(): Record<string, StateDef> {
+    return {
+      root: {
+        children: { first: { state: "leaf" }, second: { state: "leaf2" } },
+        sequence: ["first", "second"],
+        outputs: { r: { binding: { child: "second", output: "r" } } },
+      },
+      leaf: {
+        outputs: { r: { schema: { type: "string" } } },
+        operation: { kind: "prompt", prompt: "first call", model: "reviewer" },
+      },
+      leaf2: {
+        outputs: { r: { schema: { type: "string" } } },
+        environment: { conversation: { mode: "full_history" } },
+        operation: { kind: "prompt", prompt: "second call", model: "reviewer" },
+      },
+    };
+  }
 });

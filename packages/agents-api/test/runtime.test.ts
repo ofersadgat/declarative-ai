@@ -327,3 +327,93 @@ describe("createClaudeCodeFunction — delegated agent as a registered async fun
     expect(op.functionRef).toBe("claude-code");
   });
 });
+
+/**
+ * Native fork (DESIGN.md §1.6). This adapter has the primitive the design wants — `resume`
+ * continues server-side and `resume + forkSession` branches — so the replay strategy is never used
+ * for it, and the handle the run ENDED in is the one thing it must hand back.
+ */
+describe("native session resume and fork", () => {
+  /** A resolved session as the layer above hands it over: only `id` enumerable, the rest attached. */
+  const session = (over: { mode?: "append" | "fork"; providerSessionId?: string }): ExecServices["session"] => {
+    const s = { id: "ses_x@3" } as Record<string, unknown>;
+    for (const [k, v] of Object.entries({ mode: over.mode ?? "append", at: { id: "ses_x", seq: 3 }, ...over })) {
+      Object.defineProperty(s, k, { value: v, enumerable: false });
+    }
+    return s as unknown as ExecServices["session"];
+  };
+
+  const capturing = (): { query: AgentQuery; seen: () => AgentQueryOptions | undefined } => {
+    let captured: AgentQueryOptions | undefined;
+    const query: AgentQuery = async function* (opts) {
+      captured = opts;
+      yield { type: "result" as const, result: { text: "done", sessionId: "sess-after" } };
+    };
+    return { query, seen: () => captured };
+  };
+
+  it("RESUMES by handle on an append — no replay, nothing on the wire but the prompt", async () => {
+    const { query, seen } = capturing();
+    const fn = createClaudeCodeFunction({ query });
+    await fn.run(inputs(), { session: session({ mode: "append", providerSessionId: "sess-abc" }) });
+    expect(seen()?.resume).toBe("sess-abc");
+    expect(seen()?.forkSession).toBeUndefined();
+  });
+
+  it("FORKS by handle when the layer above decided to branch", async () => {
+    const { query, seen } = capturing();
+    const fn = createClaudeCodeFunction({ query });
+    await fn.run(inputs(), { session: session({ mode: "fork", providerSessionId: "sess-abc" }) });
+    expect(seen()?.resume).toBe("sess-abc");
+    expect(seen()?.forkSession).toBe(true);
+  });
+
+  it("starts FRESH when there is no handle to resume", async () => {
+    const { query, seen } = capturing();
+    const fn = createClaudeCodeFunction({ query });
+    await fn.run(inputs(), { session: session({ mode: "append" }) });
+    expect(seen()?.resume).toBeUndefined();
+    expect(seen()?.forkSession).toBeUndefined();
+  });
+
+  it("reports the session the run ENDED in — a fork returns a NEW id", async () => {
+    // Losing it would put two branches into one remote session, which is silent and unrecoverable.
+    const { query } = capturing();
+    const fn = createClaudeCodeFunction({ query });
+    const result = await fn.run(inputs(), { session: session({ mode: "fork", providerSessionId: "sess-abc" }) });
+    expect((result as { session?: { providerSessionId?: string } }).session?.providerSessionId).toBe("sess-after");
+  });
+
+  it("declares native resume, so the session layer does not reach for replay", () => {
+    expect(DELEGATED_CAPS.sessionResume).toBe(true);
+  });
+
+  it("passes nothing session-shaped when no session is in play", async () => {
+    const { query, seen } = capturing();
+    const fn = createClaudeCodeFunction({ query });
+    await fn.run(inputs(), {});
+    expect(seen()?.resume).toBeUndefined();
+  });
+});
+
+/** The provider READ seam (DESIGN.md §1.6) — what a resync re-reads from. */
+describe("reading a conversation back", () => {
+  it("offers a reader only when the adapter was given one", () => {
+    // The distinction is load-bearing: no reader means a resync starts EMPTY, and §11 requires that
+    // to be visible on the edge rather than mistaken for a conversation that had nothing in it.
+    expect(createClaudeCodeFunction({}).sessionReader).toBeUndefined();
+    expect(createClaudeCodeFunction({ readSession: async () => [] }).sessionReader).toBeDefined();
+  });
+
+  it("reads by the provider's own session id", async () => {
+    const seen: string[] = [];
+    const fn = createClaudeCodeFunction({
+      readSession: async (id) => {
+        seen.push(id);
+        return [{ role: "user", content: "from the provider" }];
+      },
+    });
+    expect(await fn.sessionReader!.read("sess-abc")).toEqual([{ role: "user", content: "from the provider" }]);
+    expect(seen).toEqual(["sess-abc"]);
+  });
+});

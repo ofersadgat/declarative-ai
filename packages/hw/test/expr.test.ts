@@ -16,8 +16,8 @@ describe("expression language — literals and identifiers (SPEC §6)", () => {
   });
 
   it("resolves identifiers from the context; missing → undefined", () => {
-    expect(ev("x", { x: 7 })).toBe(7);
-    expect(ev("missing", {})).toBe(undefined);
+    expect(ev(".x", { x: 7 })).toBe(7);
+    expect(ev(".missing", {})).toBe(undefined);
   });
 });
 
@@ -28,21 +28,21 @@ describe("property access", () => {
   };
 
   it("drills through object graphs", () => {
-    expect(ev("outputs.outcome", ctx)).toBe("clean");
-    expect(ev("inputs.nested.deep", ctx)).toBe(5);
+    expect(ev(".outputs.outcome", ctx)).toBe("clean");
+    expect(ev(".inputs.nested.deep", ctx)).toBe(5);
   });
 
   it("access on undefined/missing/null yields undefined (implicit optional chaining)", () => {
-    expect(ev("children.x.outputs.y", ctx)).toBe(undefined);
-    expect(ev("inputs.gone.deeper.still", ctx)).toBe(undefined);
-    expect(ev("n.prop", { n: null })).toBe(undefined);
-    expect(ev("b.prop", { b: 42 })).toBe(undefined);
+    expect(ev(".children.x.outputs.y", ctx)).toBe(undefined);
+    expect(ev(".inputs.gone.deeper.still", ctx)).toBe(undefined);
+    expect(ev(".n.prop", { n: null })).toBe(undefined);
+    expect(ev(".b.prop", { b: 42 })).toBe(undefined);
   });
 
   it(".length works for arrays and strings", () => {
-    expect(ev("outputs.weaknesses.length", ctx)).toBe(2);
-    expect(ev("outputs.outcome.length", ctx)).toBe(5);
-    expect(ev("outputs.weaknesses.length > 1", ctx)).toBe(true);
+    expect(ev(".outputs.weaknesses.length", ctx)).toBe(2);
+    expect(ev(".outputs.outcome.length", ctx)).toBe(5);
+    expect(ev(".outputs.weaknesses.length > 1", ctx)).toBe(true);
   });
 
   /**
@@ -54,14 +54,14 @@ describe("property access", () => {
    */
   it("reaches nothing off the prototype", () => {
     for (const src of [
-      "inputs.plan.constructor",
-      "inputs.plan.toString",
-      "inputs.nested.constructor",
-      "inputs.nested.hasOwnProperty",
-      "inputs.nested.__proto__",
-      "outputs.weaknesses.constructor",
-      "outputs.weaknesses.map",
-      "outputs.weaknesses.join",
+      ".inputs.plan.constructor",
+      ".inputs.plan.toString",
+      ".inputs.nested.constructor",
+      ".inputs.nested.hasOwnProperty",
+      ".inputs.nested.__proto__",
+      ".outputs.weaknesses.constructor",
+      ".outputs.weaknesses.map",
+      ".outputs.weaknesses.join",
     ]) {
       expect(ev(src, ctx), src).toBe(undefined);
     }
@@ -74,15 +74,15 @@ describe("operators — JavaScript semantics", () => {
     expect(ev("1 === '1'", {})).toBe(false);
     expect(ev("1 != '1'", {})).toBe(false);
     expect(ev("1 !== '1'", {})).toBe(true);
-    expect(ev("x == null", { x: undefined })).toBe(true);
-    expect(ev("x === null", { x: undefined })).toBe(false);
+    expect(ev(".x == null", { x: undefined })).toBe(true);
+    expect(ev(".x === null", { x: undefined })).toBe(false);
   });
 
   it("comparison, numeric and string", () => {
     expect(ev("2 < 10", {})).toBe(true);
     expect(ev("'b' > 'a'", {})).toBe(true);
-    expect(ev("run.iteration < limits.max_iterations", { run: { iteration: 2 }, limits: { max_iterations: 3 } })).toBe(true);
-    expect(ev("x < 1", { x: undefined })).toBe(false); // NaN comparison, as in JS
+    expect(ev(".run.iteration < .limits.max_iterations", { run: { iteration: 2 }, limits: { max_iterations: 3 } })).toBe(true);
+    expect(ev(".x < 1", { x: undefined })).toBe(false); // NaN comparison, as in JS
   });
 
   it("boolean operators and truthiness", () => {
@@ -94,15 +94,15 @@ describe("operators — JavaScript semantics", () => {
   });
 
   it("ternary, right-associative", () => {
-    expect(ev("x === 'clean' ? 'complete' : 'blocked'", { x: "clean" })).toBe("complete");
-    expect(ev("a ? 1 : b ? 2 : 3", { a: false, b: true })).toBe(2);
+    expect(ev(".x === 'clean' ? 'complete' : 'blocked'", { x: "clean" })).toBe("complete");
+    expect(ev(".a ? 1 : .b ? 2 : 3", { a: false, b: true })).toBe(2);
   });
 
   it("parentheses and precedence", () => {
     expect(ev("(1 < 2) === true", {})).toBe(true);
-    expect(ev("!a && b", { a: false, b: true })).toBe(true);
-    expect(ev("a === 1 && b === 2 || c === 3", { a: 1, b: 2, c: 0 })).toBe(true);
-    expect(ev("a === 0 && b === 2 || c === 3", { a: 1, b: 2, c: 3 })).toBe(true);
+    expect(ev("!.a && .b", { a: false, b: true })).toBe(true);
+    expect(ev(".a === 1 && .b === 2 || .c === 3", { a: 1, b: 2, c: 0 })).toBe(true);
+    expect(ev(".a === 0 && .b === 2 || .c === 3", { a: 1, b: 2, c: 3 })).toBe(true);
   });
 });
 
@@ -116,15 +116,15 @@ describe("calls", () => {
 
   it("parses a bare and a dotted callee, with any number of arguments", () => {
     expect(callOf("classify()")).toMatchObject({ type: "apply", op: "classify", args: [] });
-    expect(callOf("classify(inputs.issue)").op).toBe("classify");
-    expect(callOf("classify(inputs.issue)").args).toHaveLength(1);
+    expect(callOf("classify(.inputs.issue)").op).toBe("classify");
+    expect(callOf("classify(.inputs.issue)").args).toHaveLength(1);
     expect(callOf("lib.review(a, b, 'c')")).toMatchObject({ type: "apply", op: "lib.review" });
     expect(callOf("lib.review(a, b, 'c')").args).toHaveLength(3);
   });
 
   it("composes with the rest of the language", () => {
     // A call is an ordinary operand: it nests in operators, conditionals and other calls.
-    expect(() => parseExpression("classify(inputs.issue).severity === 'high'")).not.toThrow();
+    expect(() => parseExpression("classify(.inputs.issue).severity === 'high'")).not.toThrow();
     expect(() => parseExpression("f(a) && g(b)")).not.toThrow();
     expect(() => parseExpression("f(g(h(1)))")).not.toThrow();
     expect(() => parseExpression("cond ? f(a) : g(b)")).not.toThrow();
@@ -169,7 +169,7 @@ describe("calls", () => {
    * like a read of an undeclared namespace called `classify` — and the validator would reject it.
    */
   it("keeps the callee out of the data references, but not the arguments", () => {
-    const ast = parseExpression("classify(children.review.outputs.plan, inputs.n)");
+    const ast = parseExpression("classify(.children.review.outputs.plan, .inputs.n)");
     expect(referencesOf(ast)).toEqual([
       ["children", "review", "outputs", "plan"],
       ["inputs", "n"],
@@ -182,7 +182,7 @@ describe("calls", () => {
    * half-implemented.
    */
   it("cannot be interpreted, and says so", () => {
-    expect(() => ev("classify(inputs.n)", { inputs: { n: 1 } })).toThrow(/only the lowered form can run/);
+    expect(() => ev("classify(.inputs.n)", { inputs: { n: 1 } })).toThrow(/only the lowered form can run/);
   });
 
   /**
@@ -220,34 +220,34 @@ describe("PENDING propagation (SPEC §6/§10.4)", () => {
   };
 
   it("member access through PENDING is PENDING", () => {
-    expect(ev("children.review.outputs.report", ctx)).toBe(PENDING);
-    expect(ev("children.review.outputs", ctx)).toBe(PENDING);
+    expect(ev(".children.review.outputs.report", ctx)).toBe(PENDING);
+    expect(ev(".children.review.outputs", ctx)).toBe(PENDING);
   });
 
   it("operators touching PENDING yield PENDING", () => {
-    expect(ev("children.review.outputs.report === 'x'", ctx)).toBe(PENDING);
-    expect(ev("!children.review.outputs", ctx)).toBe(PENDING);
-    expect(ev("children.review.outputs.n < 3", ctx)).toBe(PENDING);
-    expect(ev("children.review.outputs.ok ? 1 : 2", ctx)).toBe(PENDING);
+    expect(ev(".children.review.outputs.report === 'x'", ctx)).toBe(PENDING);
+    expect(ev("!.children.review.outputs", ctx)).toBe(PENDING);
+    expect(ev(".children.review.outputs.n < 3", ctx)).toBe(PENDING);
+    expect(ev(".children.review.outputs.ok ? 1 : 2", ctx)).toBe(PENDING);
   });
 
   it("short-circuits on determinate values only", () => {
-    expect(ev("flag && children.review.outputs.ok", ctx)).toBe(false); // false && PENDING
-    expect(ev("truthy || children.review.outputs.ok", ctx)).toBe(1); // true || PENDING
-    expect(ev("children.review.outputs.ok && flag", ctx)).toBe(PENDING); // PENDING && x
-    expect(ev("children.review.outputs.ok || flag", ctx)).toBe(PENDING); // PENDING || x
-    expect(ev("truthy && children.review.outputs.ok", ctx)).toBe(PENDING); // true && PENDING
+    expect(ev(".flag && .children.review.outputs.ok", ctx)).toBe(false); // false && PENDING
+    expect(ev(".truthy || .children.review.outputs.ok", ctx)).toBe(1); // true || PENDING
+    expect(ev(".children.review.outputs.ok && .flag", ctx)).toBe(PENDING); // PENDING && x
+    expect(ev(".children.review.outputs.ok || .flag", ctx)).toBe(PENDING); // PENDING || x
+    expect(ev(".truthy && .children.review.outputs.ok", ctx)).toBe(PENDING); // true && PENDING
   });
 
   it("resolved children evaluate normally alongside pending ones", () => {
-    expect(ev("children.done.outcome === 'success'", ctx)).toBe(true);
-    expect(ev("children.done.outputs.report", ctx)).toBe("r");
+    expect(ev(".children.done.outcome === 'success'", ctx)).toBe(true);
+    expect(ev(".children.done.outputs.report", ctx)).toBe("r");
   });
 });
 
 describe("referencesOf (static analysis)", () => {
   it("collects root-anchored paths", () => {
-    const ast = parseExpression("children.critique.outputs.outcome === 'clean' && run.iteration < limits.max_iterations");
+    const ast = parseExpression(".children.critique.outputs.outcome === 'clean' && .run.iteration < .limits.max_iterations");
     expect(referencesOf(ast)).toEqual([
       ["children", "critique", "outputs", "outcome"],
       ["run", "iteration"],
@@ -256,8 +256,15 @@ describe("referencesOf (static analysis)", () => {
   });
 
   it("collects from every branch of ternary and unary", () => {
-    const ast = parseExpression("!a.b ? c.d : e");
+    const ast = parseExpression("!.a.b ? .c.d : .e");
     expect(referencesOf(ast)).toEqual([["a", "b"], ["c", "d"], ["e"]]);
+  });
+
+  it("collects nothing from a bare name, which reads no instance data", () => {
+    // A bare path is resolved along the search `path` at load, so it is not a runtime reference and
+    // must not be reported as one — the same reason a callee has never been collected.
+    expect(referencesOf(parseExpression("!a.b ? c.d : e"))).toEqual([]);
+    expect(referencesOf(parseExpression("classify(.inputs.issue)"))).toEqual([["inputs", "issue"]]);
   });
 });
 
@@ -267,12 +274,12 @@ describe("spec example expressions evaluate as documented", () => {
       outputs: { outcome: "needs_changes" },
       children: { human_review: {}, address_weaknesses: {} },
     };
-    expect(ev("children.human_review.outcome === 'success'", ctx)).toBe(false);
-    expect(ev("outputs.outcome === 'needs_changes'", ctx)).toBe(true);
+    expect(ev(".children.human_review.outcome === 'success'", ctx)).toBe(false);
+    expect(ev(".outputs.outcome === 'needs_changes'", ctx)).toBe(true);
   });
 
   it("§9 planning outcome mapping", () => {
     const ctx = { children: { critique: { outputs: { outcome: "clean" } }, context: { outputs: { plan_doc: "p" } } } };
-    expect(ev("children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'", ctx)).toBe("complete");
+    expect(ev(".children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'", ctx)).toBe("complete");
   });
 });

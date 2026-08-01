@@ -330,4 +330,15 @@ export interface OperationRecord<F extends RefFamily, R, M> {
   metrics: M;
   /** The principals who already own (were charged for) this record — memo-billing support. */
   createdBy?: string[];
+  /**
+   * The conversation this record belongs to, when it ran in one (DESIGN.md §1.6).
+   *
+   * A session is not a separate store: it IS the records sharing an `id` here, ordered by `seq`. That
+   * is why there is no message table anywhere — a record already holds what the call produced, and
+   * for a prompt op that payload is an `LlmOutput`, which carries the messages verbatim.
+   *
+   * `seq` is a RECORD index, not a message index. One call may add several messages; a position
+   * counts operations, which is the granularity the expression language exposes anyway.
+   */
+  session?: { id: string; seq: number };
 }
