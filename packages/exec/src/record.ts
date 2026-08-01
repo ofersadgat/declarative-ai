@@ -259,15 +259,68 @@ export function withSessionPosition<R = ExecServices, M extends ExecMetrics = Ex
         if (ctl.canceled()) return canceledFailure("canceled before the call started");
         const resolved = await sessions.resolve(request);
         const first = await attempt(resolved);
-        if (!isPositionTaken(first)) return first;
-        // FORK, not retry-at-the-next-slot. Something already claimed this position, so continuing
-        // here would mean continuing a conversation containing a turn this call never saw.
-        const forked = await sessions.fork(resolved.id, request.seed);
-        return await attempt(await sessions.resolve({ ...request, ref: forked, fork: false }));
+        if (isPositionTaken(first)) {
+          // FORK, not retry-at-the-next-slot. Something already claimed this position, so continuing
+          // here would mean continuing a conversation containing a turn this call never saw.
+          const forked = await sessions.fork(resolved.id, request.seed);
+          const second = await attempt(await sessions.resolve({ ...request, ref: forked, fork: false }));
+          return await checkDivergence(sessions, resolved, second, ctx);
+        }
+        return await checkDivergence(sessions, resolved, first, ctx);
       });
     },
   })) as unknown as ExecutorWrapper<R, R, M>;
   return curryOrApply(wrap, inner);
+}
+
+/**
+ * Notice that the remote moved underneath us, and answer it with a `resync` (SESSIONS.md §11).
+ *
+ * The check is cheap and exact: we RESUMED a handle, the call reports the handle it actually ended
+ * in, and on an append those must agree. When they do not, the provider's conversation is no longer
+ * the one our mirror describes — server-side compaction did it (Managed Agents does this on its own),
+ * or somebody resumed the session outside JaiRA.
+ *
+ * VERIFY ON APPEND rather than trusting: a stale mirror is silent, and the next call would replay a
+ * digest that no longer describes what the provider will send.
+ *
+ * Answering it is deliberately not "carry on". The id is a content commitment, and the same reasoning
+ * that makes an unresolvable id an error applies here — so this LOGS, then starts a new conversation
+ * with a `resync` edge whose contents are re-read from the provider. Where the adapter has no read
+ * API, the new conversation starts EMPTY, and that emptiness is visible on the edge rather than being
+ * mistaken for a conversation that happened to have nothing in it.
+ *
+ * A FORK is exempt: a new handle is exactly what a native fork returns, and calling that divergence
+ * would resync on every branch.
+ */
+async function checkDivergence(
+  sessions: SessionStore,
+  resolved: ResolvedSession,
+  result: ExecResult<ResolvedValue, ExecMetrics>,
+  ctx: ExecServices,
+): Promise<ExecResult<ResolvedValue, ExecMetrics>> {
+  const resumed = resolved.providerSessionId;
+  const reported = sessionOutcomeOf(result)?.providerSessionId;
+  if (resolved.mode !== "append" || resumed === undefined || reported === undefined || reported === resumed) return result;
+
+  const reason = `session ${resolved.id} diverged: resumed provider session ${resumed}, but the call ran in ${reported}`;
+  ctx.onDivergence?.({ session: resolved.id, resumed, reported, reason });
+
+  if (sessions.resync === undefined) return result;
+  // Re-read from the provider when it offers a way to. `read` is per-adapter and optional — the
+  // Messages API has none and, being stateless, cannot diverge in the first place.
+  let contents: readonly unknown[] = [];
+  try {
+    contents = (await ctx.sessionReader?.read(reported)) ?? [];
+  } catch {
+    // A failed re-read is still a resync, just an empty one. Losing the conversation is bad; carrying
+    // on against a mirror we know is wrong is worse.
+    contents = [];
+  }
+  const resynced = await sessions.resync(resolved.id, contents as never);
+  // The outcome points at the RESYNCED conversation, so whatever continues from here continues from
+  // what the provider actually has rather than from what we thought it had.
+  return { ...result, metrics: { ...result.metrics, sessionRef: resynced } };
 }
 
 /** Forward a per-op capability lookup, if the inner executor has one. Recording changes nothing. */

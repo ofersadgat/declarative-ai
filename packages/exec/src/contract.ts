@@ -328,6 +328,22 @@ export interface ExecServices {
    * `exec`, where resolving one would drag in the layer it is not allowed to depend on.
    */
   sessionRequest?: SessionRequest;
+  /**
+   * Reads a conversation back FROM the provider, for re-syncing after divergence (SESSIONS.md §11).
+   *
+   * Per-adapter and optional, because the capability genuinely is: Claude Code has
+   * `getSessionMessages()`, Managed Agents has `events.list`, and the Messages API has neither — and
+   * needs neither, being stateless and therefore unable to diverge. Absent ⇒ a resync starts EMPTY,
+   * which the edge records rather than passing off as a conversation that happened to be empty.
+   */
+  sessionReader?: { read(providerSessionId: string): Promise<readonly unknown[]> };
+  /**
+   * Told when the remote moved underneath us, before anything is done about it.
+   *
+   * §11 says to log and then resync, in that order and both: the resync keeps the run going, and the
+   * log is what stops a silently-diverging provider looking like normal operation.
+   */
+  onDivergence?: (event: { session: string; resumed: string; reported: string; reason: string }) => void;
   /** The workspace the current operation acts within — a Session-owned resource. */
   workspace?: Workspace;
   /** Per-call wall-clock budget (ms). Was `PromptOpEnvironment.timeoutMs`. */
@@ -496,7 +512,7 @@ export const defaultMessagesOf = <Msg>(record: { result?: { value?: unknown } })
 export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
   /** Lineage only. A branch's own records live in `rows`; its prefix is its parent's. */
   private readonly branches = new Map<string, { parent?: string; cursor: number }>();
-  private readonly rows = new Map<string, Map<number, { id: string; result?: { value?: unknown } }>>();
+  private readonly rows = new Map<string, Map<number, { id: string; result?: { value?: unknown }; externalId?: string }>>();
   private minted = 0;
 
   constructor(private readonly messagesOf: MessagesOf<Msg> = defaultMessagesOf) {}
@@ -514,9 +530,14 @@ export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
       seq = this.head(id);
       mode = "fork";
     }
+    // The provider handle this conversation currently sits on, read off its LATEST record — there is
+    // no handle map, because a conversation is locked to the provider it was used with. A FORK gets
+    // none: inheriting the parent's handle would put two branches into one remote session.
+    const handle = mode === "append" ? this.handleAt(id, seq) : undefined;
     return resolveSessionRef<Msg>(join(id, seq), {
       mode,
       at: { id, seq },
+      ...(handle !== undefined ? { providerSessionId: handle } : {}),
       messages: async () => this.materialize(id, seq),
     });
   }
@@ -551,7 +572,7 @@ export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
     this.rows.set(at.id, rows);
   }
 
-  close(id: string, settled: { result?: { value?: unknown }; sessionOutcome?: { messages?: readonly unknown[] } }): void {
+  close(id: string, settled: { result?: { value?: unknown }; sessionOutcome?: { messages?: readonly unknown[]; providerSessionId?: string } }): void {
     for (const rows of this.rows.values()) {
       for (const row of rows.values()) {
         if (row.id === id) {
@@ -560,6 +581,11 @@ export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
           // what the conversation is made of. Preferring it keeps `messagesOf` reading one shape.
           const reported = settled.sessionOutcome?.messages;
           row.result = reported !== undefined ? { value: { messages: reported } } : settled.result;
+          // The handle the call ENDED in. Kept per record rather than per conversation so that reading
+          // it at an earlier position reports what was true THEN — which is what makes a mismatch on
+          // the next call detectable as divergence rather than invisible.
+          const handle = settled.sessionOutcome?.providerSessionId;
+          if (handle !== undefined) row.externalId = handle;
           return;
         }
       }
@@ -597,6 +623,21 @@ export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
       }
     }
     return out;
+  }
+
+  /** The latest handle at or before a position, walking the lineage as materializing does. */
+  private handleAt(id: string, upTo: number): string | undefined {
+    let at: string | undefined = id;
+    let bound = upTo;
+    while (at !== undefined) {
+      const rows = [...(this.rows.get(at) ?? new Map()).entries()].sort(([a], [b]) => b - a);
+      for (const [seq, row] of rows) if (seq < bound && row.externalId !== undefined) return row.externalId;
+      const branch: { parent?: string; cursor: number } | undefined = this.branches.get(at);
+      if (branch?.parent === undefined) return undefined;
+      bound = branch.cursor;
+      at = branch.parent;
+    }
+    return undefined;
   }
 
   /** The next position an append would occupy. A branch's own records begin at its cursor. */

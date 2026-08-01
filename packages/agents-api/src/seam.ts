@@ -106,5 +106,20 @@ export interface AgentStreamMessage {
   error?: string;
 }
 
+/**
+ * Read a provider-side conversation back, for re-syncing after the remote moved (SESSIONS.md §11).
+ *
+ * Separate from {@link AgentQuery} because it is a genuinely separate capability, and an optional
+ * one: Claude Code has `getSessionMessages()`, Managed Agents has `events.list`, the Messages API has
+ * neither — and needs neither, being stateless and therefore unable to diverge. An adapter without
+ * one leaves a resync EMPTY, which the lineage edge records rather than passing off as a conversation
+ * that happened to be empty.
+ *
+ * ⚠️ Bound to the same cwd the session was created in, for the same reason `resume` is — transcripts
+ * are per-project-directory files. Reading from elsewhere finds nothing, which is indistinguishable
+ * from a conversation with no messages.
+ */
+export type AgentSessionReader = (providerSessionId: string, cwd?: string) => Promise<readonly unknown[]>;
+
 /** The seam: run an agent query and yield its message stream. */
 export type AgentQuery = (opts: AgentQueryOptions) => AsyncIterable<AgentStreamMessage>;

@@ -395,3 +395,25 @@ describe("native session resume and fork", () => {
     expect(seen()?.resume).toBeUndefined();
   });
 });
+
+/** The provider READ seam (SESSIONS.md §11) — what a resync re-reads from. */
+describe("reading a conversation back", () => {
+  it("offers a reader only when the adapter was given one", () => {
+    // The distinction is load-bearing: no reader means a resync starts EMPTY, and §11 requires that
+    // to be visible on the edge rather than mistaken for a conversation that had nothing in it.
+    expect(createClaudeCodeFunction({}).sessionReader).toBeUndefined();
+    expect(createClaudeCodeFunction({ readSession: async () => [] }).sessionReader).toBeDefined();
+  });
+
+  it("reads by the provider's own session id", async () => {
+    const seen: string[] = [];
+    const fn = createClaudeCodeFunction({
+      readSession: async (id) => {
+        seen.push(id);
+        return [{ role: "user", content: "from the provider" }];
+      },
+    });
+    expect(await fn.sessionReader!.read("sess-abc")).toEqual([{ role: "user", content: "from the provider" }]);
+    expect(seen).toEqual(["sess-abc"]);
+  });
+});

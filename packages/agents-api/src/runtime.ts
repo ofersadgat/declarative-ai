@@ -34,7 +34,7 @@ import {
 } from "@declarative-ai/exec";
 import type { Approver } from "@declarative-ai/permissions";
 import { sdkAgentQuery } from "./sdkQuery";
-import type { AgentPermissionMode, AgentQuery, AgentQueryOptions, AgentResult, InjectedTool } from "./seam";
+import type { AgentPermissionMode, AgentQuery, AgentQueryOptions, AgentResult, AgentSessionReader, InjectedTool } from "./seam";
 
 /** Delegated agents: schema-constrained output isn't guaranteed (they answer in text), they mutate the
  *  workspace, run their own non-deterministic loop (not memoizable), gate tools via a callback, and are
@@ -77,6 +77,14 @@ export interface ClaudeCodeFunctionOptions {
    *  NATIVE built-in `ref.native` (aliased) instead of being MCP-injected — so a run can use the agent's own
    *  `Read` for `read_file` while still injecting our `bash`. Ignored tools default to injection. */
   nativeTools?: Record<string, NativeToolRef>;
+  /**
+   * Reads a provider-side conversation back, for re-syncing after divergence (SESSIONS.md §11).
+   *
+   * Injected rather than reached for directly, exactly as {@link ClaudeCodeFunctionOptions.query} is:
+   * it is a second call into the SDK, and a test has to stand in for it without a provider. Absent ⇒
+   * this adapter offers no read capability, and a resync starts empty.
+   */
+  readSession?: AgentSessionReader;
 }
 
 /** Thrown when the delegated agent fails or is canceled. The invoking executor classifies it (a
@@ -117,12 +125,19 @@ export interface AgentMetrics extends ExecMetrics, BudgetMetrics {}
 export function createClaudeCodeFunction(options: ClaudeCodeFunctionOptions = {}): {
   capabilities: RuntimeCapabilities;
   run: (inputs: FunctionInputs, ctx: ExecServices) => Promise<FunctionResult<string, AgentMetrics>>;
+  /** The provider read seam a host wires into `ctx.sessionReader`, when this adapter has one. */
+  sessionReader?: { read(providerSessionId: string): Promise<readonly unknown[]> };
 } {
   const query = options.query ?? sdkAgentQuery;
   const inject = options.injectTools ?? true;
   const nativeMap = options.nativeTools ?? {};
+  const readSession = options.readSession;
   return {
     capabilities: options.capabilities ?? DELEGATED_CAPS,
+    // Present only when this adapter can actually read a conversation back. The distinction is
+    // load-bearing: an absent reader means a resync starts EMPTY, and §11 requires that to be visible
+    // rather than mistaken for a conversation that happened to have nothing in it.
+    ...(readSession !== undefined ? { sessionReader: { read: (id: string) => readSession(id) } } : {}),
     run: (inputs: FunctionInputs, ctx: ExecServices): Promise<FunctionResult<string, AgentMetrics>> => {
       // Errors are DATA (§4.2). The adapter still THROWS internally — an agent SDK is an exception-shaped
       // world — so `liftThrowing`'s classification is applied at the seam, which is what turns a 429 or an
