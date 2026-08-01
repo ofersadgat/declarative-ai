@@ -873,7 +873,6 @@ export class WorkflowEngine {
       },
       limits: { ...(instance.def.limits ?? {}) },
       artifacts,
-      conversations: Object.fromEntries(this.transcripts),
     };
   }
 

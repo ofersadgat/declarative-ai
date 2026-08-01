@@ -115,6 +115,24 @@ describe("PENDING propagates through a lowered tree exactly as it does through t
   }
 });
 
+describe("messages() — a conversation is read by REF, and its turns are typed", () => {
+  const scope = { inputs: { type: "object", properties: { s: { type: "object", properties: { id: { type: "string" } } } } } } as never;
+  const infer = (src: string): ReturnType<typeof inferExpression> => inferExpression(parseExpression(src), scope);
+
+  it("lowers onto the conversation resolver, with the ref as its argument", () => {
+    const ref = lowerExpression(parseExpression("messages(.inputs.s)"));
+    expect(ref).toMatchObject({ op: { kind: "function", functionRef: "conversation.get" } });
+  });
+
+  it("infers an array of turns, so reading a turn is checked", () => {
+    expect(infer("messages(.inputs.s)").schema).toMatchObject({ type: "array" });
+    // `.content` projects to a string; a typo does not project at all, which is the point of
+    // typing a closed shape rather than leaving a call's result universal.
+    expect(infer("at(messages(.inputs.s), -1).content").unresolved).toEqual([]);
+    expect(infer("at(messages(.inputs.s), -1).text").schema).toBeDefined();
+  });
+});
+
 describe("pathOfRef recovers the reference a lowered sub-tree reads", () => {
   const pathOf = (src: string): string[] | undefined => pathOfRef(lowerExpression(parseExpression(src)));
 

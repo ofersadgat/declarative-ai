@@ -145,6 +145,18 @@ const NON_TREE_FORMS: Readonly<Record<string, readonly string[]>> = {
   expr: [],
 };
 
+/**
+ * The id inside a session ref — `{ id }`, the one enumerable field {@link SESSION_REF} declares.
+ *
+ * A bare string is refused deliberately. It would be a second spelling, and the plausible one to
+ * write by hand is a session NAME, which no longer addresses anything: names became positions.
+ */
+function sessionIdOf(value: unknown): string | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const id = (value as { id?: unknown }).id;
+  return typeof id === "string" && id !== "" ? id : undefined;
+}
+
 /** The offending keyword when a tree node is really a producer edge or unlowered sugar. */
 function nonTreeFormOf(node: Record<string, unknown>): string | undefined {
   const keys = Object.keys(node);
@@ -293,12 +305,18 @@ function runResolver(op: Operation<InlineFamily> & { kind: "function" }, scope: 
       return v === undefined ? { error: `artifact '${name}' is not available` } : { value: v };
     }
     case RESOLVER_REFS.conversation: {
-      const session = text("session");
-      if (session === undefined) return { error: "conversation producer has no session" };
-      const messageArg = arg("message");
-      const message = messageArg && isResolvedValue(messageArg) && typeof messageArg.value === "number" ? messageArg.value : undefined;
-      const v = scope.conversation(session, message);
-      return v === undefined ? { error: `conversation '${session}' is not available` } : { value: v };
+      // A session REF, not a name. The engine mirrors transcripts under the session's id — a
+      // POSITION, `planning@3` — so a name only ever matched a conversation that had had no calls,
+      // which is the one nobody wants to read. The ref comes from `.operation.outputs.session`,
+      // which is how a conversation is addressable at all once it is a position rather than a name.
+      const sessionArg = arg("session");
+      if (sessionArg === undefined || !isResolvedValue(sessionArg)) return sessionArg ?? { error: "messages() has no session" };
+      const id = sessionIdOf(sessionArg.value);
+      if (id === undefined) {
+        return { error: `messages() needs a session ref ({ id }), got ${JSON.stringify(sessionArg.value)}` };
+      }
+      const v = scope.conversation(id, undefined);
+      return v === undefined ? { error: `the conversation at '${id}' is not available` } : { value: v };
     }
     // --- Operators (EXPRESSIONS.md §2) ----------------------------------------
     //

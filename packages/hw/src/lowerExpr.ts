@@ -197,6 +197,7 @@ function parametersFor(args: Record<string, Ref<InlineFamily>>): Record<string, 
 
 /** The resolver refs an expression lowers onto — the operators, plus the two that read data. */
 export const EXPRESSION_REFS: ReadonlySet<string> = new Set<string>([
+  RESOLVER_REFS.conversation,
   RESOLVER_REFS.context,
   RESOLVER_REFS.member,
   RESOLVER_REFS.not,

@@ -781,7 +781,6 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle): ExprScope {
     children: { type: "object", properties: childrenProps },
     // Session-owned resources: addressable, contents known only at run time.
     artifacts: { type: "object" },
-    conversations: { type: "object" },
     // Guard-only control-flow scalars (§7.5) — never a reference binding.
     run: {
       type: "object",

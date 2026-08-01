@@ -368,7 +368,7 @@ cases.
 | `".inputs.issue"` | This state's declared input, by name. | a `scope.get` producer |
 | `{ "expr": ".outputs.weaknesses" }` | A small computation in the expression DSL (§6). | an `expr.eval` producer whose output schema is the inferred type |
 | `".artifacts.design_doc"` | A session-owned artifact, by name. | an `artifact.get` producer |
-| `".conversations.review.messages.3"` | A session's transcript, or one message of it. | a `conversation.get` producer |
+| `"messages(<session ref>)"` | A conversation, by ref — a session is a position, not a name. | a `conversation.get` producer |
 
 Every sugar becomes a **producer edge** (or a literal), so the base vocabulary stays closed
 and one uniform mechanism resolves all wiring: a producer edge on a declared child resolves
@@ -684,7 +684,6 @@ children.<id>.outcome
 operation.*
 children.<id>.operation.*
 artifacts.*
-conversations.*
 ```
 
 `operation.*` is the state's **own** call as an addressable node, which is what makes engine metadata

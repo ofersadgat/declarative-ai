@@ -127,6 +127,10 @@ export const OPERATOR_PARAMS: Readonly<Record<string, readonly string[]>> = {
   [RESOLVER_REFS.cond]: ["test", "then", "else"],
   [RESOLVER_REFS.member]: ["value", "prop"],
   [RESOLVER_REFS.context]: ["name"],
+  // `messages(session)` — the ONE way to read a conversation. It is a resolver rather than a pure
+  // builtin because it reads the run's mirrored transcripts; `builtins.ts` is pure and synchronous
+  // by construction and has no scope to read.
+  [RESOLVER_REFS.conversation]: ["session"],
 };
 
 // --- Lexer -------------------------------------------------------------------
@@ -137,6 +141,17 @@ type Token =
   | { kind: "ident"; value: string; pos: number }
   | { kind: "punct"; value: string; pos: number }
   | { kind: "eof"; pos: number };
+
+/**
+ * Authored names for operations the ENGINE computes, mapped to the ref they mean.
+ *
+ * The same move `BINARY_OPS` makes for `===`: syntax is sugar, the operation is the meaning, and the
+ * AST carries the operation. So `messages(s)` and `a === b` are one kind of node by the time anything
+ * downstream looks, and neither needs a case of its own.
+ */
+const OPERATION_ALIASES: Readonly<Record<string, string>> = {
+  messages: RESOLVER_REFS.conversation,
+};
 
 const PUNCT = ["===", "!==", "==", "!=", "<=", ">=", "&&", "||", "<", ">", "!", "?", ":", "(", ")", ".", ",", "/"];
 const IDENT_START = /[A-Za-z_$]/;
@@ -344,7 +359,7 @@ class Parser {
         const callee = reference ?? pathOf(e)?.join(".");
         if (callee === undefined) throw new ExprError("only a name may be called", at);
         this.next();
-        e = { type: "apply", op: callee, args: this.args() };
+        e = { type: "apply", op: OPERATION_ALIASES[callee] ?? callee, args: this.args() };
         reference = undefined;
         continue;
       }

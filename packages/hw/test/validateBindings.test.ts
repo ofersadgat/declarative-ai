@@ -123,8 +123,6 @@ describe("what a producer edge may name (§7.4)", () => {
 
   it("still accepts the session-owned resolvers, whose contents are only known at run time", () => {
     expect(messages(withBinding(".artifacts.spec"), "root")).toBe("");
-    expect(messages(withBinding(".conversations.default"), "root")).toBe("");
-    expect(messages(withBinding(".conversations.default.messages.0"), "root")).toBe("");
   });
 
   it("still accepts the ordinary literal and scope forms", () => {

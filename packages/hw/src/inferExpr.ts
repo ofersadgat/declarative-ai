@@ -25,6 +25,14 @@ const BOOLEAN: JsonSchema = { type: "boolean" };
 const NUMBER: JsonSchema = { type: "number" };
 const INTEGER: JsonSchema = { type: "integer" };
 const STRING: JsonSchema = { type: "string" };
+/** One conversation turn, and the array `messages()` yields. Mirrors the engine's `Turn`. */
+const TURN: JsonSchema = {
+  type: "object",
+  properties: { role: { type: "string", enum: ["user", "assistant"] }, content: { type: "string" } },
+  required: ["role", "content"],
+  additionalProperties: false,
+};
+const TURNS: JsonSchema = { type: "array", items: TURN };
 const NULL: JsonSchema = { type: "null" };
 
 /** True when a schema constrains nothing — the inference result for an unknown reference. */
@@ -117,6 +125,12 @@ function inferOne(ref: Ref<InlineFamily>, scope: ExprScope, unresolved: string[]
       }
       return projected;
     }
+    case RESOLVER_REFS.conversation:
+      // `messages(s)` is an array of turns, TYPED — so `at(messages(s), -1).content` checks and
+      // `.text` is a lint error rather than a comparison that is quietly always false. The same
+      // property `run.cursor` has, and the reason for typing a closed shape at all.
+      operand("session");
+      return TURNS;
     case RESOLVER_REFS.not:
       operand("value");
       return BOOLEAN; // `!x` is boolean whatever `x` is
@@ -182,6 +196,8 @@ function infer(expr: Expr, scope: ExprScope, unresolved: string[][]): JsonSchema
       // scope — unknown rather than wrong, until the loader has resolved it.
       const args = expr.args.map((a) => infer(a, scope, unresolved));
       switch (expr.op) {
+        case RESOLVER_REFS.conversation:
+          return TURNS; // `messages(s)` — see the tree case below, which must agree
         case RESOLVER_REFS.not:
           return BOOLEAN; // `!x` is boolean whatever `x` is
         case RESOLVER_REFS.and:

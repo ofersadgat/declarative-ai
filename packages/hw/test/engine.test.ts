@@ -548,11 +548,17 @@ describe("conversation modes (SPEC §4.7)", () => {
     expect(promptOf(fake.calls[2]!)).not.toContain("Extract goals");
   });
 
-  it("a { conversation } binding wires a prior transcript in as DATA (§7.5)", async () => {
+  /**
+   * A conversation is addressed by REF, so reading a sibling's means the ref flows as data: the
+   * parent wires `.children.goals.operation.outputs.session` in, and the consumer calls `messages()`
+   * on it. There is no name to look one up by — a session is a position, and the namespace that
+   * pretended otherwise could only ever address a conversation with no messages in it.
+   */
+  it("messages() wires a prior transcript in as DATA (§7.5)", async () => {
     const files = specPlanningFiles();
-    // The critique state summarizes the planners' earlier session instead of reading its preamble:
-    // `conversations` is part of the REF vocabulary, so a transcript is an ordinary wired input.
+    files[PLAN_ID]!.children!.critique!.inputs!.planners = ".children.goals.operation.outputs.session";
     const critique = files["feature/plan/critique"]!;
+    critique.inputs = { ...critique.inputs, planners: { kind: "json" } };
     critique.environment = { conversation: { mode: "fresh" } };
     critique.operation = {
       kind: "prompt",
@@ -560,7 +566,7 @@ describe("conversation modes (SPEC §4.7)", () => {
       // An operation's bound input slots render under `{{.inputs.*}}` — the one namespace a template
       // sees, the operation's resolved inputs (state inputs plus the op's own bound inputs).
       prompt: "Summarize this transcript: {{.inputs.history}}",
-      input: { history: { kind: "json", binding: ".conversations.planning" } },
+      input: { history: { kind: "json", binding: "messages(.inputs.planners)" } },
     };
     const { engine, fake } = makeEngine(files, PLAN_ID, planningScript());
     await engine.run({ inputs: { issue: "the issue" } });
@@ -572,15 +578,17 @@ describe("conversation modes (SPEC §4.7)", () => {
     expect(criticPrompt).toContain("Extract goals");
   });
 
-  it("a { conversation } binding can select one message of a transcript", async () => {
+  it("messages() composes with the array builtins to select one turn", async () => {
     const files = specPlanningFiles();
+    files[PLAN_ID]!.children!.critique!.inputs!.planners = ".children.goals.operation.outputs.session";
     const critique = files["feature/plan/critique"]!;
+    critique.inputs = { ...critique.inputs, planners: { kind: "json" } };
     critique.environment = { conversation: { mode: "fresh" } };
     critique.operation = {
       kind: "prompt",
       model: "critic",
       prompt: "First turn was: {{.inputs.first}}",
-      input: { first: { kind: "json", binding: ".conversations.planning.messages.0" } },
+      input: { first: { kind: "json", binding: "at(messages(.inputs.planners), 0).content" } },
     };
     const { engine, fake } = makeEngine(files, PLAN_ID, planningScript());
     await engine.run({ inputs: { issue: "the issue" } });

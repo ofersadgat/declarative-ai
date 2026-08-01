@@ -572,6 +572,6 @@ export interface WorkflowBundle {
  * The old `function.*` namespace is GONE: a function state's result is an ordinary state output,
  * so guards read `outputs.*` / `children.<key>.outputs.*` uniformly.
  */
-export const REF_NAMESPACES = ["inputs", "outputs", "operation", "children", "artifacts", "conversations"] as const;
+export const REF_NAMESPACES = ["inputs", "outputs", "operation", "children", "artifacts"] as const;
 export const GUARD_NAMESPACES = ["run", "limits"] as const;
 export const CONTEXT_NAMESPACES = [...REF_NAMESPACES, ...GUARD_NAMESPACES] as const;

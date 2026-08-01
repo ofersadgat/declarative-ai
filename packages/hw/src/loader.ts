@@ -199,22 +199,11 @@ function desugarRuntimeReference(reference: string, where: string, stateId: stri
       if (rest.length !== 1) bad("must name exactly one artifact, as '.artifacts.<name>'");
       return resolverEdge(RESOLVER_REFS.artifact, { name: { text: rest[0]! } });
     }
-    case "conversations": {
-      const [session, section, index] = rest;
-      if (session === undefined) bad("must name a session, as '.conversations.<session>'");
-      const args: Record<string, Ref<InlineFamily>> = { session: { text: session! } };
-      if (section !== undefined) {
-        if (section !== "messages" || index === undefined || !/^\d+$/.test(index)) {
-          bad("must be '.conversations.<session>' or '.conversations.<session>.messages.<n>'");
-        }
-        args.message = { json: Number(index) };
-      }
-      return resolverEdge(RESOLVER_REFS.conversation, args);
-    }
     default:
       return bad(
         `starts with '${String(namespace)}', which is not a runtime namespace — ` +
-          `expected inputs, outputs, children, artifacts or conversations`,
+          `expected inputs, outputs, children or artifacts — a conversation is read with ` +
+          `messages(<session ref>), since a session is a position and not a name`,
       );
   }
 }
