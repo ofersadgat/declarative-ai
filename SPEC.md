@@ -533,10 +533,11 @@ A state selects its mode in `operation.conversation` (§7.1); the selected pream
 into that state's own call. It may be inherited from an ancestor's `environment`, so a subtree can
 be put on one mode in one place.
 
-Transcripts are scoped per **session** (`operation.session`, DESIGN.md §5.1):
-`full_history` threads the prior exchanges of the *same* session. States that declare no session share
-the run's default session (so a plain workflow threads history across all its states); a distinct
-`operation.session` isolates a subtree's conversation.
+Transcripts are scoped per **session** (`operation.session`, DESIGN.md §1.6/§5.1):
+`full_history` threads the prior exchanges of the *same* session. A state that declares no session gets
+its OWN conversation — there is no run-wide default to fall into, since an implicit shared transcript is
+what drives unbounded context growth. Threading across states is asked for, by naming a session once at a
+common ancestor's `environment` and letting the inheritance chain carry it down.
 
 Injecting a preamble and *reading a transcript as data* are different things. The `operation.conversation`
 block is the preamble; a `{ "conversation": "<session>", "message": n }` binding (§4.2) wires a
@@ -810,9 +811,10 @@ Everything about *how* an operation runs — as opposed to what it is — is wri
 alongside the rest, because each of these is a per-CALL decision:
 
 ```text
-session       Logical session id this state runs under; owns the conversation transcript,
-              workspace, and permissions. Same id across states ⇒ a shared session; absent ⇒
-              the run's default session.
+session       A session ref — an append-only conversation AT a position (DESIGN.md §1.6).
+              Same ref across states ⇒ one conversation; absent ⇒ this state gets its own,
+              and `null` says so explicitly. The DECLARED name separately keys the state's
+              workspace and permissions, which are inherited when nothing is declared.
 tools         Logical names of tools the operation may call mid-loop, resolved through
               registry.tools. A composed prompt operation runs them in a bounded loop; a
               delegated agent is handed the allow-list.

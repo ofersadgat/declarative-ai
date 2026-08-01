@@ -103,7 +103,9 @@ core (§3.2). Two properties make this safe rather than fragile:
 
 - **Order encodes semantics.** `memoize` outermost caches the final (post-repair) result; per-attempt
   concerns (`rateLimit`/`deadline`) sit innermost so they apply to each attempt; `memoize` must not wrap a
-  `session` layer (session state isn't in the memo key), and it throws at composition time if you try.
+  `session` layer — from outside, the resolved conversation is invisible, so a hit would replay a stale
+  answer and skip the append — and it throws at composition time if you try. Inside one it is sound, and
+  folds `ctx.session`'s POSITION into the key alongside `workspaceTreeHash`.
 - **Loud failure, not silent degradation.** Each wrapper *consumes* its own trigger (`withDeadline` strips
   `ctx.deadline`; `withSession` strips the declaration's session ids), and the bare core **refuses** anything
   left unconsumed. A mis-composed stack fails immediately with a clear message. The `compose(core).with(…)`
@@ -132,14 +134,28 @@ resolve (defaults ← configRef ← inline; family-aware, replace-with-warning)
 
 ### 1.6 Sessions
 
-A declaration carries a **logical** `sessionId` (portable, store-resolved) and/or an **explicit**
-`providerSessionId` (an exact server handle, usually threaded as runtime data). The provider handle never
-enters the portable declaration; it lives in the session store, keyed by the logical id — the execution result carries no session field. Resolution
-precedence: `sessionId` present in the store → resume it; `sessionId` absent → new session, seed it; else
-`providerSessionId` → resume exactly; else stateless. Client-side and provider-side sessions are the same
-seam storing different things (a transcript vs a provider handle) — a wiring choice, not two mechanisms.
-`withSession` implements the client-managed (transcript) path; the provider-handle path lands with the
-agent-sdk executor (§4.4). The store seams themselves are §3.6.
+A session is an **append-only conversation**, and a declaration's `sessionId` is a **session ref** naming
+one *at a position*. That single choice makes "continue from here" and "branch from here" the same
+primitive: an id commits to content, so holding one is holding a fact rather than a name that may since
+have moved. The ref is **opaque** — no executor parses it, and only the store reads its structure.
+
+Resolution is a **reservation**, not an observation. `withSessionPosition` claims the next position before
+the call goes out, so two writers racing the same conversation collide instead of both reading one head;
+the loser FORKS. That is the whole of the repair-versus-retry rule, derived rather than configured: a
+repair appends (the position it wants is free), a retry forks (the position it wants is taken). Nothing
+switches on "is this a retry" — it falls out of whether the position was already claimed.
+
+`providerSessionId` is honoured, not refused: an adapter that resumes natively (Claude Code `--resume`,
+the Agent SDK) gets the handle from the record at the resolved position, and one that cannot replays the
+materialized messages instead. A fork does not carry the handle across its first append, because two
+branches must not write into one remote session. A call that comes back reporting a *different* handle
+than the one it resumed is **divergence** — logged, and repairable by resync.
+
+Compaction produces a **new** session with an edge back to the intact original. It is not a fork: a fork's
+prefix is byte-identical, and a compacted conversation opens with a summary appearing nowhere in its
+origin. `withSession` composes over a record-mode core with `withRecord` inside it — the payload IS the
+conversation, so projecting it down to the op's output value any earlier would destroy what the record has
+to store. The store seams themselves are §3.6; JaiRA's `SESSIONS.md` is the full model.
 
 ### 1.7 Naming
 
@@ -374,7 +390,10 @@ interface ExecServices {
   stepStartMs?: number;             // step-start origin for deadline arithmetic
   executor?: Executor;              // composite ops execute children through this
   tools?: Record<string, Tool>;     // executables the current operation may call mid-loop
-  sessions?: SessionStore;          // run-scoped, logical-id-keyed
+  sessions?: SessionStore;          // run-scoped conversation lineage + resolution
+  records?: RecordStore;            // where executions are RECORDED; a session IS its records
+  sessionRequest?: SessionRequest;  // what the caller WANTS; `session` is where it resolved
+  session?: ResolvedSession;        // set by withSessionPosition, read by the executor
   workspace?: Workspace;            // { root, treeHash? } — a Session-owned resource
   timeoutMs?: number;               // per-call wall-clock budget
   maxCostUsd?: number;              // per-call cost ceiling
@@ -516,21 +535,28 @@ One optional environment seam (`@declarative-ai/exec` `contract.ts`), kept as a 
 engine, the LLM layer, and consumers all share it:
 
 ```ts
-// Mutable, keyed by a LOGICAL session id — a conversation's transcript, or a provider handle.
-interface SessionState<Msg = JsonValue> { messages?: Msg[]; providerSessionId?: string; }
+// A conversation is APPEND-ONLY, and a ref names one AT a position. Lineage and resolution live here;
+// the messages do not — a session IS the OperationRecords sharing a session id.
 interface SessionStore<Msg = JsonValue> {
-  get(logicalId: string): SessionState<Msg> | undefined | Promise<SessionState<Msg> | undefined>;
-  put(logicalId: string, state: SessionState<Msg>): void | Promise<void>;
+  resolve(request: SessionRequest): ResolvedSession<Msg> | Promise<ResolvedSession<Msg>>;
+  fork(ref: string, seed?: string): string | Promise<string>;
+  messages(ref: string): Msg[] | Promise<Msg[]>;
+  compact?(ref: string, messages: readonly Msg[]): string | Promise<string>;
+  resync?(ref: string, messages: readonly Msg[]): string | Promise<string>;
 }
 ```
 
-- **Optional.** An absent seam means the capability is simply unavailable: a `sessionId` with no session
-  store is an error at resolve/execute time — never a silent no-op (loud-failure discipline).
-- **`SessionStore`** backs the client-managed conversation model of §1.6. The `withSession` wrapper resolves
-  the logical id against it, prepends the stored transcript to the new turn, and folds the successful reply
-  back. A workflow injects a **run-scoped** store via `ctx.sessions` so states sharing a `sessionId` continue
-  one conversation (§7); an app-provided store takes precedence. `MapSessionStore` is the bundled in-memory
-  implementation; apps supply durable ones.
+- **Optional.** An absent seam means the capability is simply unavailable: a session with no store is an
+  error at resolve/execute time — never a silent no-op (loud-failure discipline).
+- **There is no `get`/`put`.** An observe-then-write pair cannot express the position reservation: two
+  calls both read head == 14, both decide "append", and the one that resumed a provider handle has
+  already appended remotely by the time it loses. `withSessionPosition` resolves; `withRecord` claims the
+  position by writing a record stub, and the store's uniqueness on `(session, seq)` IS the reservation —
+  durable and cross-process, where a lock is neither. A loser FORKS; it must never retry at the next slot.
+- A workflow injects a **run-scoped** store via `ctx.sessions` so states naming one conversation continue
+  it (§7); an app-provided store takes precedence. `MapSessionStore` is the bundled in-memory
+  implementation — it holds lineage AND records, because in the small the two are inseparable; apps
+  supply durable ones. JaiRA's `SESSIONS.md` is the full model.
 
 **There is no blob store.** Binary data is a leaf VALUE, so hydration is the ref family's business — the
 same as `text` and `json` — and a separate injected store beside that would be a second mechanism doing
@@ -739,14 +765,24 @@ is *declaration*, the overlay is *environment*.
 
 #### Sessions: the run-scoped resource bundle
 
-The run-scoped identity is a **session**, keyed by `sessionId`, owning
-`{ conversation, workspace, permission bindings, tool renames }`. Operations sharing a `sessionId` share
-the whole bundle — the same lever as sharing a conversation, generalized from "transcript" to
+The run-scoped identity is a **resource bundle** owning
+`{ conversation, workspace, permission bindings, tool renames }`. Operations sharing it share the whole
+thing — the same lever as sharing a conversation, generalized from "transcript" to
 "transcript + workspace + permissions + tools".
 
+**One `session` declaration, two keys.** The bundle and the conversation used to share `sessionId`, and
+they cannot once a session ref is a POSITION (§1.6) — a position moves on every call, so a
+`"session"`-scoped approval keyed on it would cover exactly one operation and every fork would silently ask
+for its own worktree. So the conversation follows the *resolved* ref, while the bundle keys on **what was
+DECLARED**, inherited from the enclosing instance when an operation declares nothing. A fork, compaction,
+resync, retry or loop iteration never changes what was declared, so the worktree and the permission ledger
+survive all of them. It is also the answer to "states get replayed and looped — how do you tell iterations
+apart?": you don't have to, since the key was never derived from the iteration.
+
 - A session is strictly more than a transcript: the conversation is one facet of it.
-- **Sharing is explicit, isolation is the default**: an operation's `session` names an id;
-  the same id means a shared session, absent means the run's default session.
+- **Sharing is explicit, isolation is the default**: an operation's `session` names an id; the same id
+  means a shared bundle, and absent means it inherits its parent's bundle while getting its OWN
+  conversation. There is no implicit run-wide default conversation.
 - **The workspace is session-owned, not runtime-owned**, and not always shared. It is default-shared
   within a subtree — a review agent reading what a coding agent wrote is the point — and overridable to
   isolate (a parallel fan-out into worktrees). Two different runtimes sharing one workspace is common
@@ -923,11 +959,13 @@ arguments, and exactly what JaiRA's app supplies in its richer form.
   config-layer `prompt` is an error — there's nothing to do with two). So a workflow state's call is an
   `LlmConfiguration` declaration like any other, not a parallel config surface.
 
-- **Sessions coordinate by logical id.** An operation's `session` is the sharing key for its owned
-  resources — conversation transcript, workspace, and permissions (§5.1); absent ⇒
-  the run's default session (so a plain workflow is one shared session). The engine keys the built-in
-  `conversationMode` preamble per session, aligning it with the run-scoped `SessionStore` (§3.6, exposed as
-  `ctx.sessions` for the llm `withSession` path) — both key on `sessionId`.
+- **Sessions coordinate by declared name — but only the resources do.** An operation's `session` is the
+  sharing key for its owned resources (workspace, permissions, tool renames — §5.1), and absent means it
+  inherits the enclosing instance's bundle. The **conversation** is the one facet that does NOT key on
+  the declared name: it keys on the *resolved* ref, a branch at a position (§1.6), and an operation that
+  declares no session gets its OWN conversation rather than joining a run-wide default. The engine keys
+  the built-in `conversationMode` preamble per conversation, so it lines up with the run-scoped
+  `SessionStore` (§3.6, exposed as `ctx.sessions` for the llm `withSession` path).
 
 - **Tools and permissions.** An operation may be given **tools** (`registry.tools`, referenced by
   logical name in `operation.tools`) it calls mid-loop — a composed prompt operation runs them in its

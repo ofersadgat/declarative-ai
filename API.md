@@ -1085,7 +1085,9 @@ and identical calls **in flight together** share one execution rather than each 
 entry. `withMemoize` **throws at composition time** if it would wrap a `sessionResume` layer (a dispatcher,
 whose static record is not the whole truth, defers that refusal into `start`, per op) — session state isn't
 in the memo key, so a hit would replay a stale answer and skip the transcript update; compose `withSession`
-**outside** it instead (sound, because that layer recomputes the sent op from the full transcript).
+**outside** it instead. That is sound because the inner memoize sees the RESOLVED `ctx.session` and folds
+that position into the key, the same way it folds `workspaceTreeHash` — so identical text at two points in
+one conversation gets two keys, a property that previously held only by accident.
 
 ### Hydration — the family transition
 
@@ -1135,7 +1137,12 @@ interface ExecServices {
   stepStartMs?: number;               // step-start origin for deadline arithmetic
   executor?: Executor;                // composite ops execute children through this
   tools?: Record<string, Tool>;       // executables the current operation may call mid-loop
-  sessions?: SessionStore;            // run-scoped, logical-id-keyed
+  sessions?: SessionStore;            // run-scoped conversation lineage + resolution
+  records?: RecordStore;              // where executions are RECORDED; a session IS its records
+  sessionRequest?: SessionRequest;    // what the caller WANTS; `session` is where it resolved
+  session?: ResolvedSession;          // set by withSessionPosition, read by the executor
+  sessionReader?: { read(id: string): Promise<readonly unknown[]> };  // provider read, for resync
+  onDivergence?: (e: { session: string; resumed: string; reported: string; reason: string }) => void;
   workspace?: Workspace;              // { root, treeHash? } — a Session-owned resource
   timeoutMs?: number;                 // per-call wall-clock budget
   maxCostUsd?: number;                // per-call cost ceiling
@@ -1230,19 +1237,35 @@ Ready-made workspace tools ship in **[`@declarative-ai/tools`](#declarative-aito
 ### Sessions
 
 ```ts
-interface SessionState<Msg = JsonValue> { messages?: Msg[]; providerSessionId?: string }
-interface SessionStore<Msg = JsonValue> {
-  get(logicalId: string): SessionState<Msg> | undefined | Promise<SessionState<Msg> | undefined>;
-  put(logicalId: string, state: SessionState<Msg>): void | Promise<void>;
+interface SessionRef { readonly id: string }                     // opaque; names a conversation AT a position
+interface SessionRequest { ref?: string; fork?: boolean; seed?: string; provider?: string }
+interface ResolvedSession<Msg = JsonValue> extends SessionRef {  // everything but `id` is NON-enumerable
+  readonly mode: "append" | "fork";
+  readonly at: { id: string; seq: number };                      // the record slot this call claims
+  readonly providerSessionId?: string;                           // append only — a fork never inherits one
+  messages(): Promise<Msg[]>;                                    // lazy: a native fork reads none
 }
-class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {}   // in-memory
+interface SessionStore<Msg = JsonValue> {
+  resolve(request: SessionRequest): ResolvedSession<Msg> | Promise<ResolvedSession<Msg>>;
+  fork(ref: string, seed?: string): string | Promise<string>;
+  messages(ref: string): Msg[] | Promise<Msg[]>;
+  compact?(ref: string, messages: readonly Msg[]): string | Promise<string>;
+  resync?(ref: string, messages: readonly Msg[]): string | Promise<string>;
+}
+class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {}   // in-memory; also a RecordStore
 ```
 
-**Mutable, keyed by a logical id** — a conversation's transcript (client-managed) or a provider handle. A
-logical id NEVER carries the provider handle in the portable declaration; it lives here, mapped from the
-logical id. Backs [`withSession`](#llm-aware-wrappers); a workflow injects a run-scoped store via
-`ctx.sessions`. Generic in the message shape so each consumer pins it (promptop: the AI-SDK `ModelMessage`;
-hw: a `Turn`); the default is plain JSON, since a stored transcript is serializable by construction.
+**Append-only.** A ref names a conversation AT a position, which is what makes "continue from here" and
+"branch from here" one primitive. **A session is not a separate store** — it IS the `OperationRecord`s
+sharing a session id, so appending a turn and recording a call are ONE write, and `PRIMARY KEY
+(session_id, seq)` is the position reservation. There is deliberately no `get`/`put`: an
+observe-then-write pair leaves a TOCTOU window the length of the whole model call.
+
+Resolution and forking are `withSessionPosition`; the write is `withRecord`;
+[`withSession`](#llm-aware-wrappers) is both plus the two llm-specific pieces (reading a session out of
+an op's config, and projecting an `LlmOutput` down to the op's output value). A workflow injects a
+run-scoped store via `ctx.sessions`. Generic in the message shape so each consumer pins it (promptop:
+the AI-SDK `ModelMessage`); the default is plain JSON.
 
 ### Handle scaffolding
 
@@ -2021,7 +2044,9 @@ interface PromptExecutorOptions extends LoweringOptions {
                               // of the projection to the op's output value — a TYPE-LEVEL fact on the
                               // executor's Out, so a wrapper stack around a record-mode core yields
                               // LlmCallResult-shaped results outward. For consumers that PERSIST what
-                              // the model produced. (withSession composes over value mode only.)
+                              // the model produced — which is what `withSession` composes over: the
+                              // payload IS the conversation, so projecting it any earlier would destroy
+                              // what the record has to store. The projection happens in `withSession`.
 }
 // createPromptExecutor({ record: true }) : Executor<ExecServices, LlmMetrics, Operation<InlineFamily>, LlmOutput>
 type CallRunner = (def: LlmCallDefinition, env: CallDeps, timeoutMs?: number) => Promise<LlmCallResult>;
@@ -2055,7 +2080,7 @@ in the same way.
 | --- | --- | --- |
 | `withRateLimit` | `withRateLimit({ limiter }): ExecutorWrapper` | Admit the call through the injected `RateLimiter` (concurrency slot + rate headroom) and feed the outcome back (drives AIMD). A cancel while queued prevents it from ever starting. |
 | `withBudget` | `withBudget(config?): ExecutorWrapper` | The ONE billing wrapper, two modes. **Reserve mode** (default): reserve against `ctx.meter` before the call — clamping the output ceiling to what the balance affords, refusing when it cannot cover a useful minimum — then **settle** the actual cost after (a failed call still settles); feeds observed output tokens back so the next reserve in the run is better priced. **Post-charge mode** (`computeCost` present): run the inner executor, then debit `computeCost(op, result)` and fold it into the reported `costUsd` — the mode an OUTER instance above `withMemoize` uses to bill memo reuse off the hit's annotation, applying to every op kind. |
-| `withSession` | `withSession(config?): ExecutorWrapper` | Resolve the op's logical `sessionId` against a `SessionStore` (from config or `ctx.sessions`): prepend the stored transcript, run, fold the reply back on success, stamp `outcome.session.id`. The session fields are **consumed** (stripped from the op sent inward), and the sent op carries the full transcript, so an inner `withMemoize` keys on the real content. Refuses `providerSessionId` outright — no current executor can thread a provider-side handle. |
+| `withSession` | `withSession(config?): ExecutorWrapper` | Resolve the op's `sessionId` against a `SessionStore` (from config or `ctx.sessions`) to a POSITION, run, and project the `LlmOutput` down to the op's output value on the way out. Forks when the position is already taken. Reports the **END** position on `metrics.sessionRef`. The session fields are **consumed** (stripped from the op sent inward). Composes over a RECORD-mode core, with `withRecord` inside it: the payload IS the conversation, so projecting any earlier would destroy what the record has to store. `providerSessionId` is honoured, not refused — an adapter that resumes natively gets it, and a fork never does. |
 
 `withSession` must sit **outside** `withMemoize` (which throws at composition time if it would wrap a
 session layer). See [README example 3](README.md#3-the-contract-path--one-seam-a-composed-executor-stack).
