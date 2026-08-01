@@ -34,7 +34,7 @@ import {
 } from "@declarative-ai/exec";
 import type { Approver } from "@declarative-ai/permissions";
 import { sdkAgentQuery } from "./sdkQuery";
-import type { AgentPermissionMode, AgentQuery, AgentQueryOptions, InjectedTool } from "./seam";
+import type { AgentPermissionMode, AgentQuery, AgentQueryOptions, AgentResult, InjectedTool } from "./seam";
 
 /** Delegated agents: schema-constrained output isn't guaranteed (they answer in text), they mutate the
  *  workspace, run their own non-deterministic loop (not memoizable), gate tools via a callback, and are
@@ -46,7 +46,10 @@ export const DELEGATED_CAPS: RuntimeCapabilities = {
   memoizable: false,
   structuredOutput: false,
   policyEnforcement: "callback",
-  sessionResume: false,
+  // NATIVE session resume, and native FORK with it (SESSIONS.md §6). Declaring it is what tells the
+  // session layer not to reach for the replay strategy: this adapter branches server-side and reads
+  // zero messages, where replay would resend the whole conversation for the same result.
+  sessionResume: true,
   streaming: true,
   runtime: "node",
 };
@@ -139,17 +142,31 @@ export function createClaudeCodeFunction(options: ClaudeCodeFunctionOptions = {}
         ...(costUsd !== undefined ? { childCostUsd: costUsd } : {}),
       });
       return run(inputs, ctx).then(
-        (r) => ({ value: r.text, metrics: metricsOf(r.costUsd) }),
+        // The payload shape a session records: the agent's answer, plus the handle the run ACTUALLY
+        // ended in. `messages` carries the answer as one assistant turn — a delegated agent does not
+        // hand back its internal log, so that turn is what a later replay against another provider
+        // has to work from, and saying so here beats leaving the conversation empty.
+        (r) => ({
+          value: r.text,
+          metrics: metricsOf(r.costUsd),
+          ...(r.sessionId !== undefined
+            ? { session: { providerSessionId: r.sessionId, messages: [{ role: "assistant", content: r.text }] } }
+            : {}),
+        }),
         (e: unknown) => ({ error: failureOf(e, "claude-code"), metrics: metricsOf() }),
       );
     },
   };
 
-  async function run(inputs: FunctionInputs, ctx: ExecServices): Promise<{ text: string; costUsd?: number }> {
+  async function run(inputs: FunctionInputs, ctx: ExecServices): Promise<AgentResult> {
       const config = configOf(inputs);
       const prompt = typeof inputs.prompt === "string" ? inputs.prompt : String(inputs.prompt ?? "");
       const approve = ctx.approve;
+      // The APPROVAL SCOPE — a resource-bundle key, not a conversation. The two used to be one string
+      // and cannot be: a conversation moves on every call, so an approval scoped to it would cover
+      // exactly one tool call (SESSIONS.md §13). The conversation is `ctx.session`, below.
       const sessionId = typeof config.sessionId === "string" ? config.sessionId : "delegated";
+      const session = ctx.session;
 
       // The run is driven by the caller's abort signal directly. A run that completes without aborting
       // must not leave a listener attached to a possibly long-lived, shared `ctx.abortSignal`.
@@ -196,6 +213,16 @@ export function createClaudeCodeFunction(options: ClaudeCodeFunctionOptions = {}
         // narrow FAIL-CLOSED (json's `syncOnly`) rather than let an async validator read as a pass.
         ...(ctx.validator !== undefined ? { validator: syncOnly(ctx.validator) } : {}),
         permissionMode: permissionModeOf(config),
+        // NATIVE FORK (SESSIONS.md §6). The session layer decided append-vs-fork before the call,
+        // because "is this a fork" and "how do I shape the request" are the same question — and the
+        // answer here is a request shape the replay strategy cannot express.
+        //
+        // The handle is threaded ONLY on an append. `ResolvedSession.providerSessionId` is already
+        // absent on a fork for that reason; the `mode` check is the belt to that braces, because two
+        // branches writing into one remote session is silent and unrecoverable.
+        ...(session?.providerSessionId !== undefined
+          ? { resume: session.providerSessionId, ...(session.mode === "fork" ? { forkSession: true } : {}) }
+          : {}),
         // Route the agent's native tool-approval callback through our approver (DESIGN §5.1, "Delegated approval fidelity").
         canUseTool: approve
           ? async (req) => {
@@ -206,7 +233,7 @@ export function createClaudeCodeFunction(options: ClaudeCodeFunctionOptions = {}
         abortSignal: signal,
       };
 
-      let result: { text: string; costUsd?: number } | undefined;
+      let result: AgentResult | undefined;
       try {
         for await (const msg of query(queryOptions)) {
           if (msg.error) throw new ClaudeCodeError(`claude-code agent error: ${msg.error}`);

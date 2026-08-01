@@ -56,12 +56,45 @@ export interface AgentQueryOptions {
    *  documents — the inline family's truth. */
   validator?: SyncOutputValidator;
   abortSignal?: AbortSignal;
+  /**
+   * The agent's own session to continue, when there is one (SESSIONS.md §6, "Native fork").
+   *
+   * This adapter has the primitive the design wants: `resume` continues a conversation server-side,
+   * reading zero messages — no replay, no transcript on the wire.
+   *
+   * ⚠️ A resumed session is bound to the CWD IT WAS CREATED IN. Transcripts live at
+   * `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`, where `<encoded-cwd>` is the absolute
+   * working directory with every non-alphanumeric character replaced by `-`. Resuming from a
+   * DIFFERENT cwd silently starts a fresh session rather than failing — so a caller that moved the
+   * workspace and kept the handle gets an empty conversation reported as a successful resume.
+   */
+  resume?: string;
+  /**
+   * Branch the resumed session instead of continuing it.
+   *
+   * `resume` + `forkSession` starts a NEW session id seeded with a copy of the original's history and
+   * leaves the original untouched — a fork, done server-side at no replay cost. The new id comes back
+   * on {@link AgentResult.sessionId}, and recording it is NOT optional: a fork that kept its parent's
+   * handle would put two branches into one remote session.
+   *
+   * Forking branches the CONVERSATION, not the filesystem — both branches see one working directory.
+   */
+  forkSession?: boolean;
 }
 
 /** The agent's final answer for a run. */
 export interface AgentResult {
   text: string;
   costUsd?: number;
+  /**
+   * The agent's session id as of this run — its own, not ours.
+   *
+   * Always the id the run ACTUALLY ended in: a new one after a fork, the resumed one otherwise. A
+   * value that differs from the handle we resumed means the remote moved underneath us
+   * (SESSIONS.md §11), which is the only way to notice server-side compaction or an out-of-band
+   * resume.
+   */
+  sessionId?: string;
 }
 
 /** A normalized message from the agent stream — the adapter only needs the terminal result + any error. */

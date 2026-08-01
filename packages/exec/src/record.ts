@@ -46,10 +46,42 @@ export interface RecordStub {
   startMs: number;
 }
 
+/**
+ * What an execution reports about the conversation it ran in.
+ *
+ * A PROMPT op needs none of this: its payload is an `LlmOutput`, which already carries the messages,
+ * so the record reads them straight off the result. A DELEGATED agent does need it — it answers with
+ * text, keeps its transcript server-side, and the one thing it must hand back is the session id the
+ * run ENDED in, because a native fork returns a NEW one and losing it puts two branches into a single
+ * remote session.
+ *
+ * Declared rather than left to structural luck: `FunctionResult` is a union, so an undeclared extra
+ * field typechecks by leniency and would be dropped by anything that rebuilt the result.
+ */
+export interface SessionOutcome {
+  /** The provider's own session id as of this run. A CHANGE from what we resumed is divergence. */
+  providerSessionId?: string;
+  /** What the run added, for an executor whose payload is not already a conversation. */
+  messages?: readonly unknown[];
+}
+
+/** Read the session outcome an execution reported, if it reported one. */
+export function sessionOutcomeOf(result: unknown): SessionOutcome | undefined {
+  const session = (result as { session?: unknown } | null | undefined)?.session;
+  return session !== null && typeof session === "object" ? (session as SessionOutcome) : undefined;
+}
+
 /** A record as stored: the stub, plus the answer once there is one. */
 export interface StoredRecord<R = ResolvedValue, M extends ExecMetrics = ExecMetrics> extends RecordStub {
   result?: { value: R } | { error: Failure; value?: R };
   metrics?: M;
+  /**
+   * What the execution SAID about its conversation — see {@link SessionOutcome}.
+   *
+   * Deliberately not called `session`: on the stub that name means the position this record CLAIMS,
+   * which is decided before the call. This is what came back.
+   */
+  sessionOutcome?: SessionOutcome;
 }
 
 /** A failure carrying the position that was already claimed — what the session layer forks on. */
@@ -76,7 +108,7 @@ export interface RecordStore<R = ResolvedValue, M extends ExecMetrics = ExecMetr
    */
   open(stub: RecordStub): void | Promise<void>;
   /** Fill in a stamped record — on failure as well as success. */
-  close(id: string, settled: Pick<StoredRecord<R, M>, "result" | "metrics">): void | Promise<void>;
+  close(id: string, settled: Pick<StoredRecord<R, M>, "result" | "metrics" | "sessionOutcome">): void | Promise<void>;
   /** A session's records in order, up to (exclusive) `upTo`. */
   bySession?(session: string, upTo?: number): StoredRecord<R, M>[] | Promise<StoredRecord<R, M>[]>;
 }
@@ -145,7 +177,10 @@ export function withRecord<R = ExecServices, M extends ExecMetrics = ExecMetrics
         const settled: StoredRecord["result"] = isOk(result)
           ? { value: result.value }
           : { error: result.error, ...(result.value !== undefined ? { value: result.value } : {}) };
-        await records.close(id, { result: settled, metrics: result.metrics });
+        // The session outcome rides along when the executor reported one. A prompt op reports none
+        // and needs none — its payload IS the conversation — so this is empty on the common path.
+        const session = sessionOutcomeOf(result);
+        await records.close(id, { result: settled, metrics: result.metrics, ...(session !== undefined ? { sessionOutcome: session } : {}) });
         return result;
       });
     },
