@@ -280,9 +280,6 @@ const TEMPLATE_REF = /\{\{\s*([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_
  *  and the llm session path share ONE representation in a record's payload. */
 type Turn = { role: "user" | "assistant"; content: string };
 
-/** The operation named by a record the ENGINE wrote for its own `conversation.mode` preamble, rather
- *  than one an executor ran. Named so the two are tellable apart when reading a conversation back. */
-const TRANSCRIPT_SOURCE = { kind: "function", functionRef: "hw.transcript", input: {}, output: { kind: "json" } } as unknown as Operation<InlineFamily>;
 
 /**
  * The resource bundle an instance runs in — workspace, permission ledger, approval scope.
@@ -1440,7 +1437,7 @@ export class WorkflowEngine {
 
     // The per-call ENVIRONMENT the old `PromptOpEnvironment` carried — tools, the time budget,
     // cancellation — are `ExecServices` fields now, which is why that type could be deleted outright.
-    const services = this.servicesFor(session.resourceKey, instance, tools);
+    const services = this.servicesFor(session.resourceKey, instance, tools, session);
     if (instance.def.limits?.timeout !== undefined) services.timeoutMs = instance.def.limits.timeout * 1000;
     let outcome;
     try {
@@ -1468,14 +1465,12 @@ export class WorkflowEngine {
     // `full_history` mode every later state in the session then read that back in its preamble.
     if (!isOk(outcome)) return fail(outcome.error);
 
-    // Conversation artifact (SPEC §4.7): every SUCCEEDED prompt operation appends its exchange to the
-    // session. The assistant turn is the op's OUTPUT VALUE. It used to prefer the model's raw text, but
-    // that stops at the prompt executor — and for a text-output op the output value IS that text, so
-    // the two agree wherever it mattered.
-    await this.appendTranscript(session.id, [
-      { role: "user", content: prompt },
-      { role: "assistant", content: typeof outcome.value === "string" ? outcome.value : JSON.stringify(outcome.value ?? null) },
-    ]);
+    // Conversation artifact (SPEC §4.7): the exchange is already in the session, because the session
+    // layer RECORDED the call — one write, not two. The engine used to synthesize a user turn and a
+    // stringified assistant turn here, which threw away every tool call and reasoning part in between
+    // and is exactly what SESSIONS.md §7 replaced. All that remains is re-reading, so a
+    // `{ conversation }` binding in this state's outputs sees what the call just added.
+    await this.refreshTranscript(session.id);
 
     const failure = this.acceptOpOutputs(instance, "prompt", (outcome.value ?? null) as ResolvedValue, op.output.kind);
     if (failure) return fail(failure);
@@ -1535,8 +1530,22 @@ export class WorkflowEngine {
   }
 
   /** The services one operation runs with: its resource bundle's workspace, its tools, its cancellation. */
-  private servicesFor(resourceKey: string, instance: Instance, tools?: Record<string, Tool>): ExecServices {
+  private servicesFor(resourceKey: string, instance: Instance, tools?: Record<string, Tool>, session?: SessionBinding): ExecServices {
     const services = this.childServices();
+    // The conversation this operation was AUTHORED against, stated as a request rather than resolved.
+    // The engine knows which conversation and whether the author asked to branch; it does not know
+    // where that conversation currently is, and must not — only the store does. A composed session
+    // layer turns this into `ctx.session`; with none composed, no session is in play, which is the
+    // honest reading of a run that never wired one.
+    if (session !== undefined) {
+      services.sessionRequest = {
+        ref: session.id,
+        ...(session.fork ? { fork: true } : {}),
+        // Stable across replays, so a re-run lands on the conversation it landed on before rather
+        // than minting a second one beside it (SESSIONS.md §13).
+        seed: `${instance.stateId}:${session.id}`,
+      };
+    }
     // Per-BUNDLE workspace (DESIGN §5.1, "Sessions: the run-scoped resource bundle"): states sharing a
     // resource key share one; a fan-out can isolate each branch (e.g. its own worktree) via
     // `workspaceFor`. Falls back to the run-level `services.workspace` when the host provides none.
@@ -1757,30 +1766,19 @@ export class WorkflowEngine {
   }
 
   /**
-   * Append the built-in `conversation.mode` turns to a session.
+   * Re-read a session after a call, so `{ conversation }` bindings see what it just added.
    *
-   * Written as a RECORD, through the same two-phase path every other writer uses — the stub claims the
-   * position, the fill carries the payload. That is not ceremony: uniqueness on `(session, seq)` is the
-   * only thing that stops two writers landing on one position, and the engine is not exempt from it.
+   * The engine NO LONGER WRITES the transcript. It used to append its own turns, which was the second
+   * of two mechanisms doing one job — and once a composed session layer records the call, both would
+   * write, land on the same position, and the loser would fork. What the engine keeps is the read: it
+   * mirrors the conversation for synchronous binding resolution (§7.5), because bindings resolve
+   * without awaiting.
    *
-   * NB this is the engine's own `conversation.mode` mechanism, distinct from what a composed session
-   * layer records for the call itself. Both write records to one store, which is the point — one home
-   * for a conversation — but a stack running both writes both.
+   * A run with no session layer composed records nothing, and the transcript stays empty. That is
+   * correct rather than a gap: without one there is no conversation.
    */
-  private async appendTranscript(sessionRef: string, turns: Turn[]): Promise<void> {
-    // Falls back to the session store itself, which is honest rather than convenient: a conversation
-    // IS its records, so any store that can serve a conversation can hold one. The run's default
-    // in-memory store implements both halves for exactly that reason.
-    const store = this.sessions() as unknown as { open?: unknown };
-    const records = this.config.services?.records ?? (typeof store.open === "function" ? (store as never) : undefined);
-    const resolved = await this.sessions().resolve({ ref: sessionRef, seed: sessionRef });
-    if (records !== undefined) {
-      const id = `${resolved.at.id}:${resolved.at.seq}`;
-      // The payload shape a prompt op's record has, so one `messagesOf` reads both.
-      await records.open({ id, source: TRANSCRIPT_SOURCE, session: resolved.at, startMs: this.clock.now() });
-      await records.close(id, { result: { value: { messages: turns } as unknown as ResolvedValue } });
-    }
-    this.transcripts.set(sessionRef, ((await this.sessions().messages(resolved.id)) ?? []) as Turn[]);
+  private async refreshTranscript(sessionRef: string): Promise<void> {
+    await this.readTranscript(sessionRef);
   }
 
   private conversationPreamble(mode: ConversationMode, transcript: Turn[], artifactNames?: string[]): string {

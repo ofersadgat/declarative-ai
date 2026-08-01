@@ -18,9 +18,23 @@
  *    writers at one position impossible — durably, and across processes, which neither an in-process
  *    lock nor a read-then-write conditional manages.
  */
-import type { ExecHandle, ExecMetrics, ExecServices, Executor, ExecutorWrapper, Failure, InlineFamily, Operation, ResolvedValue } from "./contract";
+import type {
+  ExecHandle,
+  ExecMetrics,
+  ExecResult,
+  ExecServices,
+  Executor,
+  ExecutorWrapper,
+  Failure,
+  InlineFamily,
+  Operation,
+  ResolvedSession,
+  ResolvedValue,
+  SessionRequest,
+  SessionStore,
+} from "./contract";
 import { PositionTaken, isOk } from "./contract";
-import { wrapHandle } from "./handles";
+import { canceledFailure, wrapHandle } from "./handles";
 import { curryOrApply, isExecutor } from "./wrappers";
 import { hashOperation } from "./memo";
 
@@ -182,6 +196,74 @@ export function withRecord<R = ExecServices, M extends ExecMetrics = ExecMetrics
         const session = sessionOutcomeOf(result);
         await records.close(id, { result: settled, metrics: result.metrics, ...(session !== undefined ? { sessionOutcome: session } : {}) });
         return result;
+      });
+    },
+  })) as unknown as ExecutorWrapper<R, R, M>;
+  return curryOrApply(wrap, inner);
+}
+
+/** The ctx seam {@link withSessionPosition} consumes. */
+type PositionSeams = { sessions: SessionStore };
+
+/**
+ * Resolve the conversation a call runs in, and fork when its position turns out to be taken.
+ *
+ * This is the POLICY half of the session split, and it lives in `exec` rather than in the llm layer
+ * because a delegated agent needs it just as much as a prompt op does — and `hw`, which is where the
+ * request comes from, cannot import `promptop`. `withSession` in promptop is this plus the two things
+ * only that layer knows: reading a session out of an op's config, and projecting an `LlmOutput` down
+ * to the op's output value on the way back.
+ *
+ * The caller states a REQUEST (`ctx.sessionRequest`) — which conversation, and whether to branch —
+ * and this resolves it to a position and puts it on `ctx.session`. Resolution has to happen here
+ * rather than at the requester because only the store knows where a conversation currently is, and
+ * `hw` deliberately does not.
+ */
+export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics>(inner: Executor<R, M>): Executor<R & PositionSeams, M>;
+export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<PositionSeams> = {}>(
+  config?: P,
+): ExecutorWrapper<R, R & Omit<PositionSeams, keyof P>, M>;
+export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<PositionSeams> = {}>(
+  config: P,
+  inner: Executor<R, M>,
+): Executor<R & Omit<PositionSeams, keyof P>, M>;
+export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics>(
+  configOrInner?: Partial<PositionSeams> | Executor<R, M>,
+  maybeInner?: Executor<R, M>,
+): ExecutorWrapper<R, R, M> | Executor<R, M> {
+  const config = (isExecutor(configOrInner) ? undefined : configOrInner) as Partial<PositionSeams> | undefined;
+  const inner = (isExecutor(configOrInner) ? configOrInner : maybeInner) as Executor<R, M> | undefined;
+  const wrap = ((innerExec: Executor): Executor => ({
+    // A session layer resumes state, so a `withMemoize` above must refuse to cache — and the per-op
+    // record has to say so too, or a memoize checking per-op caps would read the inner entry's record,
+    // which knows nothing about the session, and cache the call.
+    capabilities: { ...innerExec.capabilities, sessionResume: true },
+    metrics: innerExec.metrics,
+    capabilitiesFor: (op: Operation<InlineFamily>) => ({
+      ...(innerExec.capabilitiesFor?.(op) ?? innerExec.capabilities),
+      sessionResume: true,
+    }),
+    start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue> {
+      const sessions = config?.sessions ?? ctx.sessions;
+      const request = ctx.sessionRequest;
+      // No conversation asked for, or nowhere to keep one ⇒ nothing to do. Silence is right here: a
+      // run without sessions wired is an ordinary run, not a misconfiguration.
+      if (request === undefined || sessions === undefined) return innerExec.start(op, ctx);
+      return wrapHandle(async (ctl) => {
+        const attempt = async (session: ResolvedSession): Promise<ExecResult<ResolvedValue, ExecMetrics>> => {
+          const result = await ctl.started(innerExec.start(op, { ...ctx, session })).result;
+          // The END position, and the EFFECTIVE one: a call is one record, and a call that had to fork
+          // ended somewhere the caller has no other way to learn.
+          return { ...result, metrics: { ...result.metrics, sessionRef: `${session.at.id}@${session.at.seq + 1}` } };
+        };
+        if (ctl.canceled()) return canceledFailure("canceled before the call started");
+        const resolved = await sessions.resolve(request);
+        const first = await attempt(resolved);
+        if (!isPositionTaken(first)) return first;
+        // FORK, not retry-at-the-next-slot. Something already claimed this position, so continuing
+        // here would mean continuing a conversation containing a turn this call never saw.
+        const forked = await sessions.fork(resolved.id, request.seed);
+        return await attempt(await sessions.resolve({ ...request, ref: forked, fork: false }));
       });
     },
   })) as unknown as ExecutorWrapper<R, R, M>;

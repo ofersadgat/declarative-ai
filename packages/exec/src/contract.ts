@@ -316,6 +316,18 @@ export interface ExecServices {
    * exactly the messages it wrote.
    */
   session?: ResolvedSession;
+  /**
+   * The conversation the CALLER wants this call to run in — a request, not a resolution.
+   *
+   * The two are deliberately separate seams. A requester (`hw`, say) knows which conversation an
+   * operation was authored against and whether the author asked to branch; it does NOT know where
+   * that conversation currently is, and should not, because only the store does. `withSessionPosition`
+   * turns this into {@link ExecServices.session}.
+   *
+   * That split is also what lets `hw` participate at all: it can state a request using nothing but
+   * `exec`, where resolving one would drag in the layer it is not allowed to depend on.
+   */
+  sessionRequest?: SessionRequest;
   /** The workspace the current operation acts within — a Session-owned resource. */
   workspace?: Workspace;
   /** Per-call wall-clock budget (ms). Was `PromptOpEnvironment.timeoutMs`. */
@@ -539,11 +551,15 @@ export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
     this.rows.set(at.id, rows);
   }
 
-  close(id: string, settled: { result?: { value?: unknown } }): void {
+  close(id: string, settled: { result?: { value?: unknown }; sessionOutcome?: { messages?: readonly unknown[] } }): void {
     for (const rows of this.rows.values()) {
       for (const row of rows.values()) {
         if (row.id === id) {
-          row.result = settled.result;
+          // An executor whose payload IS a conversation needs nothing further; one whose payload is
+          // not — a delegated agent, a fake — reports its delta on the session channel, and that is
+          // what the conversation is made of. Preferring it keeps `messagesOf` reading one shape.
+          const reported = settled.sessionOutcome?.messages;
+          row.result = reported !== undefined ? { value: { messages: reported } } : settled.result;
           return;
         }
       }

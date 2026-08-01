@@ -90,7 +90,20 @@ export class FakePromptExecutor implements Executor<ExecServices, WorkflowMetric
         else ctx.abortSignal?.addEventListener("abort", onAbort, { once: true });
       });
       try {
-        return await Promise.race([Promise.resolve(this.script(call)), canceled]);
+        const result = await Promise.race([Promise.resolve(this.script(call)), canceled]);
+        // Report the conversation delta the way a real executor does. A prompt executor's payload IS
+        // an `LlmOutput` carrying the messages; this fake's projected value is not, so it uses the
+        // declared `session` channel, which exists for exactly that case. Without it the fake would
+        // contribute nothing to a conversation, and the preamble tests would be asserting against an
+        // engine-private write that production no longer performs.
+        if (!("error" in result) || result.error === undefined) {
+          const answer = typeof result.value === "string" ? result.value : JSON.stringify(result.value ?? null);
+          return {
+            ...result,
+            session: { messages: [{ role: "user", content: op.user }, { role: "assistant", content: answer }] },
+          } as unknown as ExecResult<ResolvedValue, WorkflowMetrics>;
+        }
+        return result;
       } catch (e) {
         return { error: { classification: "permanent", reason: (e as Error).message }, metrics: { durationMs: 0, costUsd: 0, costSource: "unknown" } };
       }

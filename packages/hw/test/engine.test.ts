@@ -13,6 +13,7 @@ import {
   type FunctionResult,
   type Tool,
 } from "@declarative-ai/exec";
+import { withRecord, withSessionPosition } from "@declarative-ai/exec";
 import { isPermissionDenied, type Approver } from "@declarative-ai/permissions";
 import { WorkflowEngine, type EngineConfig } from "../src/engine";
 import { loadBundle } from "../src/loader";
@@ -67,12 +68,19 @@ function makeEngine(files: Record<string, StateDef>, rootId: string, script: Scr
   }
   for (const [name, t] of Object.entries(opts.tools ?? {})) registry.tools.set(name, t);
   const persistence = new InMemoryPersistence();
+  // The SESSION STACK, composed as a host composes it: resolve the position, claim it, record what
+  // ran. The engine states a REQUEST and never resolves one — it cannot, since only the store knows
+  // where a conversation currently is — so without these wrappers no session is in play and the
+  // transcript stays empty. Composing them here is what makes these tests exercise the real path
+  // rather than an engine-private shortcut production never takes.
+  const store = new MapSessionStore();
+  const extra = { ...opts.extra, services: { records: store as never, ...opts.extra?.services, sessions: opts.extra?.services?.sessions ?? store } };
   const engine = new WorkflowEngine({
     bundle: loadBundle(files, rootId),
     registry,
-    prompt: opts.prompt ?? fake,
+    prompt: withSessionPosition(withRecord(((opts.prompt ?? fake) as never))) as never,
     persistence,
-    ...opts.extra,
+    ...extra,
   });
   return { engine, fake, persistence };
 }
