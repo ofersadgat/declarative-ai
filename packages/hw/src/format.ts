@@ -127,29 +127,20 @@ export type BindingDecl =
    * Always current-instance: a runtime reference into another file would have no instance to
    * resolve against, since a state can run many times. Cross-file references are transclusion,
    * resolved before anything runs.
+   *
+   * Also how an EXPRESSION is written without a wrapper — a string binding is parsed with the
+   * expression grammar, and the leading dot is what separates a read of this instance's data
+   * from a bare name resolved along the search `path` (EXPRESSIONS.md §14).
    */
   | string
-  /**
-   * A declared child's output. Lowers to a producer edge on the child + a `select` projection.
-   *
-   * `output` defaults to the NAME OF THE SLOT being bound, because
-   * `"plan_doc": { "binding": { "child": "context", "output": "plan_doc" } }` says the same word
-   * twice and the second one is the one people forget to change. `"output": "*"` is the child's
-   * whole output object as a single value — which used to be what omitting `output` meant.
-   */
-  | { child: string; output?: string }
-  /** This state's declared input, by name. Lowers to a `scope.get` producer. */
-  | { input: string }
   /** A small computation in the expression DSL. Lowers to a TREE of operator producer edges
-   *  (EXPRESSIONS.md §1) — parsed once, at load, never carried as a source string. */
-  | { expr: string }
-  /** A session-owned artifact, by name. Lowers to an `artifact.get` producer. */
-  | { artifact: string }
-  /** A previous conversation, or one message of it. Lowers to a `conversation.get` producer. */
-  | { conversation: string; message?: number };
+   *  (EXPRESSIONS.md §1) — parsed once, at load, never carried as a source string. The bare
+   *  string above says the same thing; this spelling is emphasis, for a value a reader would
+   *  otherwise have to squint at to see is computed. */
+  | { expr: string };
 
 /** Every key that tags an authored binding form — the base `Ref` cases plus the sugar. */
-const BINDING_TAGS: readonly string[] = ["text", "json", "result", "refs", "op", "child", "input", "expr", "artifact", "conversation"];
+const BINDING_TAGS: readonly string[] = ["text", "json", "result", "refs", "op", "expr"];
 
 /**
  * True when a value is spelled as a BINDING rather than as data.
@@ -239,12 +230,13 @@ export interface ExecEnvironmentDecl {
    * in `session.ts`). `""` is an error, never "fresh" — a template interpolating a bad reference
    * would otherwise silently produce an isolated conversation that looks like it worked.
    *
-   * `sessionId` is accepted as a SYNONYM, so an `LlmConfiguration`-shaped block pastes in
-   * unchanged; the loader normalizes it to this field before anything else reads the document.
+   * ONE spelling. `sessionId` used to be accepted as a synonym so an `LlmConfiguration`-shaped
+   * block could paste in unchanged; it is refused now, because a second name for a field costs an
+   * equality check at parse, a normalization that has to run before the merge, and a rule about
+   * which one wins — all to save an author one rename.
    */
   session?: string | null | { id: string } | { expr: string };
-  /** @see session — normalized away at parse; never present on a loaded state. */
-  sessionId?: string | null | { id: string } | { expr: string };
+
   /**
    * Always branch, rather than appending when the position is still the head (DESIGN.md §1.6).
    *

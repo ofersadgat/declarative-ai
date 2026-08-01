@@ -129,11 +129,6 @@ describe("ref TREES — primitives, and what a tree cannot contain", () => {
   // inside a tree arrives here unlowered.
   it("refuses unlowered binding sugar nested in a tree, naming the keyword", () => {
     expect(error({ refs: { a: { expr: ".inputs.n" } } })).toMatch(/'expr' binding sugar cannot be nested/);
-    expect(error({ refs: { a: { child: "c" } } })).toMatch(/'child' binding sugar/);
-    expect(error({ refs: { a: { child: "c", output: "o" } } })).toMatch(/'child' binding sugar/);
-    expect(error({ refs: { a: { input: "n" } } })).toMatch(/'input' binding sugar/);
-    expect(error({ refs: { a: { artifact: "doc" } } })).toMatch(/'artifact' binding sugar/);
-    expect(error({ refs: { a: { conversation: "s", message: 0 } } })).toMatch(/'conversation' binding sugar/);
   });
 
   // A key that merely SHARES a sugar keyword's name is still an ordinary object property — the same

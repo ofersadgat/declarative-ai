@@ -19,7 +19,7 @@ import {
   validateSessionDecl,
   type SessionScope,
 } from "../src/session";
-import { mergeOperationFields, normalizeSynonyms } from "../src/merge";
+import { mergeOperationFields, refuseSynonyms } from "../src/merge";
 import { loadBundle } from "../src/loader";
 import { validateBundle } from "../src/validate";
 import type { OperationFields, StateDef } from "../src/format";
@@ -138,20 +138,19 @@ describe("the environment merge", () => {
     expect(mergeOperationFields({ session: "planning" }, { model: "sonnet" }).session).toBe("planning");
   });
 
-  it("normalizes sessionId to session BEFORE merging, so a child's null overrides", () => {
-    // Left as two keys, `sessionId: null` would sit alongside the ancestor's `session: "planning"`
-    // rather than overriding it.
-    expect(mergeOperationFields({ session: "planning" }, { sessionId: null }).session).toBeNull();
-    expect(normalizeSynonyms({ sessionId: null } as OperationFields).session).toBeNull();
-    expect(normalizeSynonyms({ sessionId: "planning" } as OperationFields).session).toBe("planning");
-  });
-
-  it("still refuses a document declaring both, unless they agree", () => {
-    expect(() => normalizeSynonyms({ session: "a", sessionId: "b" })).toThrow(/one of them has to go/);
-    expect(() => normalizeSynonyms({ session: "a", sessionId: "a" })).not.toThrow();
-    // Refs compare by id, so the same position written twice is not a conflict.
-    expect(() => normalizeSynonyms({ session: { id: "x@1" }, sessionId: { id: "x@1" } })).not.toThrow();
-    expect(() => normalizeSynonyms({ session: { id: "x@1" }, sessionId: { id: "x@2" } })).toThrow();
+  /**
+   * `sessionId` was a synonym for `session` so an `LlmConfiguration`-shaped block could paste in
+   * unchanged. It is refused now — and refused rather than IGNORED, because the field is not in
+   * `OPERATION_OWN_FIELDS`, so anything unrecognized is passed through to the LLM call config. A
+   * silently dropped `sessionId` would therefore be sent to the model as a call parameter while the
+   * operation quietly started a fresh conversation.
+   */
+  it("refuses `sessionId`, rather than shipping it to the model as a call parameter", () => {
+    expect(() => refuseSynonyms({ sessionId: null } as OperationFields)).toThrow(/the field is called 'session'/);
+    expect(() => mergeOperationFields({ session: "planning" }, { sessionId: null } as OperationFields)).toThrow(
+      /the field is called 'session'/,
+    );
+    expect(() => refuseSynonyms({ session: "planning" })).not.toThrow();
   });
 
   it("survives the split into the loaded execution environment", () => {

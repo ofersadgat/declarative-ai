@@ -142,11 +142,7 @@ function isRefLeaf(tree: TreeNode): boolean {
  */
 const NON_TREE_FORMS: Readonly<Record<string, readonly string[]>> = {
   op: ["parameters"],
-  child: ["output"],
-  input: [],
   expr: [],
-  artifact: [],
-  conversation: ["message"],
 };
 
 /** The offending keyword when a tree node is really a producer edge or unlowered sugar. */

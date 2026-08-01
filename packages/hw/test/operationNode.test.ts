@@ -66,7 +66,7 @@ describe("the load-time lint", () => {
       root: {
         children: { plan: { state: "leaf" }, review: { state: "leaf" } },
         sequence: ["plan", "review"],
-        outputs: { r: { binding: { child: "review", output: "answer" } } },
+        outputs: { r: { binding: ".children.review.outputs.answer" } },
       },
       leaf: promptLeaf(),
     };
@@ -81,7 +81,7 @@ describe("the load-time lint", () => {
       root: {
         children: { gate: { state: "gate" }, review: { state: "leaf" } },
         sequence: ["gate", "review"],
-        outputs: { r: { binding: { child: "review", output: "answer" } } },
+        outputs: { r: { binding: ".children.review.outputs.answer" } },
       },
       gate: { outputs: { decision: { schema: { type: "string" } } }, operation: { kind: "function", function: "choose_option" } },
       leaf: { ...promptLeaf(), inputs: { s: { schema: {} } } },
@@ -99,7 +99,7 @@ describe("the load-time lint", () => {
       root: {
         children: { plan: { state: "leaf" }, review: { state: "leaf" } },
         sequence: ["plan", "review"],
-        outputs: { r: { binding: { child: "review", output: "answer" } } },
+        outputs: { r: { binding: ".children.review.outputs.answer" } },
       },
       leaf: promptLeaf(),
       consumer: { ...promptLeaf(), inputs: { s: { schema: {} } } },

@@ -35,21 +35,21 @@ export function specPlanningFiles(): Record<string, StateDef> {
           schema: { type: "string", enum: ["complete", "blocked"] },
           binding: { expr: ".children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'" },
         },
-        plan_doc: { ...artifact("markdown"), binding: { child: "context", output: "plan_doc" } },
+        plan_doc: { ...artifact("markdown"), binding: ".children.context.outputs.plan_doc" },
         // A "passthrough" output: the whole child result as ONE value. `*` is required now that a
         // bare `{ child }` selects the slot's own name instead.
-        critique: { binding: { child: "critique", output: "*" } },
+        critique: { binding: ".children.critique.outputs" },
       },
       children: {
-        goals: { state: "feature/plan/goals", inputs: { issue: { input: "issue" } } },
+        goals: { state: "feature/plan/goals", inputs: { issue: ".inputs.issue" } },
         context: {
           state: "feature/plan/context",
-          inputs: { issue: { input: "issue" }, goals: { child: "goals", output: "goals" } },
+          inputs: { issue: ".inputs.issue", goals: ".children.goals.outputs.goals" },
         },
         critique: {
           state: "feature/plan/critique",
           inputs: {
-            plan_doc: { child: "context", output: "plan_doc" },
+            plan_doc: ".children.context.outputs.plan_doc",
             severity_threshold: { text: "significant" },
           },
         },
@@ -91,7 +91,7 @@ export function specPlanningFiles(): Record<string, StateDef> {
         human_decision: {
           schema: { type: "string", enum: ["approve", "request_changes", "block"] },
           optional: true,
-          binding: { child: "human_review", output: "decision" },
+          binding: ".children.human_review.outputs.decision",
         },
       },
       environment: { conversation: { mode: "full_history" } },
@@ -104,14 +104,14 @@ export function specPlanningFiles(): Record<string, StateDef> {
         address_weaknesses: {
           state: "feature/plan/critique/address_weaknesses",
           inputs: {
-            plan_doc: { input: "plan_doc" },
+            plan_doc: ".inputs.plan_doc",
             weaknesses: { expr: ".outputs.weaknesses" },
             critique_report: { expr: ".outputs.critique_report" },
           },
         },
         human_review: {
           state: "feature/plan/critique/human_review",
-          inputs: { plan_doc: { input: "plan_doc" }, critique_report: { expr: ".outputs.critique_report" } },
+          inputs: { plan_doc: ".inputs.plan_doc", critique_report: { expr: ".outputs.critique_report" } },
         },
       },
       transitions: [
@@ -154,15 +154,15 @@ export function specFanoutFiles(): Record<string, StateDef> {
     review: {
       label: "Fan-out Review",
       inputs: { change: str() },
-      outputs: { summary: { ...str(), binding: { child: "synthesize", output: "summary" } } },
+      outputs: { summary: { ...str(), binding: ".children.synthesize.outputs.summary" } },
       children: {
-        claude_review: { state: "review/agent_review", async: true, inputs: { change: { input: "change" } } },
-        codex_review: { state: "review/agent_review", async: true, inputs: { change: { input: "change" } } },
+        claude_review: { state: "review/agent_review", async: true, inputs: { change: ".inputs.change" } },
+        codex_review: { state: "review/agent_review", async: true, inputs: { change: ".inputs.change" } },
         synthesize: {
           state: "review/synthesize",
           inputs: {
-            review_a: { child: "claude_review", output: "report" },
-            review_b: { child: "codex_review", output: "report" },
+            review_a: ".children.claude_review.outputs.report",
+            review_b: ".children.codex_review.outputs.report",
           },
         },
       },

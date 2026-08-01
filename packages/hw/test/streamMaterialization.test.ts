@@ -97,7 +97,7 @@ const blobSlot = { kind: "blob", schema: { type: "string", contentMediaType: "ap
 function fanoutStates(consumerKeys: string[]): Record<string, StateDef> {
   const children: Record<string, unknown> = { producer: { state: "parent/producer" } };
   for (const key of consumerKeys) {
-    children[key] = { state: "parent/consumer", inputs: { data: { child: "producer", output: "img" } } };
+    children[key] = { state: "parent/consumer", inputs: { data: ".children.producer.outputs.img" } };
   }
   return {
     parent: { label: "Parent", children, sequence: ["producer", ...consumerKeys] } as StateDef,
@@ -265,7 +265,7 @@ describe("memoization materialization (§7.3, rule 1)", () => {
       echo: {
         label: "Echo",
         inputs: { doc: blobSlot },
-        outputs: { out: { ...blobSlot, binding: { input: "doc" } } },
+        outputs: { out: { ...blobSlot, binding: ".inputs.doc" } },
       } as StateDef,
     };
     return loadBundle(states, "echo");

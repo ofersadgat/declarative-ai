@@ -560,7 +560,7 @@ describe("conversation modes (SPEC §4.7)", () => {
       // An operation's bound input slots render under `{{.inputs.*}}` — the one namespace a template
       // sees, the operation's resolved inputs (state inputs plus the op's own bound inputs).
       prompt: "Summarize this transcript: {{.inputs.history}}",
-      input: { history: { kind: "json", binding: { conversation: "planning" } } },
+      input: { history: { kind: "json", binding: ".conversations.planning" } },
     };
     const { engine, fake } = makeEngine(files, PLAN_ID, planningScript());
     await engine.run({ inputs: { issue: "the issue" } });
@@ -580,7 +580,7 @@ describe("conversation modes (SPEC §4.7)", () => {
       kind: "prompt",
       model: "critic",
       prompt: "First turn was: {{.inputs.first}}",
-      input: { first: { kind: "json", binding: { conversation: "planning", message: 0 } } },
+      input: { first: { kind: "json", binding: ".conversations.planning.messages.0" } },
     };
     const { engine, fake } = makeEngine(files, PLAN_ID, planningScript());
     await engine.run({ inputs: { issue: "the issue" } });
@@ -684,7 +684,7 @@ describe("declared outputs at termination (SPEC §3.7)", () => {
     parent: {
       label: "Parent",
       inputs: {},
-      outputs: { report: { schema: { type: "string" }, binding: { child: "never_run", output: "report" } } },
+      outputs: { report: { schema: { type: "string" }, binding: ".children.never_run.outputs.report" } },
       children: { never_run: { state: "parent/leaf" } },
       // An EMPTY sequence keeps the child out of the spine entirely — the way to say "declared, but
       // only ever entered by a transition" now that an absent sequence means declaration order (§6).
@@ -1079,7 +1079,7 @@ describe("the conversation and the resource bundle are different keys", () => {
       environment: { session: "shared" },
       children: { first: { state: "leaf" }, second: { state: "leaf2" } },
       sequence: ["first", "second"],
-      outputs: { r: { binding: { child: "second", output: "r" } } },
+      outputs: { r: { binding: ".children.second.outputs.r" } },
     },
     leaf: {
       outputs: { r: { schema: { type: "string" } } },
@@ -1159,7 +1159,7 @@ describe("the conversation and the resource bundle are different keys", () => {
           review: { state: "reviewer", inputs: { thread: { expr: ".children.plan.operation.outputs.session" } } },
         },
         sequence: ["plan", "review"],
-        outputs: { r: { binding: { child: "review", output: "r" } } },
+        outputs: { r: { binding: ".children.review.outputs.r" } },
       },
       planner: {
         outputs: { r: { schema: { type: "string" } } },
@@ -1207,7 +1207,7 @@ describe("the conversation and the resource bundle are different keys", () => {
       root: {
         children: { first: { state: "leaf" }, second: { state: "leaf2" } },
         sequence: ["first", "second"],
-        outputs: { r: { binding: { child: "second", output: "r" } } },
+        outputs: { r: { binding: ".children.second.outputs.r" } },
       },
       leaf: {
         outputs: { r: { schema: { type: "string" } } },

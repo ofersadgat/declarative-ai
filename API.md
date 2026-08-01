@@ -2453,7 +2453,7 @@ const RESOLVER_REF_VALUES: readonly string[];     // all of them, for registry s
 | Authored | Lowers to |
 | --- | --- |
 | `{ child: "plan" }` | `{ op: "plan" }` — a producer edge naming the declared child by its local key. |
-| `{ child: "plan", output: "steps" }` | that edge wrapped in a `select` projection (hw states lower to single-object-output ops, so a named output *is* a property select). |
+| `".children.plan.outputs.steps"` | that edge wrapped in a `select` projection (hw states lower to single-object-output ops, so a named output *is* a property select). |
 | `{ input: n }` | a `scope.get` producer — the model's by-name free-slot fill, made explicit. |
 | `{ expr: "…" }` | an `expr.eval` producer. Semantically an expression **is** a pure `FunctionOp` whose output schema is its inferred type, which is why binding type-checking applies to expr leaves with no special case. |
 | `{ artifact: n }` / `{ conversation: s, message? }` | an `artifact.get` / `conversation.get` producer reading session-owned resources. |

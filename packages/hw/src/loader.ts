@@ -117,27 +117,7 @@ export function desugarBinding(
   // operation. §3.1's first tier: the operation itself, as a value, with nothing applied to it.
   if (isOperationDecl(binding)) return { op: desugarOperation(binding as OperationFields, stateId) };
 
-  if ("child" in binding) {
-    // A producer edge on the declared child, plus a `select` projection for the named output (hw
-    // states lower to single-object-output ops, so a named output IS a property select).
-    const childEdge: Ref<InlineFamily> = { op: binding.child };
-    // `*` is the whole object; anything else, including the defaulted slot name, is a projection.
-    const output = binding.output ?? slotName;
-    if (output === undefined || output === WHOLE_OUTPUT) return childEdge;
-    return resolverEdge(RESOLVER_REFS.select, { value: childEdge, key: { text: output } });
-  }
-  if ("input" in binding) {
-    return resolverEdge(RESOLVER_REFS.scope, { scope: { text: "inputs" }, name: { text: binding.input } });
-  }
   if ("expr" in binding) return desugarExpression(binding.expr, where, stateId, lower);
-  if ("artifact" in binding) {
-    return resolverEdge(RESOLVER_REFS.artifact, { name: { text: binding.artifact } });
-  }
-  if ("conversation" in binding) {
-    const args: Record<string, Ref<InlineFamily>> = { session: { text: binding.conversation } };
-    if (binding.message !== undefined) args.message = { json: binding.message };
-    return resolverEdge(RESOLVER_REFS.conversation, args);
-  }
   throw new WorkflowLoadError(`${where}: unrecognized binding form ${JSON.stringify(binding)}`, stateId);
 }
 
@@ -170,25 +150,20 @@ function desugarExpression(source: string, where: string, stateId: string, lower
   }
 }
 
-/** The child a spread republishes, from either spelling of "that child's outputs". */
+/** The child a spread republishes — `.children.<key>.outputs`, the whole object it fans out. */
 function spreadChildOf(binding: BindingDecl | undefined): string | undefined {
-  if (binding === undefined) return undefined;
-  if (typeof binding === "string") {
-    const parts = binding.split(".");
-    // `.children.<key>.outputs` — the whole object, which is what a spread fans out.
-    if (parts.length === 4 && parts[0] === "" && parts[1] === "children" && parts[3] === "outputs") return parts[2];
-    return undefined;
-  }
-  return "child" in binding ? binding.child : undefined;
+  if (typeof binding !== "string") return undefined;
+  const parts = binding.split(".");
+  return parts.length === 4 && parts[0] === "" && parts[1] === "children" && parts[3] === "outputs" ? parts[2] : undefined;
 }
 
 /**
- * Lower a RUNTIME reference — `.children.critique.outputs.outcome` — to the same producer edge the
- * tagged forms lower to (REFERENCES.md §5).
+ * Lower a RUNTIME reference — `.children.critique.outputs.outcome` — to a producer edge
+ * (REFERENCES.md §5).
  *
- * This is one spelling of what `{ child }`, `{ input }`, `{ artifact }` and `{ conversation }` each
- * said separately. They remain accepted; nothing downstream can tell which spelling was used,
- * because both arrive here and leave as the same base `Ref`.
+ * This is the ONLY spelling. `{ child }`, `{ input }`, `{ artifact }` and `{ conversation }` each
+ * said one of these separately and were kept alongside it while workflows migrated; they are gone,
+ * so there is one way to name a runtime value and no table mapping five spellings onto it.
  */
 function desugarRuntimeReference(reference: string, where: string, stateId: string, slotName?: string): Ref<InlineFamily> {
   const path = reference.slice(1).split(".");
@@ -200,7 +175,7 @@ function desugarRuntimeReference(reference: string, where: string, stateId: stri
   switch (namespace) {
     case "inputs": {
       if (rest.length !== 1) bad("must name exactly one input, as '.inputs.<name>'");
-      return desugarBinding({ input: rest[0]! }, where, stateId);
+      return resolverEdge(RESOLVER_REFS.scope, { scope: { text: "inputs" }, name: { text: rest[0]! } });
     }
     case "outputs": {
       // This state's own outputs are only reachable by evaluation, which is what `expr` is.
@@ -212,24 +187,29 @@ function desugarRuntimeReference(reference: string, where: string, stateId: stri
       if (child === undefined) bad("must name a child, as '.children.<key>.outputs.<name>'");
       if (section === undefined || section === "outputs") {
         // `.children.c.outputs` is the whole object; `.children.c.outputs.x` projects one output.
-        const output = tail.length === 0 ? WHOLE_OUTPUT : tail.join(".");
-        return desugarBinding({ child: child!, output }, where, stateId, slotName);
+        // hw states lower to single-object-output ops, so a named output IS a property select.
+        const childEdge: Ref<InlineFamily> = { op: child! };
+        if (tail.length === 0) return childEdge;
+        return resolverEdge(RESOLVER_REFS.select, { value: childEdge, key: { text: tail.join(".") } });
       }
       // `outcome` and anything else about a child is control-flow state, which guards read.
       return desugarBinding({ expr: `.children.${child}.${[section, ...tail].join(".")}` }, where, stateId);
     }
     case "artifacts": {
       if (rest.length !== 1) bad("must name exactly one artifact, as '.artifacts.<name>'");
-      return desugarBinding({ artifact: rest[0]! }, where, stateId);
+      return resolverEdge(RESOLVER_REFS.artifact, { name: { text: rest[0]! } });
     }
     case "conversations": {
       const [session, section, index] = rest;
       if (session === undefined) bad("must name a session, as '.conversations.<session>'");
-      if (section === undefined) return desugarBinding({ conversation: session! }, where, stateId);
-      if (section !== "messages" || index === undefined || !/^\d+$/.test(index)) {
-        bad("must be '.conversations.<session>' or '.conversations.<session>.messages.<n>'");
+      const args: Record<string, Ref<InlineFamily>> = { session: { text: session! } };
+      if (section !== undefined) {
+        if (section !== "messages" || index === undefined || !/^\d+$/.test(index)) {
+          bad("must be '.conversations.<session>' or '.conversations.<session>.messages.<n>'");
+        }
+        args.message = { json: Number(index) };
       }
-      return desugarBinding({ conversation: session!, message: Number(index) }, where, stateId);
+      return resolverEdge(RESOLVER_REFS.conversation, args);
     }
     default:
       return bad(
@@ -448,8 +428,7 @@ export function desugarState(
         const child = spreadChildOf(decl.binding);
         if (child === undefined) {
           throw new WorkflowLoadError(
-            `outputs.${name}: a '${SPREAD_SUFFIX}' output must bind a child's outputs — ` +
-              `'.children.<key>.outputs' or { "child": "<key>" }`,
+            `outputs.${name}: a '${SPREAD_SUFFIX}' output must bind a child's outputs — '.children.<key>.outputs'`,
             id,
           );
         }
@@ -560,7 +539,7 @@ function expandOutputSpreads(state: LoadedState, states: Record<string, LoadedSt
         name: target,
         kind: slot.kind,
         ...(slot.schema !== undefined ? { schema: slot.schema } : {}),
-        binding: desugarBinding({ child: spread.child, output: name }, `outputs.${spread.prefix}${SPREAD_SUFFIX}`, state.id),
+        binding: desugarBinding(`.children.${spread.child}.outputs.${name}`, `outputs.${spread.prefix}${SPREAD_SUFFIX}`, state.id),
       };
       const childMeta = childState.slotMeta?.[`outputs.${name}`];
       const optional = spread.optional ?? childMeta?.optional;

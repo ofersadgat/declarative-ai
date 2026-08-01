@@ -18,7 +18,7 @@ describe("desugaring (API.md, \"Binding desugaring\")", () => {
 
   it("lowers every authored sugar to a base Ref case", () => {
     const plan = loadBundle(specPlanningFiles(), PLAN_ID).states[PLAN_ID]!;
-    // `{ input: "issue" }` → a `scope.get` producer edge.
+    // `".inputs.issue"` → a `scope.get` producer edge.
     const issueWire = plan.children!["goals"]!.inputs!["issue"]!;
     expect(issueWire).toMatchObject({ op: { kind: "function", functionRef: "scope.get" } });
     // `{ child, output }` → a producer edge on the child + a `select` projection.
@@ -206,7 +206,7 @@ describe("validateBundle failure modes", () => {
   it("type-checks a producer edge against the consuming slot (§7.3)", () => {
     const files = specPlanningFiles();
     // The `goals` child produces a string ARRAY; wire it into the string-typed `issue` slot instead.
-    files[PLAN_ID]!.children!["context"]!.inputs!.issue = { child: "goals", output: "goals" };
+    files[PLAN_ID]!.children!["context"]!.inputs!.issue = ".children.goals.outputs.goals";
     const report = validateBundle(loadBundle(files, PLAN_ID));
     expect(report.errors.map((e) => e.message).join("\n")).toMatch(/not type-compatible/);
   });
@@ -223,7 +223,7 @@ describe("validateBundle failure modes", () => {
     const critique = files["feature/plan/critique"]!;
     // `human_review` is reachable only through a CONDITIONAL transition, so a REQUIRED slot reading
     // it could observe nothing — the hole the strict rule closes.
-    critique.outputs!["weaknesses"]!.binding = { child: "human_review", output: "decision" };
+    critique.outputs!["weaknesses"]!.binding = ".children.human_review.outputs.decision";
     const report = validateBundle(loadBundle(files, PLAN_ID));
     expect(report.errors.map((e) => e.message).join("\n")).toMatch(/not proven to have run/);
   });

@@ -105,29 +105,16 @@ function mergeSlotMap(
 const KIND_SPECIFIC = ["args", "prompt", "system", "function"] as const;
 
 /**
- * Collapse `sessionId` onto `session` before anything else looks at the document.
+ * Refuse `sessionId`, which used to be a synonym for `session`.
  *
- * The two are synonyms (REFERENCES.md §7.2), and normalizing has to happen BEFORE merging: left as
- * two keys they would be two independent fields to the merge below, so a child writing `sessionId`
- * would sit alongside an ancestor's `session` rather than overriding it — and the operation would
- * then carry both, tripping the conflict check on a document that is perfectly well-formed.
- *
- * The `null` case is the one that bites hardest, and it is why the guard tests `undefined` rather
- * than falsiness: `sessionId: null` means "start a fresh session, whatever the chain says"
- * (DESIGN.md §1.6), so it has to reach the merge as a VALUE that overrides. Treated as absence it
- * would sit next to an ancestor's `session: "planning"` and the operation would quietly join the
- * shared conversation the author was explicitly opting out of.
+ * A refusal rather than a silent drop, because `sessionId` is NOT in `OPERATION_OWN_FIELDS`: an
+ * unrecognized field is passed through to the LLM call configuration, so ignoring it would ship the
+ * author's session declaration to the model as a call parameter and start a fresh conversation
+ * without saying so.
  */
-export function normalizeSynonyms<T extends OperationFields>(fields: T): T {
-  if (fields.sessionId === undefined) return fields;
-  if (fields.session !== undefined && !sameSession(fields.session, fields.sessionId)) {
-    throw new Error(
-      `operation declares both session '${describeSession(fields.session)}' and ` +
-        `sessionId '${describeSession(fields.sessionId)}' — they are the same field, so one of them has to go`,
-    );
-  }
-  const { sessionId, ...rest } = fields;
-  return { ...rest, session: sessionId } as T;
+export function refuseSynonyms<T extends OperationFields>(fields: T): T {
+  if ((fields as { sessionId?: unknown }).sessionId === undefined) return fields;
+  throw new Error("operation declares 'sessionId'; the field is called 'session'");
 }
 
 type SessionDeclValue = OperationFields["session"];
@@ -155,8 +142,8 @@ function describeSession(value: SessionDeclValue): string {
 
 /** Merge `over` onto `base`, field by field. `over` is the NEARER layer and wins. */
 export function mergeOperationFields(base: OperationFields, over: OperationFields): OperationFields {
-  base = normalizeSynonyms(base);
-  over = normalizeSynonyms(over);
+  base = refuseSynonyms(base);
+  over = refuseSynonyms(over);
   if (over.kind !== undefined && base.kind !== undefined && over.kind !== base.kind) {
     const narrowed: OperationFields = { ...base };
     for (const field of KIND_SPECIFIC) delete narrowed[field];

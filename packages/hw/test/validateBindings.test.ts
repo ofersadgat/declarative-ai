@@ -71,7 +71,7 @@ describe("what a producer edge may name (§7.4)", () => {
         prompt: "go",
         input: { thing: { kind: "json", binding: binding as never } },
       },
-      children: { helper: { state: "root/helper", inputs: { seed: { input: "seed" } } } },
+      children: { helper: { state: "root/helper", inputs: { seed: ".inputs.seed" } } },
       sequence: ["helper"],
     } as StateDef,
     "root/helper": {
@@ -117,19 +117,19 @@ describe("what a producer edge may name (§7.4)", () => {
     // The operation resolves its inputs before any child runs, so a producer edge to a child here can
     // only ever fail at run time ("child 'helper' has not run"). Caught statically instead. An
     // operation input is a value/scope form or an embedded operation — never a reach into children.
-    expect(messages(withBinding({ child: "helper" }), "root")).toMatch(/operation input cannot reference child 'helper'/);
-    expect(messages(withBinding({ child: "helper", output: "result" }), "root")).toMatch(/operation input cannot reference child 'helper'/);
+    expect(messages(withBinding(".children.helper.outputs"), "root")).toMatch(/operation input cannot reference child 'helper'/);
+    expect(messages(withBinding(".children.helper.outputs.result"), "root")).toMatch(/operation input cannot reference child 'helper'/);
   });
 
   it("still accepts the session-owned resolvers, whose contents are only known at run time", () => {
-    expect(messages(withBinding({ artifact: "spec" }), "root")).toBe("");
-    expect(messages(withBinding({ conversation: "default" }), "root")).toBe("");
-    expect(messages(withBinding({ conversation: "default", message: 0 }), "root")).toBe("");
+    expect(messages(withBinding(".artifacts.spec"), "root")).toBe("");
+    expect(messages(withBinding(".conversations.default"), "root")).toBe("");
+    expect(messages(withBinding(".conversations.default.messages.0"), "root")).toBe("");
   });
 
   it("still accepts the ordinary literal and scope forms", () => {
     expect(messages(withBinding({ text: "literal" }), "root")).toBe("");
-    expect(messages(withBinding({ input: "seed" }), "root")).toBe("");
+    expect(messages(withBinding(".inputs.seed"), "root")).toBe("");
     expect(messages(withBinding({ expr: ".inputs.seed" }), "root")).toBe("");
   });
 });

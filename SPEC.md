@@ -337,8 +337,8 @@ Good:
   "critique": {
     "state": "feature/plan/critique",
     "inputs": {
-      "plan_doc": { "child": "context", "output": "plan_doc" },
-      "goals": { "child": "goals", "output": "goals" }
+      "plan_doc": ".children.context.outputs.plan_doc",
+      "goals": ".children.goals.outputs.goals"
     }
   }
 }
@@ -363,12 +363,12 @@ cases.
 | `{ "refs": … }` | An inline arrangement (array/object) whose leaves are refs. | itself (base) |
 | `{ "op": … }` | A producer edge: a declared child's key, or an embedded operation. | itself (base) |
 | `{ "child": "context" }` | The child output named by THE SLOT BEING BOUND. | a producer edge on the child, plus a `select` producer projecting that property |
-| `{ "child": "context", "output": "plan_doc" }` | One named output of the child. | the same, projecting `plan_doc` |
-| `{ "child": "context", "output": "*" }` | The child's whole outputs object, as one value. | `{ "op": "context" }` |
-| `{ "input": "issue" }` | This state's declared input, by name. | a `scope.get` producer |
+| `".children.context.outputs.plan_doc"` | One named output of the child. | the same, projecting `plan_doc` |
+| `".children.context.outputs"` | The child's whole outputs object, as one value. | `{ "op": "context" }` |
+| `".inputs.issue"` | This state's declared input, by name. | a `scope.get` producer |
 | `{ "expr": ".outputs.weaknesses" }` | A small computation in the expression DSL (§6). | an `expr.eval` producer whose output schema is the inferred type |
-| `{ "artifact": "design_doc" }` | A session-owned artifact, by name. | an `artifact.get` producer |
-| `{ "conversation": "review", "message": 3 }` | A session's transcript, or one message of it. | a `conversation.get` producer |
+| `".artifacts.design_doc"` | A session-owned artifact, by name. | an `artifact.get` producer |
+| `".conversations.review.messages.3"` | A session's transcript, or one message of it. | a `conversation.get` producer |
 
 Every sugar becomes a **producer edge** (or a literal), so the base vocabulary stays closed
 and one uniform mechanism resolves all wiring: a producer edge on a declared child resolves
@@ -400,7 +400,7 @@ terminates.
     "plan_doc": {
       "kind": "blob",
       "schema": { "type": "string", "contentMediaType": "markdown" },
-      "binding": { "child": "context", "output": "plan_doc" }
+      "binding": ".children.context.outputs.plan_doc"
     },
     "outcome": {
       "schema": { "type": "string", "enum": ["complete", "blocked"] },
@@ -424,7 +424,7 @@ This is supported explicitly, as a slot that declares no `schema` — an unconst
 slot constrains nothing, so any producer satisfies it.
 
 `output` DEFAULTS to the name of the slot being bound, because
-`"plan_doc": { "binding": { "child": "context", "output": "plan_doc" } }` says the same word twice
+`"plan_doc": { "binding": ".children.context.outputs.plan_doc" }` says the same word twice
 and the repeat is the one people forget to change. `"*"` is the escape hatch for the whole object.
 
 Example — the three forms side by side:
@@ -432,10 +432,10 @@ Example — the three forms side by side:
 ```json
 {
   "outputs": {
-    "plan_doc": { "binding": { "child": "context" } },
-    "summary": { "binding": { "child": "context", "output": "notes" } },
-    "child_outputs": { "binding": { "child": "critique", "output": "*" } },
-    "ctx_*": { "binding": { "child": "context" } }
+    "plan_doc": { "binding": ".children.context.outputs.plan_doc" },
+    "summary": { "binding": ".children.context.outputs.notes" },
+    "child_outputs": { "binding": ".children.critique.outputs" },
+    "ctx_*": { "binding": ".children.context.outputs.binding" }
   }
 }
 ```
@@ -481,7 +481,7 @@ Example:
 ```
 
 A configuration input is read exactly like any other input: by a binding
-(`{ "input": "severity_threshold" }`), by an expression (`inputs.severity_threshold`), or by
+(`".inputs.severity_threshold"`), by an expression (`inputs.severity_threshold`), or by
 prompt interpolation (`{{.inputs.severity_threshold}}`).
 
 ### 4.6 Artifacts
@@ -949,7 +949,7 @@ An agent operation may not:
         "enum": ["approve", "request_changes", "block"]
       },
       "optional": true,
-      "binding": { "child": "human_review", "output": "decision" }
+      "binding": ".children.human_review.outputs.decision"
     }
   },
   "operation": {
@@ -964,7 +964,7 @@ An agent operation may not:
     "address_weaknesses": {
       "state": "feature/plan/critique/address_weaknesses",
       "inputs": {
-        "plan_doc": { "input": "plan_doc" },
+        "plan_doc": ".inputs.plan_doc",
         "weaknesses": { "expr": ".outputs.weaknesses" },
         "critique_report": { "expr": ".outputs.critique_report" }
       }
@@ -972,7 +972,7 @@ An agent operation may not:
     "human_review": {
       "state": "feature/plan/critique/human_review",
       "inputs": {
-        "plan_doc": { "input": "plan_doc" },
+        "plan_doc": ".inputs.plan_doc",
         "critique_report": { "expr": ".outputs.critique_report" }
       }
     }
@@ -1146,30 +1146,30 @@ validated outputs. The parent branches on `outputs.decision`.
     "plan_doc": {
       "kind": "blob",
       "schema": { "type": "string", "contentMediaType": "markdown" },
-      "binding": { "child": "context", "output": "plan_doc" }
+      "binding": ".children.context.outputs.plan_doc"
     },
     "critique": {
-      "binding": { "child": "critique" }
+      "binding": ".children.critique.outputs.critique"
     }
   },
   "children": {
     "goals": {
       "state": "feature/plan/goals",
       "inputs": {
-        "issue": { "input": "issue" }
+        "issue": ".inputs.issue"
       }
     },
     "context": {
       "state": "feature/plan/context",
       "inputs": {
-        "issue": { "input": "issue" },
-        "goals": { "child": "goals", "output": "goals" }
+        "issue": ".inputs.issue",
+        "goals": ".children.goals.outputs.goals"
       }
     },
     "critique": {
       "state": "feature/plan/critique",
       "inputs": {
-        "plan_doc": { "child": "context", "output": "plan_doc" },
+        "plan_doc": ".children.context.outputs.plan_doc",
         "severity_threshold": { "text": "significant" }
       }
     }
@@ -1291,21 +1291,21 @@ Example — fan-out reviews with a dataflow join:
       "state": "review/agent_review",
       "async": true,
       "inputs": {
-        "change": { "input": "change" }
+        "change": ".inputs.change"
       }
     },
     "codex_review": {
       "state": "review/agent_review",
       "async": true,
       "inputs": {
-        "change": { "input": "change" }
+        "change": ".inputs.change"
       }
     },
     "synthesize": {
       "state": "review/synthesize",
       "inputs": {
-        "review_a": { "child": "claude_review", "output": "report" },
-        "review_b": { "child": "codex_review", "output": "report" }
+        "review_a": ".children.claude_review.outputs.report",
+        "review_b": ".children.codex_review.outputs.report"
       }
     }
   },
