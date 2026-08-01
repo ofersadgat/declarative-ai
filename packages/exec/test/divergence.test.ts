@@ -1,5 +1,5 @@
 /**
- * Divergence and resync (SESSIONS.md §11).
+ * Divergence and resync (DESIGN.md §1.6).
  *
  * The remote can move without us — Managed Agents compacts server-side on its own, a Claude Code
  * session can be resumed outside JaiRA. Then our mirror describes a conversation the provider no

@@ -184,7 +184,7 @@ export type ConversationMode = "full_history" | "summary" | "fresh" | "selected_
  */
 export interface ExecEnvironmentDecl {
   /**
-   * The conversation this operation runs under (SESSIONS.md §3, §4). Three spellings:
+   * The conversation this operation runs under (DESIGN.md §1.6). Three spellings:
    *
    *  - a **name** — same name across states ⇒ one shared stream, and the name is also the
    *    resource-bundle key (workspace, permissions);
@@ -206,7 +206,7 @@ export interface ExecEnvironmentDecl {
   /** @see session — normalized away at parse; never present on a loaded state. */
   sessionId?: string | null | { id: string };
   /**
-   * Always branch, rather than appending when the position is still the head (SESSIONS.md §3).
+   * Always branch, rather than appending when the position is still the head (DESIGN.md §1.6).
    *
    * Declared where a session is CONSUMED, not carried on the value produced: a position marker
    * should not encode an intent about how a later caller will use it. Absent and `false` mean the
@@ -459,7 +459,7 @@ export interface LoadedState
    * is therefore absent on a pure composite. That gap matters: declaring `environment.session` on a
    * composite root is the ordinary way to give a whole subtree one session, and the engine needs to
    * see it there to key the subtree's resource bundle — workspace, permission ledger, approval scope
-   * — on the name the author actually wrote (SESSIONS.md §4).
+   * — on the name the author actually wrote (DESIGN.md §1.6).
    *
    * Present-but-`null` is meaningful: it is an explicit "start fresh", not an absent declaration.
    */
@@ -533,7 +533,7 @@ export interface WorkflowBundle {
  *    `{ expr }` leaves too, since an expr leaf IS a producer over the same data.
  *  - GUARD-ONLY scalars — control-flow state (`run`, `limits`), never a reference binding.
  *
- * `operation` is the state's OWN call as an addressable node (SESSIONS.md §8) — its outcome, what it
+ * `operation` is the state's OWN call as an addressable node (SPEC.md §6.1) — its outcome, what it
  * cost, which model served it, and for a prompt op the conversation position it ended at. It is a
  * namespace rather than a child on purpose: a child would perturb the instance tree, which is what
  * `run.cursor`, `run.position` and `sequence` are defined against.

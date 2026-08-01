@@ -188,7 +188,7 @@ interface TerminationRecord {
   outcome: TerminationOutcome;
   outputs?: Record<string, ResolvedValue>;
   failure?: Failure;
-  /** What the state's operation reported, carried up so a parent can read it (SESSIONS.md §8). */
+  /** What the state's operation reported, carried up so a parent can read it (SPEC.md §6.1). */
   operation?: OperationNode;
 }
 
@@ -197,7 +197,7 @@ interface ChildRecord {
   status: "running" | "done";
   outcome?: TerminationOutcome;
   outputs?: Record<string, ResolvedValue>;
-  /** The child's own operation node — what `children.<key>.operation.*` reads (SESSIONS.md §8). */
+  /** The child's own operation node — what `children.<key>.operation.*` reads (SPEC.md §6.1). */
   operation?: OperationNode;
   abort: AbortController;
   promise: Promise<void>;
@@ -220,11 +220,11 @@ interface Instance {
    * Carried on the INSTANCE rather than recomputed per operation because it is inherited: an
    * operation that declares no session runs in whatever bundle encloses it, all the way up to the
    * run's own. That inheritance is what keeps a worktree and its approvals alive across a retry or
-   * a loop iteration, neither of which changes what the author DECLARED (SESSIONS.md §13).
+   * a loop iteration, neither of which changes what the author DECLARED (DESIGN.md §5.1).
    */
   resourceKey: string;
   /**
-   * What this instance's own operation reported — `operation.*` in an expression (SESSIONS.md §8).
+   * What this instance's own operation reported — `operation.*` in an expression (SPEC.md §6.1).
    *
    * Accumulated on the instance rather than derived from the events journal, because an expression
    * cannot read a journal: that inaccessibility is the whole reason this namespace exists.
@@ -293,7 +293,7 @@ type Turn = { role: "user" | "assistant"; content: string };
  * neither changes what the author DECLARED, so both land on the same key their predecessor did.
  */
 /**
- * The engine's view of a finished call, for the `operation.*` namespace (SESSIONS.md §8).
+ * The engine's view of a finished call, for the `operation.*` namespace (SPEC.md §6.1).
  *
  * `usage` is passed through as the measurement record rather than re-shaped, so a metric an executor
  * starts reporting reaches expressions without a second mapping to keep in sync. `cost` is lifted out
@@ -301,7 +301,7 @@ type Turn = { role: "user" | "assistant"; content: string };
  *
  * `provider` and `attempts` are NOT here yet, deliberately. Neither reaches hw's seam today — they
  * are things the executor knows and does not report — so declaring them would give the lint a field
- * it could never resolve. They arrive with the executor-reported delta (SESSIONS.md §12), and
+ * it could never resolve. They arrive with the executor-reported delta (DESIGN.md §1.6), and
  * {@link operationNodeSchema} gains them at the same time, so the type never promises more than the
  * engine fills.
  */
@@ -734,7 +734,7 @@ export class WorkflowEngine {
       record.outcome = term.outcome;
       record.outputs = term.outputs;
       // The child's operation node, so `children.<key>.operation.*` reads what its call reported —
-      // including, for a prompt op, the conversation position it ended at (SESSIONS.md §8).
+      // including, for a prompt op, the conversation position it ended at (SPEC.md §6.1).
       record.operation = term.operation;
       if ((term.outcome === "error" || term.outcome === "timeout") && instance.children.get(key) === record) {
         instance.unhandledFailures.add(key);
@@ -848,7 +848,7 @@ export class WorkflowEngine {
     return {
       inputs: instance.inputs,
       outputs: instance.outputs,
-      // The state's own call as a value (SESSIONS.md §8). `{}` before it has run, so a guard reading
+      // The state's own call as a value (SPEC.md §6.1). `{}` before it has run, so a guard reading
       // `operation.outcome` gets `undefined` rather than throwing — the same shape a never-entered
       // child gets.
       operation: instance.operation ?? {},
@@ -1328,7 +1328,7 @@ export class WorkflowEngine {
     const env = instance.def.environment ?? {};
     // Tools, workspace and permissions key on the RESOURCE bundle, never on the conversation
     // position — a position moves on every call, and a `"session"`-scoped approval that moved with
-    // it would cover exactly one operation (SESSIONS.md §13).
+    // it would cover exactly one operation (DESIGN.md §5.1).
     const resourceKey = instance.resourceKey;
     // The entry's capabilities are REQUIRED and total per variant (§2), so this reads a definite value
     // instead of falling through an `undefined` and silently defaulting the permission gate.
@@ -1396,7 +1396,7 @@ export class WorkflowEngine {
     }
 
     const env = instance.def.environment ?? {};
-    // The two halves one `sessionId` used to be (SESSIONS.md §3/§4).
+    // The two halves one `sessionId` used to be (DESIGN.md §1.6).
     //
     // `session.id` is the CONVERSATION — which transcript this call joins. A declared name joins that
     // stream; `null` and absent each start a fresh one. Absent no longer falls back to a shared
@@ -1468,7 +1468,7 @@ export class WorkflowEngine {
     // Conversation artifact (SPEC §4.7): the exchange is already in the session, because the session
     // layer RECORDED the call — one write, not two. The engine used to synthesize a user turn and a
     // stringified assistant turn here, which threw away every tool call and reasoning part in between
-    // and is exactly what SESSIONS.md §7 replaced. All that remains is re-reading, so a
+    // and is exactly what the append-only model replaced. All that remains is re-reading, so a
     // `{ conversation }` binding in this state's outputs sees what the call just added.
     await this.refreshTranscript(session.id);
 
@@ -1542,7 +1542,7 @@ export class WorkflowEngine {
         ref: session.id,
         ...(session.fork ? { fork: true } : {}),
         // Stable across replays, so a re-run lands on the conversation it landed on before rather
-        // than minting a second one beside it (SESSIONS.md §13).
+        // than minting a second one beside it (DESIGN.md §5.1).
         seed: `${instance.stateId}:${session.id}`,
       };
     }
@@ -1552,7 +1552,7 @@ export class WorkflowEngine {
     //
     // Keyed on the resource bundle rather than the conversation, deliberately: a conversation position
     // changes on every call, so keying a workspace on it would hand each operation its own worktree —
-    // which SESSIONS.md §13 rules out ("forks share a worktree; JaiRA does not fork worktrees").
+    // which §5.1 rules out: forking branches the CONVERSATION, not the filesystem.
     const workspace = this.config.workspaceFor?.(resourceKey) ?? services.workspace;
     if (workspace !== services.workspace) services.workspace = workspace;
     if (tools !== undefined) services.tools = tools;
@@ -1562,13 +1562,13 @@ export class WorkflowEngine {
   }
 
   /**
-   * What one operation's `session` declaration resolves to for THIS instance (SESSIONS.md §4).
+   * What one operation's `session` declaration resolves to for THIS instance (DESIGN.md §1.6).
    *
    * The four-way order in the document collapses to the three cases {@link resolveSession} handles,
    * because the environment merge has already run: an ancestor's `environment.session` arrives as
    * this operation's own `session`, and a nearer `null` has already beaten it.
    *
-   * `positionOf` is the seam SESSIONS.md §4's instance-scoped invariant lives behind. It answers
+   * `positionOf` is the seam the instance-scoped invariant (DESIGN.md §1.6) lives behind. It answers
    * "where does THIS instance think that named stream currently is", and it must never become a
    * global name → head map: a restarted state has to re-resolve to the position it started from, so
    * that the append the failed attempt made turns the retry into a fork from the right place rather

@@ -508,7 +508,7 @@ export function desugarState(
     // `environment` exists only on a state that declares an OPERATION. A pure composite that
     // declares `environment.session` — the ordinary way to give a whole subtree one session — would
     // otherwise carry no trace of it, and the engine would key its children's resource bundle on the
-    // run instead of on the name the author wrote (SESSIONS.md §4).
+    // run instead of on the name the author wrote (DESIGN.md §1.6).
     ...("session" in environment ? { scopeSession: environment.session } : {}),
     ...(spreads.length > 0 ? { outputSpreads: spreads } : {}),
     ...(Object.keys(slotMeta).length > 0 ? { slotMeta } : {}),

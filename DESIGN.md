@@ -155,7 +155,8 @@ Compaction produces a **new** session with an edge back to the intact original. 
 prefix is byte-identical, and a compacted conversation opens with a summary appearing nowhere in its
 origin. `withSession` composes over a record-mode core with `withRecord` inside it — the payload IS the
 conversation, so projecting it down to the op's output value any earlier would destroy what the record has
-to store. The store seams themselves are §3.6; JaiRA's `SESSIONS.md` is the full model.
+to store. The store seams themselves are §3.6; the persistence, provider matrix and known limits
+are an app's concern (JaiRA's DESIGN §7.3 is the worked one).
 
 ### 1.7 Naming
 
@@ -556,7 +557,7 @@ interface SessionStore<Msg = JsonValue> {
 - A workflow injects a **run-scoped** store via `ctx.sessions` so states naming one conversation continue
   it (§7); an app-provided store takes precedence. `MapSessionStore` is the bundled in-memory
   implementation — it holds lineage AND records, because in the small the two are inseparable; apps
-  supply durable ones. JaiRA's `SESSIONS.md` is the full model.
+  supply durable ones; §1.6 is the model they implement.
 
 **There is no blob store.** Binary data is a leaf VALUE, so hydration is the ref family's business — the
 same as `text` and `json` — and a separate injected store beside that would be a second mechanism doing
@@ -787,6 +788,12 @@ apart?": you don't have to, since the key was never derived from the iteration.
   within a subtree — a review agent reading what a coding agent wrote is the point — and overridable to
   isolate (a parallel fan-out into worktrees). Two different runtimes sharing one workspace is common
   and correct.
+- **A conversation fork does NOT isolate the workspace.** Forking branches the conversation, not the
+  filesystem — the same constraint Anthropic documents for `forkSession`. Two branches of one
+  conversation share a worktree and a permission ledger, because both follow the declared name and a
+  fork never changed what was declared. Isolating a workspace is a *separate*, explicit act. Worth
+  stating outright: the isolation hook above sits right next to forking, and wiring the two together
+  by accident would turn every retry into a new checkout.
 
 #### Tool renames are just overlay bindings
 

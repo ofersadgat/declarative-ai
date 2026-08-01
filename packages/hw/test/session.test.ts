@@ -1,5 +1,5 @@
 /**
- * What an operation's `session` declaration means (SESSIONS.md §3, §4).
+ * What an operation's `session` declaration means (DESIGN.md §1.6).
  *
  * Two properties carry the whole step, and they are easy to conflate:
  *

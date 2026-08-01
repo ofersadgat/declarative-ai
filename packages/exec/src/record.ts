@@ -274,7 +274,7 @@ export function withSessionPosition<R = ExecServices, M extends ExecMetrics = Ex
 }
 
 /**
- * Notice that the remote moved underneath us, and answer it with a `resync` (SESSIONS.md §11).
+ * Notice that the remote moved underneath us, and answer it with a `resync` (DESIGN.md §1.6).
  *
  * The check is cheap and exact: we RESUMED a handle, the call reports the handle it actually ended
  * in, and on an append those must agree. When they do not, the provider's conversation is no longer

@@ -215,7 +215,7 @@ export async function generateStructured<T = JsonValue>(
   const producedFiles: GeneratedFile[] = [];
   /**
    * The messages the call APPENDED, as the SDK reports them — what a caller mirroring the
-   * conversation has to store and send back next turn (SESSIONS.md §7).
+   * conversation has to store and send back next turn (DESIGN.md §1.6).
    *
    * Read off `result.response` rather than rebuilt from the projections above, because a rebuild is
    * exactly the lossy round-trip that breaks replay: `providerOptions` rides at both message and part
@@ -293,7 +293,7 @@ export async function generateStructured<T = JsonValue>(
       toolResults: toolResults.length > 0 ? toolResults : undefined,
       files: producedFiles.length > 0 ? producedFiles : undefined,
       finishReason: args.finishReason,
-      // What the call APPENDED, verbatim, for a caller mirroring the conversation (SESSIONS.md §7).
+      // What the call APPENDED, verbatim, for a caller mirroring the conversation (DESIGN.md §1.6).
       ...(responseMessages.length > 0 ? { messages: responseMessages } : {}),
     };
     const metrics = metricsOf(args.tokens);

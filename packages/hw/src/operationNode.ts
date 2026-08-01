@@ -1,5 +1,5 @@
 /**
- * The `operation.*` expression namespace (SESSIONS.md §8).
+ * The `operation.*` expression namespace (SPEC.md §6.1).
  *
  * A state's operation was not addressable. Its result landed straight in the state's declared output
  * slots, while a CHILD was addressable as `children.<key>.outputs` — and that asymmetry is why
@@ -31,7 +31,7 @@
  * consumers want, since "append after me" and "fork after me" both mean *after*.
  *
  * There is deliberately no start marker. Recovery after an error does not need one: restart the
- * state, and SESSIONS.md §4's instance-scoped resolution re-resolves the binding to the position the
+ * state, and DESIGN.md §1.6's instance-scoped resolution re-resolves the binding to the position the
  * failed attempt started from, which has since been appended to — so it forks, from exactly the
  * right place.
  *
@@ -101,7 +101,7 @@ export function operationNodeSchema(opKind: "prompt" | "function" | undefined): 
   // `provider` and `attempts` are absent on purpose, not forgotten. Neither reaches hw's seam today
   // — they are things the EXECUTOR knows and does not report — so declaring them would hand the lint
   // a field it could never resolve and every author a value that is always undefined. They arrive
-  // with the executor-reported delta (SESSIONS.md §12), alongside the code that fills them.
+  // with the executor-reported delta (DESIGN.md §1.6), alongside the code that fills them.
   // Only a prompt operation has a conversation to end at. A function op — a `ui` gate, a delegated
   // adapter, a host helper — has none, so the slot is absent from its type and reaching for it is
   // caught at load time.

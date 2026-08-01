@@ -681,9 +681,45 @@ inputs.*
 outputs.*
 children.<id>.outputs.*
 children.<id>.outcome
+operation.*
+children.<id>.operation.*
 artifacts.*
 conversations.*
 ```
+
+`operation.*` is the state's **own** call as an addressable node, which is what makes engine metadata
+reachable without going through the events journal. It is a namespace rather than a child on purpose:
+a child would perturb the instance tree and make `run.cursor` / `run.position` / `sequence`
+ambiguous. Its shape is a **typed union** — a common core on every kind plus llm-only extras — so
+`operation.outputs.session` on a `ui` operation is a load-time authoring error rather than a runtime
+`undefined`:
+
+| Field | Kinds | Notes |
+| --- | --- | --- |
+| `outcome` | all | `success` \| `error` \| `timeout` \| `canceled`; mirrors `children.<id>.outcome` |
+| `usage` | all | the measurement record, passed through rather than re-shaped |
+| `cost` | all | USD — lifted out of `usage` because it is the field asked for by name, and a *failed* call still spends money and still reports it |
+| `model` | all | the model the call was actually made with, post-resolution |
+| `outputs.session` | prompt only | a `SessionRef`, i.e. `{ id }` and nothing else |
+
+`provider` and `attempts` are **absent on purpose**. Neither reaches the engine's seam today — they
+are things an executor knows and does not report — so declaring them would hand the lint a field it
+could never resolve and every author a value that is always `undefined`.
+
+The ref schema is closed (`additionalProperties: false`), which is what makes
+`operation.outputs.session.position` — a plausible thing to reach for, given how the notation reads —
+a lint error rather than a runtime `undefined`. A ref is opaque, and the schema says so.
+
+**`operation.outputs.session` is the END position.** A call appends *at* a position but does not know
+its end until the provider resolves, so the end marker is the only value that can exist when the
+engine reads it — and it is what a consumer actually wants ("append after me", "fork after me").
+There is deliberately no start marker: recovery after an error does not need one, since instance-scoped
+resolution (§4.7) forks from the right place on its own.
+
+Note the granularity. **Authored forking is per-operation**: one agentic call that appends forty
+entries cannot be branched at entry twenty from a workflow. A store may address finer positions so a
+human can scrub a transcript in a UI, but the expression language exposes operation boundaries only.
+`{}` before the operation has run, so a guard reading it early sees absence rather than an error.
 
 The **guard-only scalars** — control-flow state, never addressable by a reference binding,
 reachable only from `when` guards and `{ "expr": … }` leaves:

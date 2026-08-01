@@ -25,7 +25,7 @@ export function specPlanningFiles(): Record<string, StateDef> {
     "feature/plan": {
       label: "Planning",
       // SPEC §4.7's "threads across states" is DECLARED now, not implicit. An undeclared operation
-      // gets its own stream (SESSIONS.md §4) — an implicit process-wide transcript is what drove
+      // gets its own stream (DESIGN.md §1.6) — an implicit process-wide transcript is what drove
       // unbounded context growth — so a workflow whose states are meant to share a conversation says
       // so once, at the root, and the environment chain carries it down.
       environment: { session: "planning" },

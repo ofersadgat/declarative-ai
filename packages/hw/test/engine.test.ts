@@ -999,7 +999,7 @@ describe("per-session workspace overlay (DESIGN §5.1, \"Sessions: the run-scope
 });
 
 /**
- * The `operation.*` namespace at run time (SESSIONS.md §8). The lint is covered in
+ * The `operation.*` namespace at run time (SPEC.md §6.1). The lint is covered in
  * `operationNode.test.ts`; what matters here is that the values actually arrive.
  */
 describe("operation.* resolves during a run", () => {
@@ -1069,7 +1069,7 @@ describe("operation.* resolves during a run", () => {
 });
 
 /**
- * SESSIONS.md §4/§13. One `sessionId` used to key two unrelated things — which transcript a call
+ * DESIGN.md §1.6. One `sessionId` used to key two unrelated things — which transcript a call
  * joins, and which workspace / permission ledger it runs in. They have to separate once a session is
  * a POSITION, because a position moves on every call.
  */
@@ -1094,7 +1094,7 @@ describe("the conversation and the resource bundle are different keys", () => {
 
   it("a state that declares no session INHERITS the enclosing workspace", async () => {
     // Inherited, not minted per state — otherwise every undeclared operation would ask for its own
-    // worktree, which SESSIONS.md §13 rules out ("JaiRA does not fork worktrees").
+    // worktree, which §5.1 rules out — a fork branches the conversation, not the filesystem.
     const { engine, fake } = makeEngine(twoStates(), "root", () => ok({ r: "done" }), {
       extra: { workspaceFor: (key) => (key === "shared" ? { root: "/ws/shared" } : undefined) },
     });
@@ -1126,7 +1126,7 @@ describe("the conversation and the resource bundle are different keys", () => {
   });
 
   it("two UNDECLARED states no longer share a transcript", async () => {
-    // The behaviour SESSIONS.md §4 removes. `full_history` on the second state used to replay the
+    // The behaviour the append-only model removes. `full_history` on the second state used to replay the
     // first's exchange, because both fell back to one implicit "default" session.
     const { engine, fake } = makeEngine(undeclaredPair(), "root", () => ok({ r: "done" }));
     await engine.run({ inputs: {} });

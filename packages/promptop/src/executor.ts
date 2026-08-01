@@ -263,7 +263,7 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
     }
 
     /**
-     * THE SESSION, resolved to a position and reserved by the wrapper (SESSIONS.md §6).
+     * THE SESSION, resolved to a position and reserved by the wrapper (DESIGN.md §1.6).
      *
      * This is the executor's half of the split: the wrapper decided WHETHER this appends or forks;
      * shaping the request for that decision is the executor's business, and it is deliberately not

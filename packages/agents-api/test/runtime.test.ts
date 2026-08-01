@@ -329,7 +329,7 @@ describe("createClaudeCodeFunction — delegated agent as a registered async fun
 });
 
 /**
- * Native fork (SESSIONS.md §6/§10). This adapter has the primitive the design wants — `resume`
+ * Native fork (DESIGN.md §1.6). This adapter has the primitive the design wants — `resume`
  * continues server-side and `resume + forkSession` branches — so the replay strategy is never used
  * for it, and the handle the run ENDED in is the one thing it must hand back.
  */
@@ -396,7 +396,7 @@ describe("native session resume and fork", () => {
   });
 });
 
-/** The provider READ seam (SESSIONS.md §11) — what a resync re-reads from. */
+/** The provider READ seam (DESIGN.md §1.6) — what a resync re-reads from. */
 describe("reading a conversation back", () => {
   it("offers a reader only when the adapter was given one", () => {
     // The distinction is load-bearing: no reader means a resync starts EMPTY, and §11 requires that

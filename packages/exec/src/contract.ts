@@ -329,7 +329,7 @@ export interface ExecServices {
    */
   sessionRequest?: SessionRequest;
   /**
-   * Reads a conversation back FROM the provider, for re-syncing after divergence (SESSIONS.md §11).
+   * Reads a conversation back FROM the provider, for re-syncing after divergence (DESIGN.md §1.6).
    *
    * Per-adapter and optional, because the capability genuinely is: Claude Code has
    * `getSessionMessages()`, Managed Agents has `events.list`, and the Messages API has neither — and

@@ -1,5 +1,5 @@
 /**
- * What an operation's `session` declaration means (SESSIONS.md §3, §4).
+ * What an operation's `session` declaration means (DESIGN.md §1.6).
  *
  * A session is an append-only conversation stream, and a **session ref** names one AT
  * a position — which is what makes "continue from here" and "branch from here" the
@@ -19,7 +19,7 @@
  * They could share a key while a session was a name. They cannot once a session is a
  * POSITION, because a position changes on every call: a `"session"`-scoped approval
  * would then cover exactly one operation, and every fork would silently ask for its
- * own worktree — which SESSIONS.md §13 explicitly rules out ("forks share a
+ * own worktree — which DESIGN.md §5.1 explicitly rules out ("forks share a
  * worktree; JaiRA does not fork worktrees").
  *
  * So {@link SessionBinding} carries both, and the rules differ on purpose:
@@ -42,7 +42,7 @@ import type { JsonValue } from "@declarative-ai/exec";
  *
  * `id` is the only enumerable property, so the events journal and any serialized
  * inputs/outputs see `{ id }` and nothing else. Resolved forms carrying more attach it
- * non-enumerably (SESSIONS.md §3).
+ * non-enumerably (DESIGN.md §1.6).
  */
 export interface SessionRef {
   readonly id: string;
@@ -72,7 +72,7 @@ export const RESERVED_SESSION_PREFIX = "#";
  * The RUN's resource bundle: the workspace and permission ledger an operation gets
  * when neither it nor any ancestor declared a session.
  *
- * This is what `DEFAULT_SESSION` used to be, minus the part SESSIONS.md §4 removes.
+ * This is what `DEFAULT_SESSION` used to be, minus the part the append-only model removes.
  * It is no longer an implicit shared CONVERSATION — that is exactly the thing driving
  * unbounded context growth — but it remains the run's shared workspace, because a run
  * has one worktree and always did.
@@ -133,7 +133,7 @@ export interface SessionBinding {
   resourceKey: string;
   /**
    * Always fork, rather than appending if the position is still the head
-   * (SESSIONS.md §3). Expressed where a session is CONSUMED, because a position
+   * (DESIGN.md §1.6). Expressed where a session is CONSUMED, because a position
    * marker should not encode an intent about how a later caller will use it.
    */
   fork: boolean;
@@ -148,7 +148,7 @@ export interface SessionScope {
   /**
    * The position a named session currently sits at, as THIS INSTANCE sees it.
    *
-   * Instance-scoped, never a global name → head map (SESSIONS.md §4). The distinction
+   * Instance-scoped, never a global name → head map (DESIGN.md §1.6). The distinction
    * is what makes retry work: a restarted state re-resolves to the position it started
    * from, which has since been appended to by the failed attempt — so it forks, from
    * exactly the right place, instead of stacking the retry on top of the failure.
@@ -160,7 +160,7 @@ export interface SessionScope {
 }
 
 /**
- * Resolve one operation's session, per SESSIONS.md §4.
+ * Resolve one operation's session, per DESIGN.md §1.6.
  *
  * The four-way order in the document collapses to three cases here, because the
  * ENVIRONMENT MERGE has already run: an ancestor's `environment.session` reaches this

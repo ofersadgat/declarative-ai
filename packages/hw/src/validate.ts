@@ -157,7 +157,7 @@ function validateState(
   // is reported here with everything else, instead of aborting the load.
   if (def.operationError !== undefined) err("operation", def.operationError);
 
-  // A `session` that cannot mean anything (SESSIONS.md §4). Statically checkable because the merge
+  // A `session` that cannot mean anything (DESIGN.md §1.6). Statically checkable because the merge
   // has already run, so what is tested is the EFFECTIVE declaration — including one an ancestor's
   // `environment` supplied. The empty string is the case worth catching at load time: `""` would
   // otherwise start an isolated conversation and report success, which is the failure mode that
@@ -765,7 +765,7 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle): ExprScope {
     } as JsonValue;
   }
 
-  // The state's OWN operation node (SESSIONS.md §8). Absent for a pure composite, so
+  // The state's OWN operation node (SPEC.md §6.1). Absent for a pure composite, so
   // `operation.cost` there is an unresolved reference rather than an object of unknowns.
   const operation = operationNodeSchema(def.operation?.kind);
 

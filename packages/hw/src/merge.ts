@@ -114,7 +114,7 @@ const KIND_SPECIFIC = ["args", "prompt", "system", "function"] as const;
  *
  * The `null` case is the one that bites hardest, and it is why the guard tests `undefined` rather
  * than falsiness: `sessionId: null` means "start a fresh session, whatever the chain says"
- * (SESSIONS.md §4), so it has to reach the merge as a VALUE that overrides. Treated as absence it
+ * (DESIGN.md §1.6), so it has to reach the merge as a VALUE that overrides. Treated as absence it
  * would sit next to an ancestor's `session: "planning"` and the operation would quietly join the
  * shared conversation the author was explicitly opting out of.
  */

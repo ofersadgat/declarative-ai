@@ -331,7 +331,7 @@ export interface OperationRecord<F extends RefFamily, R, M> {
   /** The principals who already own (were charged for) this record — memo-billing support. */
   createdBy?: string[];
   /**
-   * The conversation this record belongs to, when it ran in one (SESSIONS.md).
+   * The conversation this record belongs to, when it ran in one (DESIGN.md §1.6).
    *
    * A session is not a separate store: it IS the records sharing an `id` here, ordered by `seq`. That
    * is why there is no message table anywhere — a record already holds what the call produced, and

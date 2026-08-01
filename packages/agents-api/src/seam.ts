@@ -57,7 +57,7 @@ export interface AgentQueryOptions {
   validator?: SyncOutputValidator;
   abortSignal?: AbortSignal;
   /**
-   * The agent's own session to continue, when there is one (SESSIONS.md §6, "Native fork").
+   * The agent's own session to continue, when there is one (DESIGN.md §1.6, "Native fork").
    *
    * This adapter has the primitive the design wants: `resume` continues a conversation server-side,
    * reading zero messages — no replay, no transcript on the wire.
@@ -91,7 +91,7 @@ export interface AgentResult {
    *
    * Always the id the run ACTUALLY ended in: a new one after a fork, the resumed one otherwise. A
    * value that differs from the handle we resumed means the remote moved underneath us
-   * (SESSIONS.md §11), which is the only way to notice server-side compaction or an out-of-band
+   * (DESIGN.md §1.6), which is the only way to notice server-side compaction or an out-of-band
    * resume.
    */
   sessionId?: string;
@@ -107,7 +107,7 @@ export interface AgentStreamMessage {
 }
 
 /**
- * Read a provider-side conversation back, for re-syncing after the remote moved (SESSIONS.md §11).
+ * Read a provider-side conversation back, for re-syncing after the remote moved (DESIGN.md §1.6).
  *
  * Separate from {@link AgentQuery} because it is a genuinely separate capability, and an optional
  * one: Claude Code has `getSessionMessages()`, Managed Agents has `events.list`, the Messages API has

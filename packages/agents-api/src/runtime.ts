@@ -46,7 +46,7 @@ export const DELEGATED_CAPS: RuntimeCapabilities = {
   memoizable: false,
   structuredOutput: false,
   policyEnforcement: "callback",
-  // NATIVE session resume, and native FORK with it (SESSIONS.md §6). Declaring it is what tells the
+  // NATIVE session resume, and native FORK with it (DESIGN.md §1.6). Declaring it is what tells the
   // session layer not to reach for the replay strategy: this adapter branches server-side and reads
   // zero messages, where replay would resend the whole conversation for the same result.
   sessionResume: true,
@@ -78,7 +78,7 @@ export interface ClaudeCodeFunctionOptions {
    *  `Read` for `read_file` while still injecting our `bash`. Ignored tools default to injection. */
   nativeTools?: Record<string, NativeToolRef>;
   /**
-   * Reads a provider-side conversation back, for re-syncing after divergence (SESSIONS.md §11).
+   * Reads a provider-side conversation back, for re-syncing after divergence (DESIGN.md §1.6).
    *
    * Injected rather than reached for directly, exactly as {@link ClaudeCodeFunctionOptions.query} is:
    * it is a second call into the SDK, and a test has to stand in for it without a provider. Absent ⇒
@@ -179,7 +179,7 @@ export function createClaudeCodeFunction(options: ClaudeCodeFunctionOptions = {}
       const approve = ctx.approve;
       // The APPROVAL SCOPE — a resource-bundle key, not a conversation. The two used to be one string
       // and cannot be: a conversation moves on every call, so an approval scoped to it would cover
-      // exactly one tool call (SESSIONS.md §13). The conversation is `ctx.session`, below.
+      // exactly one tool call (DESIGN.md §5.1). The conversation is `ctx.session`, below.
       const sessionId = typeof config.sessionId === "string" ? config.sessionId : "delegated";
       const session = ctx.session;
 
@@ -228,7 +228,7 @@ export function createClaudeCodeFunction(options: ClaudeCodeFunctionOptions = {}
         // narrow FAIL-CLOSED (json's `syncOnly`) rather than let an async validator read as a pass.
         ...(ctx.validator !== undefined ? { validator: syncOnly(ctx.validator) } : {}),
         permissionMode: permissionModeOf(config),
-        // NATIVE FORK (SESSIONS.md §6). The session layer decided append-vs-fork before the call,
+        // NATIVE FORK (DESIGN.md §1.6). The session layer decided append-vs-fork before the call,
         // because "is this a fork" and "how do I shape the request" are the same question — and the
         // answer here is a request shape the replay strategy cannot express.
         //

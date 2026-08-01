@@ -278,7 +278,7 @@ describe("withBudget — per-call reserve → settle", () => {
 });
 
 /**
- * `withSession` — the wrapper keeps the POLICY, the executor owns the MECHANISM (SESSIONS.md §6).
+ * `withSession` — the wrapper keeps the POLICY, the executor owns the MECHANISM (DESIGN.md §1.6).
  *
  * What these pin, in the order the model depends on them: the reservation is taken before the call
  * and released whatever happens; the transcript is what the EXECUTOR reported rather than something

@@ -1,5 +1,5 @@
 /**
- * The `operation.*` expression namespace (SESSIONS.md §8).
+ * The `operation.*` expression namespace (SPEC.md §6.1).
  *
  * A state's operation used to be unaddressable — its result landed straight in the state's declared
  * output slots, while a CHILD was reachable as `children.<key>.outputs`. That asymmetry is why
