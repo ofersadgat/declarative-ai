@@ -1,5 +1,5 @@
 import type { ResolvedValue, FunctionResult } from "@declarative-ai/exec";
-import type { WorkflowMetrics } from "../src/ports";
+import type { WorkflowMetrics } from "../src/ports.js";
 /**
  * Binding RESOLUTION (§7.4) — turning an operation's `Parameter` bindings into values.
  *
@@ -10,9 +10,9 @@ import type { WorkflowMetrics } from "../src/ports";
  */
 import { describe, expect, it } from "vitest";
 import type { InlineFamily, Ref } from "@declarative-ai/exec";
-import { PENDING } from "../src/expr";
-import { isResolveError, isResolvedValue, resolveInputs, resolveRef, type ResolutionScope } from "../src/resolve";
-import { RESOLVER_REFS } from "../src/format";
+import { PENDING } from "../src/expr.js";
+import { isResolveError, isResolvedValue, resolveInputs, resolveRef, type ResolutionScope } from "../src/resolve.js";
+import { RESOLVER_REFS } from "../src/format.js";
 
 const scope: ResolutionScope = {
   exprContext: { inputs: { n: 2 } },

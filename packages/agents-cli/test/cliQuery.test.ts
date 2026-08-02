@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { isOk, type ExecServices, type FunctionInputs } from "@declarative-ai/exec";
-import { cliArgv, createCliAgentQuery } from "../src/cliQuery";
-import type { AgentProcess, SpawnProcess } from "../src/process";
-import { CLI_CONFIG_ONLY_CAPS, CLI_DELEGATED_CAPS, createCliAgentFunction } from "../src/runtime";
-import { injectedToolAllowEntries, mcpConfigJson, PERMISSION_PROMPT_TOOL } from "../src/mcpProtocol";
+import { cliArgv, createCliAgentQuery } from "../src/cliQuery.js";
+import type { AgentProcess, SpawnProcess } from "../src/process.js";
+import { CLI_CONFIG_ONLY_CAPS, CLI_DELEGATED_CAPS, createCliAgentFunction } from "../src/runtime.js";
+import { injectedToolAllowEntries, mcpConfigJson, PERMISSION_PROMPT_TOOL } from "../src/mcpProtocol.js";
 
 /** A fake process that replays scripted stdout lines and records the argv it was launched with. */
 function fakeSpawn(lines: string[], exitCode = 0): { spawn: SpawnProcess; argv: string[][]; killed: () => boolean; cwds: (string | undefined)[] } {

@@ -27,7 +27,7 @@ export function mergeWorkflowMetrics(a: WorkflowMetrics, b: WorkflowMetrics): Wo
     childCostUsd: (a.childCostUsd ?? 0) + (b.childCostUsd ?? 0),
   };
 }
-import type { TerminationOutcome } from "./format";
+import type { TerminationOutcome } from "./format.js";
 
 /** An artifact value flowing through workflow inputs/outputs (SPEC §4.6). For
  *  llm-backed states the content travels inline; process units use paths.

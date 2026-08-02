@@ -1,0 +1,29 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "tsconfig.build.tsbuildinfo"
+  },
+  "include": [
+    "src/**/*.ts"
+  ],
+  "references": [
+    {
+      "path": "../exec/tsconfig.build.json"
+    },
+    {
+      "path": "../json/tsconfig.build.json"
+    },
+    {
+      "path": "../ops/tsconfig.build.json"
+    },
+    {
+      "path": "../permissions/tsconfig.build.json"
+    }
+  ]
+}

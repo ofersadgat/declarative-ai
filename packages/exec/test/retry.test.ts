@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { backoffDelayMs } from "../src/retry";
+import { backoffDelayMs } from "../src/retry.js";
 
 // The retry LOOP is `withRetry` (see wrappers.test.ts, "withRetry"). `retryLoop` — a second, parallel
 // implementation exported from the index and called by nothing but the tests that used to live here —

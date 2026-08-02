@@ -29,11 +29,11 @@ import type {
   MetricsAlgebra,
 } from "@declarative-ai/ops";
 import { RUNTIME_CAPABILITIES, failureOf, isOk, runFunction } from "@declarative-ai/ops";
-import type { ExecHandle, ExecMetrics, ExecServices, Executor, ExecResult } from "./contract";
-import { EXEC_METRICS_ALGEBRA } from "./contract";
-import { carryCall, isResolvedCall } from "./resolvedOperation";
-import { EventQueue, canceledFailure, failure, finishedHandle, linkAbort, raceWork, withMetrics, wrapHandle } from "./handles";
-import { systemClock } from "./deadline";
+import type { ExecHandle, ExecMetrics, ExecServices, Executor, ExecResult } from "./contract.js";
+import { EXEC_METRICS_ALGEBRA } from "./contract.js";
+import { carryCall, isResolvedCall } from "./resolvedOperation.js";
+import { EventQueue, canceledFailure, failure, finishedHandle, linkAbort, raceWork, withMetrics, wrapHandle } from "./handles.js";
+import { systemClock } from "./deadline.js";
 
 export interface OperationExecutorOptions {
   /** The one registry of discriminated entries (§2) — host code, sub-workflows, and delegated runtime

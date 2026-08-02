@@ -10,7 +10,7 @@
  * `widen` relaxes to the universal `{}` across kinds. `null`/`undefined` is set aside in both — it
  * unifies with anything rather than conflicting.
  */
-import type { JsonSchema, ReadonlyJsonValue, SchemaDocument } from "./json";
+import type { JsonSchema, ReadonlyJsonValue, SchemaDocument } from "./json.js";
 
 export type JoinPolicy = "strict" | "widen";
 

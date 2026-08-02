@@ -10,10 +10,10 @@
  * seam (`./process`) and the MCP bridge (`./mcpBridge`) and nothing else — a flag vocabulary and a
  * message schema are exactly the parts that do not generalize.
  */
-export * from "./cliQuery";
-export * from "./codexQuery";
-export * from "./codexRuntime";
-export * from "./mcpProtocol";
-export * from "./mcpBridge";
-export * from "./process";
-export * from "./runtime";
+export * from "./cliQuery.js";
+export * from "./codexQuery.js";
+export * from "./codexRuntime.js";
+export * from "./mcpProtocol.js";
+export * from "./mcpBridge.js";
+export * from "./process.js";
+export * from "./runtime.js";

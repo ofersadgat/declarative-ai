@@ -10,9 +10,9 @@
  * hash the schema with `@declarative-ai/json` `hashCanonical`.
  */
 import type { JsonSchema } from "@declarative-ai/json";
-import type { ModelFamily } from "./router";
+import type { ModelFamily } from "./router.js";
 
-export type { ModelFamily } from "./router";
+export type { ModelFamily } from "./router.js";
 
 /** A JSON-Schema document — an alias of the ONE ops `JsonSchema` type (API.md, "The JSON vocabulary"), kept as a
  *  name because these config schemas describe a config bag rather than a call's output. */

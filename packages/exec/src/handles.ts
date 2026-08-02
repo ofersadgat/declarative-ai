@@ -18,7 +18,7 @@
  */
 import type { Failure, ResolvedValue } from "@declarative-ai/ops";
 import { isOk } from "@declarative-ai/ops";
-import type { ExecEvent, ExecHandle, ExecMetrics, ExecResult } from "./contract";
+import type { ExecEvent, ExecHandle, ExecMetrics, ExecResult } from "./contract.js";
 
 /** An empty, already-completed event stream (for executors that emit no events). */
 export function emptyEvents(): AsyncIterable<ExecEvent> {

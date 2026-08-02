@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { ERROR_VALUE_SCHEMA, FAILURE_SCHEMA } from "@declarative-ai/json";
-import { admitsError, isErrorValue, resolutionFailure } from "../src/errorValue";
+import { admitsError, isErrorValue, resolutionFailure } from "../src/errorValue.js";
 
 /** "Any value, or any error" — the union the wrapper makes writable. */
 const ANY_OR_ERROR = { anyOf: [{}, ERROR_VALUE_SCHEMA] };

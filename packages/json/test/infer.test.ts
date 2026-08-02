@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inferFromValues, joinSchemas } from "../src/index";
+import { inferFromValues, joinSchemas } from "../src/index.js";
 
 describe("joinSchemas — unification is STRUCTURAL over `type` (§6)", () => {
   it("unifies two equal array-valued `type`s — legal JSON Schema, and reference-unequal", () => {

@@ -8,7 +8,7 @@ import {
   type PermissionDecision,
   type ProfilePredicate,
   type SmartApprover,
-} from "../src/permissions";
+} from "../src/permissions.js";
 import type { ExecServices, FunctionInputs, Tool } from "@declarative-ai/exec";
 
 const CTX: ExecServices = {};

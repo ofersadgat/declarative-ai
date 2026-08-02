@@ -6,9 +6,9 @@
  */
 import { describe, expect, it } from "vitest";
 import type { PromptOp } from "@declarative-ai/exec";
-import { loadBundle } from "../src/loader";
-import { resolveReference, selectProperty, type Vfs } from "../src/reference";
-import { validateBundle } from "../src/validate";
+import { loadBundle } from "../src/loader.js";
+import { resolveReference, selectProperty, type Vfs } from "../src/reference.js";
+import { validateBundle } from "../src/validate.js";
 
 const ROOT = "/p/.jaira";
 const WF = `${ROOT}/workflows`;

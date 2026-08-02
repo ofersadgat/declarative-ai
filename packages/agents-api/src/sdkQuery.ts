@@ -10,7 +10,7 @@
  * here.
  */
 import type { FunctionInputs } from "@declarative-ai/exec";
-import type { AgentQuery, AgentStreamMessage } from "./seam";
+import type { AgentQuery, AgentStreamMessage } from "./seam.js";
 
 /** The minimal surface of the SDK we call — cast to, never imported (keeps the missing dep off the type graph). */
 interface SdkModule {

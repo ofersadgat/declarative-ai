@@ -11,11 +11,11 @@
  */
 import type { InlineFamily, JsonValue, Operation, ResolvedValue, Serializable } from "@declarative-ai/ops";
 import { canonicalize, hashCanonical, sha256Hex } from "@declarative-ai/ops";
-import type { ExecHandle, ExecMetrics, Executor, ExecutorWrapper, ExecServices, ExecResult } from "./contract";
-import { forwardCapabilitiesFor } from "./contract";
-import { systemClock } from "./deadline";
-import type { WrapControl } from "./handles";
-import { canceledFailure, finishedHandle, permanentFailure, raceWork, withMetrics, wrapHandle } from "./handles";
+import type { ExecHandle, ExecMetrics, Executor, ExecutorWrapper, ExecServices, ExecResult } from "./contract.js";
+import { forwardCapabilitiesFor } from "./contract.js";
+import { systemClock } from "./deadline.js";
+import type { WrapControl } from "./handles.js";
+import { canceledFailure, finishedHandle, permanentFailure, raceWork, withMetrics, wrapHandle } from "./handles.js";
 import { isOk } from "@declarative-ai/ops";
 
 /**

@@ -11,8 +11,8 @@
  * an install that declined it.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { defaultStartMcpBridge, type McpBridge } from "../src/mcpBridge";
-import { APPROVAL_TOOL, mcpConfigJson } from "../src/mcpProtocol";
+import { defaultStartMcpBridge, type McpBridge } from "../src/mcpBridge.js";
+import { APPROVAL_TOOL, mcpConfigJson } from "../src/mcpProtocol.js";
 
 const sdkInstalled = await import("@modelcontextprotocol/sdk/server/index.js").then(
   () => true,

@@ -24,7 +24,7 @@ import type {
   RefKind,
 } from "@declarative-ai/exec";
 import type { PermissionMode, PermissionProfile } from "@declarative-ai/permissions";
-import { BUILTINS } from "./builtins";
+import { BUILTINS } from "./builtins.js";
 
 // The op vocabulary is hw's format vocabulary — re-exported so authors and consumers import
 // one set of names.

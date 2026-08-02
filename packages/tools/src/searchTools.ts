@@ -7,7 +7,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Tool } from "@declarative-ai/exec";
-import { requireWorkspace, resolveInWorkspace } from "./workspace";
+import { requireWorkspace, resolveInWorkspace } from "./workspace.js";
 
 /** Directory names skipped by both tools — generated/heavy trees an agent almost never wants to search. */
 const DEFAULT_IGNORE: ReadonlySet<string> = new Set([".git", "node_modules", "dist", "build", ".next", "coverage"]);

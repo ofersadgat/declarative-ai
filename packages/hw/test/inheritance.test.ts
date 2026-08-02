@@ -4,11 +4,11 @@
  */
 import { describe, expect, it } from "vitest";
 import type { FunctionOp, PromptOp } from "@declarative-ai/exec";
-import { loadBundle, sourceStateId } from "../src/loader";
-import { validateBundle } from "../src/validate";
-import { mergeOperationChain } from "../src/merge";
-import type { StateDef } from "../src/format";
-import type { Vfs } from "../src/reference";
+import { loadBundle, sourceStateId } from "../src/loader.js";
+import { validateBundle } from "../src/validate.js";
+import { mergeOperationChain } from "../src/merge.js";
+import type { StateDef } from "../src/format.js";
+import type { Vfs } from "../src/reference.js";
 
 const leaf = (extra: Partial<StateDef> = {}): StateDef => ({
   label: "Leaf",

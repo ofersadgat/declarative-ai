@@ -10,20 +10,20 @@
  * Executing a `PromptOp` through the `Executor` seam is `@declarative-ai/promptop`'s job — it owns the
  * lowering and depends on both this package and `exec`.
  */
-export * from "./files";
-export * from "./output";
-export * from "./prompt";
-export * from "./llmConfig";
-export * from "./generate";
-export * from "./call";
-export * from "./router";
-export * from "./dispatcher";
-export * from "./structured";
-export * from "./reasoning";
-export * from "./model-catalog";
-export * from "./model-catalog-source";
-export * from "./schema";
-export * from "./providerConfig";
-export * from "./costEstimate";
-export * from "./tokens";
-export * from "./plan";
+export * from "./files.js";
+export * from "./output.js";
+export * from "./prompt.js";
+export * from "./llmConfig.js";
+export * from "./generate.js";
+export * from "./call.js";
+export * from "./router.js";
+export * from "./dispatcher.js";
+export * from "./structured.js";
+export * from "./reasoning.js";
+export * from "./model-catalog.js";
+export * from "./model-catalog-source.js";
+export * from "./schema/index.js";
+export * from "./providerConfig.js";
+export * from "./costEstimate.js";
+export * from "./tokens.js";
+export * from "./plan.js";

@@ -10,7 +10,7 @@
  * op IS (content ids and memo keys are unaffected).
  */
 import type { JsonValue } from "@declarative-ai/json";
-import type { Id } from "./model";
+import type { Id } from "./model.js";
 
 /** How an op is identified for annotation: a content id (id family) or the op OBJECT's
  *  identity (inline family). */

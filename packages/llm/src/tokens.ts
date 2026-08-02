@@ -3,7 +3,7 @@
  * beside the rate limiter because it estimates a PROMPT's footprint — the limiter itself is generic
  * counting machinery and needs no notion of a prompt.
  */
-import type { CallTokenEstimate } from "./output";
+import type { CallTokenEstimate } from "./output.js";
 
 /**
  * Estimate the token footprint of a call for rate pre-admission, input/output SPLIT (ITPM and

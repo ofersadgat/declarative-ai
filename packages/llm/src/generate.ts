@@ -1,11 +1,11 @@
 import { Output, jsonSchema, streamText, type LanguageModel, type ModelMessage, type StopCondition, type SystemModelMessage, type ToolChoice, type ToolSet } from "ai";
-import { createLogger } from "./logger";
-import { ModelInfo } from "./model-catalog";
+import { createLogger } from "./logger.js";
+import { ModelInfo } from "./model-catalog.js";
 import { classifyError, decodeWithSchema, describeError, isRateLimit, retryAfterMs as retryAfterMsOf, type JsonSchema, type JsonValue } from "@declarative-ai/json";
-import type { LlmCallResult, LlmFailure, LlmMetrics, LlmOutput, ReasoningSegment, TokenCounts, ToolCall, ToolResult } from "./output";
-import type { GeneratedFile } from "./files";
-import type { LlmCallDefinition, SamplingConfiguration } from "./llmConfig";
-import { promptAsMessages, type CallPromptInput } from "./prompt";
+import type { LlmCallResult, LlmFailure, LlmMetrics, LlmOutput, ReasoningSegment, TokenCounts, ToolCall, ToolResult } from "./output.js";
+import type { GeneratedFile } from "./files.js";
+import type { LlmCallDefinition, SamplingConfiguration } from "./llmConfig.js";
+import { promptAsMessages, type CallPromptInput } from "./prompt.js";
 
 /**
  * The streaming structured-output call (§5/§5.1) + metrics. ONE LLM request; the §6.1

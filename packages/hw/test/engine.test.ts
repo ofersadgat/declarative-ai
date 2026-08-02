@@ -1,6 +1,6 @@
 import type { ResolvedValue } from "@declarative-ai/exec";
 import { hostFunction, runtimeFunction } from "@declarative-ai/exec";
-import type { WorkflowMetrics } from "../src/ports";
+import type { WorkflowMetrics } from "../src/ports.js";
 import { describe, expect, it } from "vitest";
 import {
   createOperationExecutor,
@@ -19,10 +19,10 @@ import {
 } from "@declarative-ai/exec";
 import { withRecord, withSessionPosition } from "@declarative-ai/exec";
 import { isPermissionDenied, type Approver } from "@declarative-ai/permissions";
-import { WorkflowEngine, type EngineConfig } from "../src/engine";
-import { loadBundle } from "../src/loader";
-import { InMemoryPersistence, isArtifactRef, type ArtifactRef } from "../src/ports";
-import type { EnvironmentDecl, StateDef } from "../src/format";
+import { WorkflowEngine, type EngineConfig } from "../src/engine.js";
+import { loadBundle } from "../src/loader.js";
+import { InMemoryPersistence, isArtifactRef, type ArtifactRef } from "../src/ports.js";
+import type { EnvironmentDecl, StateDef } from "../src/format.js";
 import {
   deferred,
   FakePromptExecutor,
@@ -37,8 +37,8 @@ import {
   toolNamesOf,
   type FakeCall,
   type Script,
-} from "./fakes";
-import { FANOUT_ID, PLAN_ID, specFanoutFiles, specPlanningFiles } from "./fixtures";
+} from "./fakes.js";
+import { FANOUT_ID, PLAN_ID, specFanoutFiles, specPlanningFiles } from "./fixtures.js";
 
 /** A registered host function as these tests declare one: an impl plus its REQUIRED capabilities. */
 type FakeImpl = (inputs: never, ctx: never) => Promise<FunctionResult<ResolvedValue, WorkflowMetrics>> | FunctionResult<ResolvedValue, WorkflowMetrics>;

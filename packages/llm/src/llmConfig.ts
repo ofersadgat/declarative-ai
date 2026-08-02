@@ -32,7 +32,7 @@
  * data — no provider/DB coupling, no AI-SDK import — importable by the engine, server, and config UI alike.
  */
 import type { JsonSchema, JsonValue } from "@declarative-ai/json";
-import type { CallSignature } from "./prompt";
+import type { CallSignature } from "./prompt.js";
 
 /** A serializable bag of PROVIDER-SPECIFIC options, keyed by provider id (the SDK's `providerOptions` /
  *  `SharedV3ProviderOptions = Record<string, JSONObject>`). The escape hatch for functionality not

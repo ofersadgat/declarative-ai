@@ -8,6 +8,8 @@
     "packages/*"
   ],
   "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "clean": "tsc -b tsconfig.build.json --clean",
     "typecheck": "tsc --noEmit -p packages/json && tsc --noEmit -p packages/ops && tsc --noEmit -p packages/exec && tsc --noEmit -p packages/validate && tsc --noEmit -p packages/permissions && tsc --noEmit -p packages/llm && tsc --noEmit -p packages/promptop && tsc --noEmit -p packages/tools && tsc --noEmit -p packages/hw && tsc --noEmit -p packages/agents-api && tsc --noEmit -p packages/agents-cli",
     "test": "vitest run",
     "test:watch": "vitest",

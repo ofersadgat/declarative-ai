@@ -1,9 +1,9 @@
 import { MockLanguageModelV3 } from "ai/test";
 import { beforeAll, describe, expect, expectTypeOf, it } from "vitest";
 import type { JsonValue } from "@declarative-ai/json";
-import { typedSchema } from "../src/generate";
-import { ModelInfo } from "../src/model-catalog";
-import { flatSchema, generateFlat, stream, streamingModel, usage, errorOf } from "./fakes";
+import { typedSchema } from "../src/generate.js";
+import { ModelInfo } from "../src/model-catalog.js";
+import { flatSchema, generateFlat, stream, streamingModel, usage, errorOf } from "./fakes.js";
 
 // Pin the process-wide catalog to fixed rates so the cost assertions below are deterministic and
 // decoupled from the live snapshot (`DEFAULT_MODELS`), which `npm run update:model-info` can re-price.

@@ -9,9 +9,9 @@
  * ran in, and on an append those must agree.
  */
 import { describe, expect, it } from "vitest";
-import { createOperationExecutor, MapSessionStore, newCapabilityRegistry, runtimeFunction, RUNTIME_CAPABILITIES, withRecord, withSessionPosition } from "../src";
-import type { ExecServices, Executor, ExecResult, ResolvedValue } from "../src";
-import { EXEC_METRICS_ALGEBRA, wrapHandle } from "../src";
+import { createOperationExecutor, MapSessionStore, newCapabilityRegistry, runtimeFunction, RUNTIME_CAPABILITIES, withRecord, withSessionPosition } from "../src/index.js";
+import type { ExecServices, Executor, ExecResult, ResolvedValue } from "../src/index.js";
+import { EXEC_METRICS_ALGEBRA, wrapHandle } from "../src/index.js";
 
 /** An executor that answers with a fixed conversation delta and a fixed provider handle. */
 function agent(handle: string | undefined, text = "ok"): Executor<ExecServices> {

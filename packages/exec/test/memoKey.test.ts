@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { InlineFamily, Operation } from "@declarative-ai/ops";
 import { canonicalize, sha256Hex } from "@declarative-ai/ops";
-import { hashOperation, memoKey } from "../src/memo";
+import { hashOperation, memoKey } from "../src/memo.js";
 
 /** A resolved prompt op: every input bound to a literal, which is what makes the OP the memo identity. */
 function op(user: string, style: string): Operation<InlineFamily> {

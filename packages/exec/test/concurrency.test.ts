@@ -6,7 +6,7 @@ import {
   prefixModelLimitResolver,
   ProviderDispatchRateLimiter,
   TokenBucket,
-} from "../src/index";
+} from "../src/index.js";
 
 const flush = async (n = 20): Promise<void> => {
   for (let i = 0; i < n; i++) await Promise.resolve();

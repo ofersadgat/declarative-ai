@@ -8,14 +8,14 @@
  * declaration (config + prompt + schema); `plan(declaration)` analyzes it. Nothing here executes.
  */
 import { hashCanonical, sha256Hex, type JsonSchema, type Serializable } from "@declarative-ai/json";
-import { isReasoningConfig } from "./llmConfig";
-import { estimateCallTokens } from "./tokens";
+import { isReasoningConfig } from "./llmConfig.js";
+import { estimateCallTokens } from "./tokens.js";
 import type { FilePart, ModelMessage } from "ai";
-import { promptText } from "./prompt";
-import type { LlmCallDefinition } from "./llmConfig";
-import { ModelInfo, SAMPLING_PARAM_NAMES, type Modalities } from "./model-catalog";
-import { familyForModel, type ModelFamily } from "./router";
-import { adaptSchemaCached, profileForModelId, type Enforcement } from "./schema";
+import { promptText } from "./prompt.js";
+import type { LlmCallDefinition } from "./llmConfig.js";
+import { ModelInfo, SAMPLING_PARAM_NAMES, type Modalities } from "./model-catalog.js";
+import { familyForModel, type ModelFamily } from "./router.js";
+import { adaptSchemaCached, profileForModelId, type Enforcement } from "./schema/index.js";
 
 /** The result of planning a call — everything knowable before execution. */
 export interface CallPlan {

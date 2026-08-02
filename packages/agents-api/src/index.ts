@@ -6,6 +6,6 @@
  * the two adapters differ only in how the agent is reached — and therefore in how its safety policy is
  * enforced (`callback` here, `config` there).
  */
-export * from "./seam";
-export * from "./runtime";
-export * from "./sdkQuery";
+export * from "./seam.js";
+export * from "./runtime.js";
+export * from "./sdkQuery.js";

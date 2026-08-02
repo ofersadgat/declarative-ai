@@ -1,13 +1,54 @@
 {
   "name": "@declarative-ai/llm",
   "version": "0.1.0",
+  "description": "One structured LLM call, end to end and executor-free: model routing across Anthropic and OpenRouter, streaming with cache-split cost accounting, and per-provider schema and reasoning adaptation.",
+  "keywords": [
+    "declarative-ai",
+    "llm",
+    "anthropic",
+    "openrouter",
+    "structured-output",
+    "ai"
+  ],
+  "author": "Ofer Sadgat",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ofersadgat/declarative-ai.git",
+    "directory": "packages/llm"
+  },
+  "homepage": "https://github.com/ofersadgat/declarative-ai/tree/main/packages/llm#readme",
+  "bugs": {
+    "url": "https://github.com/ofersadgat/declarative-ai/issues"
+  },
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./model-catalog": "./src/model-catalog.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./model-catalog": {
+      "types": "./dist/model-catalog.d.ts",
+      "default": "./dist/model-catalog.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json"
   },
   "dependencies": {
-    "@declarative-ai/json": "*",
+    "@declarative-ai/json": "^0.1.0",
     "@ai-sdk/anthropic": "^3.0.81",
     "@openrouter/ai-sdk-provider": "^2.9.0",
     "ai": "^6.0.195",

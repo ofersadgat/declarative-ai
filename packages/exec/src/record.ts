@@ -32,11 +32,11 @@ import type {
   ResolvedValue,
   SessionRequest,
   SessionStore,
-} from "./contract";
-import { PositionTaken, isOk } from "./contract";
-import { canceledFailure, wrapHandle } from "./handles";
-import { curryOrApply, isExecutor } from "./wrappers";
-import { hashOperation } from "./memo";
+} from "./contract.js";
+import { PositionTaken, isOk } from "./contract.js";
+import { canceledFailure, wrapHandle } from "./handles.js";
+import { curryOrApply, isExecutor } from "./wrappers.js";
+import { hashOperation } from "./memo.js";
 
 export { PositionTaken };
 

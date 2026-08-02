@@ -28,7 +28,7 @@
  * tool; a unioning merge would leave no way to take one away.
  */
 import type { JsonValue } from "@declarative-ai/exec";
-import { OPERATION_OWN_FIELDS, type NamedParameterDecl, type OperationFields, type ParameterDecl } from "./format";
+import { OPERATION_OWN_FIELDS, type NamedParameterDecl, type OperationFields, type ParameterDecl } from "./format.js";
 
 /** Fields with a merge rule of their own — everything else is nearest-wins, wholesale. */
 const MERGED_FIELDS: ReadonlySet<string> = new Set(["args", "input", "output", "conversation", "permissions", "tools", "path"]);

@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { isOk, type ExecServices, type FunctionInputs, type JsonValue, type Tool } from "@declarative-ai/exec";
 import type { Approver } from "@declarative-ai/permissions";
 import { functionOp, runtimeOp } from "@declarative-ai/exec";
-import { createClaudeCodeFunction, DELEGATED_CAPS } from "../src";
-import type { AgentPermissionDecision, AgentQuery, AgentQueryOptions, AgentToolRequest } from "../src";
+import { createClaudeCodeFunction, DELEGATED_CAPS } from "../src/index.js";
+import type { AgentPermissionDecision, AgentQuery, AgentQueryOptions, AgentToolRequest } from "../src/index.js";
 
 /** The op's bound inputs, as the engine hands them to the registered async function (§3.1). */
 const inputs = (over: { prompt?: string; config?: JsonValue } = {}): FunctionInputs => ({

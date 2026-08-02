@@ -1,9 +1,47 @@
 {
   "name": "@declarative-ai/json",
   "version": "0.1.0",
+  "description": "The JSON vocabulary at the bottom of the declarative-ai graph: values and codecs (x-type), schema templates and inference, RFC 8785 canonicalization and hashing, and the classified error/result envelope.",
+  "keywords": [
+    "declarative-ai",
+    "json-schema",
+    "canonicalization",
+    "rfc8785",
+    "codec",
+    "typescript"
+  ],
+  "author": "Ofer Sadgat",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ofersadgat/declarative-ai.git",
+    "directory": "packages/json"
+  },
+  "homepage": "https://github.com/ofersadgat/declarative-ai/tree/main/packages/json#readme",
+  "bugs": {
+    "url": "https://github.com/ofersadgat/declarative-ai/issues"
+  },
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json"
   },
   "dependencies": {
     "@noble/hashes": "^2.2.0",

@@ -5,8 +5,8 @@ import {
   isReasoningModel,
   ModelInfo,
   SAMPLING_PARAM_NAMES,
-} from "../src/model-catalog";
-import type { ProviderSchemaProfile } from "../src/schema";
+} from "../src/model-catalog.js";
+import type { ProviderSchemaProfile } from "../src/schema/index.js";
 
 describe("pricing (default catalog)", () => {
   const catalog = ModelInfo.instance;

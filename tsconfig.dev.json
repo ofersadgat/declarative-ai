@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@declarative-ai/agents-api": ["packages/agents-api/src/index.ts"],
+      "@declarative-ai/agents-cli": ["packages/agents-cli/src/index.ts"],
+      "@declarative-ai/exec": ["packages/exec/src/index.ts"],
+      "@declarative-ai/hw": ["packages/hw/src/index.ts"],
+      "@declarative-ai/json": ["packages/json/src/index.ts"],
+      "@declarative-ai/llm": ["packages/llm/src/index.ts"],
+      "@declarative-ai/llm/model-catalog": ["packages/llm/src/model-catalog.ts"],
+      "@declarative-ai/ops": ["packages/ops/src/index.ts"],
+      "@declarative-ai/permissions": ["packages/permissions/src/index.ts"],
+      "@declarative-ai/promptop": ["packages/promptop/src/index.ts"],
+      "@declarative-ai/tools": ["packages/tools/src/index.ts"],
+      "@declarative-ai/validate": ["packages/validate/src/index.ts"]
+    }
+  }
+}

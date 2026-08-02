@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { InMemoryOpMetadata } from "../src/metadata";
+import { InMemoryOpMetadata } from "../src/metadata.js";
 
 describe("InMemoryOpMetadata", () => {
   it("annotates by content id", () => {

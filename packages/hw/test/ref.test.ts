@@ -1,8 +1,8 @@
 /** State path references (§2.1) — the grammar an `id` or a `children[].state` is written in. */
 import { describe, expect, it } from "vitest";
-import { isBareStateId, resolveStateRef, stateFilePath, StateRefError } from "../src/ref";
-import { loadBundle } from "../src/loader";
-import type { StateDef } from "../src/format";
+import { isBareStateId, resolveStateRef, stateFilePath, StateRefError } from "../src/ref.js";
+import { loadBundle } from "../src/loader.js";
+import type { StateDef } from "../src/format.js";
 
 const roots = { JAIRA: "/proj/.jaira", PROJECT: "/proj" };
 const opts = { defaultRoot: "/proj/.jaira/workflows", roots };

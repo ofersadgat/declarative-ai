@@ -15,11 +15,11 @@
  */
 import type { InlineFamily, JsonValue, Operation, Parameter, Ref, RefTree, ResolvedValue } from "@declarative-ai/exec";
 import { carryCall, isOk } from "@declarative-ai/exec";
-import { applyBinary, evaluate, isPending, memberOf, parseExpression, PENDING, type BinaryOp, type Pending } from "./expr";
+import { applyBinary, evaluate, isPending, memberOf, parseExpression, PENDING, type BinaryOp, type Pending } from "./expr.js";
 import type { Failure } from "@declarative-ai/json";
-import { admitsError, errorValueSchemaFor, resolutionFailure } from "./errorValue";
-import { BUILTINS } from "./builtins";
-import { RESOLVER_REFS, RESOLVER_REF_SET } from "./format";
+import { admitsError, errorValueSchemaFor, resolutionFailure } from "./errorValue.js";
+import { BUILTINS } from "./builtins.js";
+import { RESOLVER_REFS, RESOLVER_REF_SET } from "./format.js";
 
 /**
  * What a resolution can yield: a value, PENDING (an async producer still in flight), or an error.

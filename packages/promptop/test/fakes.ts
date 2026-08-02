@@ -6,11 +6,11 @@
 import type { InlineFamily, JsonValue, ExecResult, ResolvedValue, PromptOp, SessionStore } from "@declarative-ai/exec";
 import { MapSessionStore, isOk, withRecord } from "@declarative-ai/exec";
 import type { ExecServices, Executor } from "@declarative-ai/exec";
-import { withSession } from "../src/wrappers";
+import { withSession } from "../src/wrappers.js";
 import type { Failure } from "@declarative-ai/exec";
 import type { ModelMessage } from "ai";
 import type { LlmCallResult, LlmCallDefinition, LlmMetrics, LlmOutput } from "@declarative-ai/llm";
-import type { CallDeps, CallRunner } from "../src/executor";
+import type { CallDeps, CallRunner } from "../src/executor.js";
 
 export const OUTPUT_SCHEMA = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] } as const;
 

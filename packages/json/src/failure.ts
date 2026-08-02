@@ -11,7 +11,7 @@
  * vocabulary that now lives in `@declarative-ai/llm`. They were here only because the old `Outcome`
  * named them all at once.
  */
-import { ERROR_CLASSES, type ErrorClass } from "./classification";
+import { ERROR_CLASSES, type ErrorClass } from "./classification.js";
 
 /**
  * A classified failure. `reason` is the REAL underlying cause, human-readable — never a bookkeeping

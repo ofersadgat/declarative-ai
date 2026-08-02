@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { flattenForDepth } from "../../src/schema/flatten";
-import type { SchemaNode } from "../../src/schema/profile";
+import { flattenForDepth } from "../../src/schema/flatten.js";
+import type { SchemaNode } from "../../src/schema/profile.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test ergonomics on dynamic schemas.
 type Any = any;

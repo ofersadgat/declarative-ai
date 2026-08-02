@@ -1,12 +1,51 @@
 {
   "name": "@declarative-ai/validate",
   "version": "0.1.0",
+  "description": "Structural JSON Schema subtyping, one generic binding checker parameterized by ref family, and one ajv wrapper with an injectable $ref resolver.",
+  "keywords": [
+    "declarative-ai",
+    "json-schema",
+    "validation",
+    "ajv",
+    "subtyping"
+  ],
+  "author": "Ofer Sadgat",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ofersadgat/declarative-ai.git",
+    "directory": "packages/validate"
+  },
+  "homepage": "https://github.com/ofersadgat/declarative-ai/tree/main/packages/validate#readme",
+  "bugs": {
+    "url": "https://github.com/ofersadgat/declarative-ai/issues"
+  },
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json"
+  },
   "dependencies": {
-    "@declarative-ai/exec": "*",
-    "@declarative-ai/json": "*",
-    "@declarative-ai/ops": "*",
+    "@declarative-ai/exec": "^0.1.0",
+    "@declarative-ai/json": "^0.1.0",
+    "@declarative-ai/ops": "^0.1.0",
     "ajv": "^8.20.0"
   }
 }

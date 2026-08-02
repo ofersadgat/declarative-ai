@@ -4,7 +4,7 @@
  * budget reads to tell "this call was free" from "we never priced this call".
  */
 import { describe, expect, it } from "vitest";
-import { mergeLlmMetrics, type LlmMetrics } from "../src/output";
+import { mergeLlmMetrics, type LlmMetrics } from "../src/output.js";
 
 const m = (over: Partial<LlmMetrics> = {}): LlmMetrics => ({ durationMs: 10, costUsd: 0, costSource: "unknown", ...over });
 

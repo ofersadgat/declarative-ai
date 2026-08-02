@@ -27,7 +27,7 @@
  */
 import type { Failure, JsonValue, Result } from "@declarative-ai/json";
 import { classifyError, describeError, isRateLimit, retryAfterMs } from "@declarative-ai/json";
-import type { InlineFamily, ResolvedValue, Signature } from "./model";
+import type { InlineFamily, ResolvedValue, Signature } from "./model.js";
 
 /** The dynamic base for function inputs (§2.2); refined per-def by `FunctionDef<I, O>`. */
 export type FunctionInputs = Record<string, ResolvedValue>;

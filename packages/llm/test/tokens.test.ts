@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { estimateCallTokens } from "../src/tokens";
+import { estimateCallTokens } from "../src/tokens.js";
 
 describe("estimateCallTokens", () => {
   it("estimates input from chars/4 across prompt + system, and output from the ceiling", () => {

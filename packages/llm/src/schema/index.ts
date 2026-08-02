@@ -1,4 +1,4 @@
-export { adaptSchema, adaptSchemaCached } from "./adapt";
+export { adaptSchema, adaptSchemaCached } from "./adapt.js";
 export type {
   AdaptNote,
   AdaptResult,
@@ -7,7 +7,7 @@ export type {
   KeywordSupport,
   ProviderSchemaProfile,
   SchemaNode,
-} from "./profile";
+} from "./profile.js";
 export {
   ADVISORY,
   ANTHROPIC_AI_SDK,
@@ -20,4 +20,4 @@ export {
   profileForCaps,
   profileForModelId,
   profileIdForCaps,
-} from "./profiles";
+} from "./profiles.js";

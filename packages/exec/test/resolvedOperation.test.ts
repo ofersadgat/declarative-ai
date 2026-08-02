@@ -1,5 +1,5 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
-import type { CallTarget, ExecMetrics, ExecServices, FunctionInputs, FunctionRegistry, InlineFamily, Operation, Ref } from "../src/index";
+import type { CallTarget, ExecMetrics, ExecServices, FunctionInputs, FunctionRegistry, InlineFamily, Operation, Ref } from "../src/index.js";
 import {
   HOST_CAPABILITIES,
   OperationExecutor,
@@ -14,7 +14,7 @@ import {
   resolveCalls,
   withCall,
   tryRunPureSync,
-} from "../src/index";
+} from "../src/index.js";
 
 const registry = (): FunctionRegistry<ExecServices, ExecMetrics> => {
   const functions: FunctionRegistry<ExecServices, ExecMetrics> = new Map();

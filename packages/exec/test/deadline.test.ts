@@ -4,7 +4,7 @@ import {
   deadlineDecision,
   DEFAULT_FLOOR_MS,
   DEFAULT_SAFETY_MARGIN_MS,
-} from "../src/index";
+} from "../src/index.js";
 
 describe("deadline cutoff (§6.2)", () => {
   const cfg = { maxDurationMs: 300_000 };

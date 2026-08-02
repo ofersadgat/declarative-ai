@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { isOk, type ExecServices, type FunctionInputs, type ResolvedSession } from "@declarative-ai/exec";
-import { codexArgv, codexRefusal, createCodexAgentQuery, mcpServerOverride, readCodexEvent, replayPreamble, sandboxFor } from "../src/codexQuery";
-import { CODEX_CAPS, createCodexAgentFunction } from "../src/codexRuntime";
-import type { AgentProcess, SpawnOptions, SpawnProcess } from "../src/process";
+import { codexArgv, codexRefusal, createCodexAgentQuery, mcpServerOverride, readCodexEvent, replayPreamble, sandboxFor } from "../src/codexQuery.js";
+import { CODEX_CAPS, createCodexAgentFunction } from "../src/codexRuntime.js";
+import type { AgentProcess, SpawnOptions, SpawnProcess } from "../src/process.js";
 
 /** A fake process that replays scripted stdout lines and records how it was launched. */
 function fakeSpawn(lines: string[], exitCode = 0): {

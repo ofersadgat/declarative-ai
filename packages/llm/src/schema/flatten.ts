@@ -1,5 +1,5 @@
 import type { JsonValue } from "@declarative-ai/json";
-import type { SchemaNode } from "./profile";
+import type { SchemaNode } from "./profile.js";
 
 /**
  * Lossless DEPTH-reduction by object key-flattening (§5.1, the `maxDepthStrategy: "flatten"` transform).

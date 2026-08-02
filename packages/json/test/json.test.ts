@@ -1,5 +1,5 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
-import { collectRefs, type JsonSchema, type JsonValue, type Jsonify, type SchemaDocument, type SchemaOutput } from "../src/index";
+import { collectRefs, type JsonSchema, type JsonValue, type Jsonify, type SchemaDocument, type SchemaOutput } from "../src/index.js";
 
 describe("SchemaOutput<S> — the phantom, or JsonValue (§3.4: never `unknown` in an exported position)", () => {
   it("reads a document with no phantom as JsonValue, INDEX-SIGNATURE documents included", () => {

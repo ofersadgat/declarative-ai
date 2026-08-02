@@ -12,8 +12,8 @@
  * A RUNTIME reference (`.children.critique.outputs.outcome`) is left alone here. It sits in a
  * binding, it addresses this instance's data, and the desugarer lowers it like any other binding.
  */
-import { mergeOperationFields } from "./merge";
-import { bindingForDocument } from "./format";
+import { mergeOperationFields } from "./merge.js";
+import { bindingForDocument } from "./format.js";
 import {
   isDataFile,
   isPathSpelling,
@@ -25,8 +25,8 @@ import {
   type ReferenceOptions,
   type ResolvedReference,
   type Vfs,
-} from "./reference";
-import { fieldShape, STATE_SHAPE, type Shape } from "./shape";
+} from "./reference.js";
+import { fieldShape, STATE_SHAPE, type Shape } from "./shape.js";
 
 export interface ExpandOptions {
   vfs: Vfs;

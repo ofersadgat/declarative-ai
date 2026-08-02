@@ -1,6 +1,6 @@
 import { hostFunction } from "@declarative-ai/exec";
 import type { ResolvedValue, FunctionResult } from "@declarative-ai/exec";
-import type { WorkflowMetrics } from "../src/ports";
+import type { WorkflowMetrics } from "../src/ports.js";
 import { describe, expect, it } from "vitest";
 import {
   hashOperation,
@@ -14,10 +14,10 @@ import {
   type Operation,
 } from "@declarative-ai/exec";
 import { SchemaValidator } from "@declarative-ai/validate";
-import { createWorkflowExecutor, workflowMemoKey, type HierarchicalWorkflowDefinition } from "../src/executor";
-import { loadBundle, snapshotHash } from "../src/loader";
-import { FakePromptExecutor, INTERACTIVE, modelOf, newRegistry, ok, promptTail, ScriptedFunction, type Script, errorOf } from "./fakes";
-import { PLAN_ID, specPlanningFiles } from "./fixtures";
+import { createWorkflowExecutor, workflowMemoKey, type HierarchicalWorkflowDefinition } from "../src/executor.js";
+import { loadBundle, snapshotHash } from "../src/loader.js";
+import { FakePromptExecutor, INTERACTIVE, modelOf, newRegistry, ok, promptTail, ScriptedFunction, type Script, errorOf } from "./fakes.js";
+import { PLAN_ID, specPlanningFiles } from "./fixtures.js";
 
 const CTX: ExecServices = { validator: new SchemaValidator() };
 

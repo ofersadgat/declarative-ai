@@ -6,7 +6,7 @@ import {
   OPENROUTER_STRICT,
   profileForCaps,
   profileForModelId,
-} from "../../src/schema/profiles";
+} from "../../src/schema/profiles.js";
 
 describe("profileForCaps — capability-derived structured-output profile", () => {
   it("native claude-* → the SDK-deferring Anthropic profile, regardless of caps", () => {

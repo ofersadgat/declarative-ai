@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { JsonSchema } from "@declarative-ai/json";
-import { plan } from "../src/plan";
-import type { LlmCallDefinition } from "../src/llmConfig";
-import { ModelInfo } from "../src/model-catalog";
-import { flatSchema } from "./fakes";
+import { plan } from "../src/plan.js";
+import type { LlmCallDefinition } from "../src/llmConfig.js";
+import { ModelInfo } from "../src/model-catalog.js";
+import { flatSchema } from "./fakes.js";
 
 const baseDef: LlmCallDefinition & { schema?: JsonSchema } = {
   model: "anthropic/claude-haiku-4-5",

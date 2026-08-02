@@ -26,7 +26,7 @@ import {
   type ResolvedValue,
   type Tool,
 } from "@declarative-ai/exec";
-import { mergeWorkflowMetrics, type WorkflowMetrics } from "../src/ports";
+import { mergeWorkflowMetrics, type WorkflowMetrics } from "../src/ports.js";
 
 const CAPS: Capabilities = {
   structuredOutput: true,

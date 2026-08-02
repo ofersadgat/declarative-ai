@@ -13,8 +13,8 @@
  */
 import { describe, expect, it } from "vitest";
 import { kindFor } from "@declarative-ai/exec";
-import { loadBundle } from "../src/loader";
-import type { StateDef } from "../src/format";
+import { loadBundle } from "../src/loader.js";
+import type { StateDef } from "../src/format.js";
 
 const load = (outputs: Record<string, unknown>) =>
   loadBundle(

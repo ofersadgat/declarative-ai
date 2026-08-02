@@ -5,9 +5,9 @@
  * package rather than 265 lines sitting in a core everything depends on. It DECLARES its own seams on
  * `ExecServices` (DESIGN §3.2) — `exec` therefore does not know that permissions exist.
  */
-import type { Approver, ExecPolicy } from "./permissions";
+import type { Approver, ExecPolicy } from "./permissions.js";
 
-export * from "./permissions";
+export * from "./permissions.js";
 
 declare module "@declarative-ai/exec" {
   interface ExecServices {

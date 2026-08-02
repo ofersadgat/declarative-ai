@@ -10,7 +10,7 @@
  */
 import { createClaudeCodeFunction, DELEGATED_CAPS, type ClaudeCodeFunctionOptions } from "@declarative-ai/agents-api";
 import type { RuntimeCapabilities } from "@declarative-ai/exec";
-import { createCodexAgentQuery, type CodexAgentOptions } from "./codexQuery";
+import { createCodexAgentQuery, type CodexAgentOptions } from "./codexQuery.js";
 
 /**
  * What codex can honestly claim.

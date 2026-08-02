@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Serializable } from "@declarative-ai/json";
-import { canonicalize, hashCanonical } from "../src/hashing";
+import { canonicalize, hashCanonical } from "../src/hashing.js";
 
 /** A class with `#private` fields behind getters — an ordinary TS idiom, and the exact shape the
  *  `SerializableFields<T>` bound ACCEPTS (its declared fields are `number`/`string`) while JCS reads

@@ -9,7 +9,7 @@
  * Pure + clock-injectable so the floor-guard and margin arithmetic are deterministically
  * testable without real timers.
  */
-import type { Clock, DeadlineConfig } from "./contract";
+import type { Clock, DeadlineConfig } from "./contract.js";
 
 export type { Clock, DeadlineConfig };
 

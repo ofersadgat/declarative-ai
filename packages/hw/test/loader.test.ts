@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { loadBundle, snapshotHash, stateIdFromPath, WorkflowLoadError } from "../src/loader";
-import { validateBundle } from "../src/validate";
-import { referencePathsOf } from "../src/lowerExpr";
-import type { StateDef } from "../src/format";
-import { FANOUT_ID, PLAN_ID, specFanoutFiles, specPlanningFiles } from "./fixtures";
+import { loadBundle, snapshotHash, stateIdFromPath, WorkflowLoadError } from "../src/loader.js";
+import { validateBundle } from "../src/validate.js";
+import { referencePathsOf } from "../src/lowerExpr.js";
+import type { StateDef } from "../src/format.js";
+import { FANOUT_ID, PLAN_ID, specFanoutFiles, specPlanningFiles } from "./fixtures.js";
 
 describe("stateIdFromPath", () => {
   it("strips extensions and normalizes separators", () => {

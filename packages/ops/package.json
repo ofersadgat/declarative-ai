@@ -1,10 +1,49 @@
 {
   "name": "@declarative-ai/ops",
   "version": "0.1.0",
+  "description": "The typed operation spine: an operation model generic over a ref family, the function registry, the Signature to JSON Schema bridge, and the metrics floor.",
+  "keywords": [
+    "declarative-ai",
+    "operations",
+    "json-schema",
+    "registry",
+    "typescript"
+  ],
+  "author": "Ofer Sadgat",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ofersadgat/declarative-ai.git",
+    "directory": "packages/ops"
+  },
+  "homepage": "https://github.com/ofersadgat/declarative-ai/tree/main/packages/ops#readme",
+  "bugs": {
+    "url": "https://github.com/ofersadgat/declarative-ai/issues"
+  },
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json"
+  },
   "dependencies": {
-    "@declarative-ai/json": "*",
+    "@declarative-ai/json": "^0.1.0",
     "json-schema-to-ts": "^3.1.1"
   }
 }

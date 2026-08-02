@@ -13,9 +13,9 @@ import type {
   PromptOp,
   Ref,
   ResolvedValue,
-} from "../src/model";
+} from "../src/model.js";
 import type { JsonSchema, JsonValue } from "@declarative-ai/json";
-import type { Metrics } from "../src/metrics";
+import type { Metrics } from "../src/metrics.js";
 
 // Type-shape assertions: `Operation<IdFamily>` matches findmyprompt's
 // model semantics modulo the property renames (`textId` → `text`, …, id field dropped

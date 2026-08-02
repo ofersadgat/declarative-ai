@@ -1,7 +1,7 @@
 import type { JsonValue, SchemaDocument } from "@declarative-ai/json";
-import { findDiscriminators } from "../structured";
-import { flattenForDepth } from "./flatten";
-import type { AdaptNote, AdaptResult, KeywordRule, KeywordSupport, MaxDepthCountStrategy, ProviderSchemaProfile, SchemaNode } from "./profile";
+import { findDiscriminators } from "../structured.js";
+import { flattenForDepth } from "./flatten.js";
+import type { AdaptNote, AdaptResult, KeywordRule, KeywordSupport, MaxDepthCountStrategy, ProviderSchemaProfile, SchemaNode } from "./profile.js";
 
 /**
  * The generic, config-driven structured-output schema adapter (§5.1). Replaces the Anthropic-only

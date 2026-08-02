@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { SchemaDocument } from "@declarative-ai/json";
-import { adaptSchema, __internal } from "../../src/schema/adapt";
+import { adaptSchema, __internal } from "../../src/schema/adapt.js";
 import {
   ADVISORY,
   ANTHROPIC_AI_SDK,
   ANTHROPIC_RAW,
   JSON_OBJECT,
   OPENAI_STRICT,
-} from "../../src/schema/profiles";
-import type { ProviderSchemaProfile, SchemaNode } from "../../src/schema/profile";
+} from "../../src/schema/profiles.js";
+import type { ProviderSchemaProfile, SchemaNode } from "../../src/schema/profile.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test ergonomics on dynamic schemas.
 type Any = any;

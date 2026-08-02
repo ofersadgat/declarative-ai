@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ExecServices } from "@declarative-ai/exec";
-import { allTools, requireWorkspace, runCommandTool } from "../src";
+import { allTools, requireWorkspace, runCommandTool } from "../src/index.js";
 
 // Drive the shell through tiny node scripts written into the workspace — deterministic and cross-platform
 // (no shell-specific echo/exit syntax, no nested-quote fragility), needing only `node` on PATH.

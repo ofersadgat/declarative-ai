@@ -9,7 +9,7 @@ import {
   type ConfigLayer,
   type ReasoningConfiguration,
   type SamplingConfiguration,
-} from "../src/llmConfig";
+} from "../src/llmConfig.js";
 
 /** `ConfigLayer` now types the knobs, so a malformed layer is a COMPILE error too. These negative tests
  *  deliberately smuggle one past the signature to prove the runtime parse still refuses it. */

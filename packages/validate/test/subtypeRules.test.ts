@@ -9,7 +9,7 @@
  * REASON too: a bare `ok:false` tells an author nothing about what to change.
  */
 import { describe, expect, it } from "vitest";
-import { isSubschema, type Schema } from "../src/subtype";
+import { isSubschema, type Schema } from "../src/subtype.js";
 
 type Resolve = (id: string) => Schema | undefined;
 

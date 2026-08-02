@@ -1,7 +1,15 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
-import canonicalizeJCS from "canonicalize";
-import type { Serializable, SerializableFields } from "./json";
+import canonicalizeModule from "canonicalize";
+import type { Serializable, SerializableFields } from "./json.js";
+
+/**
+ * `canonicalize` is CJS (`module.exports = serialize`) shipping an ESM-shaped `.d.ts`, so under
+ * `module: NodeNext` the default import TYPES as the module namespace even though every runtime
+ * (Node's CJS interop, bundlers, edge) hands back the function itself. Restore the call signature
+ * the value actually has.
+ */
+const canonicalizeJCS = canonicalizeModule as unknown as (input: unknown) => string | undefined;
 
 /**
  * Content-addressing primitives, extracted from findmyprompt `src/engine/artifacts/`

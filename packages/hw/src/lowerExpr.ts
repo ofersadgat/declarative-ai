@@ -21,11 +21,11 @@
  * is still a walk over the tree rather than a second parse.
  */
 import type { InlineFamily, Operation, Parameter, Ref } from "@declarative-ai/exec";
-import { ExprError, OPERATOR_PARAMS, pathOf, type Expr } from "./expr";
+import { ExprError, OPERATOR_PARAMS, pathOf, type Expr } from "./expr.js";
 
 /** The operations whose `op` argument is an operation REFERENCE rather than a data path (§3.5). */
 const HIGHER_ORDER_NAMES: ReadonlySet<string> = new Set(["map", "filter", "flatMap", "reduce"]);
-import { RESOLVER_REFS } from "./format";
+import { RESOLVER_REFS } from "./format.js";
 
 /** A producer edge on one operator resolver. Mirrors the loader's `resolverEdge`. */
 function edge(functionRef: string, args: Record<string, Ref<InlineFamily>>): Ref<InlineFamily> {

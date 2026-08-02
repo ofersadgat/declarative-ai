@@ -11,7 +11,7 @@ import type {
   InlineFamily,
   Operation,
   ResolvedValue,
-} from "../src/index";
+} from "../src/index.js";
 import {
   EXEC_METRICS_ALGEBRA,
   EventQueue,
@@ -25,7 +25,7 @@ import {
   withDeadline,
   withMemoize,
   withRetry,
-} from "../src/index";
+} from "../src/index.js";
 
 const errorOf = <O>(r: ExecResult<O>): Failure | undefined => (isOk(r) ? undefined : r.error);
 

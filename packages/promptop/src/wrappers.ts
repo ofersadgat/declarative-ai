@@ -48,8 +48,8 @@ import {
   type OutputTokenStats,
 } from "@declarative-ai/llm";
 import type { LlmOutput, ModelMessage } from "@declarative-ai/llm";
-import { lowerPromptOp, type LoweringOptions } from "./lowering";
-import { projectLlmOutput } from "./executor";
+import { lowerPromptOp, type LoweringOptions } from "./lowering.js";
+import { projectLlmOutput } from "./executor.js";
 
 /**
  * What `withBudget` reads off a measurement: money (its job), plus the observed output size it prices

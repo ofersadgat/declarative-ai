@@ -25,9 +25,9 @@
  * `dispatcher` — hence `undici`/`node:net` and the AI SDK providers — into a browser bundle. Same
  * un-barrelling rationale as the ajv note in index.ts: keep the module graph honest, not just the API.
  */
-import { GENERATED_MODELS } from "./model-catalog-data.generated";
-import type { ModelRoute } from "./router";
-import type { ProviderSchemaProfile } from "./schema/profile";
+import { GENERATED_MODELS } from "./model-catalog-data.generated.js";
+import type { ModelRoute } from "./router.js";
+import type { ProviderSchemaProfile } from "./schema/profile.js";
 
 /**
  * The four rate dimensions that fully determine an Anthropic call's cost. The cache rates

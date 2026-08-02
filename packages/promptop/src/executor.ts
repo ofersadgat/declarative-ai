@@ -40,7 +40,7 @@ import {
   type ModelRouter,
   type ToolExecutor,
 } from "@declarative-ai/llm";
-import { lowerPromptOp, type LoweringOptions } from "./lowering";
+import { lowerPromptOp, type LoweringOptions } from "./lowering.js";
 
 // `modelRouter` is llm's seam, so llm's own type is what names it — and this is the package that can
 // (§1.2). `exec` therefore never declares an opaque `ModelHandle` it cannot describe.

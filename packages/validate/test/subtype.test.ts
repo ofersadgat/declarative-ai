@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isSubschema, type Schema } from "../src/subtype";
+import { isSubschema, type Schema } from "../src/subtype.js";
 
 const sub = (a: Schema, b: Schema) => isSubschema(a, b);
 

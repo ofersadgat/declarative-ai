@@ -37,10 +37,10 @@
  * sandbox mode has to answer for.
  */
 import type { AgentQuery, AgentQueryOptions, AgentResult, AgentStreamMessage } from "@declarative-ai/agents-api";
-import type { JsonValue } from "./deps";
-import { defaultStartMcpBridge, type McpBridge, type StartMcpBridge } from "./mcpBridge";
-import { MCP_SERVER_NAME } from "./mcpProtocol";
-import { defaultSpawn, type SpawnProcess } from "./process";
+import type { JsonValue } from "./deps.js";
+import { defaultStartMcpBridge, type McpBridge, type StartMcpBridge } from "./mcpBridge.js";
+import { MCP_SERVER_NAME } from "./mcpProtocol.js";
+import { defaultSpawn, type SpawnProcess } from "./process.js";
 
 /** The executable this adapter drives. */
 export const CODEX_COMMAND = "codex";

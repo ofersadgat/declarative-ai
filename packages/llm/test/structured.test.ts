@@ -5,7 +5,7 @@ import {
   parseOutputSchema,
   patchSchemaForAnthropic,
   reconstructOutput,
-} from "../src/structured";
+} from "../src/structured.js";
 
 describe("patchSchemaForAnthropic (§5.1)", () => {
   it("does NOT mutate the input (original survives for reconstruction)", () => {

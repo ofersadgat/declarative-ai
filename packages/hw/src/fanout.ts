@@ -17,8 +17,8 @@
  * deliberately absent: its stream must survive un-drained so it can be piped (§7.4).
  */
 import type { InlineFamily, Ref, RefTree } from "@declarative-ai/exec";
-import { pathOfRef } from "./lowerExpr";
-import { RESOLVER_REFS, type LoadedState } from "./format";
+import { pathOfRef } from "./lowerExpr.js";
+import { RESOLVER_REFS, type LoadedState } from "./format.js";
 
 /** Marks a whole-child edge (`{ child: P }`, no output selected) — it consumes every output of P. */
 const WHOLE = "*";

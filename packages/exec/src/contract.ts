@@ -37,8 +37,8 @@ import type {
 // The op vocabulary is what flows through this contract — re-exported so a consumer that speaks
 // execution imports one name set.
 export * from "@declarative-ai/ops";
-export * from "./budget";
-export * from "./ratelimit";
+export * from "./budget.js";
+export * from "./ratelimit.js";
 
 // --- Metrics ------------------------------------------------------------------
 
@@ -284,7 +284,7 @@ export interface Workspace {
 export interface ExecServices {
   /** The metered wallet, when one is wired in. Declared by `budget.ts` and read ONLY by the layer whose
    *  job is money — `exec` itself never touches it. */
-  meter?: import("./budget").BudgetMeter;
+  meter?: import("./budget.js").BudgetMeter;
   /** Boundary schema validation. */
   validator?: OutputValidator;
   clock?: Clock;
@@ -300,7 +300,7 @@ export interface ExecServices {
   sessions?: SessionStore;
   /** Where executions are RECORDED (`withRecord`). Also where a session's messages come from, since a
    *  session is the records sharing a `session.id`. Absent ⇒ nothing is recorded. */
-  records?: import("./record").RecordStore;
+  records?: import("./record.js").RecordStore;
   /**
    * The session this call runs in, already resolved to a position and RESERVED (see
    * {@link SessionLease}).

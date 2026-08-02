@@ -1,6 +1,6 @@
-import { ModelInfo } from "../model-catalog";
-import { isAnthropicModel, providerNativeId } from "../router";
-import type { ProviderSchemaProfile } from "./profile";
+import { ModelInfo } from "../model-catalog.js";
+import { isAnthropicModel, providerNativeId } from "../router.js";
+import type { ProviderSchemaProfile } from "./profile.js";
 
 /**
  * Concrete provider profiles (§5.1) + the model→profile selector. Profiles are keyed by TRANSPORT

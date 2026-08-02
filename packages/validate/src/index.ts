@@ -16,6 +16,6 @@
  * `OutputValidator` seam it consumes (`validateValue`) and never learns the concrete type, which is the
  * §1.2 rule applied in its lighter form. `SchemaValidator` simply implements that seam.
  */
-export * from "./subtype";
-export * from "./checker";
-export * from "./ajv";
+export * from "./subtype.js";
+export * from "./checker.js";
+export * from "./ajv.js";

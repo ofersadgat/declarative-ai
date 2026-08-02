@@ -8,10 +8,10 @@
  */
 import { describe, expect, it } from "vitest";
 import type { InlineFamily, Ref } from "@declarative-ai/exec";
-import { evaluate, parseExpression, PENDING } from "../src/expr";
-import { lowerExpression, pathOfRef } from "../src/lowerExpr";
-import { inferExpression, inferRef } from "../src/inferExpr";
-import { isResolvedValue, resolveRef, type ResolutionScope } from "../src/resolve";
+import { evaluate, parseExpression, PENDING } from "../src/expr.js";
+import { lowerExpression, pathOfRef } from "../src/lowerExpr.js";
+import { inferExpression, inferRef } from "../src/inferExpr.js";
+import { isResolvedValue, resolveRef, type ResolutionScope } from "../src/resolve.js";
 
 /** Every context an expression below is evaluated against — the awkward cases on purpose. */
 const CONTEXTS: Record<string, Record<string, unknown>> = {

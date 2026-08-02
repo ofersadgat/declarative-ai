@@ -21,8 +21,8 @@
  * `$param` and `x-type` (./codec) are the same SHAPE — a name inside the document resolved through a
  * map — and they coexist: `$param` binds type VARIABLES per call, `x-type` binds type NAMES globally.
  */
-import type { SchemaDocument } from "./json";
-import { getOwn, setOwn } from "./ownProps";
+import type { SchemaDocument } from "./json.js";
+import { getOwn, setOwn } from "./ownProps.js";
 
 export const PARAM_KEY = "$param";
 

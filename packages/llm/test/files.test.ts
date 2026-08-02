@@ -1,9 +1,9 @@
 import { MockLanguageModelV3 } from "ai/test";
 import { describe, expect, it } from "vitest";
-import { executeLlmCall } from "../src/call";
-import { ModelInfo } from "../src/model-catalog";
-import { plan } from "../src/plan";
-import { fakeRouter, generateFlat, stream, usage, errorOf } from "./fakes";
+import { executeLlmCall } from "../src/call.js";
+import { ModelInfo } from "../src/model-catalog.js";
+import { plan } from "../src/plan.js";
+import { fakeRouter, generateFlat, stream, usage, errorOf } from "./fakes.js";
 
 const TEXT = [
   { type: "stream-start", warnings: [] },

@@ -27,8 +27,8 @@
  *    off the agent path) whenever the caller supplies one. `agents-api`'s adapter supplies `ctx.validator`
  *    automatically, so the engine-driven path is checked without anyone opting in.
  */
-import type { AgentPermissionDecision, AgentToolRequest, InjectedTool, SyncOutputValidator } from "./deps";
-import { bridgePath, handleToolCall, isAuthorizedBridgeRequest, newBridgeToken, toolDescriptors } from "./mcpProtocol";
+import type { AgentPermissionDecision, AgentToolRequest, InjectedTool, SyncOutputValidator } from "./deps.js";
+import { bridgePath, handleToolCall, isAuthorizedBridgeRequest, newBridgeToken, toolDescriptors } from "./mcpProtocol.js";
 
 /** What a bridge exposes to the CLI. */
 export interface McpBridge {

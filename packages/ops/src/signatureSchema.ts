@@ -16,7 +16,7 @@
  */
 import type { JsonSchema, SchemaDocument } from "@declarative-ai/json";
 import { resolveTypes } from "@declarative-ai/json";
-import type { Parameter, RefFamily, Signature } from "./model";
+import type { Parameter, RefFamily, Signature } from "./model.js";
 
 /** How a family turns the `schema` a parameter carries into a schema document. */
 export type SchemaDeref<F extends RefFamily> = (schema: F["schema"]) => JsonSchema;

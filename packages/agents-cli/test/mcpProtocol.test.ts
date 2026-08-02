@@ -22,7 +22,7 @@ import {
   newBridgeToken,
   parseApprovalRequest,
   toolDescriptors,
-} from "../src/mcpProtocol";
+} from "../src/mcpProtocol.js";
 
 /** Decode what the CLI would actually read: the JSON string inside `content[0].text`. */
 const decode = (result: { content: Array<{ text: string }> }) => JSON.parse(result.content[0]!.text) as Record<string, unknown>;

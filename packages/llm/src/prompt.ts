@@ -6,7 +6,7 @@
  */
 import type { ModelMessage, SystemModelMessage } from "ai";
 import type { JsonSchema, JsonValue } from "@declarative-ai/json";
-import type { FileInput } from "./files";
+import type { FileInput } from "./files.js";
 
 // `CallPromptInput` names these AI SDK types in its PUBLIC shape, so a consumer cannot describe a
 // prompt without them. `llm` owns the AI SDK boundary — re-exporting here is what lets a package above

@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { BudgetMeter, BudgetMetrics, BudgetReservation, CallEstimate, Capabilities, ExecMetrics, ExecServices, Executor, MapSessionStore, MetricsAlgebra, Operation, InlineFamily, RateLimiter, SessionStore } from "@declarative-ai/exec";
 import { EXEC_METRICS_ALGEBRA, MapMemoCache, RUNTIME_CAPABILITIES, compose, withMemoize, wrapHandle } from "@declarative-ai/exec";
 import type { ModelMessage } from "ai";
-import { createPromptExecutor } from "../src/executor";
-import { withBudget, withRateLimit, withSession } from "../src/wrappers";
-import { fakeRunner, okOutcome, promptOp, sessionStack, transcripts, errorOf } from "./fakes";
+import { createPromptExecutor } from "../src/executor.js";
+import { withBudget, withRateLimit, withSession } from "../src/wrappers.js";
+import { fakeRunner, okOutcome, promptOp, sessionStack, transcripts, errorOf } from "./fakes.js";
 
 /**
  * Put a stream in a known state and return the ref for its HEAD.

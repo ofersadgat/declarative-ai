@@ -1,8 +1,8 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import type { JsonSchema, JsonValue } from "@declarative-ai/json";
-import type { FunctionOp, InlineFamily, Parameter, PromptOp, Ref } from "../src/model";
+import type { FunctionOp, InlineFamily, Parameter, PromptOp, Ref } from "../src/model.js";
 import { isOk } from "@declarative-ai/json";
-import { HOST_CAPABILITIES, isStreaming, runFunction, type FunctionRegistry } from "../src/registry";
+import { HOST_CAPABILITIES, isStreaming, runFunction, type FunctionRegistry } from "../src/registry.js";
 import {
   bound,
   defineFunction,
@@ -14,7 +14,7 @@ import {
   type InferSchema,
   type OperationOutput,
   type Widened,
-} from "../src/typed";
+} from "../src/typed.js";
 
 // The §4 example: impl params inferred from the input schema, return checked as number.
 const wordCount = defineFunction({

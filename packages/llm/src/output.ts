@@ -14,7 +14,7 @@
  */
 import type { ModelMessage } from "ai";
 import type { Failure, JsonValue, ResultWithMetrics } from "@declarative-ai/json";
-import type { GeneratedFile } from "./files";
+import type { GeneratedFile } from "./files.js";
 
 /**
  * One non-output segment of the trace, positioned against the output text it accompanies. Everything

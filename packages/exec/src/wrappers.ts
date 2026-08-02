@@ -13,12 +13,12 @@
  */
 import type { InlineFamily, Operation, PromptOp, ResolvedValue } from "@declarative-ai/ops";
 import { isOk } from "@declarative-ai/ops";
-import type { DeadlineConfig, ExecHandle, ExecMetrics, Executor, ExecutorWrapper, ExecServices, ExecResult } from "./contract";
-import { forwardCapabilitiesFor } from "./contract";
-import { DEADLINE_FLOOR_REASON, deadlineDecision, isDeadlineFloor, systemClock } from "./deadline";
-import { abortableDelay, canceledFailure, finishedHandle, permanentFailure, raceWork, withMetrics, wrapHandle } from "./handles";
-import type { RetryBudget } from "./retry";
-import { DEFAULT_BASE_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS, backoffDelayMs } from "./retry";
+import type { DeadlineConfig, ExecHandle, ExecMetrics, Executor, ExecutorWrapper, ExecServices, ExecResult } from "./contract.js";
+import { forwardCapabilitiesFor } from "./contract.js";
+import { DEADLINE_FLOOR_REASON, deadlineDecision, isDeadlineFloor, systemClock } from "./deadline.js";
+import { abortableDelay, canceledFailure, finishedHandle, permanentFailure, raceWork, withMetrics, wrapHandle } from "./handles.js";
+import type { RetryBudget } from "./retry.js";
+import { DEFAULT_BASE_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS, backoffDelayMs } from "./retry.js";
 
 /** True iff a value is an `Executor` (has `.start`) — disambiguates a wrapper's optional trailing
  *  `inner` from its optional config argument (both structurally disjoint from `Executor`). */

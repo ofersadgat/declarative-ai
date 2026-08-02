@@ -22,12 +22,12 @@
  */
 import type { FunctionCapabilities, InlineFamily, JsonSchema, JsonValue, Operation, Parameter, Ref, RefKind, RefTree } from "@declarative-ai/exec";
 import { checkBinding as checkBindingGeneric, isSubschema, producerSchemaOf, type CheckerHooks, type CheckIssue, type Schema } from "@declarative-ai/validate";
-import { parseExpression, referencesOf, type Expr } from "./expr";
-import { EXPRESSION_REFS, pathOfRef, referencePathsOf } from "./lowerExpr";
-import { embeddedOpsOf } from "./resolve";
-import { validateSessionDecl } from "./session";
-import { operationNodeSchema } from "./operationNode";
-import { ANY_SCHEMA, inferExpression, inferRef, isBooleanSchema, isUniversalSchema, type ExprScope } from "./inferExpr";
+import { parseExpression, referencesOf, type Expr } from "./expr.js";
+import { EXPRESSION_REFS, pathOfRef, referencePathsOf } from "./lowerExpr.js";
+import { embeddedOpsOf } from "./resolve.js";
+import { validateSessionDecl } from "./session.js";
+import { operationNodeSchema } from "./operationNode.js";
+import { ANY_SCHEMA, inferExpression, inferRef, isBooleanSchema, isUniversalSchema, type ExprScope } from "./inferExpr.js";
 import {
   GUARD_NAMESPACES,
   REF_NAMESPACES,
@@ -36,7 +36,7 @@ import {
   type LoadedState,
   type SlotMeta,
   type WorkflowBundle,
-} from "./format";
+} from "./format.js";
 
 export interface ValidationIssue {
   stateId: string;

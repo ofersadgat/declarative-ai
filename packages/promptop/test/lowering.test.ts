@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { MapConfigurationRegistry } from "@declarative-ai/llm";
-import { createPromptExecutor } from "../src/executor";
-import { lowerPromptOp } from "../src/lowering";
-import { fakeRunner, OUTPUT_SCHEMA, okOutcome, promptOp, errorOf } from "./fakes";
+import { createPromptExecutor } from "../src/executor.js";
+import { lowerPromptOp } from "../src/lowering.js";
+import { fakeRunner, OUTPUT_SCHEMA, okOutcome, promptOp, errorOf } from "./fakes.js";
 
 describe("lowerPromptOp — the PromptOp → LlmCallDefinition lowering (decision #7)", () => {
   it("merges defaults ← inline config and puts the op's `user` text in the prompt", () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { SchemaDocument } from "../src/index";
-import { applyTemplate, collapseHoles, resolveTypes } from "../src/index";
+import type { SchemaDocument } from "../src/index.js";
+import { applyTemplate, collapseHoles, resolveTypes } from "../src/index.js";
 
 /** `{"__proto__": …}` written as a literal would SET the prototype, so wire-shaped inputs are parsed —
  *  which is also exactly how they arrive in production (`JSON.parse` makes it an OWN property). */

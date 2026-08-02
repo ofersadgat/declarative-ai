@@ -1,9 +1,9 @@
 import { MockLanguageModelV3 } from "ai/test";
 import { describe, expect, expectTypeOf, it } from "vitest";
-import { typedSchema } from "../src/generate";
-import type { LlmCallResult } from "../src/output";
-import { executeRequest, type LlmCallEnvironment } from "../src/call";
-import { fakeRouter, flatSchema, streamingModel, usage, errorOf } from "./fakes";
+import { typedSchema } from "../src/generate.js";
+import type { LlmCallResult } from "../src/output.js";
+import { executeRequest, type LlmCallEnvironment } from "../src/call.js";
+import { fakeRouter, flatSchema, streamingModel, usage, errorOf } from "./fakes.js";
 
 function okModel(): MockLanguageModelV3 {
   return streamingModel([
@@ -80,8 +80,8 @@ describe("executeRequest — declaration + env convenience", () => {
 
 describe("executeLlmCall — injectable schema-profile resolution", () => {
   it("uses env.schemaProfile over the built-in catalog profile", async () => {
-    const { JSON_OBJECT } = await import("../src/schema");
-    const { executeLlmCall } = await import("../src/call");
+    const { JSON_OBJECT } = await import("../src/schema/index.js");
+    const { executeLlmCall } = await import("../src/call.js");
     const seen: string[] = [];
     // An advisory profile that REQUIRES the word "json" in the prompt: with no "json" anywhere the
     // call must fail fast (permanent) BEFORE hitting the provider. The default (catalog) profile for

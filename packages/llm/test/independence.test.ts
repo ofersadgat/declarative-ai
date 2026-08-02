@@ -15,9 +15,9 @@ import path from "node:path";
 import { MockLanguageModelV3 } from "ai/test";
 import { describe, expect, it } from "vitest";
 import type { OutputValidator } from "@declarative-ai/json";
-import { executeLlmCall } from "../src/call";
-import type { LlmCallDefinition } from "../src/llmConfig";
-import { fakeRouter, stream, usage, errorOf } from "./fakes";
+import { executeLlmCall } from "../src/call.js";
+import type { LlmCallDefinition } from "../src/llmConfig.js";
+import { fakeRouter, stream, usage, errorOf } from "./fakes.js";
 
 const ROOT = path.resolve(__dirname, "../../..");
 

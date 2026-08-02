@@ -10,7 +10,7 @@
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import type { Tool } from "@declarative-ai/exec";
-import { requireWorkspace, resolveInWorkspace } from "./workspace";
+import { requireWorkspace, resolveInWorkspace } from "./workspace.js";
 
 const pexec = promisify(exec);
 

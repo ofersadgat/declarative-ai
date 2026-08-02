@@ -14,7 +14,7 @@ import {
   requireWorkspace,
   resolveInWorkspace,
   writeFileTool,
-} from "../src";
+} from "../src/index.js";
 
 let root: string;
 beforeAll(async () => {

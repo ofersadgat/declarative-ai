@@ -4,11 +4,11 @@
  */
 import { describe, expect, it } from "vitest";
 import { hostFunction, type ExecResult, type HostCapabilities, type ResolvedValue } from "@declarative-ai/exec";
-import { newRegistry, ok } from "./fakes";
-import { WorkflowEngine } from "../src/engine";
-import { loadBundle } from "../src/loader";
-import type { StateDef } from "../src/format";
-import type { WorkflowMetrics } from "../src/ports";
+import { newRegistry, ok } from "./fakes.js";
+import { WorkflowEngine } from "../src/engine.js";
+import { loadBundle } from "../src/loader.js";
+import type { StateDef } from "../src/format.js";
+import type { WorkflowMetrics } from "../src/ports.js";
 
 const HOST: HostCapabilities = { interactive: false, readOnly: true, memoizable: false };
 

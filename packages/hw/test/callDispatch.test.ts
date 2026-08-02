@@ -8,12 +8,12 @@
 import { describe, expect, it } from "vitest";
 import { hostFunction, type ExecServices, type FunctionInputs, type InlineFamily, type Operation, type ResolvedValue } from "@declarative-ai/exec";
 import { SchemaValidator } from "@declarative-ai/validate";
-import { WorkflowEngine } from "../src/engine";
-import { loadBundle } from "../src/loader";
-import { validateBundle } from "../src/validate";
-import { FakePromptExecutor, newRegistry, ok, promptTail } from "./fakes";
-import type { Vfs } from "../src/reference";
-import type { WorkflowMetrics } from "../src/ports";
+import { WorkflowEngine } from "../src/engine.js";
+import { loadBundle } from "../src/loader.js";
+import { validateBundle } from "../src/validate.js";
+import { FakePromptExecutor, newRegistry, ok, promptTail } from "./fakes.js";
+import type { Vfs } from "../src/reference.js";
+import type { WorkflowMetrics } from "../src/ports.js";
 
 const ROOT = "/p/.jaira";
 const WF = `${ROOT}/workflows`;

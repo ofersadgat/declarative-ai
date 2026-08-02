@@ -13,7 +13,7 @@
  */
 import { createClaudeCodeFunction, DELEGATED_CAPS, type ClaudeCodeFunctionOptions } from "@declarative-ai/agents-api";
 import type { RuntimeCapabilities } from "@declarative-ai/exec";
-import { createCliAgentQuery, type CliAgentOptions } from "./cliQuery";
+import { createCliAgentQuery, type CliAgentOptions } from "./cliQuery.js";
 
 /**
  * A CLI agent routes each gated tool-use back to our approver — over the MCP bridge, via

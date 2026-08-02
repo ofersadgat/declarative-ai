@@ -12,9 +12,9 @@
  */
 import { describe, expect, it } from "vitest";
 import type { JsonSchema } from "@declarative-ai/exec";
-import type { StateDef } from "../src/format";
-import { loadBundle } from "../src/loader";
-import { validateBundle } from "../src/validate";
+import type { StateDef } from "../src/format.js";
+import { loadBundle } from "../src/loader.js";
+import { validateBundle } from "../src/validate.js";
 
 const report = (files: Record<string, StateDef>, rootId: string, env = {}) => validateBundle(loadBundle(files, rootId), env);
 const messages = (files: Record<string, StateDef>, rootId: string, env = {}) =>

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { keyForModel, ModelInfo } from "../src/model-catalog";
+import { keyForModel, ModelInfo } from "../src/model-catalog.js";
 import {
   anthropicRejectsSampling,
   claudeSupportedParameters,
@@ -15,7 +15,7 @@ import {
   sanitizePricingRows,
   validatePricingRows,
   type PricingSource,
-} from "../src/model-catalog-source";
+} from "../src/model-catalog-source.js";
 
 const fixture = readFileSync(
   fileURLToPath(new URL("./fixtures/anthropic-pricing.md", import.meta.url)),

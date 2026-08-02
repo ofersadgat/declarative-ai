@@ -19,14 +19,14 @@ import {
   type ResolvedValue,
 } from "@declarative-ai/exec";
 import { SchemaValidator } from "@declarative-ai/validate";
-import { WorkflowEngine } from "../src/engine";
-import { loadBundle } from "../src/loader";
-import { computeFanOut } from "../src/fanout";
-import { isByteStream, materialize, MaterializeError } from "../src/materialize";
-import { createWorkflowExecutor, type HierarchicalWorkflowDefinition } from "../src/executor";
-import type { StateDef } from "../src/format";
-import type { WorkflowMetrics } from "../src/ports";
-import { errorOf, FakePromptExecutor, newRegistry } from "./fakes";
+import { WorkflowEngine } from "../src/engine.js";
+import { loadBundle } from "../src/loader.js";
+import { computeFanOut } from "../src/fanout.js";
+import { isByteStream, materialize, MaterializeError } from "../src/materialize.js";
+import { createWorkflowExecutor, type HierarchicalWorkflowDefinition } from "../src/executor.js";
+import type { StateDef } from "../src/format.js";
+import type { WorkflowMetrics } from "../src/ports.js";
+import { errorOf, FakePromptExecutor, newRegistry } from "./fakes.js";
 
 const BATCH: HostCapabilities = { interactive: false, readOnly: true, memoizable: true };
 const CTX: ExecServices = { validator: new SchemaValidator() };

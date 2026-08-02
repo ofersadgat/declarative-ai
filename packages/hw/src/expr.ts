@@ -17,8 +17,8 @@
  *    wiring that evaluates to PENDING waits.
  */
 
-import { BUILTIN_PARAMS } from "./builtins";
-import { RESOLVER_REFS } from "./format";
+import { BUILTIN_PARAMS } from "./builtins.js";
+import { RESOLVER_REFS } from "./format.js";
 
 /** The pending sentinel — placed in the evaluation context at unresolved async-child
  *  output nodes, and propagated through every operator that touches it. */

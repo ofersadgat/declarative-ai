@@ -1,9 +1,9 @@
 import { jsonSchema, stepCountIs, tool } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { describe, expect, it } from "vitest";
-import { generateStructured } from "../src/generate";
-import { executeLlmCall, type CallDeps } from "../src/call";
-import { fakeRouter, generateFlat, stream, usage, errorOf } from "./fakes";
+import { generateStructured } from "../src/generate.js";
+import { executeLlmCall, type CallDeps } from "../src/call.js";
+import { fakeRouter, generateFlat, stream, usage, errorOf } from "./fakes.js";
 
 const TOOL_CALL_STEP = [
   { type: "stream-start", warnings: [] },

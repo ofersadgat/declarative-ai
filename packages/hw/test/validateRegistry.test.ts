@@ -1,4 +1,4 @@
-import type { WorkflowMetrics } from "../src/ports";
+import type { WorkflowMetrics } from "../src/ports.js";
 /**
  * Validation as a function of *(document, registry)* (DESIGN §7).
  *
@@ -11,9 +11,9 @@ import { hostFunction, pureFunction, runtimeFunction, HOST_CAPABILITIES, PURE_CA
   type FunctionRegistry,
   type ResolvedValue,
 } from "@declarative-ai/exec";
-import { loadBundle } from "../src/loader";
-import { validateBundle } from "../src/validate";
-import { PLAN_ID, specPlanningFiles } from "./fixtures";
+import { loadBundle } from "../src/loader.js";
+import { validateBundle } from "../src/validate.js";
+import { PLAN_ID, specPlanningFiles } from "./fixtures.js";
 
 /** The fixture's one function state — `choose_option`, a human-approval gate. */
 const HR = "feature/plan/critique/human_review";

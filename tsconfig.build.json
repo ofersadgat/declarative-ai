@@ -1,0 +1,38 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/agents-api/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/agents-cli/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/exec/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/hw/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/json/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/llm/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/ops/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/permissions/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/promptop/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/tools/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/validate/tsconfig.build.json"
+    }
+  ]
+}

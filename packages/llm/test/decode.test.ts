@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { codecs, type JsonValue } from "@declarative-ai/json";
-import { generateFlat, streamingModel, usage } from "./fakes";
+import { generateFlat, streamingModel, usage } from "./fakes.js";
 
 // The declaration-merging half of the codec contract (API.md, "Codecs and type names"): a type NAME
 // bound globally. Vitest isolates module state per file, so registering the process-global `codecs`

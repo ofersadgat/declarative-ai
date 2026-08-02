@@ -13,7 +13,7 @@
  * Pure timing seams (`now`, `wait`) are injectable so the bucket/AIMD are deterministically
  * testable.
  */
-import type { CallEstimate, CallTokenEstimate, RateLimiter } from "./contract";
+import type { CallEstimate, CallTokenEstimate, RateLimiter } from "./contract.js";
 
 export type { CallEstimate, CallTokenEstimate, RateLimiter };
 

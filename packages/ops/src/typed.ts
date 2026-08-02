@@ -28,10 +28,10 @@ import type {
   Ref,
   RefFamily,
   RefKind,
-} from "./model";
-import { kindFor } from "./model";
-import type { FunctionInputs, FunctionRegistry, HostCapabilities, PureCapabilities } from "./registry";
-import { failureOf, hostFunction, liftThrowing, pureFunction, PURE_CAPABILITIES } from "./registry";
+} from "./model.js";
+import { kindFor } from "./model.js";
+import type { FunctionInputs, FunctionRegistry, HostCapabilities, PureCapabilities } from "./registry.js";
+import { failureOf, hostFunction, liftThrowing, pureFunction, PURE_CAPABILITIES } from "./registry.js";
 
 declare const WidenedTag: unique symbol;
 declare const OpInputType: unique symbol;

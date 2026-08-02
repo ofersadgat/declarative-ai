@@ -23,7 +23,7 @@
  */
 import type { JsonSchema, JsonValue, SchemaDocument } from "@declarative-ai/json";
 import type { InlineFamily, Operation, Parameter, Ref, RefFamily, Signature } from "@declarative-ai/ops";
-import { isSubschema, type ResolveRef, type Schema } from "./subtype";
+import { isSubschema, type ResolveRef, type Schema } from "./subtype.js";
 
 export interface CheckIssue {
   /** Where in the operation, e.g. `operation.input.plan` or `children.critique.inputs.plan_doc`. */

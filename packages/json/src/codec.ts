@@ -30,8 +30,8 @@
  * never silently hand an encoded epoch to a bare-number slot (or vice versa). See
  * `@declarative-ai/validate`'s `isSubschema`.
  */
-import type { JsonValue, Jsonify, SchemaDocument } from "./json";
-import { getOwn, setOwn } from "./ownProps";
+import type { JsonValue, Jsonify, SchemaDocument } from "./json.js";
+import { getOwn, setOwn } from "./ownProps.js";
 
 /** The schema keyword that names a value's DECODED type. */
 export const X_TYPE = "x-type";

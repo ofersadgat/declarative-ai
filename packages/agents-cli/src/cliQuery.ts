@@ -25,9 +25,9 @@
  * believes it is gated.
  */
 import type { AgentQuery, AgentQueryOptions, AgentStreamMessage } from "@declarative-ai/agents-api";
-import { defaultStartMcpBridge, type McpBridge, type StartMcpBridge } from "./mcpBridge";
-import { mcpConfigJson, PERMISSION_PROMPT_TOOL } from "./mcpProtocol";
-import { defaultSpawn, type AgentProcess, type SpawnProcess } from "./process";
+import { defaultStartMcpBridge, type McpBridge, type StartMcpBridge } from "./mcpBridge.js";
+import { mcpConfigJson, PERMISSION_PROMPT_TOOL } from "./mcpProtocol.js";
+import { defaultSpawn, type AgentProcess, type SpawnProcess } from "./process.js";
 
 /** One line of the agent's stdout, already parsed. */
 export type CliMessage = Record<string, unknown>;

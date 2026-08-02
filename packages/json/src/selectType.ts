@@ -12,8 +12,8 @@
  * Static-literal paths only. No JSONPath library does this schema→schema transform. Throws on an
  * unsupported path segment or a structural mismatch (e.g. `.prop` on a non-object).
  */
-import type { JsonSchema, SchemaDocument } from "./json";
-import { getOwn } from "./ownProps";
+import type { JsonSchema, SchemaDocument } from "./json.js";
+import { getOwn } from "./ownProps.js";
 
 export type PathSegment = { kind: "prop"; name: string } | { kind: "wildcard" } | { kind: "index"; index: number };
 

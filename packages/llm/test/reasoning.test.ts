@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { adaptReasoning } from "../src/reasoning";
+import { adaptReasoning } from "../src/reasoning.js";
 
 describe("adaptReasoning — provider-neutral ReasoningSpec → provider providerOptions", () => {
   it("returns undefined when nothing is requested (a no-reasoning call is byte-identical)", () => {

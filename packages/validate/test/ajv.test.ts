@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SchemaDocument } from "@declarative-ai/json";
-import { SchemaValidator } from "../src/ajv";
+import { SchemaValidator } from "../src/ajv.js";
 
 describe("SchemaValidator", () => {
   it("validates inline schemas synchronously and caches by content hash", () => {
@@ -33,7 +33,7 @@ describe("SchemaValidator", () => {
 
 describe("asBoundaryValidator — the maybe-async boundary lift", () => {
   it("resolves store-id $refs through the resolver (async path) and validates against the closure", async () => {
-    const { SchemaValidator, asBoundaryValidator } = await import("../src/ajv");
+    const { SchemaValidator, asBoundaryValidator } = await import("../src/ajv.js");
     const stored: Record<string, object> = {
       "json:leaf": { type: "object", properties: { n: { type: "number" } }, required: ["n"] },
     };
@@ -47,14 +47,14 @@ describe("asBoundaryValidator — the maybe-async boundary lift", () => {
   });
 
   it("a ref-free document answers synchronously through the SYNC seam", async () => {
-    const { SchemaValidator, asBoundaryValidator } = await import("../src/ajv");
+    const { SchemaValidator, asBoundaryValidator } = await import("../src/ajv.js");
     const boundary = asBoundaryValidator(new SchemaValidator());
     const res = boundary.validateValue({ type: "string" } as never, "hi");
     expect(res).toEqual({ ok: true }); // NOT a promise — the inline family's truth
   });
 
   it("getId routes EVERY document through the store-backed path under the caller's minted id", async () => {
-    const { SchemaValidator, asBoundaryValidator } = await import("../src/ajv");
+    const { SchemaValidator, asBoundaryValidator } = await import("../src/ajv.js");
     const stored: Record<string, object> = {
       "json:leaf": { type: "string", minLength: 2 },
     };
@@ -84,7 +84,7 @@ describe("asBoundaryValidator — the maybe-async boundary lift", () => {
   });
 
   it("forJsonStore wires a content-addressed json store without a subclass", async () => {
-    const { SchemaValidator, asBoundaryValidator } = await import("../src/ajv");
+    const { SchemaValidator, asBoundaryValidator } = await import("../src/ajv.js");
     // A store serving `{ json }` artifacts by id — the findmyprompt ArtifactStore surface.
     const artifacts: Record<string, { json: unknown }> = {
       "json:leaf": { json: { type: "string", minLength: 2 } },

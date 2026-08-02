@@ -10,9 +10,9 @@
  * Its only non-workspace dependency is `json-schema-to-ts`, and that is TYPES ONLY.
  */
 export * from "@declarative-ai/json";
-export * from "./model";
-export * from "./metrics";
-export * from "./registry";
-export * from "./metadata";
-export * from "./signatureSchema";
-export * from "./typed";
+export * from "./model.js";
+export * from "./metrics.js";
+export * from "./registry.js";
+export * from "./metadata.js";
+export * from "./signatureSchema.js";
+export * from "./typed.js";

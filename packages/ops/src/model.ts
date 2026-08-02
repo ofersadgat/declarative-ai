@@ -20,7 +20,7 @@
  * stays in findmyprompt's `artifacts/`, execution in `@declarative-ai/exec`.
  */
 import type { Failure, JsonSchema, JsonValue, Result, SchemaDocument } from "@declarative-ai/json";
-import type { Metrics } from "./metrics";
+import type { Metrics } from "./metrics.js";
 
 /** A content id (kind-prefixed sha256 hex) or a UUID domain-entity id. */
 export type Id = string;

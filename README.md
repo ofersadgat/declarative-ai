@@ -54,8 +54,9 @@ executor as a plain `Executor`, which is what keeps the AI SDK out of the workfl
 | `@declarative-ai/agents-api` | Delegated agents reached through an in-process SDK (`createClaudeCodeFunction`), plus the normalized `AgentQuery` seam both agent packages share. Its entry declares `policyEnforcement: "callback"` — it routes the agent's tool approvals back through `ctx.approve` | peer |
 | `@declarative-ai/agents-cli` | The same adapter over a CLI subprocess, for two binaries. **`claude`** reaches back for approvals and host tools over an MCP bridge (`--mcp-config` + `--permission-prompt-tool`), so its entry declares `policyEnforcement: "callback"` too; `CLI_CONFIG_ONLY_CAPS` is the honest record for a run with no approver at all. **`codex`** (`createCodexAgentFunction`) has no such channel, so it declares `"config"` — a pinned sandbox, and everything it cannot honour refused rather than dropped — and `sessionResume` without `sessionFork`, since it appends server-side but cannot branch | — |
 
-Packages are consumed as TypeScript source (`exports` → `src/index.ts`); consumers bundle (Next:
-`transpilePackages`; Electron: esbuild/vite).
+Packages ship compiled ESM with declarations (`exports` → `dist/index.js` + `dist/index.d.ts`), built
+with `npm run build`. TypeScript source ships alongside it, and declaration maps point at it, so
+go-to-definition lands in the real file. Node ≥ 20 imports them directly; no bundler step is required.
 
 **They are independently usable, and that is enforced.** A structured LLM call needs `json + llm` and
 nothing else — `npm i @declarative-ai/llm` installs no ajv. Optional capabilities declare their own seams

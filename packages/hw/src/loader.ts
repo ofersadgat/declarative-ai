@@ -16,7 +16,7 @@
  * sugar hash differently but a desugaring change never invalidates a stored snapshot.
  */
 import { canonicalize, hashCanonical, kindFor, sha256Hex, type InlineFamily, type JsonSchema, type JsonValue, type NamedParameter, type Operation, type Parameter, type Ref, type RefKind } from "@declarative-ai/exec";
-import { computeFanOut } from "./fanout";
+import { computeFanOut } from "./fanout.js";
 import {
   bindingForDocument,
   RESOLVER_REFS,
@@ -33,13 +33,13 @@ import {
   type SlotMeta,
   type StateDef,
   type WorkflowBundle,
-} from "./format";
-import { parseExpression } from "./expr";
-import { lowerExpression, type LowerOptions } from "./lowerExpr";
-import { environmentIdentity, mergeOperationFields, resolutionEnvironment } from "./merge";
-import { resolveStateRef, StateRefError, type StateRefOptions } from "./ref";
-import { expandReferences } from "./expand";
-import { isDataFile, isRuntimeReference, parseReferencedFile, resolveReference, selectProperty, type Vfs } from "./reference";
+} from "./format.js";
+import { parseExpression } from "./expr.js";
+import { lowerExpression, type LowerOptions } from "./lowerExpr.js";
+import { environmentIdentity, mergeOperationFields, resolutionEnvironment } from "./merge.js";
+import { resolveStateRef, StateRefError, type StateRefOptions } from "./ref.js";
+import { expandReferences } from "./expand.js";
+import { isDataFile, isRuntimeReference, parseReferencedFile, resolveReference, selectProperty, type Vfs } from "./reference.js";
 
 export class WorkflowLoadError extends Error {
   constructor(

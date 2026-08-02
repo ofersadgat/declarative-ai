@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { InlineFamily, JsonSchema, Operation } from "@declarative-ai/ops";
-import { checkBinding, checkOperation, type CheckerHooks } from "../src/checker";
-import { isSubschema } from "../src/subtype";
+import { checkBinding, checkOperation, type CheckerHooks } from "../src/checker.js";
+import { isSubschema } from "../src/subtype.js";
 
 const inline: CheckerHooks<InlineFamily> = {
   producer: (ref) => (typeof ref === "string" ? undefined : ref),

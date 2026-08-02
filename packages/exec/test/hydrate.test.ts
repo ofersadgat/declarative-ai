@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { ExecResult, ExecServices, Executor, Failure, InlineFamily, Operation, ResolvedValue } from "../src/index";
-import { EXEC_METRICS_ALGEBRA, MapMemoCache, RUNTIME_CAPABILITIES, compose, isOk, withHydration, withMemoize } from "../src/index";
+import type { ExecResult, ExecServices, Executor, Failure, InlineFamily, Operation, ResolvedValue } from "../src/index.js";
+import { EXEC_METRICS_ALGEBRA, MapMemoCache, RUNTIME_CAPABILITIES, compose, isOk, withHydration, withMemoize } from "../src/index.js";
 
 const errorOf = <O,>(r: ExecResult<O>): Failure | undefined => (isOk(r) ? undefined : r.error);
 

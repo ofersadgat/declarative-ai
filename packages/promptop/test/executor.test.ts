@@ -1,8 +1,8 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import type { ExecResult, ExecServices, InlineFamily, Operation, Tool } from "@declarative-ai/exec";
 import type { LlmMetrics, LlmOutput } from "@declarative-ai/llm";
-import { PromptExecutor, createPromptExecutor } from "../src/executor";
-import { fakeRunner, okOutcome, promptOp, errorOf } from "./fakes";
+import { PromptExecutor, createPromptExecutor } from "../src/executor.js";
+import { fakeRunner, okOutcome, promptOp, errorOf } from "./fakes.js";
 
 describe("PromptExecutor (core) — outcome mapping", () => {
   it("declares the prompt capabilities as one TOTAL record (no separate ExecutorCapabilities)", () => {
@@ -188,7 +188,7 @@ describe("executePromptOp — the op-level call (no projection)", () => {
     const { runner, calls } = fakeRunner([
       okOutcome({ thinking: [{ type: "reasoning", text: "hmm", textOffset: 0 }] }),
     ]);
-    const { executePromptOp } = await import("../src/executor");
+    const { executePromptOp } = await import("../src/executor.js");
     const out = await executePromptOp(promptOp(), { modelRouter: undefined as never }, { runner });
     expect(calls).toHaveLength(1);
     expect(calls[0]!.def.prompt).toBe("What is 2+2?");
@@ -200,7 +200,7 @@ describe("executePromptOp — the op-level call (no projection)", () => {
 
   it("a lowering fault is a permanent failure through the never-throws seam — the runner is never hit", async () => {
     const { runner, calls } = fakeRunner([okOutcome()]);
-    const { executePromptOp } = await import("../src/executor");
+    const { executePromptOp } = await import("../src/executor.js");
     // A config-layer `prompt` is the documented lowering error (a PromptOp's prompt is its `user` text).
     const bad = promptOp({}, { prompt: "smuggled" });
     const out = await executePromptOp(bad, { modelRouter: undefined as never }, { runner });
@@ -214,7 +214,7 @@ describe("record mode — the projection as a TYPE-LEVEL mode (Out = LlmOutput)"
   it("a record-mode core returns the FULL payload as the execution value, through a wrapper stack", async () => {
     const { runner } = fakeRunner([okOutcome({ thinking: [{ type: "reasoning", text: "hmm", textOffset: 0 }] })]);
     const { compose } = await import("@declarative-ai/exec");
-    const { withBudget, withRateLimit } = await import("../src/wrappers");
+    const { withBudget, withRateLimit } = await import("../src/wrappers.js");
     const { PassthroughRateLimiter } = await import("@declarative-ai/exec");
     const core = createPromptExecutor({ runner, record: true });
     const stack = compose(core)

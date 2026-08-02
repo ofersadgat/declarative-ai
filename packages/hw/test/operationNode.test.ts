@@ -11,10 +11,10 @@
  * a binding that silently resolves to nothing.
  */
 import { describe, expect, it } from "vitest";
-import { loadBundle } from "../src/loader";
-import { validateBundle } from "../src/validate";
-import { operationNodeSchema } from "../src/operationNode";
-import type { StateDef } from "../src/format";
+import { loadBundle } from "../src/loader.js";
+import { validateBundle } from "../src/validate.js";
+import { operationNodeSchema } from "../src/operationNode.js";
+import type { StateDef } from "../src/format.js";
 
 const errorsFor = (files: Record<string, StateDef>, rootId: string): string[] =>
   validateBundle(loadBundle(files, rootId)).errors.map((e) => `${e.stateId}:${e.path}:${e.message}`);

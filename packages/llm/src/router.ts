@@ -1,8 +1,8 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import type { LanguageModel } from "ai";
-import { createLogger } from "./logger";
-import { installLongTimeoutDispatcher } from "./dispatcher";
+import { createLogger } from "./logger.js";
+import { installLongTimeoutDispatcher } from "./dispatcher.js";
 
 const log = createLogger("engine.providers.router");
 

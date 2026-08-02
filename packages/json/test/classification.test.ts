@@ -7,7 +7,7 @@ import {
   isRateLimit,
   isTimeoutOrAbort,
   retryAfterMs,
-} from "../src/classification";
+} from "../src/classification.js";
 
 describe("error classification (§10.4)", () => {
   it("honors an explicit retryable flag first", () => {

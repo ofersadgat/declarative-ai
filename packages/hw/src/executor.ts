@@ -26,13 +26,13 @@ import {
   type ExecResult,
 } from "@declarative-ai/exec";
 import { syncOnly } from "@declarative-ai/exec";
-import { WorkflowEngine, type CallCache } from "./engine";
-import type { WorkflowBundle } from "./format";
-import { isByteStream, materialize, MaterializeError } from "./materialize";
-import { snapshotHash } from "./loader";
-import type { Persistence, WorkflowMetrics } from "./ports";
-import { mergeWorkflowMetrics } from "./ports";
-import { validateBundle } from "./validate";
+import { WorkflowEngine, type CallCache } from "./engine.js";
+import type { WorkflowBundle } from "./format.js";
+import { isByteStream, materialize, MaterializeError } from "./materialize.js";
+import { snapshotHash } from "./loader.js";
+import type { Persistence, WorkflowMetrics } from "./ports.js";
+import { mergeWorkflowMetrics } from "./ports.js";
+import { validateBundle } from "./validate.js";
 
 /**
  * The workflow definition: a RESOLVED bundle.

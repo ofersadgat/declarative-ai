@@ -1,5 +1,5 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
-import type { ExecEvent, ExecHandle, Failure, FunctionInputs, FunctionRegistry, ExecMetrics, ExecResult, ExecServices, Executor, InlineFamily, Operation, Ref, ResolvedValue } from "../src/index";
+import type { ExecEvent, ExecHandle, Failure, FunctionInputs, FunctionRegistry, ExecMetrics, ExecResult, ExecServices, Executor, InlineFamily, Operation, Ref, ResolvedValue } from "../src/index.js";
 import {
   EXEC_METRICS_ALGEBRA,
   isOk,
@@ -16,7 +16,7 @@ import {
   withDeadline,
   withMemoize,
   withRetry,
-} from "../src/index";
+} from "../src/index.js";
 
 
 /** Read a result's failure, or `undefined` when it succeeded. `error` is not a property of the union —

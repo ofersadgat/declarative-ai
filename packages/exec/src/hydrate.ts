@@ -26,9 +26,9 @@
  */
 import type { Capabilities, InlineFamily, Operation, ResolvedValue } from "@declarative-ai/ops";
 import { failureOf } from "@declarative-ai/ops";
-import type { ExecHandle, ExecMetrics, ExecServices, Executor } from "./contract";
-import { systemClock } from "./deadline";
-import { wrapHandle } from "./handles";
+import type { ExecHandle, ExecMetrics, ExecServices, Executor } from "./contract.js";
+import { systemClock } from "./deadline.js";
+import { wrapHandle } from "./handles.js";
 
 /** How a family turns ITS op into the resolved inline op an executor runs — store reads, `$base`
  *  folding, producer edges. Receives the ctx so a hydrator that needs services (a session's workspace,

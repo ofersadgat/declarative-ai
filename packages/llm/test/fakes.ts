@@ -3,14 +3,14 @@
  * router — so a change to the mock stream shape or the `ModelRouter` interface lands in ONE place.
  */
 import { isOk } from "@declarative-ai/json";
-import type { LlmCallResult, LlmFailure, LlmOutput } from "../src/output";
+import type { LlmCallResult, LlmFailure, LlmOutput } from "../src/output.js";
 import { simulateReadableStream, type LanguageModel } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import type { JsonValue } from "@declarative-ai/json";
-import { generateStructured, type GenerateEnvironment } from "../src/generate";
-import type { LlmCallDefinition, ReasoningSpec, SamplingConfiguration } from "../src/llmConfig";
-import type { CallSignature } from "../src/prompt";
-import type { ModelRouter } from "../src/router";
+import { generateStructured, type GenerateEnvironment } from "../src/generate.js";
+import type { LlmCallDefinition, ReasoningSpec, SamplingConfiguration } from "../src/llmConfig.js";
+import type { CallSignature } from "../src/prompt.js";
+import type { ModelRouter } from "../src/router.js";
 
 /** AI SDK 6 `LanguageModelV3Usage`: token totals nest under `.total`. */
 export const usage = (input: number, output: number): Record<string, unknown> => ({

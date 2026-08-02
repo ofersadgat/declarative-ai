@@ -12,7 +12,7 @@ import {
   runtimeFunction,
   type FunctionInputs,
   type FunctionRegistry,
-} from "../src/registry";
+} from "../src/registry.js";
 
 interface FakeCtx {
   label: string;

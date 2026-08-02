@@ -14,7 +14,7 @@
  * call is byte-identical to before (this can't regress existing runs).
  */
 import type { JsonValue } from "@declarative-ai/json";
-import type { ProviderOptions, ReasoningSpec } from "./llmConfig";
+import type { ProviderOptions, ReasoningSpec } from "./llmConfig.js";
 
 /** Representative thinking budgets for an effort level, for providers that only accept a budget. */
 const EFFORT_BUDGET: Record<"low" | "medium" | "high", number> = { low: 2048, medium: 8192, high: 16384 };

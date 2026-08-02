@@ -8,7 +8,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Tool } from "@declarative-ai/exec";
-import { requireWorkspace, resolveInWorkspace } from "./workspace";
+import { requireWorkspace, resolveInWorkspace } from "./workspace.js";
 
 /** Require a string field (empty allowed — e.g. an empty file body). */
 function str(input: Record<string, unknown>, key: string): string {

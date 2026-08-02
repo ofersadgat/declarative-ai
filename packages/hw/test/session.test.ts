@@ -18,11 +18,11 @@ import {
   sessionFromExpr,
   validateSessionDecl,
   type SessionScope,
-} from "../src/session";
-import { mergeOperationFields, refuseSynonyms } from "../src/merge";
-import { loadBundle } from "../src/loader";
-import { validateBundle } from "../src/validate";
-import type { OperationFields, StateDef } from "../src/format";
+} from "../src/session.js";
+import { mergeOperationFields, refuseSynonyms } from "../src/merge.js";
+import { loadBundle } from "../src/loader.js";
+import { validateBundle } from "../src/validate.js";
+import type { OperationFields, StateDef } from "../src/format.js";
 
 const scope = (overrides: Partial<SessionScope> = {}): SessionScope => ({
   instanceId: 7,

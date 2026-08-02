@@ -1,5 +1,5 @@
 import type { ResolvedValue, FunctionResult } from "@declarative-ai/exec";
-import type { WorkflowMetrics } from "../src/ports";
+import type { WorkflowMetrics } from "../src/ports.js";
 /**
  * A BLOB-kind operation output (DESIGN §3.7): "a produced artifact is a blob-kind output
  * slot, not a parallel output channel."
@@ -12,10 +12,10 @@ import type { WorkflowMetrics } from "../src/ports";
 import { describe, expect, it } from "vitest";
 import type { ExecServices, ExecResult, HostCapabilities } from "@declarative-ai/exec";
 import { hostFunction } from "@declarative-ai/exec";
-import { WorkflowEngine } from "../src/engine";
-import { loadBundle } from "../src/loader";
-import type { StateDef } from "../src/format";
-import { FakePromptExecutor, newRegistry } from "./fakes";
+import { WorkflowEngine } from "../src/engine.js";
+import { loadBundle } from "../src/loader.js";
+import type { StateDef } from "../src/format.js";
+import { FakePromptExecutor, newRegistry } from "./fakes.js";
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
 

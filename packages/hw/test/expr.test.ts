@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evaluateExpression as ev, ExprError, parseExpression, PENDING, referencesOf } from "../src/expr";
+import { evaluateExpression as ev, ExprError, parseExpression, PENDING, referencesOf } from "../src/expr.js";
 
 describe("expression language — literals and identifiers (SPEC §6)", () => {
   it("parses literals", () => {

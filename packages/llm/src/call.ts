@@ -16,15 +16,15 @@
  */
 import { jsonSchema, stepCountIs, type FilePart, type ModelMessage, type StopCondition, type TextPart, type ToolCallOptions, type ToolChoice, type ToolSet } from "ai";
 import type { JsonValue, OutputValidator } from "@declarative-ai/json";
-import type { LlmCallDefinition, ProviderOptions, ToolDefinition } from "./llmConfig";
-import type { FileInput } from "./files";
-import { generateStructured, type GenerateEnvironment } from "./generate";
-import type { LlmCallResult } from "./output";
-import { ModelInfo } from "./model-catalog";
-import { promptAsMessages, promptText, type CallPromptInput } from "./prompt";
-import { adaptReasoning } from "./reasoning";
-import { providerNativeId, type ModelRouter } from "./router";
-import { adaptSchemaCached, profileForModelId, type ProviderSchemaProfile } from "./schema";
+import type { LlmCallDefinition, ProviderOptions, ToolDefinition } from "./llmConfig.js";
+import type { FileInput } from "./files.js";
+import { generateStructured, type GenerateEnvironment } from "./generate.js";
+import type { LlmCallResult } from "./output.js";
+import { ModelInfo } from "./model-catalog.js";
+import { promptAsMessages, promptText, type CallPromptInput } from "./prompt.js";
+import { adaptReasoning } from "./reasoning.js";
+import { providerNativeId, type ModelRouter } from "./router.js";
+import { adaptSchemaCached, profileForModelId, type ProviderSchemaProfile } from "./schema/index.js";
 
 /** A runtime tool implementation — the `execute` for a declared FUNCTION tool, looked up by tool name.
  *  Injected via the ENVIRONMENT (not serialized), mirroring how the model handle and validator are. */

@@ -12,10 +12,10 @@ import {
   type JsonSchema,
   type JsonValue,
   type SchemaDocument,
-} from "../src/index";
+} from "../src/index.js";
 
 // The declaration-merging half of §3.3: a type NAME, bound globally, once.
-declare module "../src/codec" {
+declare module "../src/codec.js" {
   interface TypeRegistry {
     DateTime: { value: Date; json: number };
   }

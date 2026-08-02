@@ -6,9 +6,9 @@
  * did not lower would pass a unit test and fail a workflow.
  */
 import { describe, expect, it } from "vitest";
-import { parseExpression, PENDING } from "../src/expr";
-import { lowerExpression } from "../src/lowerExpr";
-import { isResolvedValue, resolveRef, type ResolutionScope } from "../src/resolve";
+import { parseExpression, PENDING } from "../src/expr.js";
+import { lowerExpression } from "../src/lowerExpr.js";
+import { isResolvedValue, resolveRef, type ResolutionScope } from "../src/resolve.js";
 
 const scope: ResolutionScope = {
   exprContext: {

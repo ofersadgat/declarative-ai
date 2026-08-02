@@ -25,7 +25,7 @@
  * Being version-pinned observation rather than a published contract, this is the first thing to check
  * if a future CLI rejects our decisions.
  */
-import type { AgentPermissionDecision, AgentToolRequest, InjectedTool, JsonValue, SchemaDocument, SyncOutputValidator } from "./deps";
+import type { AgentPermissionDecision, AgentToolRequest, InjectedTool, JsonValue, SchemaDocument, SyncOutputValidator } from "./deps.js";
 
 /** The MCP server name our tools are exposed under; the agent sees `mcp__dai__<tool>`. */
 export const MCP_SERVER_NAME = "dai";

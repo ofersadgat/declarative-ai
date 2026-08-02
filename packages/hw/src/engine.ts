@@ -62,7 +62,7 @@ import {
   isOk,
   resolveCalls,
 } from "@declarative-ai/exec";
-import type { WorkflowMetrics } from "./ports";
+import type { WorkflowMetrics } from "./ports.js";
 import {
   PermissionLedger,
   planExitTool,
@@ -74,8 +74,8 @@ import {
   type SmartApprover,
 } from "@declarative-ai/permissions";
 import { SchemaValidator } from "@declarative-ai/validate";
-import { isPending, parseExpression, PENDING } from "./expr";
-import { lowerExpression } from "./lowerExpr";
+import { isPending, parseExpression, PENDING } from "./expr.js";
+import { lowerExpression } from "./lowerExpr.js";
 import type {
   ConversationMode,
   ExecEnvironmentDecl,
@@ -84,13 +84,13 @@ import type {
   SlotMeta,
   TerminationOutcome,
   WorkflowBundle,
-} from "./format";
-import { bindElement, bindInputs, embeddedOpsOf, higherOrderEdgesOf, higherOrderOf, isResolvedValue, isResolveError, resolveEmbedded, resolveInputs, resolveRef, type ResolutionScope, type Resolved } from "./resolve";
-import { isByteStream, materialize, MaterializeError } from "./materialize";
-import { RUN_RESOURCE_KEY, isSessionExpr, resolveSession, sessionFromExpr, type SessionBinding, type SessionDecl } from "./session";
-import type { OperationNode } from "./operationNode";
-import { isFannedOut } from "./fanout";
-import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, type Persistence } from "./ports";
+} from "./format.js";
+import { bindElement, bindInputs, embeddedOpsOf, higherOrderEdgesOf, higherOrderOf, isResolvedValue, isResolveError, resolveEmbedded, resolveInputs, resolveRef, type ResolutionScope, type Resolved } from "./resolve.js";
+import { isByteStream, materialize, MaterializeError } from "./materialize.js";
+import { RUN_RESOURCE_KEY, isSessionExpr, resolveSession, sessionFromExpr, type SessionBinding, type SessionDecl } from "./session.js";
+import type { OperationNode } from "./operationNode.js";
+import { isFannedOut } from "./fanout.js";
+import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, type Persistence } from "./ports.js";
 
 /**
  * What a call's memo remembers: the value it produced, or the failure it produced.

@@ -7,7 +7,7 @@
  * carrying JSON Schemas, and wiring as authored BINDING SUGAR (`{ child, output }`, `{ input }`,
  * `{ expr }`) that the loader lowers to base `Ref` cases.
  */
-import type { StateDef } from "../src/format";
+import type { StateDef } from "../src/format.js";
 
 // Slot builders, not shared constants: each call returns a FRESH object, so a test that mutates one
 // state's slot (to provoke a validation error) can't leak that mutation into every other fixture.

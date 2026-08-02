@@ -11,6 +11,6 @@
  * `exec` owns the generic machinery, `promptop` owns the LLM-specific implementation, and nothing in
  * `exec` knows `PromptOp` exists.
  */
-export * from "./lowering";
-export * from "./executor";
-export * from "./wrappers";
+export * from "./lowering.js";
+export * from "./executor.js";
+export * from "./wrappers.js";

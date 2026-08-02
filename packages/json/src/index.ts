@@ -10,13 +10,13 @@
  * `@noble/hashes`, both tiny and runtime-agnostic. It knows nothing about operations, execution,
  * providers, or validation.
  */
-export * from "./json";
-export * from "./codec";
-export * from "./template";
-export * from "./infer";
-export * from "./selectType";
-export * from "./hashing";
-export * from "./classification";
-export * from "./failure";
-export * from "./result";
-export * from "./encodedError";
+export * from "./json.js";
+export * from "./codec.js";
+export * from "./template.js";
+export * from "./infer.js";
+export * from "./selectType.js";
+export * from "./hashing.js";
+export * from "./classification.js";
+export * from "./failure.js";
+export * from "./result.js";
+export * from "./encodedError.js";

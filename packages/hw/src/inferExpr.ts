@@ -15,9 +15,9 @@
  * type, not the only source of typing.
  */
 import type { InlineFamily, JsonSchema, JsonValue, Ref } from "@declarative-ai/exec";
-import { pathOf, selfPathOf, type Expr } from "./expr";
-import { RESOLVER_REFS } from "./format";
-import { pathOfRef } from "./lowerExpr";
+import { pathOf, selfPathOf, type Expr } from "./expr.js";
+import { RESOLVER_REFS } from "./format.js";
+import { pathOfRef } from "./lowerExpr.js";
 
 /** The universal schema — "any value" (what an unconstrained slot accepts). */
 export const ANY_SCHEMA: JsonSchema = {};

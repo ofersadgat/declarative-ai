@@ -1,5 +1,5 @@
 import { Agent, setGlobalDispatcher } from "undici";
-import { createLogger } from "./logger";
+import { createLogger } from "./logger.js";
 
 const log = createLogger("engine.providers.dispatcher");
 

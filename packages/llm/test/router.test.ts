@@ -5,7 +5,7 @@ import {
   isAnthropicModel,
   parseModelRoute,
   providerNativeId,
-} from "../src/router";
+} from "../src/router.js";
 
 describe("provider router (§5)", () => {
   it("parses the explicit `{route}/{model}` prefix and strips it to the provider-native id", () => {

@@ -1,15 +1,53 @@
 {
   "name": "@declarative-ai/agents-cli",
   "version": "0.1.0",
+  "description": "Delegated agents reached through a CLI subprocess - claude and codex - over the normalized AgentQuery seam shared with @declarative-ai/agents-api.",
+  "keywords": [
+    "declarative-ai",
+    "agents",
+    "claude-code",
+    "codex",
+    "cli",
+    "ai"
+  ],
+  "author": "Ofer Sadgat",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ofersadgat/declarative-ai.git",
+    "directory": "packages/agents-cli"
+  },
+  "homepage": "https://github.com/ofersadgat/declarative-ai/tree/main/packages/agents-cli#readme",
+  "bugs": {
+    "url": "https://github.com/ofersadgat/declarative-ai/issues"
+  },
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json"
   },
   "dependencies": {
-    "@declarative-ai/agents-api": "*",
-    "@declarative-ai/exec": "*",
-    "@declarative-ai/json": "*",
-    "@declarative-ai/ops": "*"
+    "@declarative-ai/agents-api": "^0.1.0",
+    "@declarative-ai/exec": "^0.1.0",
+    "@declarative-ai/json": "^0.1.0",
+    "@declarative-ai/ops": "^0.1.0"
   },
   "peerDependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0"

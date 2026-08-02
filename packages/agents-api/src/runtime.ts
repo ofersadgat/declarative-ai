@@ -33,8 +33,8 @@ import {
   type RuntimeCapabilities,
 } from "@declarative-ai/exec";
 import type { Approver } from "@declarative-ai/permissions";
-import { sdkAgentQuery } from "./sdkQuery";
-import type { AgentPermissionMode, AgentQuery, AgentQueryOptions, AgentResult, AgentSessionReader, InjectedTool } from "./seam";
+import { sdkAgentQuery } from "./sdkQuery.js";
+import type { AgentPermissionMode, AgentQuery, AgentQueryOptions, AgentResult, AgentSessionReader, InjectedTool } from "./seam.js";
 
 /** Delegated agents: schema-constrained output isn't guaranteed (they answer in text), they mutate the
  *  workspace, run their own non-deterministic loop (not memoizable), gate tools via a callback, and are

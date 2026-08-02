@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveSelectOutputSchema } from "../src/index";
+import { resolveSelectOutputSchema } from "../src/index.js";
 
 describe("resolveSelectOutputSchema — descent reads OWN properties (§6)", () => {
   const schema = { type: "object", properties: { a: { type: "string" }, xs: { type: "array", items: { type: "number" } } } };

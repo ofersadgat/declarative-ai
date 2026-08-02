@@ -1,4 +1,4 @@
-import { ERROR_CLASSES, type ErrorClass } from "./classification";
+import { ERROR_CLASSES, type ErrorClass } from "./classification.js";
 
 /**
  * Durable, re-derivable error payloads (extracted from findmyprompt
