@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { isOk, type ExecServices, type FunctionInputs } from "@declarative-ai/exec";
-import { cliArgv, createCliAgentQuery, type AgentProcess, type SpawnProcess } from "../src/cliQuery";
+import { cliArgv, createCliAgentQuery } from "../src/cliQuery";
+import type { AgentProcess, SpawnProcess } from "../src/process";
 import { CLI_CONFIG_ONLY_CAPS, CLI_DELEGATED_CAPS, createCliAgentFunction } from "../src/runtime";
 import { injectedToolAllowEntries, mcpConfigJson, PERMISSION_PROMPT_TOOL } from "../src/mcpProtocol";
 

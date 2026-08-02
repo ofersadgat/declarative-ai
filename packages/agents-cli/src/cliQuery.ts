@@ -27,22 +27,10 @@
 import type { AgentQuery, AgentQueryOptions, AgentStreamMessage } from "@declarative-ai/agents-api";
 import { defaultStartMcpBridge, type McpBridge, type StartMcpBridge } from "./mcpBridge";
 import { mcpConfigJson, PERMISSION_PROMPT_TOOL } from "./mcpProtocol";
+import { defaultSpawn, type AgentProcess, type SpawnProcess } from "./process";
 
 /** One line of the agent's stdout, already parsed. */
 export type CliMessage = Record<string, unknown>;
-
-/** A running child process, reduced to what the adapter needs. */
-export interface AgentProcess {
-  /** Newline-delimited JSON messages the agent wrote to stdout. */
-  lines: AsyncIterable<string>;
-  /** Terminate the process (wired to the caller's abort signal). */
-  kill(): void;
-  /** Resolves with the exit code once the process ends. */
-  exit: Promise<number>;
-}
-
-/** The injectable process seam: launch the agent CLI with these argv and return its stream. */
-export type SpawnProcess = (argv: string[], opts: { cwd?: string }) => AgentProcess;
 
 export interface CliAgentOptions {
   /** The executable to run. Default `"claude"`. */
@@ -185,37 +173,5 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
       child?.kill();
       await bridge?.close();
     }
-  };
-}
-
-/** The default `node:child_process` spawn, imported lazily so the module stays edge-importable. */
-async function defaultSpawn(): Promise<SpawnProcess> {
-  const { spawn } = await import("node:child_process");
-  const readline = await import("node:readline");
-  return (argv, opts) => {
-    const [command, ...args] = argv;
-    // stderr is IGNORED, not piped: an unread pipe fills at ~64 KB and the child then blocks forever on
-    // write, so stdout stops and `exit` never settles. The CLI's diagnostics are not our channel — the
-    // exit code and the `result` message are.
-    const child = spawn(command!, args, { cwd: opts.cwd, stdio: ["ignore", "pipe", "ignore"] });
-    const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
-
-    // A ChildProcess `'error'` event with no listener THROWS, which would take down the host process —
-    // and ENOENT on a missing `claude` binary is the likeliest first-run outcome. Capture it and let it
-    // surface through the exit code instead.
-    let spawnError: Error | undefined;
-    child.on("error", (e: Error) => {
-      spawnError = e;
-      lines.close();
-    });
-
-    return {
-      lines,
-      kill: () => void child.kill(),
-      exit: new Promise<number>((resolve) => {
-        child.on("error", () => resolve(-1));
-        child.on("close", (code) => resolve(spawnError ? -1 : (code ?? 0)));
-      }),
-    };
   };
 }
