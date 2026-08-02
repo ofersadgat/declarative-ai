@@ -119,6 +119,11 @@ function validateState(
       // cross-tree remain expressible; the engine only needs the reference to resolve.
       warn(`children.${key}.state`, `'${child.state}' is not a descendant path of '${id}'`);
     }
+    // A per-mount `environment` is an ordinary defaults layer, so its `session` is checkable exactly
+    // where a state's is — and reporting it HERE names the line the author wrote, rather than
+    // surfacing it against the child state after the merge has moved it.
+    const childSessionComplaint = validateSessionDecl(child.environment?.session);
+    if (childSessionComplaint !== undefined) err(`children.${key}.environment.session`, childSessionComplaint);
     for (const [inputName, binding] of Object.entries(child.inputs ?? {})) {
       const path = `children.${key}.inputs.${inputName}`;
       const consumer = childDef?.inputs?.[inputName];

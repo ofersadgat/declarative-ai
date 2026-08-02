@@ -406,6 +406,34 @@ export interface ChildDecl {
   inputs?: Record<string, BindingDecl>;
   /** SPEC §10.4: starting this child does not block the sequence. */
   async?: boolean;
+  /**
+   * Defaults for THIS MOUNT of the child, and its subtree (§5).
+   *
+   * The `environment` chain was per-STATE, so every child of one parent inherited the same layer and
+   * two children could not differ in it. That is fine until the difference is the point: mounting one
+   * `review/agent_review` twice, once under `claude-code` and once under `codex-cli`, is a two-line
+   * change with this and two near-duplicate state files without it.
+   *
+   * ```json
+   * "children": {
+   *   "claude_review": { "state": "$/review/agent_review", "async": true,
+   *                      "environment": { "kind": "function", "function": "claude-code" } },
+   *   "codex_review":  { "state": "$/review/agent_review", "async": true,
+   *                      "environment": { "kind": "function", "function": "codex-cli" } }
+   * }
+   * ```
+   *
+   * It sits BETWEEN the parent's `environment` and the child's own, in the ordinary nearest-wins
+   * order — so it is a default the child may still override, not an imposition. A state that names
+   * its own `operation.function` therefore cannot be varied this way, which is correct: a state that
+   * says what it runs means it. A state meant to be mounted under several runtimes leaves `function`
+   * to the chain (`"operation": { "kind": "function" }`), which the loader already supports.
+   *
+   * Two mounts under two different environments load as two VARIANTS of the state (see `variantFor`),
+   * so everything downstream — validation, snapshots, the board, events — still sees one id with one
+   * operation. That machinery predates this field; per-child layers just reach it.
+   */
+  environment?: EnvironmentDecl;
 }
 
 export interface TransitionDecl {
@@ -548,6 +576,9 @@ export interface LoadedChild {
   /** Desugared wiring into the child's declared inputs. */
   inputs?: Record<string, Ref<InlineFamily>>;
   async?: boolean;
+  /** The per-mount defaults this child was declared with, carried through so the closure walk can
+   *  fold them into the chain (and so a lint surface can see why a state loaded as two variants). */
+  environment?: EnvironmentDecl;
 }
 
 /** A loaded workflow: the root state ID plus every reachable state, keyed by state ID. */

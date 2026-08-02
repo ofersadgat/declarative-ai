@@ -128,6 +128,88 @@ describe("environment inheritance (§5)", () => {
     expect(bundle.source![viaB]).toEqual(defs["lib/shared"]);
   });
 
+  /**
+   * The two-reviewer case: ONE review state, mounted twice under two different agents.
+   *
+   * Before `children[].environment` the chain was per-STATE, so both children of a parent inherited
+   * the same layer and the only way to differ was two near-duplicate state files.
+   */
+  it("lets two CHILDREN of one parent mount one state under different environments", () => {
+    const defs: Record<string, StateDef> = {
+      root: {
+        label: "Review",
+        children: {
+          claude_review: { state: "review/agent_review", async: true, environment: { kind: "function", function: "claude-code" } },
+          codex_review: { state: "review/agent_review", async: true, environment: { kind: "function", function: "codex-cli" } },
+        },
+      },
+      "review/agent_review": leaf({ operation: {} }),
+    };
+    const bundle = loadBundle(defs, "root");
+    const viaClaude = bundle.states["root"]!.children!.claude_review!.state;
+    const viaCodex = bundle.states["root"]!.children!.codex_review!.state;
+    expect(viaClaude).not.toBe(viaCodex);
+    expect((bundle.states[viaClaude]!.operation as FunctionOp<never>).functionRef).toBe("claude-code");
+    expect((bundle.states[viaCodex]!.operation as FunctionOp<never>).functionRef).toBe("codex-cli");
+    // Both mounts still map back to the one file the author wrote.
+    expect(sourceStateId(viaCodex)).toBe("review/agent_review");
+    expect(validateBundle(bundle).errors).toEqual([]);
+  });
+
+  it("sits UNDER the child's own environment — a state that says what it runs still wins", () => {
+    const defs: Record<string, StateDef> = {
+      root: { children: { pinned: { state: "lib/pinned", environment: { kind: "function", function: "codex-cli" } } } },
+      "lib/pinned": leaf({ environment: { kind: "function", function: "claude-code" }, operation: {} }),
+    };
+    const bundle = loadBundle(defs, "root");
+    const mounted = bundle.states["root"]!.children!.pinned!.state;
+    // Nearest layer wins, and the state's own is nearer than the mount's. A state meant to be varied
+    // leaves `function` to the chain instead.
+    expect((bundle.states[mounted]!.operation as FunctionOp<never>).functionRef).toBe("claude-code");
+  });
+
+  it("layers OVER the parent's environment, so a mount refines rather than replaces", () => {
+    const defs: Record<string, StateDef> = {
+      root: {
+        environment: { kind: "prompt", model: "m1", session: "review" },
+        children: { fast: { state: "lib/leaf", environment: { model: "m2" } } },
+      },
+      "lib/leaf": leaf({ operation: { prompt: "go" } }),
+    };
+    const bundle = loadBundle(defs, "root");
+    const mounted = bundle.states["root"]!.children!.fast!.state;
+    // The mount changed the model; everything else the parent supplied came through untouched.
+    expect((bundle.states[mounted]!.operation as PromptOp<never>).config).toEqual({ model: "m2" });
+    expect(bundle.states[mounted]!.environment?.session).toBe("review");
+  });
+
+  it("collapses back to ONE entry when two mounts declare the same thing", () => {
+    // The identity hashes what a state RUNS AS, not where it was reached from — so the ordinary
+    // shared-library case does not sprout duplicates just because someone wrote the layer twice.
+    const defs: Record<string, StateDef> = {
+      root: {
+        children: {
+          a: { state: "lib/leaf", environment: { kind: "function", function: "claude-code" } },
+          b: { state: "lib/leaf", environment: { kind: "function", function: "claude-code" } },
+        },
+      },
+      "lib/leaf": leaf({ operation: {} }),
+    };
+    const bundle = loadBundle(defs, "root");
+    expect(Object.keys(bundle.states).filter((id) => id.startsWith("lib/leaf"))).toHaveLength(1);
+  });
+
+  it("reports a bad session on a mount against the line that declared it", () => {
+    const defs: Record<string, StateDef> = {
+      root: { children: { a: { state: "lib/leaf", environment: { session: "" } } } },
+      "lib/leaf": leaf({ operation: { prompt: "go", model: "m" } }),
+    };
+    const report = validateBundle(loadBundle(defs, "root"));
+    expect(report.errors).toContainEqual(
+      expect.objectContaining({ stateId: "root", path: "children.a.environment.session" }),
+    );
+  });
+
   it("allows the same state under two parents when the environments agree", () => {
     const defs: Record<string, StateDef> = {
       root: {

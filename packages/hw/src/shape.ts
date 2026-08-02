@@ -96,6 +96,9 @@ const child: Shape = {
     state: { t: "ref" },
     inputs: { t: "object", rest: { t: "binding" } },
     async: scalar,
+    // Per-mount defaults, written in the same shape as any other environment — so a `$ref` inside one
+    // transcludes exactly as it does at state level.
+    environment: operation,
   },
 };
 

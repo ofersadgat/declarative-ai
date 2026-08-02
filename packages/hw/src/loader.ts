@@ -445,6 +445,9 @@ export function desugarState(
         state: resolveChildRef(child.state ?? `./${key}`, id, key, refs),
         ...(child.inputs ? { inputs: wired } : {}),
         ...(child.async !== undefined ? { async: child.async } : {}),
+        // Carried, never merged here: this layer belongs to the CHILD's chain, and folding it into
+        // the parent's own environment would apply it to the parent's operation too (§5).
+        ...(child.environment !== undefined ? { environment: child.environment } : {}),
       };
     }
   }
@@ -833,16 +836,21 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
     // know references exist, and reading the raw one here meant a transcluded `environment` reached
     // this state and not its children.
     const forChildren = resolutionEnvironment(inherited, expanded.environment);
-    const childIdentity = environmentIdentity(forChildren);
     // From the LOADED children, so inferred ones (§6) are walked exactly like declared ones and
     // their references are already resolved to canonical ids. Each child's `state` is then rewritten
     // to the variant THIS mount reaches, so a parent always points at the child it actually runs.
     for (const child of Object.values(loaded.children ?? {})) {
       const childSource = child.state;
       fetch(childSource);
-      const childVariant = variantFor(childSource, childIdentity);
+      // PER CHILD, not per state: a child's own `environment` is the nearest layer above the state it
+      // mounts, so two children of one parent can hand the SAME state two different environments —
+      // which is the whole point (`ChildDecl.environment`). With none declared this is the parent's
+      // chain unchanged, and the identity is the one every sibling shares, so the ordinary
+      // shared-library case still collapses onto a single entry.
+      const childEnvironment = child.environment !== undefined ? resolutionEnvironment(forChildren, child.environment) : forChildren;
+      const childVariant = variantFor(childSource, environmentIdentity(childEnvironment));
       child.state = childVariant;
-      queue.push({ id: childSource, variant: childVariant, inherited: forChildren });
+      queue.push({ id: childSource, variant: childVariant, inherited: childEnvironment });
     }
   }
   // Spreads resolve against the loaded closure, so they run once the walk is done. Fan-out is
