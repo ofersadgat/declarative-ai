@@ -295,7 +295,16 @@ export class OperationExecutor implements Executor {
     // The impl's own report (an agent's spend) wins over our timing frame, which only knows the wall
     // clock; `startMs`/`durationMs` stay ours so they measure the dispatch, not the impl's opinion.
     const metrics: ExecMetrics = { ...produced.metrics, startMs, durationMs: clock.now() - startMs };
-    return isOk(produced) ? { value: produced.value, metrics } : { error: produced.error, metrics };
+    // The CONVERSATION report rides along, on the failure path too. This result is REBUILT rather than
+    // spread, so a field not named here is dropped — and the field that was being dropped is the
+    // provider session id a delegated agent ended in. Losing it is silent and expensive: `withRecord`
+    // stores no outcome, the next resume finds no handle, and every call opens a new remote
+    // conversation while the workflow reads as though they were one.
+    //
+    // On failure too, because a call that failed AFTER the provider appended turns still moved the
+    // remote — and not recording that is divergence on the very next call.
+    const session = produced.session !== undefined ? { session: produced.session } : {};
+    return isOk(produced) ? { value: produced.value, metrics, ...session } : { error: produced.error, metrics, ...session };
   }
 }
 

@@ -9,7 +9,7 @@
  * ran in, and on an append those must agree.
  */
 import { describe, expect, it } from "vitest";
-import { MapSessionStore, RUNTIME_CAPABILITIES, withRecord, withSessionPosition } from "../src";
+import { createOperationExecutor, MapSessionStore, newCapabilityRegistry, runtimeFunction, RUNTIME_CAPABILITIES, withRecord, withSessionPosition } from "../src";
 import type { ExecServices, Executor, ExecResult, ResolvedValue } from "../src";
 import { EXEC_METRICS_ALGEBRA, wrapHandle } from "../src";
 
@@ -118,5 +118,60 @@ describe("divergence detection", () => {
     await stack(store, agent(undefined)).start(op, ctx).result;
     await stack(store, agent(undefined)).start(op, ctx).result;
     expect(seen).toEqual([]);
+  });
+});
+
+/**
+ * The same channel, through the DISPATCHER — which is how a delegated agent actually reaches it.
+ *
+ * `FunctionResult` is a union, so an undeclared field on it typechecks by leniency and is dropped by
+ * anything that REBUILDS the result. The dispatcher rebuilds every function result, so an agent's
+ * provider session id was being discarded between the adapter and the record layer: no outcome
+ * stored, no handle to resume, a new remote conversation on every call, and not one error anywhere.
+ */
+describe("a delegated agent's session outcome survives dispatch", () => {
+  const dispatcherFor = (handle: string) => {
+    const registry = newCapabilityRegistry();
+    // Registered under the name the shared `op` dispatches to.
+    registry.functions.set(
+      "x",
+      runtimeFunction(
+        (async () => ({
+          value: "ok" as ResolvedValue,
+          metrics: { durationMs: 1 },
+          session: { providerSessionId: handle, messages: [{ role: "assistant", content: "ok" }] },
+        })) as never,
+        { ...RUNTIME_CAPABILITIES, sessionResume: true },
+      ) as never,
+    );
+    return createOperationExecutor({ functions: registry.functions as never });
+  };
+
+  it("reaches the record layer, so the NEXT call can resume the handle", async () => {
+    const store = new MapSessionStore();
+    const ctx = { sessionRequest: { ref: "chat" } } as ExecServices;
+    await stack(store, dispatcherFor("sess-a") as never).start(op, ctx).result;
+
+    let resumed: string | undefined;
+    const observing: Executor<ExecServices> = {
+      capabilities: { ...RUNTIME_CAPABILITIES },
+      metrics: EXEC_METRICS_ALGEBRA,
+      start: (_o, c) =>
+        wrapHandle(async () => {
+          resumed = c.session?.providerSessionId;
+          return { value: "ok" as ResolvedValue, metrics: { durationMs: 1 } };
+        }),
+    };
+    await stack(store, observing).start(op, ctx).result;
+    expect(resumed).toBe("sess-a");
+  });
+
+  it("still reports divergence when the dispatched call ran somewhere else", async () => {
+    const store = new MapSessionStore();
+    const seen: Array<{ resumed: string; reported: string }> = [];
+    const ctx = { sessionRequest: { ref: "chat" }, onDivergence: (e: unknown) => seen.push(e as never) } as ExecServices;
+    await stack(store, dispatcherFor("sess-a") as never).start(op, ctx).result;
+    await stack(store, dispatcherFor("sess-MOVED") as never).start(op, ctx).result;
+    expect(seen).toHaveLength(1);
   });
 });

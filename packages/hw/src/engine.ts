@@ -1332,17 +1332,38 @@ export class WorkflowEngine {
     // The execution ENVIRONMENT (session, tools, permissions) is a sibling of the op, never part of
     // it (§7.1). A delegated adapter enforces policy through its own callback, so its tools stay raw.
     const env = instance.def.environment ?? {};
-    // Tools, workspace and permissions key on the RESOURCE bundle, never on the conversation
-    // position — a position moves on every call, and a `"session"`-scoped approval that moved with
-    // it would cover exactly one operation (DESIGN.md §5.1).
-    const resourceKey = instance.resourceKey;
     // The entry's capabilities are REQUIRED and total per variant (§2), so this reads a definite value
     // instead of falling through an `undefined` and silently defaulting the permission gate.
     const delegates = entry.kind === "runtime" && entry.capabilities.policyEnforcement === "callback";
+    /**
+     * The CONVERSATION a delegated agent runs in (DESIGN.md §1.6, SESSIONS.md §6).
+     *
+     * This used to be prompt-only, and the omission was silent in the worst way: an agent adapter
+     * reads `ctx.session` to decide between resuming a handle and starting fresh, so with no request
+     * stated here every delegated call started a NEW provider conversation while the workflow read as
+     * though `session: "review"` had joined them up. Nothing failed; the agent just never remembered.
+     *
+     * `sessionResume` is the gate because it is the entry's own statement that it HAS a transcript
+     * worth placing. A pure host function has none, and minting a conversation for one would put
+     * empty records in the store for every helper call.
+     */
+    let session: SessionBinding | undefined;
+    if (entry.kind === "runtime" && entry.capabilities.sessionResume) {
+      const resolved = this.sessionFor(instance);
+      // A `{ expr }` session that cannot be read is PERMANENT: retrying re-evaluates the same
+      // expression against the same data and fails the same way.
+      if ("error" in resolved) return fail({ classification: "permanent", reason: resolved.error });
+      session = resolved;
+    }
+    // Tools, workspace and permissions key on the RESOURCE bundle, never on the conversation
+    // position — a position moves on every call, and a `"session"`-scoped approval that moved with
+    // it would cover exactly one operation (DESIGN.md §5.1). The two agree except when a session was
+    // named by an EXPRESSION, where only the resolved binding knows the name it evaluated to.
+    const resourceKey = session?.resourceKey ?? instance.resourceKey;
     const toolsOrFailure = this.resolveTools(env, resourceKey, delegates);
     if ("failure" in toolsOrFailure) return fail(toolsOrFailure.failure);
 
-    const services = this.servicesFor(resourceKey, instance, toolsOrFailure.tools);
+    const services = this.servicesFor(resourceKey, instance, toolsOrFailure.tools, session);
     // Errors are DATA (§4.2): the impl RESOLVES value-or-failure, so a 429 raised inside a registered
     // function keeps its classification instead of being reconstructed from `err.name` — which is what
     // made every non-`AbortError` permanently failed, retry machinery and all.
@@ -1367,9 +1388,15 @@ export class WorkflowEngine {
       // true of a metrics record an impl BUILDS and not of one the dispatcher frames around it.
       this.childCost += metrics.costUsd ?? 0;
     }
-    // A function op has no conversation, so its node carries no `session` — which is the same fact
-    // `operationNodeSchema` states in the type, where `operation.outputs.session` on a `ui` gate is
-    // an authoring error rather than a runtime undefined.
+    // The operation NODE carries no `session`, which is the same fact `operationNodeSchema` states in
+    // the type: `operation.outputs.session` is prompt-only, so reaching for it on a `ui` gate is an
+    // authoring error rather than a runtime undefined.
+    //
+    // Not the same claim as "a function op has no conversation" — a delegated agent plainly does, and
+    // now runs in one (above). Publishing its END POSITION as a node output is a separate change: the
+    // loader has no registry, so it cannot tell a delegated adapter from a host helper, and widening
+    // the type for every function op would trade a load-time error for a value that is usually
+    // undefined. Wiring one agent's conversation into a later state is done by NAME today.
     instance.operation = operationNodeOf(isOk(outcome) ? "success" : "error", metrics, modelOfOp(op));
     if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
     if (!isOk(outcome)) return fail(outcome.error);

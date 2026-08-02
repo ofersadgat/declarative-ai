@@ -3,6 +3,7 @@ import { hostFunction, runtimeFunction } from "@declarative-ai/exec";
 import type { WorkflowMetrics } from "../src/ports";
 import { describe, expect, it } from "vitest";
 import {
+  createOperationExecutor,
   MapSessionStore,
   RUNTIME_CAPABILITIES,
   type ExecServices,
@@ -11,6 +12,9 @@ import {
   type JsonValue,
   type ExecResult,
   type FunctionResult,
+  type ResolvedSession,
+  type RuntimeCapabilities,
+  type SessionRequest,
   type Tool,
 } from "@declarative-ai/exec";
 import { withRecord, withSessionPosition } from "@declarative-ai/exec";
@@ -40,7 +44,8 @@ import { FANOUT_ID, PLAN_ID, specFanoutFiles, specPlanningFiles } from "./fixtur
 type FakeImpl = (inputs: never, ctx: never) => Promise<FunctionResult<ResolvedValue, WorkflowMetrics>> | FunctionResult<ResolvedValue, WorkflowMetrics>;
 interface FakeEntry {
   run: FakeImpl;
-  capabilities?: HostCapabilities;
+  /** Partial over the RUNTIME record: a `runtime` entry has fields a host one does not (`sessionResume`). */
+  capabilities?: Partial<RuntimeCapabilities>;
   /** Register as a DELEGATED runtime (policyEnforcement: "callback") rather than plain host code. */
   runtime?: boolean;
 }
@@ -50,6 +55,14 @@ interface MakeEngineOpts {
   tools?: Record<string, Tool>;
   /** Override the prompt executor (e.g. a delegated-capability variant). */
   prompt?: Executor<ExecServices, WorkflowMetrics>;
+  /**
+   * Compose the session stack around the DISPATCHER rather than around the prompt executor alone.
+   *
+   * This is what a host does when its runtimes have conversations: a function op never travels
+   * through `config.prompt`, so a session layer composed there resolves nothing for a delegated
+   * agent — the request is stated and nobody answers it.
+   */
+  sessionDispatcher?: boolean;
   extra?: Partial<EngineConfig>;
 }
 
@@ -61,9 +74,9 @@ function makeEngine(files: Record<string, StateDef>, rootId: string, script: Scr
   for (const [name, fn] of Object.entries(opts.functions ?? {})) {
     const entry: FakeEntry = typeof fn === "function" ? { run: fn } : fn;
     if (entry.runtime) {
-      registry.functions.set(name, runtimeFunction(entry.run as never, { ...RUNTIME_CAPABILITIES, ...entry.capabilities, policyEnforcement: "callback" }));
+      registry.functions.set(name, runtimeFunction(entry.run as never, { ...RUNTIME_CAPABILITIES, policyEnforcement: "callback", ...entry.capabilities }));
     } else {
-      registry.functions.set(name, hostFunction(entry.run as never, entry.capabilities ?? HOST));
+      registry.functions.set(name, hostFunction(entry.run as never, (entry.capabilities as HostCapabilities) ?? HOST));
     }
   }
   for (const [name, t] of Object.entries(opts.tools ?? {})) registry.tools.set(name, t);
@@ -75,11 +88,21 @@ function makeEngine(files: Record<string, StateDef>, rootId: string, script: Scr
   // rather than an engine-private shortcut production never takes.
   const store = new MapSessionStore();
   const extra = { ...opts.extra, services: { records: store as never, ...opts.extra?.services, sessions: opts.extra?.services?.sessions ?? store } };
+  // Around the DISPATCHER, so a FUNCTION op reaches the layer too. One layer, both paths: composing
+  // it here AND around the prompt executor would put two position layers on one prompt call, and the
+  // inner one would find its position already claimed and fork on every call.
+  const operations = opts.sessionDispatcher
+    ? (withSessionPosition(
+        { sessions: store },
+        withRecord({ records: store as never }, createOperationExecutor({ functions: registry.functions as never, prompt: (opts.prompt ?? fake) as never })),
+      ) as never)
+    : undefined;
   const engine = new WorkflowEngine({
     bundle: loadBundle(files, rootId),
     registry,
     prompt: withSessionPosition(withRecord(((opts.prompt ?? fake) as never))) as never,
     persistence,
+    ...(operations !== undefined ? { operations } : {}),
     ...extra,
   });
   return { engine, fake, persistence };
@@ -973,6 +996,94 @@ describe("tool permissions (DESIGN §5.1, \"Permissions: two orthogonal axes\")"
     });
     await engine.run({ inputs: {} });
     expect(isPermissionDenied(toolResult)).toBe(true); // "write" is out of the custom "search" profile
+  });
+});
+
+describe("a delegated agent runs in a CONVERSATION (SESSIONS.md §6)", () => {
+  /** Captures what the engine handed the runtime: the request it stated, and what it resolved to. */
+  function capturingAgent(capabilities: Partial<RuntimeCapabilities>) {
+    const seen: Array<{ request?: SessionRequest; session?: ResolvedSession }> = [];
+    const entry: FakeEntry = {
+      runtime: true,
+      capabilities,
+      run: ((_inputs: never, ctx: ExecServices): FunctionResult<ResolvedValue, WorkflowMetrics> => {
+        seen.push({ ...(ctx.sessionRequest ? { request: ctx.sessionRequest } : {}), ...(ctx.session ? { session: ctx.session } : {}) });
+        return { value: { r: "done" } };
+      }) as FakeImpl,
+    };
+    return { entry, seen };
+  }
+
+  const agentFiles = (session?: string): Record<string, StateDef> => ({
+    s: {
+      inputs: {},
+      outputs: { r: { schema: { type: "string" } } },
+      operation: { kind: "function", function: "agent", ...(session !== undefined ? { session } : {}) },
+    },
+  });
+
+  /**
+   * THE BUG THIS PINS. `runFunctionOp` never passed a session to `servicesFor`, so a delegated agent
+   * got no `ctx.sessionRequest` and therefore no `ctx.session` — and an agent adapter reads exactly
+   * that to decide between resuming its provider handle and starting fresh. Every delegated call
+   * silently started a NEW provider conversation while the workflow read as though `session: "review"`
+   * had joined them up. Nothing failed; the agent just never remembered.
+   */
+  it("states the session request a state declared", async () => {
+    const { entry, seen } = capturingAgent({ sessionResume: true });
+    const { engine } = makeEngine(agentFiles("review"), "s", () => ok({}), { functions: { agent: entry } });
+    expect((await engine.run({ inputs: {} })).outcome).toBe("success");
+    expect(seen[0]!.request?.ref).toBe("review");
+    // Stable across replays, so a re-run lands on the conversation it landed on before.
+    expect(seen[0]!.request?.seed).toBe("s:review");
+  });
+
+  it("mints a per-instance conversation when the state declares none", async () => {
+    const { entry, seen } = capturingAgent({ sessionResume: true });
+    const { engine } = makeEngine(agentFiles(), "s", () => ok({}), { functions: { agent: entry } });
+    await engine.run({ inputs: {} });
+    // An undeclared conversation is private to the instance, never an implicit shared transcript —
+    // that is the growth the append-only model exists to stop.
+    expect(seen[0]!.request?.ref).toMatch(/^#i\d+$/);
+  });
+
+  // The gate is the entry's own claim to HAVE a transcript. Minting conversations for pure helpers
+  // would put an empty record in the store for every glue call in the graph.
+  it("states none for a runtime that cannot resume, and none for a host function", async () => {
+    const cannotResume = capturingAgent({ sessionResume: false });
+    const { engine } = makeEngine(agentFiles("review"), "s", () => ok({}), { functions: { agent: cannotResume.entry } });
+    await engine.run({ inputs: {} });
+    expect(cannotResume.seen[0]!.request).toBeUndefined();
+
+    const host = capturingAgent({});
+    host.entry.runtime = false;
+    const plain = makeEngine(agentFiles("review"), "s", () => ok({}), { functions: { agent: host.entry } });
+    await plain.engine.run({ inputs: {} });
+    expect(host.seen[0]!.request).toBeUndefined();
+  });
+
+  it("resolves to a POSITION once the host composes the session layer around the dispatcher", async () => {
+    const { entry, seen } = capturingAgent({ sessionResume: true });
+    const { engine } = makeEngine(agentFiles("review"), "s", () => ok({}), { functions: { agent: entry }, sessionDispatcher: true });
+    await engine.run({ inputs: {} });
+    expect(seen[0]!.session?.mode).toBe("append");
+    expect(seen[0]!.session?.id).toBeTypeOf("string");
+  });
+
+  it("puts two states that name one conversation into one conversation", async () => {
+    const { entry, seen } = capturingAgent({ sessionResume: true });
+    const files: Record<string, StateDef> = {
+      root: { inputs: {}, outputs: {}, children: { first: {}, second: {} }, sequence: ["first", "second"] },
+      "root/first": { inputs: {}, outputs: { r: { schema: { type: "string" } } }, operation: { kind: "function", function: "agent", session: "review" } },
+      "root/second": { inputs: {}, outputs: { r: { schema: { type: "string" } } }, operation: { kind: "function", function: "agent", session: "review" } },
+    };
+    const { engine } = makeEngine(files, "root", () => ok({}), { functions: { agent: entry }, sessionDispatcher: true });
+    await engine.run({ inputs: {} });
+    expect(seen).toHaveLength(2);
+    // Same lineage, and the second call sits AFTER the first — which is the whole point: reviewer #2
+    // continues the thread rather than starting beside it.
+    expect(seen[1]!.session?.at.id).toBe(seen[0]!.session?.at.id);
+    expect(seen[1]!.session!.at.seq).toBeGreaterThan(seen[0]!.session!.at.seq);
   });
 });
 

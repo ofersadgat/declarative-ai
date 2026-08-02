@@ -50,6 +50,9 @@ export const DELEGATED_CAPS: RuntimeCapabilities = {
   // session layer not to reach for the replay strategy: this adapter branches server-side and reads
   // zero messages, where replay would resend the whole conversation for the same result.
   sessionResume: true,
+  // Stated rather than left to the default, now that resume and fork are separable: this adapter has
+  // BOTH, and `forkSession` is the primitive that makes the second one true.
+  sessionFork: true,
   streaming: true,
   runtime: "node",
 };
@@ -77,6 +80,19 @@ export interface ClaudeCodeFunctionOptions {
    *  NATIVE built-in `ref.native` (aliased) instead of being MCP-injected — so a run can use the agent's own
    *  `Read` for `read_file` while still injecting our `bash`. Ignored tools default to injection. */
   nativeTools?: Record<string, NativeToolRef>;
+  /**
+   * Route the agent's tool approvals to `ctx.approve`. Default `true`.
+   *
+   * `false` states that this transport HAS no mid-run approval channel — codex is the case: `codex
+   * exec` offers nothing like `--permission-prompt-tool`. Making it an option rather than letting the
+   * query silently ignore an approver is the point: an adapter constructed this way declares
+   * `policyEnforcement: "config"`, and the engine answers that by policy-WRAPPING its injected tools
+   * instead of handing them over raw — so the gate moves, rather than disappearing.
+   *
+   * Setting this `false` on a transport that CAN ask is a safety regression, not a tidy-up: the agent
+   * would then reach its native tools under nothing but the up-front posture.
+   */
+  approvalCallback?: boolean;
   /**
    * Reads a provider-side conversation back, for re-syncing after divergence (DESIGN.md §1.6).
    *
@@ -132,8 +148,14 @@ export function createClaudeCodeFunction(options: ClaudeCodeFunctionOptions = {}
   const inject = options.injectTools ?? true;
   const nativeMap = options.nativeTools ?? {};
   const readSession = options.readSession;
+  const capabilities = options.capabilities ?? DELEGATED_CAPS;
+  const wantsApprovalCallback = options.approvalCallback ?? true;
+  // Can this adapter BRANCH a conversation server-side? Read off its own declared capabilities, so
+  // there is one answer and it is the one the engine also reads. Absent means "the same as resume",
+  // which is what every adapter predating the split meant by `sessionResume: true`.
+  const nativeFork = capabilities.sessionFork ?? capabilities.sessionResume;
   return {
-    capabilities: options.capabilities ?? DELEGATED_CAPS,
+    capabilities,
     // Present only when this adapter can actually read a conversation back. The distinction is
     // load-bearing: an absent reader means a resync starts EMPTY, and §11 requires that to be visible
     // rather than mistaken for a conversation that happened to have nothing in it.
@@ -218,6 +240,15 @@ export function createClaudeCodeFunction(options: ClaudeCodeFunctionOptions = {}
         if (Object.keys(injected).length > 0) mcpTools = injected;
       }
 
+      // The FORK-WITHOUT-A-FORK-PRIMITIVE case (SESSIONS.md §6, "Strategies"). An adapter that appends
+      // natively but cannot branch has exactly one honest way to start a branch: replay. Materializing
+      // here — rather than in the query — keeps the decision in the one place that knows both what was
+      // asked (`session.mode`) and what this transport can do, and keeps every query free of it.
+      //
+      // `messages()` is a LAZY accessor and this is the only path that pays for it. The cheap path
+      // (append, or a native fork) still reads zero messages.
+      const replay = session?.mode === "fork" && !nativeFork ? await session.messages() : undefined;
+
       const queryOptions: AgentQueryOptions = {
         prompt,
         cwd: ctx.workspace?.root,
@@ -235,11 +266,16 @@ export function createClaudeCodeFunction(options: ClaudeCodeFunctionOptions = {}
         // The handle is threaded ONLY on an append. `ResolvedSession.providerSessionId` is already
         // absent on a fork for that reason; the `mode` check is the belt to that braces, because two
         // branches writing into one remote session is silent and unrecoverable.
-        ...(session?.providerSessionId !== undefined
+        //
+        // A fork on an adapter with no fork primitive must NOT carry the handle — that is the one rule
+        // SESSIONS.md §6 states outright, because two branches writing into one remote session is
+        // silent and unrecoverable. Such a fork goes out as `messages` instead, below.
+        ...(session?.providerSessionId !== undefined && (session.mode !== "fork" || nativeFork)
           ? { resume: session.providerSessionId, ...(session.mode === "fork" ? { forkSession: true } : {}) }
           : {}),
+        ...(replay !== undefined ? { messages: replay } : {}),
         // Route the agent's native tool-approval callback through our approver (DESIGN §5.1, "Delegated approval fidelity").
-        canUseTool: approve
+        canUseTool: approve && wantsApprovalCallback
           ? async (req) => {
               const decision = await approve({ tool: req.toolName, input: req.input, sessionId });
               return decision.decision === "allow" ? { allow: true } : { allow: false, reason: `denied by permission policy` };

@@ -80,6 +80,25 @@ export interface AgentQueryOptions {
    * Forking branches the CONVERSATION, not the filesystem — both branches see one working directory.
    */
   forkSession?: boolean;
+  /**
+   * The conversation to REPLAY into this call — the fallback for an adapter that appends natively but
+   * cannot branch (SESSIONS.md §6, "Strategies").
+   *
+   * Codex is the case this exists for: `codex exec resume <id>` continues a conversation server-side,
+   * and there is no fork primitive at all. So its append is free and its FORK has to be replayed, which
+   * is a per-call decision the adapter makes from `session.mode` — never a caller's.
+   *
+   * Mutually exclusive with {@link AgentQueryOptions.resume} by construction: replaying a transcript
+   * into a session that already contains it duplicates the conversation. An adapter that is handed both
+   * must refuse rather than pick one.
+   *
+   * ⚠️ Replay against a DELEGATED agent is lossy in a way it is not against a message-based provider.
+   * There is no message array on the wire — a delegated CLI takes one prompt — so the transcript is
+   * rendered into text; and what a delegated agent contributes to a transcript is already an outline
+   * (one assistant turn per call, since it keeps its real log server-side). Both halves of that are why
+   * the lineage edge records such a branch as summary-seeded rather than as a native fork.
+   */
+  messages?: readonly JsonValue[];
 }
 
 /** The agent's final answer for a run. */

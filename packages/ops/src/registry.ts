@@ -43,7 +43,24 @@ export type FunctionInputs = Record<string, ResolvedValue>;
  * is the only thing that knows how much. Without this channel that spend has nowhere to go, so an
  * agent's cost simply vanished once dispatch moved to the function registry.
  */
-export type FunctionResult<O, M> = Result<O, Failure> & { metrics?: M };
+export type FunctionResult<O, M> = Result<O, Failure> & { metrics?: M; session?: ReportedSession };
+
+/**
+ * What an impl reports about the CONVERSATION it ran in — `exec`'s `SessionOutcome`, restated
+ * structurally because `exec` depends on this package and not the other way round.
+ *
+ * It is declared rather than left to structural leniency, and that is not a formality: this type is a
+ * union, so an undeclared extra field typechecks and is then silently dropped by anything that
+ * REBUILDS the result — which the operation dispatcher does on every call. A delegated agent's
+ * provider session id travelled exactly that path and vanished, so every resume started a fresh
+ * conversation and no failure was raised anywhere.
+ */
+export interface ReportedSession {
+  /** The provider's own session id as of this run. A CHANGE from what we resumed is divergence. */
+  providerSessionId?: string;
+  /** What the run added, for an executor whose payload is not already a conversation. */
+  messages?: readonly unknown[];
+}
 
 /** A pure, sync function implementation: deterministic glue (parse, combine, select) — no model, no
  *  stage, no cost. It still resolves value-or-error, because "this input is malformed" is a real,
@@ -122,6 +139,22 @@ export interface RuntimeCapabilities extends HostCapabilities {
   policyEnforcement: PolicyEnforcement;
   /** Supports session continuation. */
   sessionResume: boolean;
+  /**
+   * Supports BRANCHING a conversation server-side, as distinct from continuing one.
+   *
+   * Optional, and absent means "the same as {@link RuntimeCapabilities.sessionResume}" — which is what
+   * every adapter written before this field meant by declaring resume: Claude Code's `resume` +
+   * `forkSession` gives both at once, and the Messages API replays, so both halves are free.
+   *
+   * Codex is what splits them: `codex exec resume <id>` appends natively, and there is no fork
+   * primitive at all. An adapter in that position declares `{ sessionResume: true, sessionFork: false }`
+   * and REPLAYS a fork instead — which is a different request shape, not a slower path to the same one.
+   *
+   * The rule this exists to make checkable: a fork must never inherit the parent's provider handle
+   * unless the adapter can really branch, because two branches writing into one remote session is
+   * silent and unrecoverable (SESSIONS.md §6).
+   */
+  sessionFork?: boolean;
   /** Emits incremental output. */
   streaming: boolean;
   /** Where it can run. */
