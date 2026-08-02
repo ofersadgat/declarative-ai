@@ -866,13 +866,19 @@ permissions   The authored per-operation permission baseline: `profile`, `defaul
 `environment` is an `operation` with every field optional. A state's effective operation is
 
 ```text
-merge(root.environment, …, parent.environment, own.environment, own.operation)
+merge(root.environment, …, parent.environment, mount.environment, own.environment, own.operation)
 ```
 
 with the nearest layer winning, so a root can set the model, the session and the tool set once for
 a whole subtree. Only a state that DECLARES an `operation` gets one — `{}` is the opt-in to a fully
 inherited one, and without it a pure composite under an `environment`-declaring root stays a pure
 composite instead of inheriting an operation and running it.
+
+`mount.environment` is `children.<key>.environment`: a layer the parent applies to ONE child rather
+than to all of them. Without it the chain was per-state, so two children of one parent could not
+differ in it — which is exactly what "review this change with two different agents" needs (§10.4).
+It sits under the child's own layers, so a state that names its own `operation.function` still wins;
+a state meant to be mounted under several runtimes leaves that field to the chain.
 
 A state mounted under two parents that give it different environments is running as two different
 things, so it loads as two entries: the first mount keeps the plain id and any later one that
@@ -1289,6 +1295,7 @@ Example — fan-out reviews with a dataflow join:
     "claude_review": {
       "state": "review/agent_review",
       "async": true,
+      "environment": { "kind": "function", "function": "claude-cli" },
       "inputs": {
         "change": ".inputs.change"
       }
@@ -1296,6 +1303,7 @@ Example — fan-out reviews with a dataflow join:
     "codex_review": {
       "state": "review/agent_review",
       "async": true,
+      "environment": { "kind": "function", "function": "codex-cli" },
       "inputs": {
         "change": ".inputs.change"
       }
@@ -1316,6 +1324,10 @@ Both reviews start without blocking. The sequence cursor reaches `synthesize`
 immediately, but its inputs reference both review outputs, so it waits for
 both to resolve before starting. With no transitions declared, the state
 terminates with `terminate.success` once all three children finish.
+
+Note what makes the two reviews DIFFERENT: one `review/agent_review` state, mounted twice under two
+per-mount `environment` layers (§7.1a), so the reviewed state names no agent of its own and needs no
+duplicate file. The two mounts load as two variants of one id.
 
 The two producer edges into `synthesize` pass the reachability check (§6.2) even though the
 reviews are async: an async sequence member is still proven to run, and "in flight" is a run-time

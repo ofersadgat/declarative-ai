@@ -562,7 +562,11 @@ type Result<S, E> = { value: S } | { error: E; value?: S };   // success has NO 
 function isOk<S, E>(r: Result<S, E>): r is { value: S };
 // A function op's result: that envelope with `E` pinned to the classified `Failure`, plus an OPTIONAL
 // metrics report (most impls are pure glue with nothing to say):
-type FunctionResult<O, M> = Result<O, Failure> & { metrics?: M };
+// …plus what the impl says about the CONVERSATION it ran in. Declared rather than left to structural
+// leniency: this is a union, so an undeclared field typechecks and is then dropped by anything that
+// REBUILDS the result — which the dispatcher does, and which silently lost a delegated agent's handle.
+type FunctionResult<O, M> = Result<O, Failure> & { metrics?: M; session?: ReportedSession };
+interface ReportedSession { providerSessionId?: string; messages?: readonly unknown[] }
 
 type FunctionImpl<I = FunctionInputs, O = ResolvedValue, M = Metrics>            = (inputs: I) => FunctionResult<O, M>;
 type AsyncFunctionImpl<I = FunctionInputs, O = ResolvedValue, M = Metrics, Ctx = unknown> =
@@ -622,7 +626,10 @@ interface HostCapabilities { interactive: boolean; readOnly: boolean; memoizable
 interface RuntimeCapabilities extends HostCapabilities {
   structuredOutput: boolean; mutatesWorkspace: boolean;
   policyEnforcement: "callback" | "config" | "none";
-  sessionResume: boolean; streaming: boolean; runtime: "edge-safe" | "node";
+  sessionResume: boolean;                         // can CONTINUE a conversation
+  sessionFork?: boolean;                          // can BRANCH one. Absent ⇒ same as sessionResume:
+                                                  // what every adapter meant before one could do only the first
+  streaming: boolean; runtime: "edge-safe" | "node";
 }
 type Capabilities = RuntimeCapabilities;          // what an Executor advertises — the same record
 
@@ -2363,7 +2370,13 @@ interface ParameterDecl {
 }
 interface NamedParameterDecl extends ParameterDecl { name?: string; }
 
-interface ChildDecl { state: string; inputs?: Record<string, BindingDecl>; async?: boolean; }
+interface ChildDecl {
+  state: string; inputs?: Record<string, BindingDecl>; async?: boolean;
+  // Defaults for THIS MOUNT and its subtree, between the parent's `environment` and the child's own.
+  // One state mounted twice under two of these loads as two variants — which is how one review state
+  // runs under two different agents.
+  environment?: EnvironmentDecl;
+}
 interface TransitionDecl { to: string; when?: string; }        // `when` must INFER to boolean
 interface LimitsDecl { max_iterations?: number; timeout?: number; }
 ```
@@ -2569,12 +2582,20 @@ interface ClaudeCodeFunctionOptions {
   capabilities?: RuntimeCapabilities;            // override the advertised entry capabilities
   injectTools?: boolean;                         // MCP-inject ctx.tools so the agent calls OUR impls (default true)
   nativeTools?: Record<string, NativeToolRef>;   // per-name override: use the agent's own built-in instead
+  approvalCallback?: boolean;                    // false ⇒ this transport HAS no mid-run approval channel,
+                                                 // so no approver is passed to the query (codex). Setting it
+                                                 // on a transport that can ask is a safety regression
+  readSession?: AgentSessionReader;              // read a provider conversation back, for a resync
 }
 
 const DELEGATED_CAPS: RuntimeCapabilities = {
   interactive: true, readOnly: false,
   mutatesWorkspace: true, memoizable: false, structuredOutput: false,
-  policyEnforcement: "callback", sessionResume: false, streaming: true, runtime: "node",
+  policyEnforcement: "callback",
+  // NATIVE resume, and native FORK with it (`resume` + `forkSession`). Declaring them is what tells the
+  // session layer not to reach for replay: this adapter branches server-side and reads zero messages.
+  sessionResume: true, sessionFork: true,
+  streaming: true, runtime: "node",
 };
 
 interface ClaudeCodeConfig {                     // the authored surface, bound as the op's `config` input
@@ -2637,13 +2658,18 @@ interface InjectedTool {
 
 interface AgentQueryOptions {
   prompt: string; cwd?: string;
-  allowedTools?: string[];                       // native names the agent may use
+  allowedTools?: string[];                       // native names the agent may use — a PRE-APPROVAL list
+  disallowedTools?: string[];                    // the deny floor, by the name the agent addresses
   mcpTools?: Record<string, InjectedTool>;       // our impls, injected over MCP
+  validator?: SyncOutputValidator;               // boundary check for injected tool ARGUMENTS
   permissionMode?: AgentPermissionMode;
   canUseTool?: AgentPermissionCallback;
+  resume?: string;                               // the provider conversation to continue (cwd-bound!)
+  forkSession?: boolean;                         // branch it server-side instead — native fork only
+  messages?: readonly JsonValue[];               // …or REPLAY it, for an adapter with no fork primitive
   abortSignal?: AbortSignal;
 }
-interface AgentResult { text: string; costUsd?: number; }
+interface AgentResult { text: string; costUsd?: number; sessionId?: string }  // the id the run ENDED in
 interface AgentStreamMessage { type: "result" | "assistant" | "other"; result?: AgentResult; error?: string; }
 ```
 
@@ -2673,15 +2699,32 @@ interface CliAgentOptions {
   startBridge?: StartMcpBridge;   // the MCP-bridge seam; default a loopback HTTP server
 }
 
-type SpawnProcess = (argv: string[], opts: { cwd?: string }) => AgentProcess;
-interface AgentProcess { lines: AsyncIterable<string>; kill(): void; exit: Promise<number> }
-
 function needsBridge(opts: AgentQueryOptions): boolean;
 function cliArgv(opts: AgentQueryOptions, config?: CliAgentOptions, bridgeUrl?: string): string[];
 ```
 
-**Its enforcement model is `callback`, the same guarantee as the SDK adapter's** — the mechanism differs,
-not the promise. The CLI cannot call back into our process directly, so the adapter stands up a small
+The **process seam** is shared by both CLIs, and by a host that wants to observe or relocate a spawn:
+
+```ts
+type SpawnProcess = (argv: string[], opts: SpawnOptions) => AgentProcess;
+interface SpawnOptions { cwd?: string; stdin?: string }   // stdin: for a prompt too big for argv
+interface AgentProcess { lines: AsyncIterable<string>; kill(): void; exit: Promise<number> }
+function defaultSpawn(): Promise<SpawnProcess>;           // lazy `node:child_process`, edge-importable
+
+// Windows: Node refuses to spawn a `.cmd` without a shell, and a shell would eat these argv (a bearer
+// token, a TOML table). An npm-installed CLI IS a `.cmd` shim, and the shim names the JS entry it runs —
+// so this resolves it to `node <entry>`. A real executable wins and is returned untouched.
+function resolveProgram(command: string, deps: ProgramDeps): { file: string; prefix: string[] };
+interface ProgramDeps {
+  exists: (path: string) => boolean;
+  readText: (path: string) => string | undefined;
+  platform?: string; pathDirs?: readonly string[]; binaryExtensions?: readonly string[]; node?: string;
+}
+```
+
+**The `claude` adapter's enforcement model is `callback`, the same guarantee as the SDK adapter's** — the
+mechanism differs, not the promise. (Codex's is `config`, and deliberately: see below.)
+The CLI cannot call back into our process directly, so the adapter stands up a small
 **MCP bridge** the agent reaches over `--mcp-config`, and passes `--permission-prompt-tool` so the CLI
 *asks* before each gated tool-use rather than deciding on its own. Host-implemented tools ride the same
 bridge, which is why `injectTools` means the same thing here as there. `CLI_CONFIG_ONLY_CAPS` is the honest
@@ -2701,3 +2744,47 @@ The MCP protocol pieces are exported too, so a host can stand up its own bridge:
 | `APPROVAL_INPUT_SCHEMA`, `ApprovalRequest`, `parseApprovalRequest`, `approvalResponseText`, `malformedApprovalResponseText` | the approval tool's wire contract. |
 | `McpToolDescriptor` / `toolDescriptors(spec)` / `injectedToolAllowEntries(tools)` / `handleToolCall(...)` | exposing host tools over the bridge, and the `--allowedTools` entries their MCP-qualified names need. |
 | `McpBridge` / `McpBridgeSpec` / `StartMcpBridge` / `defaultStartMcpBridge` / `SDK_MISSING` | the bridge seam and its default loopback-HTTP implementation. |
+
+### The codex adapter
+
+```ts
+function createCodexAgentFunction(options?: CodexAgentFunctionOptions): ReturnType<typeof createClaudeCodeFunction>;
+interface CodexAgentFunctionOptions extends Omit<ClaudeCodeFunctionOptions, "query" | "approvalCallback">, CodexAgentOptions {}
+
+const CODEX_CAPS: RuntimeCapabilities;   // policyEnforcement: "config", sessionResume: true, sessionFork: false
+const CODEX_COMMAND: "codex";
+type CodexSandbox = "read-only" | "workspace-write" | "danger-full-access";
+
+function createCodexAgentQuery(config?: CodexAgentOptions): AgentQuery;
+interface CodexAgentOptions {
+  command?: string;               // default "codex"
+  args?: string[];                // extra argv inserted after the generated flags
+  spawn?: SpawnProcess;
+  startBridge?: StartMcpBridge;
+  sandbox?: CodexSandbox;         // when the caller states no permission mode; default "workspace-write"
+}
+
+function codexArgv(opts: AgentQueryOptions, config?: CodexAgentOptions, bridgeUrl?: string): string[];
+function codexRefusal(opts: AgentQueryOptions): string | undefined;   // what it will not pretend to do
+function sandboxFor(mode: AgentPermissionMode | undefined, fallback?: CodexSandbox): CodexSandbox;
+function mcpServerOverride(url: string, tools?: readonly string[], server?: string): string;
+function readCodexEvent(event: Record<string, unknown>, run: CodexRun): CodexRun;  // pure; both dialects
+function replayPreamble(messages: readonly JsonValue[]): string;      // a fork, rendered as text
+```
+
+**Verified against codex-cli 0.145.0, and none of it is guessable.** `codex exec resume` accepts a
+strict SUBSET of `codex exec`'s options — no `--sandbox`, no `-C`, no `--color` — so one argv is built
+from the intersection and the sandbox travels as `-c sandbox_mode="…"`, which both forms accept. The
+answer arrives as `item.completed` carrying an item of type **`agent_message`** — the name a first
+guess gets wrong, and `readCodexEvent` accepts `assistant_message` too rather than let a rename become a
+silent total failure. The prompt goes on **stdin**, since a replayed conversation does not fit in a
+Windows command line. No cost is reported — codex counts tokens — so a run records
+`costSource: "unknown"` rather than a derived number.
+
+**What it refuses**, each because the silent version is worse: an approver (no
+`--permission-prompt-tool` analogue exists, so `approvalCallback: false` is fixed on this entry), a
+native fork (`forkSession` — the session layer must replay instead, which `sessionFork: false` is what
+tells it), `resume` + `messages` together, a per-tool deny list, a native allow-list, and
+**MCP-injected tools**: codex reaches the bridge and is offered the tool, then auto-denies the call and
+hands the agent the string `user cancelled MCP tool call` — which it would report as its answer,
+successfully.

@@ -199,7 +199,9 @@ ai-exec/
                                              engine, snapshot hashing, and its executor (§7)
     agents-api/  @declarative-ai/agents-api  delegated agents reached through an in-process SDK,
                                              plus the normalized AgentQuery seam
-    agents-cli/  @declarative-ai/agents-cli  the same adapter over a CLI subprocess
+    agents-cli/  @declarative-ai/agents-cli  the same adapter over a CLI subprocess —
+                                             `claude` and `codex`, sharing the process seam
+                                             and the MCP bridge and nothing else
 ```
 
 ```text
@@ -351,7 +353,9 @@ interface Executor<R = ExecServices, M extends ExecMetrics = ExecMetrics> {
 // two share ONE record and cannot drift. Required and TOTAL, never all-optional.
 interface RuntimeCapabilities {
   structuredOutput: boolean;        // native schema-constrained output
-  sessionResume: boolean;
+  sessionResume: boolean;           // can CONTINUE a conversation server-side
+  sessionFork?: boolean;            // can BRANCH one. Absent ⇒ same as sessionResume, which is what every
+                                    // adapter meant before codex (appends natively, cannot fork ⇒ replays)
   streaming: boolean;
   interactive: boolean;             // needs a human/renderer — search callers refuse it up front
   readOnly: boolean;                // what the read-only/plan profiles gate on
@@ -690,12 +694,23 @@ package:
 `agents-api` reaches an agent through an in-process SDK (an optional peer on
 `@anthropic-ai/claude-agent-sdk`), `agents-cli` through a CLI subprocess. Both drive the same
 normalized `AgentQuery` seam and produce the same shape of `runtime` registry entry, so a workflow
-authored against one runs against the other. Both declare `policyEnforcement: "callback"` — the SDK path
-routes each tool approval back through `ctx.approve` in-process, and the CLI path does the same over an
-MCP bridge (`--mcp-config` + `--permission-prompt-tool`), because the *guarantee* is what the capability
-describes, not the mechanism. `CLI_CONFIG_ONLY_CAPS` (`policyEnforcement: "config"`) is the honest record
-for a caller that deliberately runs with no approver, on an up-front posture alone. Both are
-`mutatesWorkspace: true, runtime: node`.
+authored against one runs against the other. The `claude` adapters declare `policyEnforcement:
+"callback"` — the SDK path routes each tool approval back through `ctx.approve` in-process, and the CLI
+path does the same over an MCP bridge (`--mcp-config` + `--permission-prompt-tool`), because the
+*guarantee* is what the capability describes, not the mechanism. `CLI_CONFIG_ONLY_CAPS`
+(`policyEnforcement: "config"`) is the honest record for a caller that deliberately runs with no
+approver, on an up-front posture alone. All are `mutatesWorkspace: true, runtime: node`.
+
+**Codex is the second CLI, and it is what forced two capabilities apart.** `createCodexAgentFunction`
+drives `codex exec --json`, which has no `--permission-prompt-tool` analogue at all, so no tool-use can
+reach `ctx.approve` mid-run: it declares `"config"` — a sandbox pinned on every run
+(`-c sandbox_mode=…`) — and is constructed with `approvalCallback: false`, so an approver is refused
+rather than silently ignored. It also appends a conversation server-side (`codex exec resume <id>`) and
+cannot BRANCH one, which is why `sessionFork` exists separately from `sessionResume`: an adapter that
+replays a fork shapes a different request, not a slower version of the same one (§4.5). Everything else
+this transport cannot honour — a per-tool deny list, a native allow-list, MCP-injected tools, which it
+reaches and then auto-denies — is refused loudly. A delegated agent that answers `user cancelled MCP
+tool call` and reports success is indistinguishable from one that found nothing.
 
 The canonical policy *model* lives in `@declarative-ai/permissions`; policy authoring and the approval
 UI stay in JaiRA. findmyprompt adopts the adapters unchanged when it gains a worker host; until then

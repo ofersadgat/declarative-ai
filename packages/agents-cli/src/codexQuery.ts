@@ -270,7 +270,7 @@ function renderTurn(message: JsonValue): string {
 }
 
 /** What one run accumulates from the event stream, before it becomes an {@link AgentResult}. */
-interface CodexRun {
+export interface CodexRun {
   text?: string;
   sessionId?: string;
   error?: string;
