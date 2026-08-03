@@ -100,6 +100,35 @@ describe("§8 exit criteria — package independence", () => {
     expect(promptopSrc.some((s) => /from\s+["']@declarative-ai\/exec["']/.test(s))).toBe(true);
   });
 
+  it("never names the native peer in a specifier a BUNDLER can follow", () => {
+    // Declaring `node-llama-cpp` an optional peer is not enough to make it optional. A literal
+    // `import("node-llama-cpp")` is statically analyzable, so esbuild/webpack walk into it while
+    // bundling ANY consumer — and fail on things that consumer has nothing to do with: top-level
+    // `await` in the platform shims (illegal in a `cjs` output), `@node-llama-cpp/{mac,linux}-*`
+    // packages that were never installed, and a `.node` binary with no loader. That broke a downstream
+    // build with sixteen errors for a route it had not used.
+    //
+    // Reproduced directly: `import("node-llama-cpp")` in a file in this repo fails an esbuild
+    // `--format=cjs --bundle` with exactly that class of error; the opaque form emits zero and leaves
+    // the peer out of the bundle entirely.
+    const offenders: string[] = [];
+    for (const file of sourceFiles(path.join(ROOT, "packages/llm/src"))) {
+      // Comments are stripped first: this module has to DESCRIBE the specifier it must not write, and a
+      // regex that cannot tell prose from code would fail on its own explanation.
+      const src = readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+      // The literal forms a bundler resolves. A runtime-built specifier is invisible to this, which is
+      // the entire point of using one.
+      if (/(?:^|[^.\w])(?:import|require)\s*\(\s*["']node-llama-cpp["']\s*\)/.test(src)) {
+        offenders.push(path.relative(ROOT, file));
+      }
+    }
+    expect(offenders).toEqual([]);
+    // ...and the loader really does still reach it, so this is not passing because the code was deleted.
+    const embedded = readFileSync(path.join(ROOT, "packages/llm/src/embedded.ts"), "utf8");
+    expect(embedded).toMatch(/const PEER = \["node", "llama", "cpp"\]\.join\("-"\)/);
+    expect(embedded).toMatch(/import\(.*PEER\)/);
+  });
+
   it("runs a STRUCTURED call end to end with json + llm and nothing else", async () => {
     const model = new MockLanguageModelV3({
       doStream: async () =>

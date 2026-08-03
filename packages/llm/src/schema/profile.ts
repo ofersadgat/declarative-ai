@@ -63,8 +63,9 @@ export interface ProviderSchemaProfile {
    *    json_object (advisory) if the specific schema doesn't fit the decoder's bounds.
    *  - `"object"` — JSON-object mode only (`response_format:{type:"json_object"}`): the model emits SOME
    *    JSON but conformance to a schema is NOT enforced by the decoder — the §4 Ajv boundary is the gate,
-   *    and the schema rides along only as an advisory hint. Requires the word "json" in the prompt on
-   *    OpenAI-compatible upstreams (see {@link promptRequiresJSONSpecifier}).
+   *    and the schema is DESCRIBED IN THE PROMPT, because this wire format forces JSON syntax while
+   *    saying nothing about shape. (That hint also satisfies the OpenAI-compatible contract requiring
+   *    the literal word "json" in the messages, which is why no separate specifier flag exists.)
    *  - `false` — neither: no structured mode at all. The call is a PLAIN text completion (no
    *    `response_format`); the schema is described in the prompt and the JSON is parsed out of the text.
    * Derived from the model's `supported_parameters` at import (`structured_outputs`→`"schema"`,
@@ -72,17 +73,6 @@ export interface ProviderSchemaProfile {
    * carries structured output the OpenRouter param names don't describe).
    */
   supportsStructuredOutput: "schema" | "object" | false;
-  /**
-   * Whether this transport's json_object mode REQUIRES the literal word "json" in the messages (the
-   * OpenAI-compatible contract — Alibaba/DashScope, OpenAI, and others 400 without it). Only consulted
-   * when a call actually lands in json_object mode (`enforce:"advisory"`); irrelevant to strict/text.
-   *  - falsy/absent — no requirement (the default; capability-routing usually keeps these off json_object).
-   *  - `true`       — FAIL FAST: if neither system nor user prompt contains "json", the call is failed
-   *                   locally (permanent) instead of hitting the provider's 400 — the prompt is left intact.
-   *  - `"force"`    — if "json" is absent, APPEND a short JSON directive to the system prompt so the call
-   *                   succeeds (the prompt is minimally augmented at call time; the stored op is untouched).
-   */
-  promptRequiresJSONSpecifier?: boolean | "force";
   /** How the provider expresses an ABSENT optional field — the 3-rung ladder:
    *  `"omit"` (truly optional, leave `required` alone) → `"nullable"` (force all required, mark optionals
    *  nullable so the model can answer `null`, drop the nulls on the way out) → `"none"` (force all

@@ -78,6 +78,49 @@ export interface ValidationEnvironment {
   /** Assert a NON-interactive context (search/optimizer, which cannot answer a prompt): an operation
    *  bound to an interactive entry is then an error. Unset ⇒ not checked. */
   interactive?: boolean;
+  /**
+   * Whether a model's WEIGHTS are on this machine — for locally-served models, which cannot run until
+   * something has fetched multiple gigabytes of them.
+   *
+   * Three properties of the signature are deliberate:
+   *
+   *  - **It is a predicate, not a lookup.** `hw` does not depend on `@declarative-ai/llm` and must not
+   *    learn what a route is; the caller, who does, decides which ids it manages.
+   *  - **`undefined` means NOT MINE.** A remote model has no weights to be missing, so a caller returns
+   *    `undefined` for it and nothing is reported. Only an explicit `false` is a finding.
+   *  - **It is SYNCHRONOUS.** This validator backs a lint surface and never performs I/O beyond a stat;
+   *    "is it here" is answerable, "go and fetch it" is not. Provisioning is a separate step the host
+   *    runs between validating and executing.
+   *
+   * Unset ⇒ not checked, like `interactive` above. The finding is a WARNING rather than an error
+   * because a state the run never enters never needs its weights, which is the same reasoning that
+   * keeps an unregistered `functionRef` a warning by default.
+   */
+  weightsPresent?: (modelId: string) => boolean | undefined;
+  /**
+   * Where a locally-served model's working set would LAND on this machine — the three placement tiers.
+   *
+   * `"vram"` runs at full speed, `"ram"` spills off the GPU and runs slowly, `"swap"` spills past system
+   * memory into the pagefile and effectively does not run at all. `undefined` means "not a model I
+   * manage", exactly as {@link weightsPresent} does.
+   *
+   * Synchronous for the same reason: the validator does no async work. The caller predicts placements
+   * ahead of time (the prediction is cheap — it reads the GGUF header, not the weights) and hands in a
+   * lookup. Doing it at validation rather than at admission is the point: the loader resolves the
+   * `environment` chain first, so a workflow's whole model working set is knowable before anything runs
+   * instead of discovered one failed call at a time.
+   */
+  placement?: (modelId: string) => "vram" | "ram" | "swap" | undefined;
+  /**
+   * How severely a degraded placement is reported. Defaults: spilling to RAM is a WARNING (it works,
+   * slowly, and the author should know), spilling to swap is an ERROR (it does not meaningfully run).
+   *
+   * This is the acknowledgment surface. A host whose user has said "yes, run the 70B degraded anyway"
+   * sets `swap: "warn"`; one that will not tolerate any spill sets `ram: "error"`. The policy lives in
+   * the host's configuration, never in a workflow document — a workflow that could downgrade its own
+   * safety check would not be a check.
+   */
+  placementPolicy?: { ram?: "ignore" | "warn" | "error"; swap?: "ignore" | "warn" | "error" };
 }
 
 export function validateBundle(bundle: WorkflowBundle, env: ValidationEnvironment = {}): ValidationReport {
@@ -246,6 +289,60 @@ function validateState(
 
 // --- Operations ---------------------------------------------------------------
 
+/**
+ * Report a locally-served model whose weights are not on this machine (§5).
+ *
+ * The check is possible at all because the loader has already merged the `environment` chain, so a
+ * state's operation carries its RESOLVED model — including one supplied by an ancestor's defaults or by
+ * a per-mount layer. That is what makes a workflow's whole model working-set knowable before anything
+ * runs, rather than discovered one failed call at a time.
+ *
+ * The model has to be a literal to be checked: an `{expr}`-bound config is only knowable at run time,
+ * and guessing would produce findings about models the run never asks for.
+ */
+function checkWeights(
+  op: Extract<Operation<InlineFamily>, { kind: "prompt" }>,
+  path: string,
+  stateId: string,
+  errors: ValidationIssue[],
+  warn: (path: string, message: string) => void,
+  env: ValidationEnvironment,
+): void {
+  const model = literalModelOf(op);
+  if (model === undefined) return;
+
+  // `undefined` is "not a model I manage" — a remote model has no weights to be missing.
+  if (env.weightsPresent?.(model) === false) {
+    warn(
+      `${path}.config.model`,
+      `model '${model}' is served locally but its weights are not present — provision them before running (validation cannot fetch them)`,
+    );
+  }
+
+  const tier = env.placement?.(model);
+  if (tier === undefined || tier === "vram") return;
+  const policy = env.placementPolicy ?? {};
+  // The defaults ARE the policy this exists to express: a RAM spill works and should be said out loud;
+  // a swap spill does not meaningfully run and blocks until someone acknowledges it.
+  const severity = tier === "swap" ? (policy.swap ?? "error") : (policy.ram ?? "warn");
+  if (severity === "ignore") return;
+  const message =
+    tier === "swap"
+      ? `model '${model}' would spill past system memory into swap on this machine — it will not run usefully. Reduce its context, choose a smaller quantization, or acknowledge the cost (placementPolicy.swap)`
+      : `model '${model}' would spill out of VRAM into system memory on this machine — it will run, considerably slower`;
+  if (severity === "error") errors.push({ stateId, path: `${path}.config.model`, message });
+  else warn(`${path}.config.model`, message);
+}
+
+/** A prompt op's model id, when it is a LITERAL. An `{expr}`-bound config is only knowable at run time,
+ *  and guessing would produce findings about models the run never asks for. */
+function literalModelOf(op: Extract<Operation<InlineFamily>, { kind: "prompt" }>): string | undefined {
+  const config: unknown = op.config;
+  if (config === null || typeof config !== "object" || Array.isArray(config)) return undefined;
+  const model = (config as Record<string, JsonValue>)["model"];
+  return typeof model === "string" && model.length > 0 ? model : undefined;
+}
+
 function checkOperation(
   op: Operation<InlineFamily>,
   path: string,
@@ -270,6 +367,7 @@ function checkOperation(
   } else if (op.user === undefined || op.user === "") {
     warn(`${path}.prompt`, "prompt operation has an empty prompt (no template and no skill)");
   }
+  if (op.kind === "prompt") checkWeights(op, path, stateId, errors, warn, env);
   for (const [name, param] of Object.entries(op.input)) {
     if (param.binding !== undefined) {
       // The state's operation runs BEFORE any child (engine loop step 2/5), so no child output exists

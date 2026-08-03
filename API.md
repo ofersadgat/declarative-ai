@@ -54,6 +54,7 @@ the README, this doc links to it instead.
   - [`plan` — the dry run](#plan--the-dry-run)
   - [Model router](#model-router)
   - [Model catalog](#model-catalog)
+  - [Locally-served models](#locally-served-models)
   - [Cost estimation](#cost-estimation)
   - [Schema & provider adaptation](#schema--provider-adaptation)
 - [`@declarative-ai/promptop`](#declarative-aipromptop)
@@ -1857,21 +1858,67 @@ dry-run can never drift from what execution sends. It gates media inputs per med
 
 ### Model router
 
-Explicit `{route}/{model}` routing over native Anthropic + OpenRouter. Source: `router.ts`.
+Explicit `{route}/{model}` routing over four routes — two remote, two local. Source: `router.ts`.
 
 ```ts
 function createModelRouter(options?: ModelRouterOptions): ModelRouter;
 interface ModelRouter {
   resolveModel(modelId: string, opts?: ResolveModelOptions): LanguageModel;   // the AI-SDK type
   isAnthropic(modelId: string): boolean;
+  close?(): Promise<void>;                       // release what the ROUTER started (managed servers, weights)
+  unloadModel?(modelId: string): Promise<void>;  // free ONE model — a ResidencyManager's `unload`
 }
 interface ModelRouterOptions {
   anthropicApiKey?; openRouterApiKey?; skipDispatcher?;
   openRouterUsageAccounting?;             // real charged cost per response (default ON)
   openRouterStrictStructuredOutputs?;     // send strict json_schema (default OFF; Ajv is the gate)
+  local?: LocalServerConfig | ((providerId: string) => LocalServerConfig | undefined);
+  embedded?: EmbeddedModelConfig | ((providerId: string) => EmbeddedModelConfig | undefined);
 }
-interface ResolveModelOptions { strictStructuredOutput?: boolean; }
+interface ResolveModelOptions {
+  strictStructuredOutput?: boolean;
+  embedded?: { contextSize?; gpuLayers?; sequences? };   // per-call residency knobs
+}
 ```
+
+The four routes split on two independent questions — **who serves it** (a remote fleet that meters you,
+versus your own hardware) and **how it is reached** (HTTP, versus no wire at all):
+
+| route | served by | reached via |
+| --- | --- | --- |
+| `anthropic` | native Anthropic API | HTTP |
+| `openrouter` | OpenRouter | HTTP |
+| `local` | an OpenAI-compatible server on this machine (Ollama, LM Studio, `llama-server`, vLLM) | HTTP |
+| `embedded` | weights in **this process**, via `node-llama-cpp` | none |
+
+`local` deliberately does **not** distinguish a server you attached to from one this library spawned:
+that is a fact about lifecycle ownership, not about the model, and the id names the model. Both are
+configured through `LocalServerConfig`; adding `serve` upgrades attached to managed.
+
+```ts
+interface LocalServerConfig {
+  baseURL: string;                    // including the version path, e.g. http://localhost:11434/v1
+  apiKey?; headers?; queryParams?; name?; fetch?;
+  supportsStructuredOutputs?: boolean; // CEILING on json_schema, not a switch (see below). Default true
+  includeUsage?: boolean;              // ask for streamed usage. Default true
+  serve?: ManagedServerSpec;           // absent ⇒ attached; present ⇒ probe, and spawn only if nothing answers
+}
+```
+
+Two behaviours are easy to get wrong and are therefore fixed:
+
+- **`supportsStructuredOutputs` is a ceiling.** The underlying provider reads it as *which*
+  `response_format` to send (`json_schema` vs `json_object`), not whether to send one — so it follows the
+  per-call `strictStructuredOutput` the schema profile computed, capped by this flag. Pinning it true
+  sent strict `json_schema` on every local call, the one shape Ollama and LM Studio most often reject.
+  Suppressing `response_format` entirely is the **text tier's** job and comes from the profile.
+- **Managed servers boot on the first REQUEST, not on resolve.** `resolveModel` is synchronous and
+  cannot await a process start, so readiness is awaited inside the provider's `fetch`. A router
+  configured with a server it never calls starts nothing.
+
+An unconfigured `local`/`embedded` id is **refused**, not passed through — a local model reaching the
+OpenRouter branch would be sent to a remote provider with an API key attached and 404 as though the model
+were unknown.
 
 The `ModelRouter` interface lives **here**, in the package that can describe what it returns. It used to
 sit in `core` purely so `ExecServices.modelRouter` could be typed — which meant the bottom package named an
@@ -1887,11 +1934,13 @@ Route parsing helpers:
 
 | Export | Purpose |
 | --- | --- |
-| `type ModelFamily = "anthropic" \| "openrouter"` / `ModelRoute` | the two serving routes. |
+| `type ModelFamily` / `ModelRoute`, `MODEL_ROUTES` | the four serving routes, from one constant. |
 | `parseModelRoute(modelId): { route; providerId }` | parse `{route}/{model}`; **throws** on a bare id. |
 | `providerNativeId(modelId): string` | the route-stripped provider id (the schema-profile family key). |
 | `familyForModel(modelId): ModelFamily` | the serving route. |
 | `isAnthropicModel(nativeId): boolean` | true for a bare `claude-*` **native** id (native-id space only). |
+| `isRemoteModel(id)` / `isLocalModel(id)` | complements: metered by someone else, versus running on your hardware. |
+| `isEmbeddedModel(id): boolean` | the models whose memory **we** control — the correct scope for a residency manager. |
 | `installLongTimeoutDispatcher(opts?)` | node-only undici dispatcher for long-running calls (auto-installed by `createModelRouter` unless `skipDispatcher`). |
 
 ### Model catalog
@@ -1956,6 +2005,142 @@ seams and the `*_URL` constants. Only needed if you refresh the catalog yourself
 is what preserves the literal keys so `KnownModelKey` and the strong constructor typing work — a plain
 `.json` import would widen them to `string`. A source that fails to fetch/validate is skipped (the core
 seed stands). Add `--seed-only` to regenerate offline from just the core seed.
+
+### Locally-served models
+
+Everything above `resolveModel` is unchanged by a local route: the same `generateStructured`, the same
+wrappers, the same metrics. What changes is that the scarce resource is **memory instead of money**, and
+memory does not regenerate while you wait — something must be unloaded before something else can load,
+and the thing being unloaded may be in use. Sources: `localServer.ts`, `embedded.ts`, `weights.ts`,
+`residency.ts`.
+
+#### Managed servers (`localServer.ts`)
+
+```ts
+class ManagedServer {
+  constructor(spec: ManagedServerSpec, baseURL: string, fetchImpl?: FetchFunction);
+  ensureReady(): Promise<void>;   // idempotent, concurrency-safe
+  close(): Promise<void>;         // stops ONLY a process this instance started
+}
+interface ManagedServerSpec {
+  command: string; args?; cwd?; env?;
+  readyUrl?;            // default `${baseURL}/models` — every server on this route implements it
+  readyTimeoutMs?;      // default 60s: a server memory-mapping a large model answers slowly
+  pollIntervalMs?; stopTimeoutMs?;
+  spawn?: SpawnServer;  // injectable launcher
+}
+```
+
+Three properties are load-bearing:
+
+- **Probe before spawn.** A configured `serve` means "make sure one is there", not "start one" — an
+  already-answering endpoint is *adopted*. Spawning unconditionally fails on the bound port and turns a
+  working setup into an error.
+- **Close only what we spawned.** An adopted server survives `close()`; it belongs to whoever ran it.
+- **A failed boot clears its memo**, so a slow or unlucky start can be retried — and kills the process it
+  started first, so a retry cannot orphan one per attempt.
+
+#### In-process weights (`embedded.ts`)
+
+Needs the **optional peer** `node-llama-cpp`, reached through a runtime-assembled specifier so no bundler
+follows it. A literal `import("node-llama-cpp")` is statically analyzable, and bundling any consumer then
+walked into the native package and failed on top-level `await` in its platform shims, unresolvable
+`@node-llama-cpp/*` binaries, and `.node` files with no loader — for a route the consumer had not used.
+
+```ts
+function embeddedLanguageModel(providerId, store, providerName?, override?): LanguageModelV3;
+class EmbeddedModelStore {
+  configFor(providerId): EmbeddedModelConfig | undefined;
+  open(providerId, override?): Promise<LoadedModel>;   // memoized per model id
+  unload(providerId): Promise<void>;                   // free ONE model's weights
+  close(): Promise<void>;
+}
+function mergeEmbeddedConfig(base, override): EmbeddedModelConfig;
+function catalogRowForGguf(o: { model; source; downloads? }): Promise<ModelInfoInterface>;
+function classifyPlacement(resolved, totalLayers, free): Placement;
+function embeddedPlacementProbe(store, providerIdOf): PlacementProbe;
+```
+
+The handle is returned **synchronously** and the GGUF is mapped on the first `doStream` — the lazy-handle
+pattern, since `resolveModel` cannot await seconds of I/O. Concurrency is **bought with memory**: a
+context fixes its `sequences` count at load and each sequence carries its own KV cache (measured: a 0.5B
+model was 374 MB of weights and 491 MB for four 4096-token sequences), so sequences are pooled, acquired
+per call and returned on every path including abort.
+
+`catalogRowForGguf` reads a row out of the GGUF header — footprint, layers, trained context, quantization
+from `general.file_type` rather than the filename — over a range request, so an 18 GB model is catalogued
+in about a second without downloading it. Its **zero rates are a claim**: local inference is free, and a
+row saying so is what lets `costSource` report `"table"` instead of `"unknown"`.
+
+#### Weights (`weights.ts`)
+
+```ts
+class WeightsStore {
+  constructor(options: { directory: string; token?: WeightsToken; fetch?; onProgress?; catalog? });
+  pathFor(modelId): string | undefined;
+  present(modelId): boolean | undefined;     // sync — the predicate hw validation takes
+  ensure(modelId, signal?): Promise<string>; // download what is missing; concurrent calls coalesce
+}
+class WeightsCredentialRequired extends Error { kind: "credential-required"; scope; uri }
+class WeightsUnavailable extends Error { kind: "unavailable"; modelId }
+```
+
+Node-only, and deliberately **not** in the catalog module: `@declarative-ai/llm/model-catalog` is
+dependency-free so a UI can read identity and pricing without dragging `undici` into a browser bundle.
+Metadata belongs on the row; the `fetch`/`node:fs` acting on it belongs here. It needs no
+`node-llama-cpp` — provisioning weights and running them are separate jobs.
+
+`directory` is **required**; the library never picks a cache location. Downloads resume from a `.part`
+file, restart when a server ignores `Range` (appending a 200-with-whole-body would silently corrupt),
+verify the checksum **before** the rename (the un-suffixed name is what `present()` reads, so corruption
+must never occupy it), and fetch every part of a split model. A gated repo raises
+`WeightsCredentialRequired` naming the scope, so a host prompts for a token rather than seeing a 401
+reported as a missing file.
+
+#### Residency (`residency.ts`)
+
+```ts
+class ResidencyManager {
+  constructor(options?: ResidencyOptions);
+  acquire(modelId, signal?): Promise<ResidencyLease>;
+  residentModels(): string[];
+  close(): Promise<void>;
+}
+interface ResidencyOptions {
+  probe?: PlacementProbe; policy?: PlacementPolicy;
+  maxResident?;              // default 1 — the honest default for one GPU
+  maxConcurrentPerModel?;    // default 1; raising it costs KV cache at LOAD time
+  drainLimit?;               // default 8 — consecutive grants before yielding
+  unload?: (modelId) => Promise<void>;
+}
+type PlacementTier = "vram" | "ram" | "swap";
+type PlacementDecision = { action: "proceed" } | { action: "degrade"; gpuLayers } | { action: "refuse"; reason };
+const REFUSE_DEGRADED: PlacementPolicy;   // the default
+```
+
+Four properties are the design:
+
+- **A lease is SHARED, not exclusive.** One resident model serves many concurrent calls; the count is
+  what makes eviction safe, because a model is evictable exactly when nothing holds it.
+- **Queues are per model, and a resident model drains before it is swapped.** Global FIFO with room for
+  one model and an A,B,A,B arrival pattern reloads on every call. `drainLimit` bounds the drain, or a
+  continuously-fed model starves every other one.
+- **Nothing is preempted.** A generation in flight keeps its model until it finishes.
+- **The scheduler never imports `node-llama-cpp`.** Prediction is the `PlacementProbe` seam, so the
+  arbitration logic is testable against invented hardware.
+
+`REFUSE_DEGRADED` proceeds on `"vram"` and refuses anything degraded, naming what it would have cost. A
+model quietly running ten times slower is invisible in every metric except wall-clock; a host that wants
+degradation supplies a `PlacementPolicy`, which receives the model id (so a per-model answer needs no
+signature change) and may be async (so it can escalate to a human rather than answer from config).
+
+Wire it to a router — construction stays acyclic because the router exposes `unloadModel` rather than
+taking a manager:
+
+```ts
+const router  = createModelRouter({ embedded: … });
+const manager = new ResidencyManager({ unload: (id) => router.unloadModel(id) });
+```
 
 ### Cost estimation
 
@@ -2089,12 +2274,30 @@ in the same way.
 
 | Wrapper | Signature (config form) | What it does |
 | --- | --- | --- |
-| `withRateLimit` | `withRateLimit({ limiter }): ExecutorWrapper` | Admit the call through the injected `RateLimiter` (concurrency slot + rate headroom) and feed the outcome back (drives AIMD). A cancel while queued prevents it from ever starting. |
+| `withRateLimit` | `withRateLimit({ limiter, appliesTo? }): ExecutorWrapper` | Admit the call through the injected `RateLimiter` (concurrency slot + rate headroom) and feed the outcome back (drives AIMD). A cancel while queued prevents it from ever starting. `appliesTo` scopes it to a set of models by resolved id; anything else passes straight through, untouched. |
+| `withModelManager` | `withModelManager({ manager, appliesTo? }): ExecutorWrapper` | Hold a `ResidencyLease` on the model's weights for the duration of the call, released on **every** path — a leaked lease pins a model resident forever, and eviction needs zero leases. A cancel while queued never loads the model. A refused placement becomes a `permanent` failure (the machine cannot run it; retrying changes nothing). The wait is reported as `metrics.queuedMs`. |
 | `withBudget` | `withBudget(config?): ExecutorWrapper` | The ONE billing wrapper, two modes. **Reserve mode** (default): reserve against `ctx.meter` before the call — clamping the output ceiling to what the balance affords, refusing when it cannot cover a useful minimum — then **settle** the actual cost after (a failed call still settles); feeds observed output tokens back so the next reserve in the run is better priced. **Post-charge mode** (`computeCost` present): run the inner executor, then debit `computeCost(op, result)` and fold it into the reported `costUsd` — the mode an OUTER instance above `withMemoize` uses to bill memo reuse off the hit's annotation, applying to every op kind. |
 | `withSession` | `withSession(config?): ExecutorWrapper` | Resolve the op's `sessionId` against a `SessionStore` (from config or `ctx.sessions`) to a POSITION, run, and project the `LlmOutput` down to the op's output value on the way out. Forks when the position is already taken. Reports the **END** position on `metrics.sessionRef`. The session fields are **consumed** (stripped from the op sent inward). Composes over a RECORD-mode core, with `withRecord` inside it: the payload IS the conversation, so projecting any earlier would destroy what the record has to store. `providerSessionId` is honoured, not refused — an adapter that resumes natively gets it, and a fork never does. |
 
 `withSession` must sit **outside** `withMemoize` (which throws at composition time if it would wrap a
 session layer). See [README example 3](README.md#3-the-contract-path--one-seam-a-composed-executor-stack).
+
+`withRateLimit` and `withModelManager` are both bounded resources acquired in **nested** order, so the
+sets they govern must be **disjoint** — otherwise a call can hold a residency lease while waiting for a
+rate slot that another call holds while waiting for that lease. `appliesTo` is the mechanism that
+guarantees it:
+
+```ts
+compose(prompt)
+  .with(withRateLimit({ limiter, appliesTo: (id) => !isEmbeddedModel(id) }))   // provider quota
+  .with(withModelManager({ manager, appliesTo: isEmbeddedModel }))            // your VRAM
+```
+
+Note `isEmbeddedModel`, **not** `isLocalModel`: a `local/` server runs on your hardware but its memory
+belongs to another process that swaps on its own schedule, so there is no residency there for us to
+manage — it is still worth rate-limiting, which is why the limiter takes the complement. Compose
+`withModelManager` **outside** `withDeadline`, since queueing and loading are not the call's own latency
+and charging a minute-long load to its window turns "the machine was busy" into a deadline failure.
 
 ---
 

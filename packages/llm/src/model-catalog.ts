@@ -129,6 +129,61 @@ export interface ModelInfoInterface extends RateSet {
   available?: boolean;
   /** Provenance — which source last wrote this row ("openrouter-models" | "anthropic-docs" | "seed"). */
   source?: string;
+
+  // --- Weights (locally-served models) --------------------------------------
+  /**
+   * DESCRIPTOR: the model's weights are published under an open license. A property of the model, and
+   * true of plenty of rows served only remotely (a Llama on OpenRouter is still open-weight).
+   *
+   * Deliberately NOT a claim that we can run it: openness is about the license, {@link downloads} is
+   * about whether a servable artifact exists. A model can be open-weight with no GGUF anyone has
+   * published, and a row can carry weights under a license that forbids redistribution.
+   */
+  openWeights?: boolean;
+  /**
+   * Quantization of THIS row's weights (`Q4_K_M`, `Q8_0`, `F16`, …).
+   *
+   * It is row-level rather than a variant list because quantization changes everything the runtime
+   * keys on — footprint, quality, and how much context fits beside it — so each quant is its own
+   * `${route}/${model}` id, collapsed back together for a picker by {@link canonicalId}.
+   */
+  quantization?: string;
+  /**
+   * Resident size of the weights in MEBIBYTES, for the residency planner.
+   *
+   * The weights alone: the KV cache is NOT included, because it is a function of the context size and
+   * concurrency a CALL asks for rather than of the model. A planner adds the two.
+   */
+  weightsMb?: number;
+  /** Where the weights can be fetched from. Several entries are MIRRORS of this row's one quant, not
+   *  alternative quants — those are separate rows. Empty/absent ⇒ nothing to download (bring your own
+   *  file). */
+  downloads?: readonly WeightsLocation[];
+}
+
+/** One place a row's weights can be obtained from. */
+export interface WeightsLocation {
+  /** How to reach it: a HuggingFace repo reference, a plain URL, or a path already on this machine. */
+  source: "hf" | "url" | "file";
+  /**
+   * The reference itself — `<org>/<repo>/<file.gguf>` for `hf`, an absolute URL for `url`, a
+   * filesystem path for `file`. For a SPLIT model this names the FIRST part (see {@link parts}).
+   */
+  uri: string;
+  /** Total bytes across every part, when the source publishes it. */
+  sizeBytes?: number;
+  /** Integrity check for {@link uri}, when the source publishes one. */
+  sha256?: string;
+  /**
+   * The remaining parts of a SPLIT model, in order.
+   *
+   * Large GGUFs ship as `…-00001-of-00009.gguf` sets and every part is required — a downloader that
+   * fetches only `uri` gets a file that looks complete and loads to an error. Absent ⇒ single file.
+   */
+  parts?: readonly string[];
+  /** The source requires accepted terms plus a credential (most Llama/Gemma repos). A downloader with
+   *  no token should fail NAMING this rather than reporting the 401 as a missing file. */
+  gated?: boolean;
 }
 
 /**

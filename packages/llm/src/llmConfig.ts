@@ -99,6 +99,22 @@ export interface LlmConfiguration {
   /** Requested OUTPUT modalities (e.g. `["text","image"]`) for models that must be ASKED to emit non-text
    *  output. Gated against the model's `modalities.output` at plan time; forwarded per-provider. */
   outputModalities?: string[];
+
+  // --- Locally-served models: the knobs that cost MEMORY rather than money ----------
+  //
+  // They sit on the universal config because that is the layer hw's `environment` chain merges, which
+  // is how a subtree declares "run this under a 32k context" — and because what a call costs in memory
+  // is as much a property of the call as what it costs in money. They are inert for a remote model.
+
+  /** Context window to allocate for a locally-served model. Larger costs KV cache and can push layers
+   *  off the GPU: the same 32B model sits entirely in VRAM at 4k and spills at 32k. */
+  contextSize?: number;
+  /** Layers to offload to the GPU. `"auto"` fits as many as the CURRENT free VRAM allows — the only
+   *  correct answer on a GPU this process does not own. */
+  gpuLayers?: number | "auto" | "max";
+  /** Concurrent generations this model may serve. Each carries its own KV cache, so concurrency here is
+   *  bought with memory rather than being free as it is against a remote fleet. */
+  sequences?: number;
 }
 
 /** Sampling models — the decoding knobs a temperature-sampling endpoint accepts (a reasoning model
@@ -156,6 +172,17 @@ export class LlmConfigParseError extends Error {
  *  boundary position (§2.2): every one is narrowed by the `parse*` functions below before it escapes as a
  *  typed field, and this type is never the shape of a parsed result. */
 type RawBag = Record<string, unknown>;
+
+/** `gpuLayers` is a number OR one of two adaptive words, so it needs its own coercion. Strict like every
+ *  other field here: a present-but-wrong value throws rather than silently becoming `"auto"`, because
+ *  silently choosing the adaptive policy is exactly how a caller who asked for a full offload ends up
+ *  running at a tenth of the speed and never learns why. */
+function parseGpuLayers(v: unknown): number | "auto" | "max" | undefined {
+  if (v === undefined) return undefined;
+  if (v === "auto" || v === "max") return v;
+  if (typeof v === "number" && Number.isFinite(v) && v >= 0) return v;
+  throw new LlmConfigParseError('gpuLayers must be a non-negative number, "auto", or "max"');
+}
 
 /** Coerce a field that must be a finite number IF PRESENT: absent ⇒ undefined; present-but-not-a-number ⇒
  *  throw (never a best-effort drop). */
@@ -279,6 +306,9 @@ export function parseLlmConfig(json: JsonValue): LlmCallConfig {
     sessionId: strField(j.sessionId, "sessionId"),
     providerSessionId: strField(j.providerSessionId, "providerSessionId"),
     outputModalities: strArr(j.outputModalities, "outputModalities"),
+    contextSize: numField(j.contextSize, "contextSize"),
+    gpuLayers: parseGpuLayers(j.gpuLayers),
+    sequences: numField(j.sequences, "sequences"),
   };
 
   if (j.reasoning !== undefined) {
@@ -321,6 +351,9 @@ const CONFIG_KEYS = new Set<string>([
   "sessionId",
   "providerSessionId",
   "outputModalities",
+  "contextSize",
+  "gpuLayers",
+  "sequences",
   "reasoning",
   ...SAMPLING_KEYS,
 ]);

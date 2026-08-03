@@ -3,7 +3,8 @@ import type { BudgetMeter, BudgetMetrics, BudgetReservation, CallEstimate, Capab
 import { EXEC_METRICS_ALGEBRA, MapMemoCache, RUNTIME_CAPABILITIES, compose, withMemoize, wrapHandle } from "@declarative-ai/exec";
 import type { ModelMessage } from "ai";
 import { createPromptExecutor } from "../src/executor.js";
-import { withBudget, withRateLimit, withSession } from "../src/wrappers.js";
+import { ResidencyManager, PlacementRefused, type Placement } from "@declarative-ai/llm";
+import { withBudget, withModelManager, withRateLimit, withSession } from "../src/wrappers.js";
 import { fakeRunner, okOutcome, promptOp, sessionStack, transcripts, errorOf } from "./fakes.js";
 
 /**
@@ -36,6 +37,99 @@ function countingInner(perOp: Partial<Capabilities>): { inner: Executor<ExecServ
   return { inner, starts: () => n };
 }
 
+
+describe("withModelManager", () => {
+  const placement = (over: Partial<Placement> = {}): Placement => ({
+    tier: "vram",
+    gpuLayers: 32,
+    totalLayers: 32,
+    contextSize: 4096,
+    vramBytes: 8e9,
+    ramBytes: 1e8,
+    ...over,
+  });
+
+  it("holds a lease for the duration of the call and RELEASES it afterwards", async () => {
+    const manager = new ResidencyManager({ maxConcurrentPerModel: 1 });
+    const { runner } = fakeRunner([okOutcome(), okOutcome()]);
+    const stack = withModelManager({ manager }, createPromptExecutor({ runner }));
+    expect(errorOf(await stack.start(promptOp(), {}).result)).toBeUndefined();
+    // A second call proves the lease came BACK: with one slot, a leaked lease would hang here forever.
+    expect(errorOf(await stack.start(promptOp(), {}).result)).toBeUndefined();
+  });
+
+  it("releases the lease even when the call FAILS", async () => {
+    // The leak that matters most: eviction requires zero leases, so one lost lease permanently costs a
+    // slot on a machine that may only have one.
+    const manager = new ResidencyManager({ maxConcurrentPerModel: 1 });
+    const { runner } = fakeRunner([okOutcome({ error: { classification: "permanent", reason: "boom" } }), okOutcome()]);
+    const stack = withModelManager({ manager }, createPromptExecutor({ runner }));
+    expect(errorOf(await stack.start(promptOp(), {}).result)).toMatchObject({ reason: "boom" });
+    expect(errorOf(await stack.start(promptOp(), {}).result)).toBeUndefined();
+  });
+
+  it("SERIALIZES two models that cannot be co-resident", async () => {
+    const manager = new ResidencyManager({ maxResident: 1, maxConcurrentPerModel: 1 });
+    const { runner } = fakeRunner([okOutcome(), okOutcome()]);
+    const stack = withModelManager({ manager }, createPromptExecutor({ runner }));
+    await Promise.all([
+      stack.start(promptOp({ config: { model: "embedded/a" } }), {}).result,
+      stack.start(promptOp({ config: { model: "embedded/b" } }), {}).result,
+    ]);
+    expect(manager.residentModels()).toHaveLength(1); // one at a time, not both
+  });
+
+  it("turns a REFUSED placement into a permanent failure rather than a throw", async () => {
+    const manager = new ResidencyManager({ probe: { predict: () => Promise.resolve(placement({ tier: "swap" })) } });
+    const { runner, calls } = fakeRunner([okOutcome()]);
+    const stack = withModelManager({ manager }, createPromptExecutor({ runner }));
+    const out = await stack.start(promptOp(), {}).result;
+    expect(errorOf(out)?.classification).toBe("permanent"); // the machine cannot run it; retrying changes nothing
+    expect(errorOf(out)?.reason).toMatch(/spill to swap/);
+    expect(calls).toHaveLength(0); // and no call was made
+  });
+
+  it("cancel while QUEUED never starts the call", async () => {
+    // Waiting for residency can take minutes — an eviction, then a multi-gigabyte load. A caller that
+    // gave up must not cause the work.
+    const manager = new ResidencyManager({ maxResident: 1, maxConcurrentPerModel: 1 });
+    const { runner, calls } = fakeRunner([okOutcome(), okOutcome()]);
+    const stack = withModelManager({ manager }, createPromptExecutor({ runner }));
+    const held = stack.start(promptOp({ config: { model: "embedded/a" } }), {});
+    const queued = stack.start(promptOp({ config: { model: "embedded/b" } }), {});
+    const canceling = queued.cancel();
+    const out = await queued.result;
+    await canceling;
+    await held.result;
+    expect(errorOf(out)?.classification).toBe("canceled");
+    expect(calls).toHaveLength(1); // only the one that held a lease ran
+  });
+
+  it("reports the WAIT separately from the work", async () => {
+    // Otherwise a model that had to be evicted and reloaded is indistinguishable from a slow call —
+    // two findings you act on completely differently.
+    const manager = new ResidencyManager({
+      maxResident: 1,
+      maxConcurrentPerModel: 1,
+      unload: () => new Promise((r) => setTimeout(r, 40)), // stand in for freeing gigabytes
+    });
+    const { runner } = fakeRunner([okOutcome(), okOutcome()]);
+    const stack = withModelManager({ manager }, createPromptExecutor({ runner }));
+    const first = await stack.start(promptOp({ config: { model: "embedded/a" } }), {}).result;
+    const second = await stack.start(promptOp({ config: { model: "embedded/b" } }), {}).result;
+    expect(first.metrics.queuedMs ?? 0).toBeLessThan(20); // nothing resident: admitted immediately
+    expect(second.metrics.queuedMs ?? 0).toBeGreaterThanOrEqual(30); // waited for the eviction
+  });
+
+  it("passes a non-prompt op straight through", async () => {
+    const manager = new ResidencyManager();
+    const { inner, starts } = countingInner({});
+    const stack = withModelManager({ manager }, inner as unknown as Executor);
+    await stack.start({ kind: "function", functionRef: "f", input: {}, output: { name: "o", kind: "json" } } as Operation<InlineFamily>, {}).result;
+    expect(starts()).toBe(1);
+    expect(manager.residentModels()).toEqual([]);
+  });
+});
 
 describe("withRateLimit", () => {
   it("schedules the call through the limiter with the token estimate and reports the outcome", async () => {
@@ -117,6 +211,90 @@ describe("withRateLimit", () => {
     expect(seen.est[0]!.modelId).toBe("anthropic/claude-haiku-4-5");
     expect(seen.est[0]!.outputTokens).toBe(4000);
     expect(seen.reported).toEqual([{ rateLimited: undefined, modelId: "anthropic/claude-haiku-4-5" }]);
+  });
+
+  describe("appliesTo", () => {
+    /** A limiter that records what it was asked to admit and runs it. */
+    const spyLimiter = (): { limiter: RateLimiter; seen: { est: CallEstimate[]; reported: unknown[] } } => {
+      const seen: { est: CallEstimate[]; reported: unknown[] } = { est: [], reported: [] };
+      return {
+        seen,
+        limiter: {
+          schedule: (est, run) => {
+            seen.est.push(est);
+            return run();
+          },
+          reportOutcome: (o) => void seen.reported.push(o),
+        },
+      };
+    };
+
+    it("a model the predicate REJECTS bypasses the limiter entirely", async () => {
+      // The point of the split: a residency-managed local model must not also take a rate slot, or the
+      // two bounded resources can be acquired in opposite orders and deadlock.
+      const { limiter, seen } = spyLimiter();
+      const { runner, calls } = fakeRunner([okOutcome()]);
+      const stack = withRateLimit({ limiter, appliesTo: (id) => id?.startsWith("anthropic/") === true }, createPromptExecutor({ runner }));
+      const out = await stack.start(promptOp({ config: { model: "embedded/qwen3-8b-q4_k_m" } }), {}).result;
+      expect(errorOf(out)).toBeUndefined(); // the call still RAN
+      expect(calls).toHaveLength(1);
+      expect(seen.est).toHaveLength(0); // ...but never through the limiter
+      expect(seen.reported).toHaveLength(0);
+    });
+
+    it("a model the predicate ACCEPTS is scheduled as usual", async () => {
+      const { limiter, seen } = spyLimiter();
+      const { runner } = fakeRunner([okOutcome()]);
+      const stack = withRateLimit({ limiter, appliesTo: (id) => id?.startsWith("anthropic/") === true }, createPromptExecutor({ runner }));
+      const out = await stack.start(promptOp(), {}).result;
+      expect(errorOf(out)).toBeUndefined();
+      expect(seen.est[0]!.modelId).toBe("anthropic/claude-haiku-4-5");
+      expect(seen.reported).toEqual([{ rateLimited: undefined, modelId: "anthropic/claude-haiku-4-5" }]);
+    });
+
+    it("no predicate governs EVERY model — the historical default is unchanged", async () => {
+      const { limiter, seen } = spyLimiter();
+      const { runner } = fakeRunner([okOutcome()]);
+      const stack = withRateLimit({ limiter }, createPromptExecutor({ runner }));
+      await stack.start(promptOp({ config: { model: "embedded/qwen3-8b-q4_k_m" } }), {}).result;
+      expect(seen.est[0]!.modelId).toBe("embedded/qwen3-8b-q4_k_m");
+    });
+
+    it("pairs with withModelManager over DISJOINT model sets", async () => {
+      // The composition this option exists for. Both layers are bounded resources acquired in nested
+      // order, so overlapping sets admit a lock ordering: one call holding a residency lease waiting
+      // for a rate slot, while another holds the slot waiting for a lease that needs the first to
+      // finish. Disjoint sets make that cycle unconstructible.
+      const { limiter, seen } = spyLimiter();
+      const manager = new ResidencyManager();
+      const { runner } = fakeRunner([okOutcome(), okOutcome()]);
+      const stack = withModelManager(
+        { manager, appliesTo: (id) => id?.startsWith("embedded/") === true },
+        withRateLimit({ limiter, appliesTo: (id) => id?.startsWith("embedded/") !== true }, createPromptExecutor({ runner })),
+      );
+      await stack.start(promptOp({ config: { model: "embedded/qwen3-8b-q4_k_m" } }), {}).result;
+      expect(seen.est).toHaveLength(0); // the local model never took a rate slot...
+      expect(manager.residentModels()).toEqual(["embedded/qwen3-8b-q4_k_m"]);
+
+      await stack.start(promptOp(), {}).result;
+      expect(seen.est).toHaveLength(1); // ...and the remote one never took a residency lease
+      expect(manager.residentModels()).toEqual(["embedded/qwen3-8b-q4_k_m"]);
+    });
+
+    it("the predicate sees the RESOLVED model, not the op's inline fragment", async () => {
+      // Same trap `pricedCall` exists for: a `defaults`-supplied model is invisible in `op.config`, so a
+      // predicate reading the raw op would route every defaulted call to the wrong layer.
+      const seenIds: (string | undefined)[] = [];
+      const { limiter } = spyLimiter();
+      const defaults = { model: "embedded/qwen3-8b-q4_k_m", maxOutputTokens: 256 };
+      const { runner } = fakeRunner([okOutcome()]);
+      const stack = withRateLimit(
+        { limiter, defaults, appliesTo: (id) => (seenIds.push(id), true) },
+        createPromptExecutor({ runner, defaults }),
+      );
+      await stack.start(promptOp({ config: {} }), {}).result;
+      expect(seenIds).toEqual(["embedded/qwen3-8b-q4_k_m"]);
+    });
   });
 
   it("counts the FULL message set that will be sent, not just system + user", async () => {

@@ -86,6 +86,15 @@ export interface TokenCounts {
 export interface LlmMetrics extends TokenCounts {
   durationMs: number;
   startMs?: number;
+  /**
+   * Time spent WAITING TO START, ms — queued behind a bounded resource, plus any loading that admission
+   * had to do first. Restated here rather than inherited, exactly as `durationMs` and `startMs` are.
+   *
+   * It keeps a busy machine from reading as a slow model: a locally-served call that had to evict and
+   * reload can spend a minute before its first token, and folding that into `durationMs` reports the
+   * provider as slow when nothing about the provider was.
+   */
+  queuedMs?: number;
   /** USD this call cost. Required: "free" and "unknown" are different claims, and `costSource` carries
    *  the second one. */
   costUsd: number;
@@ -117,6 +126,8 @@ export function mergeLlmMetrics(a: LlmMetrics, b: LlmMetrics): LlmMetrics {
   return {
     durationMs: a.durationMs + b.durationMs,
     startMs: a.startMs ?? b.startMs,
+    // Sums like duration: two retried attempts that each queued for a model swap really did wait twice.
+    queuedMs: sum(a.queuedMs, b.queuedMs),
     costUsd: a.costUsd + b.costUsd,
     // The MORE AUTHORITATIVE of the two, not the latest. Taking `b`'s unconditionally let a retry
     // relabel real spend as un-priced — merging a billed `{0.004, "table"}` with an attempt that

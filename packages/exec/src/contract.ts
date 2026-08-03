@@ -55,6 +55,17 @@ export interface ExecMetrics {
   durationMs: number;
   /** When it started (ms epoch). */
   startMs?: number;
+  /**
+   * Time spent WAITING TO START, ms — queued for admission behind a bounded resource, and any loading
+   * that admission had to do first.
+   *
+   * It exists because otherwise that time is indistinguishable from the work. A model that had to be
+   * evicted and reloaded can add a minute before a single token is generated, and folding that into
+   * `durationMs` reports the call as slow when the machine was busy — two very different findings, and
+   * the one you act on differently. Kept as time rather than anything provider-specific, which is why
+   * it can live here alongside `durationMs` without this package learning what a model is.
+   */
+  queuedMs?: number;
   /** LLM calls made by children, rolled up by a composite. A prompt op IS one such call; a non-LLM
    *  function (a pure helper, a sub-workflow that made none) contributes zero. */
   childLlmCalls?: number;
@@ -78,6 +89,9 @@ export function mergeExecMetrics<M extends ExecMetrics>(a: M, b: M): M {
     ...b,
     durationMs: a.durationMs + b.durationMs,
     ...(startMs !== undefined ? { startMs } : {}),
+    // Sums like duration: two retried attempts that each queued for a model swap really did spend both
+    // waits. Absent on both sides stays absent, so nothing gains a spurious zero.
+    ...(a.queuedMs !== undefined || b.queuedMs !== undefined ? { queuedMs: (a.queuedMs ?? 0) + (b.queuedMs ?? 0) } : {}),
     ...(a.childLlmCalls !== undefined || b.childLlmCalls !== undefined ? { childLlmCalls: (a.childLlmCalls ?? 0) + (b.childLlmCalls ?? 0) } : {}),
   };
 }

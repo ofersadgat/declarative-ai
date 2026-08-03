@@ -187,7 +187,10 @@ ai-exec/
                                              the augmentable ExecServices, composition, memoization,
                                              rate limiting, deadline, retry, SessionStore
     llm/         @declarative-ai/llm         one structured LLM call end to end + the provider layer
-                                             (node & edge-capable); exec-FREE
+                                             (node & edge-capable); exec-FREE. Four routes: anthropic,
+                                             openrouter, local (an OpenAI-compatible server) and
+                                             embedded (weights in-process), plus the weights store and
+                                             the residency manager the last two need
     promptop/    @declarative-ai/promptop    PromptOp → LlmCallDefinition lowering, the prompt
                                              Executor, and the llm-aware wrappers
     validate/    @declarative-ai/validate    structural subtyping, the ONE generic binding checker,
@@ -232,7 +235,9 @@ imports (findmyprompt's `hash.ts` discipline — edge/Workflow-runtime safe). `@
 adds only `json-schema-to-ts`, and that is TYPES ONLY, which is what lets findmyprompt adopt the same
 op vocabulary without taking on the execution contract. **Packages are independently usable, and that
 is enforced by test**: `npm i @declarative-ai/llm` installs no ajv, and a structured LLM call runs with
-`json + llm` and nothing else. `@declarative-ai/llm` depends on the `ai` SDK + provider packages;
+`json + llm` and nothing else. `@declarative-ai/llm` depends on the `ai` SDK + provider packages, and takes `node-llama-cpp` as an
+**optional peer** — the in-process route's ~100 MB of native binaries are neither installed nor loaded,
+nor followed by a bundler, unless an `embedded/` model is actually resolved (§4.1a).
 `@declarative-ai/promptop` is the only thing that joins it to `exec`. `@declarative-ai/hw` **does not
 depend on `promptop`** — that would drag the AI SDK and every provider package into the workflow engine.
 It takes the prompt executor as a plain `Executor` (`exec`'s own type), so it never
@@ -654,6 +659,46 @@ The declarative model of §1 lands entirely here:
   `openrouter` = everything else); a bare id is a fail-fast error, never guessed. The `ModelRouter`
   (`createModelRouter`) creates provider clients lazily, so a process that only calls one route never needs
   the other's key.
+
+### 4.1a Models that run on your own machine
+
+The `local` and `embedded` routes add no new execution seam: a locally-served model resolves to the same
+`LanguageModel` the remote routes do, and everything above `resolveModel` — `generateStructured`, the
+wrappers, the metrics — is untouched. What changes is the **economics**, and that is a design constraint
+rather than a detail.
+
+**A remote fleet meters you by rate and by money; your own machine meters you by memory, and the two are
+nothing alike.** Rate headroom regenerates on its own, so waiting is always sufficient and a limiter only
+ever has to decide *when*. Memory does not regenerate: something must be **unloaded** before something
+else can load, the thing being unloaded may be in use, and the decision is *what to give up*. That is a
+different kind of arbiter, which is why `withRateLimit` was not extended to cover it.
+
+Three consequences shape the implementation.
+
+**Loading is slow, so nothing may load at resolve time.** `resolveModel` is synchronous, and mapping a
+GGUF takes seconds while fetching one takes minutes. Both local routes therefore return a handle
+immediately and do their work on first use — a managed server boots inside the provider's `fetch`, and
+embedded weights map on the first `doStream` (which returns `PromiseLike`, so this is within the
+contract). A pleasant side effect: a router configured with a model it never calls starts nothing.
+
+**Concurrency is bought with memory.** A llama.cpp context fixes its sequence count at load and each
+sequence carries its own KV cache — measured, a 0.5B model was 374 MB of weights and 491 MB for four
+4096-token sequences. So "one resident model serves many concurrent calls" is true only up to a number
+chosen *at load time* and paid for in VRAM, and per-model concurrency is a residency decision rather than
+a rate one. This is also why the placement tier is a property of **model + context + concurrency**, never
+of the model alone: the same 32B sits entirely in VRAM at 4k context and spills at 32k.
+
+**We do not own the GPU.** Free VRAM changes underneath us — during development of this feature it moved
+by 11 GB between two commands. So the manager keeps an exact ledger of *its own* allocations, treats
+capacity as a re-sampled observation, and treats admission as a prediction that allocation may still
+refute. `local/` goes further: its memory belongs to another process entirely, so its residency is
+declared uncontrolled rather than pretended — the same "state what you cannot do" move the codex adapter
+makes with `policyEnforcement`.
+
+The optional peer follows from the same honesty. `node-llama-cpp` ships ~100 MB of native binaries, so a
+consumer who only calls Anthropic must not pay for it — which means not only declaring it optional but
+making it *actually* invisible: reached through a runtime-assembled specifier so no bundler follows it
+into platform shims and `.node` files for a route the consumer never used.
 
 ### 4.2 Hierarchical workflows (`@declarative-ai/hw`)
 

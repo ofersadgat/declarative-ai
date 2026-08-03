@@ -76,9 +76,80 @@ export const OPENROUTER_CONFIG_SCHEMA: JsonSchemaDoc = {
   additionalProperties: false,
 };
 
+/**
+ * Local OpenAI-compatible SERVER config space (Ollama, LM Studio, `llama-server`, vLLM). The sampling
+ * knobs are llama.cpp's, which is a superset of OpenAI's in one direction (`minP`) and a subset in
+ * another: no `frequencyPenalty`/`presencePenalty` here, because the OpenAI-compatible shims in front
+ * of llama.cpp accept them inconsistently and a silently-ignored knob is worse than an absent one.
+ *
+ * No `reasoning`: the neutral spec is adapted on the way out by `adaptReasoning`, which knows the
+ * Anthropic and OpenRouter shapes only. Declaring it here would let an author request thinking that
+ * nothing translates. It is additive to add once a local adapter can honor it.
+ */
+export const LOCAL_CONFIG_SCHEMA: JsonSchemaDoc = {
+  type: "object",
+  title: "local-config",
+  properties: {
+    model: { type: "string", description: "Model id as the local server names it, e.g. qwen2.5-32b-instruct" },
+    temperature: { type: "number", minimum: 0, maximum: 2 },
+    topP: { type: "number", minimum: 0, maximum: 1 },
+    topK: { type: "integer", minimum: 0 },
+    minP: { type: "number", minimum: 0, maximum: 1 },
+    maxOutputTokens: { type: "integer", minimum: 1 },
+    seed: { type: "integer" },
+    stopSequences: { type: "array", items: { type: "string" } },
+  },
+  required: ["model"],
+  additionalProperties: false,
+};
+
+/**
+ * In-process (`node-llama-cpp`) config space — the local server's knobs plus the three that decide what
+ * the call COSTS IN MEMORY rather than in money.
+ *
+ * `contextSize`, `gpuLayers` and `sequences` are load-time parameters, not per-request ones, and they
+ * sit here deliberately: they are what makes two calls to the same weights different in resource
+ * terms, and the residency manager has to read them to plan. The KV cache scales with BOTH
+ * `contextSize` and `sequences` (measured: a 0.5B model was 374 MB of weights and 491 MB for four
+ * 4096-token sequences — the cache exceeded the model), so concurrency is bought with VRAM here in a
+ * way it never is against a remote fleet.
+ */
+export const EMBEDDED_CONFIG_SCHEMA: JsonSchemaDoc = {
+  type: "object",
+  title: "embedded-config",
+  properties: {
+    model: { type: "string", description: "Catalog model id, e.g. qwen2.5-7b-instruct-q4_k_m" },
+    temperature: { type: "number", minimum: 0, maximum: 2 },
+    topP: { type: "number", minimum: 0, maximum: 1 },
+    topK: { type: "integer", minimum: 0 },
+    minP: { type: "number", minimum: 0, maximum: 1 },
+    maxOutputTokens: { type: "integer", minimum: 1 },
+    seed: { type: "integer" },
+    stopSequences: { type: "array", items: { type: "string" } },
+    contextSize: {
+      type: "integer",
+      minimum: 1,
+      description: "Context window to allocate. Larger costs KV cache memory and can force layers off the GPU.",
+    },
+    gpuLayers: {
+      oneOf: [{ type: "integer", minimum: 0 }, { type: "string", enum: ["auto", "max"] }],
+      description: "Layers to offload to the GPU. 'auto' fits as many as the CURRENT free VRAM allows.",
+    },
+    sequences: {
+      type: "integer",
+      minimum: 1,
+      description: "Concurrent generations this model may serve. Each carries its own KV cache.",
+    },
+  },
+  required: ["model"],
+  additionalProperties: false,
+};
+
 const SCHEMAS: Record<ModelFamily, JsonSchemaDoc> = {
   anthropic: ANTHROPIC_CONFIG_SCHEMA,
   openrouter: OPENROUTER_CONFIG_SCHEMA,
+  local: LOCAL_CONFIG_SCHEMA,
+  embedded: EMBEDDED_CONFIG_SCHEMA,
 };
 
 /** The JSON-Schema document for a family. */

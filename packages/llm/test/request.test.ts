@@ -3,7 +3,7 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import { typedSchema } from "../src/generate.js";
 import type { LlmCallResult } from "../src/output.js";
 import { executeRequest, type LlmCallEnvironment } from "../src/call.js";
-import { fakeRouter, flatSchema, streamingModel, usage, errorOf } from "./fakes.js";
+import { fakeRouter, flatSchema, stream, streamingModel, usage, errorOf } from "./fakes.js";
 
 function okModel(): MockLanguageModelV3 {
   return streamingModel([
@@ -80,25 +80,38 @@ describe("executeRequest — declaration + env convenience", () => {
 
 describe("executeLlmCall — injectable schema-profile resolution", () => {
   it("uses env.schemaProfile over the built-in catalog profile", async () => {
-    const { JSON_OBJECT } = await import("../src/schema/index.js");
+    const { ADVISORY } = await import("../src/schema/index.js");
     const { executeLlmCall } = await import("../src/call.js");
     const seen: string[] = [];
-    // An advisory profile that REQUIRES the word "json" in the prompt: with no "json" anywhere the
-    // call must fail fast (permanent) BEFORE hitting the provider. The default (catalog) profile for
-    // this model is the strict Anthropic tier, which never fails this way — so reaching the failure
-    // proves the injected resolver was consulted.
+    // The catalog default for this model is the STRICT Anthropic tier, which puts the schema on the
+    // wire and leaves the system prompt alone. Injecting the TEXT floor instead flips both: no
+    // `responseFormat`, and the schema described in the prompt. Observing that flip is what proves the
+    // injected resolver was consulted rather than the catalog.
+    let sent: { responseFormat?: unknown; prompt?: unknown } = {};
+    const model = new MockLanguageModelV3({
+      doStream: async (options) => {
+        sent = options as typeof sent;
+        return stream([
+          { type: "text-start", id: "1" },
+          { type: "text-delta", id: "1", delta: '{"answer":"4"}' },
+          { type: "text-end", id: "1" },
+          { type: "finish", finishReason: "stop", usage: usage(1, 1) },
+        ]);
+      },
+    });
     const out = await executeLlmCall(
       { model: "anthropic/claude-haiku-4-5", prompt: "what is 2+2?", schema: flatSchema, timeoutMs: 5000 },
       {
-        modelRouter: fakeRouter(okModel()),
+        modelRouter: fakeRouter(model),
         schemaProfile: (modelId) => {
           seen.push(modelId);
-          return { ...JSON_OBJECT, promptRequiresJSONSpecifier: true };
+          return ADVISORY;
         },
       },
     );
     expect(seen).toEqual(["anthropic/claude-haiku-4-5"]);
-    expect(errorOf(out)?.classification).toBe("permanent");
-    expect(errorOf(out)?.reason).toMatch(/promptRequiresJSONSpecifier/);
+    expect(errorOf(out)).toBeUndefined();
+    expect(sent.responseFormat).toBeUndefined(); // text tier sends none
+    expect(JSON.stringify(sent.prompt)).toMatch(/conforming to this JSON Schema/);
   });
 });

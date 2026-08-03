@@ -35,7 +35,7 @@ import type {
   SessionStore,
   CallEstimate,
 } from "@declarative-ai/exec";
-import { canceledFailure, curryOrApply, forwardCapabilitiesFor, isExecutor, isOk, isPositionTaken, wrapHandle } from "@declarative-ai/exec";
+import { canceledFailure, curryOrApply, forwardCapabilitiesFor, isExecutor, isOk, isPositionTaken, systemClock, wrapHandle } from "@declarative-ai/exec";
 import {
   DEFAULT_HOLD_OUTPUT_MULTIPLIER,
   MIN_USEFUL_OUTPUT_TOKENS,
@@ -47,7 +47,7 @@ import {
   promptText,
   type OutputTokenStats,
 } from "@declarative-ai/llm";
-import type { LlmOutput, ModelMessage } from "@declarative-ai/llm";
+import type { LlmOutput, ModelMessage, ResidencyLease, ResidencyManager } from "@declarative-ai/llm";
 import { lowerPromptOp, type LoweringOptions } from "./lowering.js";
 import { projectLlmOutput } from "./executor.js";
 
@@ -199,15 +199,40 @@ function isPrompt(op: Operation<InlineFamily>): op is PromptOp<InlineFamily> {
 
 // --- Rate limiting -------------------------------------------------------------
 
-/** Options for {@link withRateLimit}: the limiter, plus the config-resolution inputs the ESTIMATE is
- *  priced against (see {@link pricedCall}). */
-export type RateLimitOptions = { limiter: RateLimiter } & ResolutionOptions;
+/** Options for {@link withRateLimit}: the limiter, the models it GOVERNS, plus the config-resolution
+ *  inputs the ESTIMATE is priced against (see {@link pricedCall}). */
+export type RateLimitOptions = {
+  limiter: RateLimiter;
+  /**
+   * Which models this limiter governs, by resolved model id. Absent ⇒ ALL of them (the historical
+   * behavior, and the right default for a stack whose calls all go to one provider fleet).
+   *
+   * It exists because rate headroom and MEMORY residency are two different scarcities gating two
+   * different sets of models. A remote call waits for provider quota; a local one waits for weights to
+   * be resident. Splitting them by model id lets each layer govern the set it actually knows about —
+   * `withRateLimit({ appliesTo: isRemote })` outside a residency manager scoped to the local ones.
+   *
+   * That split is not merely tidy, it is what keeps the composition SAFE. Both layers are bounded
+   * resources acquired in nested order, so if one model is gated by both there is a lock ordering:
+   * call A holds a residency lease and waits for a concurrency slot, while call B holds the slot and
+   * waits for a lease that cannot be granted until A finishes. Disjoint sets make that cycle
+   * unconstructible.
+   *
+   * A call whose model no layer resolved arrives as `undefined` — the predicate decides, because
+   * "governed by default" and "ungoverned by default" are both defensible and only the caller knows
+   * which fleet an unnamed model would land in.
+   */
+  appliesTo?: (modelId: string | undefined) => boolean;
+} & ResolutionOptions;
 
 /**
  * Rate limiting: admit the inner call through the injected `RateLimiter` (concurrency slot + rate
  * headroom) using a token estimate off the prompt text, and feed the outcome back (`reportOutcome`
  * drives AIMD). A cancel that lands while the call is still QUEUED prevents it from ever starting
  * (returns a `canceled` outcome); a limiter fault is normalized into a permanent failure.
+ *
+ * Scoped to the models {@link RateLimitOptions.appliesTo} names; anything else passes through to the
+ * inner executor untouched, exactly as a non-prompt op does.
  */
 export function withRateLimit<R = ExecServices, M extends ExecMetrics = ExecMetrics, Out = ResolvedValue>(
   config: RateLimitOptions,
@@ -220,12 +245,25 @@ export function withRateLimit<R = ExecServices, M extends ExecMetrics = ExecMetr
   config: RateLimitOptions,
   inner?: Executor<R, M, Operation<InlineFamily>, Out>,
 ): ExecutorWrapper<R, R, M, Operation<InlineFamily>, Out> | Executor<R, M, Operation<InlineFamily>, Out> {
-  const { limiter } = config;
+  const { limiter, appliesTo } = config;
   /** Per-op token-estimate cache: the estimate is derived from the full prompt text (potentially a long
    *  transcript), and the SAME op object is re-submitted per repair attempt / retry. Scoped to THIS
    *  wrapper because the estimate now depends on its `defaults`/`configs` too — a module-level cache
    *  would hand one stack's resolution to another's. */
   const estimateCache = new WeakMap<object, CallEstimate>();
+  /** The RESOLUTION, cached separately from the estimate because `appliesTo` needs only the model id
+   *  and must decide BEFORE the estimate is computed — tokenizing a 20k-char transcript to price a call
+   *  this limiter then declines to govern is pure waste. Same key and same lifetime as the estimate
+   *  cache, so the two never disagree about which call they describe. */
+  const pricedCache = new WeakMap<object, PricedCall>();
+  const pricedFor = (op: PromptOp<InlineFamily>): PricedCall => {
+    let priced = pricedCache.get(op);
+    if (priced === undefined) {
+      priced = pricedCall(op, config);
+      pricedCache.set(op, priced);
+    }
+    return priced;
+  };
   const wrap = ((innerExec: Executor): Executor => ({
     capabilities: innerExec.capabilities,
     metrics: innerExec.metrics,
@@ -235,12 +273,17 @@ export function withRateLimit<R = ExecServices, M extends ExecMetrics = ExecMetr
     ...forwardCapabilitiesFor(innerExec),
     start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue> {
       if (!isPrompt(op)) return innerExec.start(op, ctx);
+      const priced = pricedFor(op);
+      // An UNGOVERNED model is handed straight to the inner executor — the same untouched passthrough a
+      // non-prompt op gets, rather than a wrapped handle that would only forward. Deciding here, before
+      // `wrapHandle`, is what keeps the inner handle's event stream identical for a call this limiter
+      // has nothing to say about.
+      if (appliesTo !== undefined && !appliesTo(priced.model)) return innerExec.start(op, ctx);
       return wrapHandle(async (ctl) => {
         let est = estimateCache.get(op);
         if (!est) {
-          // Resolving is what makes the estimate honest, and it is also the expensive part — so it
-          // happens on the cache MISS, not once per `start`.
-          const priced = pricedCall(op, config);
+          // Tokenizing the resolved text is the expensive half, so it happens on the cache MISS — the
+          // resolution itself is already shared with the `appliesTo` check above.
           est = { ...estimateCallTokens(priced.text, undefined, priced.maxOutputTokens), modelId: priced.model };
           estimateCache.set(op, est);
         }
@@ -257,6 +300,109 @@ export function withRateLimit<R = ExecServices, M extends ExecMetrics = ExecMetr
         });
         if (ran) limiter.reportOutcome({ rateLimited: isOk(result) ? undefined : result.error.rateLimited, modelId });
         return result;
+      });
+    },
+  })) as unknown as ExecutorWrapper<R, R, M, Operation<InlineFamily>, Out>;
+  return curryOrApply(wrap, inner);
+}
+
+// --- Model residency -----------------------------------------------------------
+
+/** Options for {@link withModelManager}: the arbiter, the models it governs, and the config-resolution
+ *  inputs used to learn which model a call wants. */
+export type ModelManagerOptions = {
+  manager: ResidencyManager;
+  /**
+   * Which models this manager governs. Absent ⇒ ALL of them.
+   *
+   * The correct pairing is `withModelManager({ appliesTo: isEmbeddedModel })` outside
+   * `withRateLimit({ appliesTo: (id) => !isEmbeddedModel(id) })` — total and disjoint.
+   *
+   * Note it is `isEmbeddedModel`, NOT `isLocalModel`. A `local/` server runs on your hardware but its
+   * memory belongs to another process that swaps on its own schedule, so managing residency for it
+   * would serialize work on bookkeeping we cannot enforce. It still has finite capacity and is worth
+   * rate-limiting, which is why the limiter takes the complement rather than `isRemoteModel`.
+   *
+   * Disjointness is not merely tidy: both layers are bounded resources acquired in nested order, so an
+   * overlap admits a lock ordering — see {@link RateLimitOptions.appliesTo}.
+   */
+  appliesTo?: (modelId: string | undefined) => boolean;
+} & ResolutionOptions;
+
+/**
+ * MODEL RESIDENCY: hold a lease on the model's weights for the duration of the call.
+ *
+ * Everything interesting is in the {@link ResidencyManager}; this wrapper's whole job is to learn which
+ * model the call wants, take a lease before dispatching, and give it back afterwards. Two details are
+ * what make it correct rather than merely plausible:
+ *
+ *  - **The lease is released on EVERY path** — success, failure, cancel-while-queued, and a throw. A
+ *    lease never returned pins a model resident forever, and since eviction requires zero leases, one
+ *    leak permanently poisons a slot on a machine that may only have one.
+ *  - **A cancel that lands while QUEUED never loads the model.** Waiting for residency can take minutes
+ *    (an eviction, then a multi-gigabyte load), so a caller that gave up must not cause the work.
+ *
+ * Compose it OUTSIDE `withDeadline`: queueing and loading are not the call's own latency, and charging
+ * a 60-second model load to the call's window turns "the machine was busy" into a deadline failure that
+ * reads like provider slowness.
+ */
+export function withModelManager<R = ExecServices, M extends ExecMetrics = ExecMetrics, Out = ResolvedValue>(
+  config: ModelManagerOptions,
+): ExecutorWrapper<R, R, M, Operation<InlineFamily>, Out>;
+export function withModelManager<R = ExecServices, M extends ExecMetrics = ExecMetrics, Out = ResolvedValue>(
+  config: ModelManagerOptions,
+  inner: Executor<R, M, Operation<InlineFamily>, Out>,
+): Executor<R, M, Operation<InlineFamily>, Out>;
+export function withModelManager<R = ExecServices, M extends ExecMetrics = ExecMetrics, Out = ResolvedValue>(
+  config: ModelManagerOptions,
+  inner?: Executor<R, M, Operation<InlineFamily>, Out>,
+): ExecutorWrapper<R, R, M, Operation<InlineFamily>, Out> | Executor<R, M, Operation<InlineFamily>, Out> {
+  const { manager, appliesTo } = config;
+  const modelCache = new WeakMap<object, string | undefined>();
+  const wrap = ((innerExec: Executor): Executor => ({
+    capabilities: innerExec.capabilities,
+    metrics: innerExec.metrics,
+    ...forwardCapabilitiesFor(innerExec),
+    start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue> {
+      if (!isPrompt(op)) return innerExec.start(op, ctx);
+      let modelId = modelCache.get(op);
+      if (!modelCache.has(op)) {
+        modelId = pricedCall(op, config).model;
+        modelCache.set(op, modelId);
+      }
+      // An ungoverned model is handed straight through, untouched — the same passthrough a non-prompt
+      // op gets. A model with no residency to manage must not queue behind one that has.
+      if (appliesTo !== undefined && !appliesTo(modelId)) return innerExec.start(op, ctx);
+      if (modelId === undefined) return innerExec.start(op, ctx);
+      return wrapHandle(async (ctl) => {
+        let lease: ResidencyLease;
+        const waitFrom = (ctx.clock ?? systemClock).now();
+        try {
+          lease = await manager.acquire(modelId, ctl.signal);
+        } catch (err) {
+          // A REFUSED placement is permanent — the machine cannot run this model and retrying changes
+          // nothing — while a cancel is a cancel. Anything else (a probe or policy fault) is reported
+          // as permanent too rather than being swallowed into a silent admission.
+          if (ctl.canceled()) return canceledFailure("canceled while queued for model residency");
+          return {
+            error: { classification: "permanent" as const, reason: err instanceof Error ? err.message : String(err) },
+            metrics: { durationMs: 0 },
+          };
+        }
+        // Measured across the WHOLE wait — queueing behind other calls, an eviction, and the load that
+        // followed it — because from the caller's side those are one indivisible "not started yet".
+        const queuedMs = (ctx.clock ?? systemClock).now() - waitFrom;
+        try {
+          if (ctl.canceled()) return canceledFailure("canceled while queued for model residency");
+          const result = await ctl.started(innerExec.start(op, ctx)).result;
+          // Added rather than overwritten: an inner layer that also queued (a rate limiter) already
+          // recorded its own wait, and the call really did spend both.
+          return { ...result, metrics: { ...result.metrics, queuedMs: (result.metrics.queuedMs ?? 0) + queuedMs } };
+        } finally {
+          // On EVERY path. A lease never returned pins the model resident forever, and eviction needs
+          // zero leases — so one leak permanently costs a slot on a machine that may only have one.
+          lease.release();
+        }
       });
     },
   })) as unknown as ExecutorWrapper<R, R, M, Operation<InlineFamily>, Out>;

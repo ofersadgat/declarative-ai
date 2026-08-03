@@ -45,8 +45,8 @@ executor as a plain `Executor`, which is what keeps the AI SDK out of the workfl
 | `@declarative-ai/json` | The bottom of the graph, and nothing in it can be declined: `JsonValue`/`Jsonify<T>`/`JsonSchema<T>`/`SchemaDocument`/`Serializable`, the codec + type-name registry (`x-type`), schema templates (`$param`), schema inference, `selectType`, RFC 8785 canonicalization + hashing, the classified error vocabulary (`ErrorClass`/`Failure`), and the `Result`/`ResultWithMetrics` envelope all three result types build on | `canonicalize`, `@noble/hashes` |
 | `@declarative-ai/ops` | The typed operation spine: the op model generic over a REF FAMILY (`PromptOp`/`FunctionOp`/`Parameter`/`Ref`, id-addressed or inline), the ONE function registry of discriminated entries (`pure` \| `host` \| `runtime`) with required per-variant capabilities, the `Signature` ⇄ schema bridge, the `Metrics` floor, `OperationRecord`, op metadata, and the `FromSchema` typed layer | `json-schema-to-ts` (types only) |
 | `@declarative-ai/exec` | The ONE execution seam: `Executor.start(op, ctx)`, `ExecHandle`, `ExecResult`, the augmentable `ExecServices`, composition (`compose(...).with(...)`), memoization, AIMD rate limiting + token buckets, deadline arithmetic, retry, append-only sessions (`SessionStore`, `withSessionPosition`, `withRecord`) | — |
-| `@declarative-ai/llm` | One structured LLM call, end to end and `exec`-free: `executeLlmCall(definition, environment)`, the model router (Anthropic/OpenRouter), streaming generation with cache-split cost accounting, `LlmConfiguration` + strict parsing/resolution, schema/reasoning adaptation, tools, files, the model catalog, and `plan` | `ai`, `@ai-sdk/*`, `undici` |
-| `@declarative-ai/promptop` | `PromptOp → LlmCallDefinition` lowering, the prompt `Executor`, and the llm-aware wrappers (`withRateLimit`/`withBudget`/`withSession`) | — |
+| `@declarative-ai/llm` | One structured LLM call, end to end and `exec`-free: `executeLlmCall(definition, environment)`, the model router (Anthropic/OpenRouter/local/embedded, with managed-server lifecycle), streaming generation with cache-split cost accounting, `LlmConfiguration` + strict parsing/resolution, schema/reasoning adaptation, tools, files, the model catalog, the weights store, model residency, and `plan` | `ai`, `@ai-sdk/*`, `undici`; **optional peer** `node-llama-cpp` |
+| `@declarative-ai/promptop` | `PromptOp → LlmCallDefinition` lowering, the prompt `Executor`, and the llm-aware wrappers (`withRateLimit`/`withBudget`/`withSession`/`withModelManager`) | — |
 | `@declarative-ai/validate` | Structural JSON-Schema subtyping, the ONE generic binding checker (parameterized by ref family), and one ajv wrapper with an injectable `$ref` resolver. The only package carrying a heavy dependency | **ajv** |
 | `@declarative-ai/permissions` | The tool-call permission model: `ExecPolicy`, `Approver`, profile × mode resolution, baselines | — |
 | `@declarative-ai/tools` | Workspace-backed agent tools (`read_file`/`write_file`/`edit_file`/`list_dir`/`grep`/`glob`/`run_command`) with a path-escape guard — the impls that make a composed prompt executor a coding agent | `node:*` |
@@ -171,11 +171,70 @@ if (!isOk(result)) {
 }
 ```
 
-> **Model ids are route-prefixed** `{route}/{model}`, where route is `anthropic` (native Anthropic API)
-> or `openrouter` (everything else). The remainder is the provider-native id: `anthropic/claude-sonnet-5`,
-> `openrouter/openai/gpt-5`. The same underlying model can be reached either way —
-> `anthropic/claude-opus-4-8` (native) vs `openrouter/anthropic/claude-opus-4.8` (via OpenRouter) — with
-> no ambiguity. Routing is **explicit**: a bare, unprefixed id is a fail-fast error, never guessed.
+> **Model ids are route-prefixed** `{route}/{model}`. The remainder is the provider-native id, and
+> routing is **explicit**: a bare, unprefixed id is a fail-fast error, never guessed.
+>
+> | route | served by | example |
+> | --- | --- | --- |
+> | `anthropic` | native Anthropic API | `anthropic/claude-sonnet-5` |
+> | `openrouter` | OpenRouter | `openrouter/openai/gpt-5` |
+> | `local` | an OpenAI-compatible server on your machine — Ollama, LM Studio, `llama-server`, vLLM | `local/qwen2.5-32b-instruct` |
+> | `embedded` | weights loaded into **this process** via `node-llama-cpp` | `embedded/qwen2.5-7b-instruct-q4_k_m` |
+>
+> The same underlying model can be reached several ways — `anthropic/claude-opus-4-8` (native) vs
+> `openrouter/anthropic/claude-opus-4.8` (via OpenRouter) — with no ambiguity. The four split on two
+> independent questions: **who serves it** (a remote fleet that meters you, versus your own hardware) and
+> **how it is reached** (HTTP, versus no wire at all).
+
+### Running models locally
+
+`local` and `embedded` need configuration, because a library must not guess where your GPU is:
+
+```ts
+const router = createModelRouter({
+  // Attach to a server, or start one: `serve` probes first and only spawns if nothing answers,
+  // so a developer with `ollama serve` already running keeps theirs. `router.close()` stops only
+  // what the router itself started.
+  local: { baseURL: "http://localhost:11434/v1", serve: { command: "ollama", args: ["serve"] } },
+  // In-process weights. Needs the OPTIONAL peer `node-llama-cpp` (~100 MB of prebuilt binaries),
+  // loaded only when an `embedded/` model is actually resolved.
+  embedded: (id) => ({ modelPath: `/models/${id}.gguf`, contextSize: 8192 }),
+});
+```
+
+Locally-served models are **free but not weightless**: they cost memory instead of money, and memory is
+not a resource that regenerates while you wait. `ResidencyManager` arbitrates which models are loaded —
+shared leases, per-model queues that drain before a swap, no preemption — and `withModelManager` holds a
+lease for the duration of a call. Scope it to the models whose memory you actually control:
+
+```ts
+compose(prompt)
+  .with(withRateLimit({ limiter, appliesTo: (id) => !isEmbeddedModel(id) })) // provider quota
+  .with(withModelManager({ manager, appliesTo: isEmbeddedModel }))          // your VRAM
+```
+
+The two sets must stay **disjoint**: both are bounded resources acquired in nested order, so an overlap
+admits a lock ordering where one call holds a lease waiting for a slot while another holds the slot
+waiting for that lease. Note it is `isEmbeddedModel`, not `isLocalModel` — a `local/` server runs on your
+hardware but its memory belongs to another process that swaps on its own schedule, so there is no
+residency there for us to manage (it is still worth rate-limiting, which is why the limiter takes the
+complement).
+
+Before a workflow runs, `validateBundle` can report locally-served models whose **weights are missing**
+or whose **working set would not fit** — the loader resolves hw's `environment` chain first, so the whole
+model working set is knowable statically rather than discovered one failed call at a time:
+
+```ts
+validateBundle(bundle, {
+  weightsPresent: (id) => store.present(id),        // undefined ⇒ "not a model I manage"
+  placement: (id) => placements.get(id),            // "vram" | "ram" | "swap"
+  placementPolicy: { swap: "warn" },                // the acknowledgment surface; host config, never a workflow
+});
+```
+
+Weights themselves come from `WeightsStore` — resumable downloads to a **caller-supplied** directory,
+split-model parts, checksum-before-publish, and a typed `WeightsCredentialRequired` for gated repos so a
+host can prompt for a token rather than see a 401 reported as a missing file.
 
 The declaration is a **union**: a model is *sampling* (`temperature`/`topP`/`topK`/penalties) **XOR**
 *reasoning* (a neutral `reasoning: { effort?, budgetTokens? }`), never both. Illegal "both at once" states

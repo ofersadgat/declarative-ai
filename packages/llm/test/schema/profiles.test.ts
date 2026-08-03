@@ -3,7 +3,11 @@ import {
   ADVISORY,
   ANTHROPIC_AI_SDK,
   JSON_OBJECT,
+  LLAMACPP_GRAMMAR,
+  LOCAL_JSON_OBJECT,
   OPENROUTER_STRICT,
+  PROFILE_REGISTRY,
+  PROVIDER_DEFAULT_PROFILE_ID,
   profileForCaps,
   profileForModelId,
 } from "../../src/schema/profiles.js";
@@ -45,5 +49,47 @@ describe("profileForModelId — catalog-first, else capability fallback", () => 
 
   it("an unknown OpenRouter model with no catalog row falls back to the provider default (strict)", () => {
     expect(profileForModelId("openrouter/brand/unseen-model").id).toBe(OPENROUTER_STRICT.id);
+  });
+
+  describe("locally-served routes", () => {
+    it("resolves by ROUTE, never through the OpenRouter capability derivation", () => {
+      // The trap: a local model has no `supported_parameters` (no registry publishes them for a GGUF),
+      // so falling into `profileForCaps` would hit its unknown-caps arm and hand a GGUF on your desk
+      // the OpenAI strict dialect — 10-deep nesting cap, 5000-property cap, "json" prompt specifier.
+      expect(profileForModelId("local/qwen2.5-32b-instruct").id).toBe(LOCAL_JSON_OBJECT.id);
+      expect(profileForModelId("embedded/qwen2.5-7b-instruct-q4_k_m").id).toBe(LLAMACPP_GRAMMAR.id);
+      expect(profileForModelId("local/qwen2.5-32b-instruct").id).not.toBe(OPENROUTER_STRICT.id);
+    });
+
+    it("a local model whose NAME looks like claude does not get the Anthropic profile", () => {
+      // `profileForCaps` keys the Anthropic branch off a bare `claude-` prefix. Route wins over the
+      // name, or a locally-served distill would be sent through the Anthropic SDK's dialect.
+      expect(profileForModelId("embedded/claude-ish-finetune-q4_k_m").id).toBe(LLAMACPP_GRAMMAR.id);
+    });
+
+    it("the grammar profile claims STRICT enforcement and no decoder ceilings", () => {
+      // A GBNF grammar makes an off-schema token unrepresentable, so unlike every advisory tier this
+      // one genuinely constrains — and unlike the strict tiers it has no size/nesting limits to trip.
+      expect(LLAMACPP_GRAMMAR.supportsStructuredOutput).toBe("schema");
+      expect(LLAMACPP_GRAMMAR.rootArray).toBe(true); // no forced object root
+      expect(LLAMACPP_GRAMMAR.rootUnion).toBe(true);
+      expect(LLAMACPP_GRAMMAR.unions).toBe("anyOf"); // alternation IS a grammar rule
+      expect(LLAMACPP_GRAMMAR.maxDepth).toBeUndefined();
+      expect(LLAMACPP_GRAMMAR.limits).toBeUndefined();
+    });
+
+    it("the local-server profile is the object tier, and can emit only an object root", () => {
+      expect(LOCAL_JSON_OBJECT.supportsStructuredOutput).toBe("object");
+      expect(LOCAL_JSON_OBJECT.rootArray).toBe(false); // json_object mode has no array-root form
+      // ...unlike the grammar profile, whose start rule can be anything.
+      expect(LLAMACPP_GRAMMAR.rootArray).toBe(true);
+    });
+
+    it("both profiles are registered, so a catalog row can reference them by id", () => {
+      expect(PROFILE_REGISTRY[LOCAL_JSON_OBJECT.id]).toBe(LOCAL_JSON_OBJECT);
+      expect(PROFILE_REGISTRY[LLAMACPP_GRAMMAR.id]).toBe(LLAMACPP_GRAMMAR);
+      expect(PROVIDER_DEFAULT_PROFILE_ID.local).toBe(LOCAL_JSON_OBJECT.id);
+      expect(PROVIDER_DEFAULT_PROFILE_ID.embedded).toBe(LLAMACPP_GRAMMAR.id);
+    });
   });
 });

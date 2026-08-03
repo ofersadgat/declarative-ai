@@ -114,27 +114,33 @@ async function runCall<T>(def: LlmCallDefinition<T>, env: CallDeps, timeoutArg?:
   // json_object hint, and a text-tier model gets no `response_format` at all.
   const profile = def.schema ? (env.schemaProfile ?? profileForModelId)(def.model) : undefined;
   const adapt = def.schema && profile ? adaptSchemaCached(def.schema, profile) : undefined;
-  const model = env.modelRouter.resolveModel(def.model, { strictStructuredOutput: adapt?.enforce === "strict" });
+  // The residency knobs ride along to the router because they decide what the call costs in MEMORY, the
+  // way the strict flag decides what it costs in schema fidelity. Inert for a remote model; for a local
+  // one this is what makes an hw `environment` declaring a 32k context actually reach the loader.
+  const model = env.modelRouter.resolveModel(def.model, {
+    strictStructuredOutput: adapt?.enforce === "strict",
+    embedded: { contextSize: def.contextSize, gpuLayers: def.gpuLayers, sequences: def.sequences },
+  });
 
   // Wire-mode shaping of the system prompt (the ONLY place the authored prompt is touched, and only for
-  // non-strict tiers):
-  //  - TEXT tier (`enforce:"text"`): no `response_format` is sent, so DESCRIBE the schema in the prompt.
-  //  - json_object tier (`enforce:"advisory"`): honor the profile's `promptRequiresJSONSpecifier`
-  //    contract. `"force"` injects a directive; `true` fails fast (permanent) so the call isn't silently
-  //    400'd with the prompt left intact.
+  // non-strict tiers). The rule is one thing: IF THE WIRE DOES NOT CARRY THE SCHEMA, THE PROMPT MUST.
+  //
+  //  - TEXT tier (`enforce:"text"`) — no `response_format` at all.
+  //  - json_object tier (`enforce:"advisory"`) — a `response_format` that forces JSON SYNTAX while
+  //    communicating nothing about the SHAPE. This tier used to get no hint either, so the model was
+  //    told "emit JSON" and left to guess the fields, with the §4 Ajv boundary rejecting whatever came
+  //    back. A schema the model never sees is strictly worse than one in the prompt; Ajv stays the gate
+  //    on both paths, so describing it can only raise the hit rate.
+  //
+  // Only the STRICT tier is left untouched, because there the schema really is on the wire.
+  //
+  // It also subsumes the OpenAI-compatible "the messages must contain the word json" contract that used
+  // to need its own profile flag, a prompt scan and a fail-fast branch: `AdaptResult.outgoing` is
+  // REQUIRED, so a non-strict tier always has a schema to describe, and the hint always says
+  // "JSON Schema". Three pieces of machinery for a condition that can no longer occur.
   let system = def.system;
-  if (adapt?.enforce === "text" && adapt.outgoing) {
-    system = appendToSystem(system, schemaPromptHint(adapt.outgoing));
-  } else if (adapt?.enforce === "advisory" && profile?.promptRequiresJSONSpecifier) {
-    if (!/json/i.test(promptText(def))) {
-      if (profile.promptRequiresJSONSpecifier === "force") {
-        system = appendToSystem(system, JSON_OBJECT_DIRECTIVE);
-      } else {
-        return failFast<T>(
-          `model ${def.model} requires the word "json" in the prompt to use json_object mode (promptRequiresJSONSpecifier), but neither the system nor user prompt contained it`,
-        );
-      }
-    }
+  if (adapt !== undefined && (adapt.enforce === "text" || adapt.enforce === "advisory")) {
+    system = appendToSystem(system, schemaPromptHint(adapt.outgoing as Record<string, unknown>));
   }
 
   // Which decoding knobs the model actually accepts. A param no endpoint supports — e.g. `temperature`
@@ -293,12 +299,9 @@ function mergeProviderOptions(raw: ProviderOptions | undefined, adapted: Provide
   return out;
 }
 
-/** A short directive appended to the system prompt to satisfy an OpenAI-compatible json_object
- *  upstream's "the messages must contain the word 'json'" contract. */
-const JSON_OBJECT_DIRECTIVE = "\n\nReturn your answer as a single valid JSON object.";
-
-/** Describe the (adapted) output schema in prose for a TEXT-tier model that gets no `response_format` —
- *  the only signal it has about the shape to emit. The boundary validation is still the gate. */
+/** Describe the (adapted) output schema in prose for a model whose WIRE FORMAT does not carry it — the
+ *  text tier (no `response_format`) and the json_object tier (syntax forced, shape unstated). The only
+ *  signal either has about the shape to emit; the §4 boundary validation is still the gate. */
 function schemaPromptHint(schema: Record<string, unknown>): string {
   return `\n\nRespond with ONLY a single valid JSON value conforming to this JSON Schema — no prose, no markdown fences:\n${JSON.stringify(schema)}`;
 }
