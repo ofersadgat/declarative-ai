@@ -690,7 +690,7 @@ artifacts.*
 reachable without going through the events journal. It is a namespace rather than a child on purpose:
 a child would perturb the instance tree and make `run.cursor` / `run.position` / `sequence`
 ambiguous. Its shape is a **typed union** — a common core on every kind plus llm-only extras — so
-`operation.outputs.session` on a `ui` operation is a load-time authoring error rather than a runtime
+`operation.output.session` on a `ui` operation is a load-time authoring error rather than a runtime
 `undefined`:
 
 | Field | Kinds | Notes |
@@ -706,10 +706,10 @@ are things an executor knows and does not report — so declaring them would han
 could never resolve and every author a value that is always `undefined`.
 
 The ref schema is closed (`additionalProperties: false`), which is what makes
-`operation.outputs.session.position` — a plausible thing to reach for, given how the notation reads —
+`operation.output.session.position` — a plausible thing to reach for, given how the notation reads —
 a lint error rather than a runtime `undefined`. A ref is opaque, and the schema says so.
 
-**`operation.outputs.session` is the END position.** A call appends *at* a position but does not know
+**`operation.output.session` is the END position.** A call appends *at* a position but does not know
 its end until the provider resolves, so the end marker is the only value that can exist when the
 engine reads it — and it is what a consumer actually wants ("append after me", "fork after me").
 There is deliberately no start marker: recovery after an error does not need one, since instance-scoped
@@ -848,7 +848,7 @@ alongside the rest, because each of these is a per-CALL decision:
 ```text
 session       The conversation this call joins (DESIGN.md §1.6). A NAME shares an
               append-only stream by declaration; {"expr": …} names an exact position
-              computed at run time, normally from `operation.outputs.session`; `null`
+              computed at run time, normally from `operation.output.session`; `null`
               starts a fresh one, and absent means this state gets its own. The DECLARED
               name separately keys the state's workspace and permissions, which are
               inherited when nothing is declared.

@@ -59,11 +59,11 @@ export interface SessionRef {
 export type SessionDecl = string | null | SessionRef | SessionExpr;
 
 /**
- * A `session` computed at run time — `{"expr": ".children.plan.operation.outputs.session"}`.
+ * A `session` computed at run time — `{"expr": ".children.plan.operation.output.session"}`.
  *
  * The other three spellings are STATIC: the loader reads them off the merged document, and they
  * mean the same thing on every instance. That is right for a name and useless for a ref, because
- * the only way to obtain a ref is to read one an operation produced, and `operation.outputs.session`
+ * the only way to obtain a ref is to read one an operation produced, and `operation.output.session`
  * does not exist until that operation has run.
  *
  * So the explicit spelling has to be a BINDING, resolved per instance against the consuming state's
