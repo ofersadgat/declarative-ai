@@ -93,14 +93,20 @@ class HangingByteStream implements ByteStream {
 const blobSlot = { kind: "blob", schema: { type: "string", contentMediaType: "application/octet-stream" } } as const;
 
 /** A parent with a `producer` (a function op that emits a blob stream) and `n` consumers, each a
- *  function op reading the producer's `img` output. With `n >= 2` the producer output fans out. */
-function fanoutStates(consumerKeys: string[]): Record<string, StateDef> {
+ *  function op reading the producer's `img` output. With `n >= 2` the producer output fans out.
+ *
+ *  `alsoReadsMetadata` adds a parent output bound to `.children.producer.operation.cost` — a read of
+ *  how the call WENT, which consumes no output of it. */
+function fanoutStates(consumerKeys: string[], alsoReadsMetadata = false): Record<string, StateDef> {
   const children: Record<string, unknown> = { producer: { state: "parent/producer" } };
   for (const key of consumerKeys) {
     children[key] = { state: "parent/consumer", inputs: { data: ".children.producer.outputs.img" } };
   }
+  const metadataOutput = alsoReadsMetadata
+    ? { outputs: { spend: { schema: { type: "number" }, binding: ".children.producer.operation.cost" } } }
+    : {};
   return {
-    parent: { label: "Parent", children, sequence: ["producer", ...consumerKeys] } as StateDef,
+    parent: { label: "Parent", children, sequence: ["producer", ...consumerKeys], ...metadataOutput } as StateDef,
     "parent/producer": {
       label: "Producer",
       outputs: { img: blobSlot },
@@ -178,6 +184,34 @@ describe("fan-out materialization (§7.3, rule 2)", () => {
     expect(computeFanOut(bundle.states["parent"]!)).toBeDefined();
     // A single consumer is NOT a fan-out — its stream must survive to be piped.
     expect(computeFanOut(loadBundle(fanoutStates(["c1"]), "parent").states["parent"]!)).toBeUndefined();
+  });
+
+  /**
+   * A read of how a child's call WENT is not a read of what it produced. The tally used to decide
+   * this by path position — anything under `children.<k>` that was not `outputs.<name>` and not
+   * literally `outcome` counted as consuming EVERY output — so `children.<k>.operation.cost`, and
+   * with it the documented `…operation.output.session` idiom for flowing a conversation to a
+   * sibling, tallied a whole-child consumption. One genuine consumer plus one metadata read then
+   * reached two, and a stream that should have been piped was drained at the producer's completion
+   * instead (§7.4).
+   *
+   * Asserted on the tally directly: over-materialization changes no value anywhere, so nothing an
+   * output comparison could look at would have caught this.
+   */
+  it("does not count a read of the producer's call METADATA as consuming its outputs", () => {
+    const withMetadata = loadBundle(fanoutStates(["c1"], true), "parent").states["parent"]!;
+    expect(computeFanOut(withMetadata)).toBeUndefined();
+    // The genuine second consumer still counts, metadata read or not.
+    expect(computeFanOut(loadBundle(fanoutStates(["c1", "c2"], true), "parent").states["parent"]!)).toBeDefined();
+  });
+
+  it("leaves a single consumer's stream live even when a sibling binding reads the call's cost", async () => {
+    const stream = new FakeByteStream([bytes(1, 2, 3)]);
+    const seen: ResolvedValue[] = [];
+    const result = await fanoutEngine(fanoutStates(["c1"], true), stream, seen).run({ inputs: {} });
+    expect(result.outcome).toBe("success");
+    expect(isByteStream(seen[0])).toBe(true);
+    expect(stream.readerCount).toBe(0);
   });
 
   it("drains a fanned-out blob input for a function op — the impl receives the full bytes", async () => {

@@ -25,6 +25,7 @@ import type {
 } from "@declarative-ai/exec";
 import type { PermissionMode, PermissionProfile } from "@declarative-ai/permissions";
 import { BUILTINS } from "./builtins.js";
+import { OPERATION_ENGINE_OUTPUT, OPERATION_METADATA_FIELDS } from "./operationNode.js";
 
 // The op vocabulary is hw's format vocabulary — re-exported so authors and consumers import
 // one set of names.
@@ -628,3 +629,53 @@ export interface WorkflowBundle {
 export const REF_NAMESPACES = ["inputs", "outputs", "operation", "children", "artifacts"] as const;
 export const GUARD_NAMESPACES = ["run", "limits"] as const;
 export const CONTEXT_NAMESPACES = [...REF_NAMESPACES, ...GUARD_NAMESPACES] as const;
+
+/**
+ * What a read of a runtime path CONSUMES from a producing child — `undefined` for a read of nothing
+ * that could be a stream, and an `output` of {@link WHOLE_CHILD} for one that reaches every output.
+ *
+ * This lives here, beside the namespace vocabulary it interprets, because the question is "what does
+ * this SHAPE mean" and the shape is defined right above. It used to be answered inline in
+ * `fanout.ts` by indexing path positions — `path[2] === "outputs"`, `path[2] !== "outcome"` — which
+ * made the tally a third place hard-coding the `children` namespace, alongside the validator's
+ * `childrenProps` and the engine's `exprContext`. Two of those three fail SILENTLY when the
+ * namespace grows a segment, because a miscounted consumer is a wrong number and not an error.
+ */
+export type Consumption = { child: string; output: string } | undefined;
+
+/** Marks a read that consumes EVERY output of a child. */
+export const WHOLE_CHILD = "*";
+
+/**
+ * Decide what one lowered path consumes.
+ *
+ * The distinctions are load-bearing (see the `fanout.ts` header): a specific output is one blob
+ * consumed, a coarser read consumes every output, and a read of how the child WENT consumes none.
+ * Counting that last kind forces a materialization nothing needs, and §7.4 wants a single-consumer
+ * output left a live stream so it can be piped.
+ */
+export function consumptionOf(path: readonly string[]): Consumption {
+  if (path[0] !== "children" || path[1] === undefined) return undefined;
+  const child = path[1];
+  const whole: Consumption = { child, output: WHOLE_CHILD };
+  const [section, ...tail] = path.slice(2);
+
+  if (section === undefined) return whole; // `.children.k` — the child itself, so all of it
+  if (section === "outcome") return undefined; // the termination STATUS, not an output
+  if (section === "outputs") return tail[0] !== undefined ? { child, output: tail[0] } : whole;
+  if (section !== "operation") return whole;
+
+  const field = tail[0];
+  // The node itself carries what the call returned, so a bare read reaches it.
+  if (field === undefined) return whole;
+  // How the call WENT, not what it produced.
+  if (OPERATION_METADATA_FIELDS.has(field)) return undefined;
+  if (field !== "output") return whole;
+  // Engine-written and opaque: a session ref is never bytes.
+  if (tail[1] === OPERATION_ENGINE_OUTPUT) return undefined;
+  // Otherwise this IS the returned value. WHICH declared slot it feeds is not knowable from the
+  // referring state alone — a state may publish it under another name — so it counts as all of them.
+  // Over-materializing is the safe direction: under-counting races two readers on one stream,
+  // silently.
+  return whole;
+}

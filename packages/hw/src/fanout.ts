@@ -18,10 +18,10 @@
  */
 import type { InlineFamily, Ref, RefTree } from "@declarative-ai/exec";
 import { pathOfRef } from "./lowerExpr.js";
-import { RESOLVER_REFS, type LoadedState } from "./format.js";
+import { consumptionOf, RESOLVER_REFS, WHOLE_CHILD, type LoadedState } from "./format.js";
 
 /** Marks a whole-child edge (`{ child: P }`, no output selected) — it consumes every output of P. */
-const WHOLE = "*";
+const WHOLE = WHOLE_CHILD;
 const SEP = "\0";
 
 /**
@@ -101,16 +101,14 @@ function collect(ref: Ref<InlineFamily>, out: Set<string>): void {
     // recognized structurally here instead: a `context.get("children")` at the bottom of an
     // `op.member` chain IS the same consumption that wiring the child would be.
     //
-    // This replaced re-parsing the expression's source text. The distinctions are the ones that
-    // parse drew, and they are load-bearing: a specific output is one blob consumed, a coarser read
-    // consumes EVERY output, and `children.P.outcome` consumes NONE — it is the termination status,
-    // not an output, and counting it would force a materialization nothing needs (§7.4).
+    // This replaced re-parsing the expression's source text. WHAT each shape consumes is
+    // `consumptionOf`'s to say (`format.ts`), next to the namespace vocabulary that defines the
+    // shape — rather than a set of path indices here, which is what this was, and which made every
+    // namespace segment added anywhere a silent miscount waiting to happen.
     const path = pathOfRef(ref);
     if (path !== undefined) {
-      if (path[0] === "children" && path[1] !== undefined) {
-        if (path[2] === "outputs" && path[3] !== undefined) out.add(`${path[1]}${SEP}${path[3]}`);
-        else if (path[2] !== "outcome") out.add(`${path[1]}${SEP}${WHOLE}`);
-      }
+      const consumed = consumptionOf(path);
+      if (consumed !== undefined) out.add(`${consumed.child}${SEP}${consumed.output}`);
       return;
     }
     // scope/artifact/conversation resolvers name no child; operators and embedded ops carry nested

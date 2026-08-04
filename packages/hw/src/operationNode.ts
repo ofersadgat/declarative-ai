@@ -56,6 +56,26 @@ import type { JsonSchema, JsonValue } from "@declarative-ai/exec";
 export const OPERATION_OUTCOMES = ["success", "error", "timeout", "canceled"] as const;
 
 /**
+ * The fields of `operation.*` that describe the CALL rather than carry its result — how it went,
+ * what it cost, which model served it. Everything the call actually produced lives under `output`.
+ *
+ * Named as a set because a second reader needs it: the fan-out tally has to know that reading one of
+ * these consumes no producer output, exactly as `children.<key>.outcome` does not (`fanout.ts`).
+ * Counting them would force a materialization nothing needs.
+ */
+export const OPERATION_METADATA_FIELDS: ReadonlySet<string> = new Set(["outcome", "usage", "cost", "model"]);
+
+/**
+ * The one name under `operation.output` the ENGINE writes rather than the call returning it: the
+ * conversation position a prompt call ended at.
+ *
+ * It shares the namespace with the call's own outputs (see the header), which is why the tally needs
+ * it by name — `operation.output.<name>` is a read of the returned value, but this one particular
+ * name is a session ref and can never be a stream.
+ */
+export const OPERATION_ENGINE_OUTPUT = "session";
+
+/**
  * What `operation.*` exposes, as a typed union over the operation's kind.
  *
  * The common core is on every kind. `outputs.session` is PROMPT-only, and that is the point of
