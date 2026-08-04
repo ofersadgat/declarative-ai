@@ -47,21 +47,50 @@ export interface ReferenceOptions {
    * Where a bare reference hangs off — one root, or an ordered SEARCH PATH (EXPRESSIONS.md §4).
    *
    * With several, a bare reference is tried against each in turn and the first match wins, exactly
-   * as a shell resolves a bare command name against `PATH`. The forms that are not bare do not
-   * consult it: absolute and `file:` are themselves, `$VAR/…` names its own root, and `./`/`../` are
-   * anchored to the referring state — a relative reference is *relative*, and searching would make
-   * that meaningless.
+   * as a shell resolves a bare command name against `PATH`. Absolute and `file:` references are
+   * themselves and `$VAR/…` names its own root, so neither consults it. A `./`/`../` reference is
+   * anchored to the referring state FIRST and the result searched — the anchoring is what makes it
+   * relative, and searching what follows is what lets a later layer's state point at an earlier
+   * layer's override of its own child.
    *
-   * Only the FIRST entry produces bare ids (see {@link primaryRoot}).
+   * EVERY entry produces bare ids (see {@link identityOf}), which is what makes the path a LAYERING
+   * mechanism rather than only a convenience: the same bare id means "whichever layer supplies it".
    */
   defaultRoot?: string | readonly string[];
-  /** Roots a `$VAR/…` reference may name. `$` alone is an alias for `$JAIRA`. */
+  /** Roots a `$VAR/…` reference may name — each names exactly one place, and never searches. */
   roots?: Readonly<Record<string, string>>;
+  /**
+   * The ordered LAYER ROOTS that a bare `$` searches — `[<project>/.jaira, ~/.jaira]` in JaiRA.
+   *
+   * `$` is the sigil for "resolve this against the layers", so `$/lib/review` finds the project's
+   * copy if there is one and the shared copy otherwise. That is what lets the fragments a state is
+   * assembled from — prompts, types, guards, operation documents — layer exactly as whole states
+   * do; without it, an override model covers state files and nothing inside them.
+   *
+   * `defaultRoot` is derived from this in practice (`<root>/workflows`, `<root>/functions` per
+   * root), but the two stay separate options because they answer different questions: this is where
+   * a LAYER begins, that is where a BARE state id hangs off.
+   *
+   * Absent ⇒ `$` keeps its original meaning, an alias for `$JAIRA`.
+   */
+  rootPath?: readonly string[];
   /** The canonical id of the state doing the referring — the base for `./` and `../`. */
   from?: string;
   vfs?: Vfs;
   /** Collects non-fatal ambiguities (REFERENCES.md §9). */
   onWarn?: (message: string) => void;
+  /**
+   * What it means when a bare reference matches at more than one path entry.
+   *
+   * `"warn"` (the default) reports it: with nothing but `PATH` semantics, a file appearing at an
+   * earlier entry silently changes what an existing reference means, anywhere in the workflow.
+   *
+   * `"override"` says the shadowing IS the design — an earlier entry is a project-local override of
+   * a shared base layer — and stays quiet. It changes no resolution, only whether the overlap is
+   * reported, because a caller that layers roots deliberately would otherwise get one warning per
+   * overridden state and learn to ignore all of them.
+   */
+  shadowing?: "warn" | "override";
 }
 
 /** A parsed and located reference. */
@@ -69,8 +98,8 @@ export interface ResolvedReference {
   /** Absolute POSIX path of the target file; absent for a same-file (`.foo`) reference. */
   file?: string;
   /**
-   * The canonical identity of the target: bare when it lands under the default root, absolute
-   * otherwise, with a `.json`/`.yaml`/`.yml` suffix stripped so a state keeps today's id.
+   * The canonical identity of the target: bare when it lands under ANY entry of the search path,
+   * absolute otherwise, with a `.json`/`.yaml`/`.yml` suffix stripped so a state keeps today's id.
    */
   id?: string;
   /** Property path within the file. Empty ⇒ the file as a whole. */
@@ -240,7 +269,8 @@ function splitAtFile(
  * the path is the hazard without the `which -a`.
  *
  * Only meaningful with a filesystem in hand — with no `vfs` every root "matches" trivially, because
- * there is nothing to check existence against.
+ * there is nothing to check existence against. Silent under `shadowing: "override"`, where an
+ * earlier entry shadowing a later one is the caller's whole intent.
  */
 function warnIfShadowed(
   path: readonly string[],
@@ -251,7 +281,7 @@ function warnIfShadowed(
   chosen: string,
 ): void {
   const onWarn = options.onWarn;
-  if (!onWarn || options.vfs === undefined) return;
+  if (!onWarn || options.vfs === undefined || options.shadowing === "override") return;
   for (const root of path.slice(matchedAt + 1)) {
     try {
       // Quiet: the shadowed candidate's own within-directory ambiguities are not this warning's news.
@@ -266,6 +296,73 @@ function warnIfShadowed(
   }
 }
 
+/**
+ * Resolve a BARE body against the search path: first match wins, exactly as a shell resolves a bare
+ * command name against `PATH`.
+ *
+ * Shared by the two spellings that produce a bare target — a bare reference, and a `./`/`../` one
+ * whose referring state is itself bare. Both have to search, or a relative link inside a base-layer
+ * state would be pinned to the base layer and never see the project's override of what it points at.
+ */
+function searchBare(body: string, options: ReferenceOptions, reference: string): ResolvedReference {
+  const path = searchPath(options);
+  if (path.length === 0) {
+    // No root configured: the reference IS its own id, which is what an in-memory bundle means.
+    const segments = normalizeSegments(body);
+    if (segments[0] === "..") throw new ReferenceError_(`reference '${reference}' climbs above the root`);
+    if (segments.length === 0) throw new ReferenceError_(`reference '${reference}' names no path`);
+    return { file: segments.join("/"), id: segments.join("/"), property: [], local: false };
+  }
+  let lastError: unknown;
+  for (const [index, root] of path.entries()) {
+    let found;
+    try {
+      found = splitAtFile(canonicalAbsolute(`${root}/${body}`), options, reference);
+    } catch (e) {
+      lastError = e; // not here — try the next entry
+      continue;
+    }
+    warnIfShadowed(path, index, body, options, reference, found.file);
+    return { file: found.file, id: identityOf(found.file, options), property: found.property, local: false };
+  }
+  // With one root there is no "path" to speak of, so `splitAtFile`'s own message — which names the
+  // file it looked for — says more than a list of one would.
+  if (path.length === 1) throw lastError as Error;
+  throw new ReferenceError_(`reference '${reference}' matches no file on the path (${path.join(", ")})`);
+}
+
+/**
+ * Resolve a `$`-rooted body against the ordered LAYER ROOTS: first match wins.
+ *
+ * The same rule `searchBare` uses, over a different list. Kept separate because the two lists mean
+ * different things — `rootPath` entries are layer roots (`…/.jaira`), `defaultRoot` entries are the
+ * directories a bare state id hangs off (`…/.jaira/workflows`) — and conflating them would make
+ * `$/workflows/x` and `x` two spellings that resolve differently for no reason a reader could see.
+ *
+ * A miss everywhere reports the roots tried, because "not found" without "looked here" is the least
+ * useful message a path-based resolver can produce.
+ */
+function searchRoots(
+  rootPath: readonly string[],
+  rest: string,
+  options: ReferenceOptions,
+  reference: string,
+): ResolvedReference {
+  let lastError: unknown;
+  for (const root of rootPath) {
+    let found;
+    try {
+      found = splitAtFile(canonicalAbsolute(`${root}/${rest}`), options, reference);
+    } catch (e) {
+      lastError = e;
+      continue;
+    }
+    return { file: found.file, id: identityOf(found.file, options), property: found.property, local: false };
+  }
+  if (rootPath.length === 1) throw lastError as Error;
+  throw new ReferenceError_(`reference '${reference}' matches no file under any layer root (${rootPath.join(", ")})`);
+}
+
 /** The search path a bare reference is tried against, in order. */
 function searchPath(options: ReferenceOptions): readonly string[] {
   const d = options.defaultRoot;
@@ -274,27 +371,32 @@ function searchPath(options: ReferenceOptions): readonly string[] {
 }
 
 /**
- * The one root a bare id folds back against — the FIRST entry of the search path.
+ * Fold an absolute target back to its bare id when it lands under ANY entry of the search path.
  *
- * Not "whichever entry matched", and this is the rule that keeps the path safe. A canonical id keys
- * the snapshot hash, the event log, task rows and `$STATE_ID`; if two different files at two
- * different path entries both folded back to the bare id `foo`, they would collide in exactly the
- * thing that is supposed to tell them apart. Anything found further along the path canonicalizes to
- * an absolute POSIX path, which is what out-of-tree references already do — a built-in operator is
- * out of tree, and its id says so.
+ * This is what makes the path a LAYERING mechanism. A canonical id keys the snapshot hash, the event
+ * log, task rows and `$STATE_ID`; folding back from every entry means `feature/plan` names the same
+ * state whether the file came from the project's own root or from a shared base root further along.
+ * Two files at two entries therefore share one id — which is not a collision but an OVERRIDE, and
+ * resolution has already picked the winner (first entry wins) before this is asked.
+ *
+ * The cost is real and worth stating: an id alone no longer says which file it came from, so a
+ * workflow can mean different things in two projects. What keeps a RUN honest is that execution
+ * reads a pinned snapshot of the resolved bundle rather than re-resolving the live path.
+ *
+ * The LONGEST matching root wins, so nested entries (`…/.jaira/workflows` inside `…/.jaira`) fold to
+ * the most specific id rather than to whichever happens to be listed first.
  */
-function primaryRoot(options: ReferenceOptions): string | undefined {
-  return searchPath(options)[0];
-}
-
-/** Fold an absolute target back to its bare id when it lands under the PRIMARY root. */
 function identityOf(file: string, options: ReferenceOptions): string {
   const stripped = file.replace(/\.(json|yaml|yml)$/i, "");
-  const root = primaryRoot(options);
-  if (root === undefined) return stripped;
-  const canonicalRoot = canonicalAbsolute(root);
-  const prefix = canonicalRoot.endsWith("/") ? canonicalRoot : `${canonicalRoot}/`;
-  return stripped.startsWith(prefix) ? stripped.slice(prefix.length) : stripped;
+  let best: string | undefined;
+  for (const root of searchPath(options)) {
+    const canonicalRoot = canonicalAbsolute(root);
+    const prefix = canonicalRoot.endsWith("/") ? canonicalRoot : `${canonicalRoot}/`;
+    if (!stripped.startsWith(prefix)) continue;
+    const bare = stripped.slice(prefix.length);
+    if (best === undefined || bare.length < best.length) best = bare;
+  }
+  return best ?? stripped;
 }
 
 /** Parse and locate one reference. */
@@ -321,13 +423,27 @@ export function resolveReference(reference: string, options: ReferenceOptions = 
     if (!isAbsolutePath(body)) throw new ReferenceError_(`'file:' reference '${reference}' must be absolute`);
   }
 
+  // A trailing slash means a directory was named, which has no value — caught before normalization
+  // strips it (REFERENCES.md §9), and before the bare branch searches the path.
+  if (body.endsWith("/") || body.endsWith("\\")) {
+    throw new ReferenceError_(`reference '${reference}' names a directory, not a file`);
+  }
+
   let absolutePrefix: string;
   if (isAbsolutePath(body)) {
     absolutePrefix = canonicalAbsolute(body);
   } else if (body.startsWith("$")) {
     const rootVar = ROOT_VAR.exec(body);
     if (!rootVar) throw new ReferenceError_(`malformed root variable in reference '${reference}'`);
-    // `$` alone is `$JAIRA` — the shorthand for the root almost every fragment hangs off.
+    const rest = rootVar[2] ?? "";
+    // `$` alone SEARCHES `rootPath` — the ordered layer roots — so a shared fragment (a prompt, a
+    // type, a guard, an operation document) layers exactly as a shared state does. Without this,
+    // layering would cover whole state files and nothing they are assembled from, which is half a
+    // feature. A NAMED root still names exactly one place: that is what `$JAIRA` is for.
+    if (rootVar[1] === undefined && options.rootPath !== undefined && options.rootPath.length > 0) {
+      return searchRoots(options.rootPath, rest, options, reference);
+    }
+    // `$` with no `rootPath` configured falls back to `$JAIRA`, which is what it has always meant.
     const name = rootVar[1] ?? "JAIRA";
     const root = options.roots?.[name];
     if (root === undefined) {
@@ -337,52 +453,29 @@ export function resolveReference(reference: string, options: ReferenceOptions = 
           (known.length > 0 ? ` — known: ${known.map((r) => `$${r}`).join(", ")}` : ""),
       );
     }
-    absolutePrefix = canonicalAbsolute(`${root}/${rootVar[2] ?? ""}`);
+    absolutePrefix = canonicalAbsolute(`${root}/${rest}`);
   } else if (isRelativeFilePath(body)) {
     const from = options.from;
     if (from === undefined) {
       throw new ReferenceError_(`relative reference '${reference}' has no referring state to resolve against`);
     }
-    // Anchored to the PRIMARY root: a relative reference is relative to the referring state, and the
-    // referring state's own id is bare only under that one.
-    const base = isAbsolutePath(from) ? from : `${primaryRoot(options) ?? ""}/${from}`;
-    const segments = normalizeSegments(`${base}/${body}`);
+    const segments = normalizeSegments(`${from}/${body}`);
     if (segments[0] === "..") {
       throw new ReferenceError_(`relative reference '${reference}' from '${from}' climbs above the root`);
     }
-    absolutePrefix = `/${segments.join("/")}`;
-    if (/^[a-zA-Z]:/.test(base.replace(/\\/g, "/"))) absolutePrefix = `${segments[0]}/${segments.slice(1).join("/")}`;
-  } else {
-    const path = searchPath(options);
-    if (path.length === 0) {
-      // No root configured: the reference IS its own id, which is what an in-memory bundle means.
-      const segments = normalizeSegments(body);
-      if (segments[0] === "..") throw new ReferenceError_(`reference '${reference}' climbs above the root`);
+    if (!isAbsolutePath(from)) {
+      // The referring id is bare, so the target has a bare spelling too — and it is SEARCHED like any
+      // other bare reference. Anchoring it to the primary root instead would mean a `./child` inside a
+      // base-layer state could never reach the project's override of that child.
       if (segments.length === 0) throw new ReferenceError_(`reference '${reference}' names no path`);
-      return { file: segments.join("/"), id: segments.join("/"), property: [], local: false };
+      return searchBare(segments.join("/"), options, reference);
     }
-    if (path.length > 1) {
-      // SEARCH the path: first match wins, exactly as a shell resolves a bare command name. Only
-      // the last failure is reported, because it is the one that names every root that was tried.
-      for (const [index, root] of path.entries()) {
-        let found;
-        try {
-          found = splitAtFile(canonicalAbsolute(`${root}/${body}`), options, reference);
-        } catch {
-          continue; // not here — try the next entry
-        }
-        warnIfShadowed(path, index, body, options, reference, found.file);
-        return { file: found.file, id: identityOf(found.file, options), property: found.property, local: false };
-      }
-      throw new ReferenceError_(`reference '${reference}' matches no file on the path (${path.join(", ")})`);
-    }
-    absolutePrefix = canonicalAbsolute(`${path[0]!}/${body}`);
-  }
-
-  // A trailing slash means a directory was named, which has no value — caught before normalization
-  // strips it (REFERENCES.md §9).
-  if (body.endsWith("/") || body.endsWith("\\")) {
-    throw new ReferenceError_(`reference '${reference}' names a directory, not a file`);
+    // An absolute referring id is out of tree and stays there: it has no bare spelling to search with.
+    absolutePrefix = /^[a-zA-Z]:/.test(from.replace(/\\/g, "/"))
+      ? `${segments[0]}/${segments.slice(1).join("/")}`
+      : `/${segments.join("/")}`;
+  } else {
+    return searchBare(body, options, reference);
   }
 
   const { file, property } = splitAtFile(absolutePrefix, options, reference);

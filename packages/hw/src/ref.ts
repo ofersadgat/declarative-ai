@@ -33,18 +33,28 @@ export class StateRefError extends Error {}
 
 export interface StateRefOptions {
   /**
-   * Where a bare reference hangs off, as a resolved absolute path. Ids under it keep their bare
-   * spelling. Absent ⇒ only bare references are accepted (the caller has no filesystem in hand).
+   * Where a bare reference hangs off, as a resolved absolute path — or the ordered search path,
+   * when the caller layers several. Ids under ANY of them keep their bare spelling, so a state
+   * supplied by a shared base root is named the same as the project's own override of it.
+   *
+   * Absent ⇒ only bare references are accepted (the caller has no filesystem in hand).
    */
-  defaultRoot?: string;
+  defaultRoot?: string | readonly string[];
   /** Roots a `$VAR/…` reference may name, e.g. `{ JAIRA: "/p/.jaira", PROJECT: "/p" }`. */
   roots?: Readonly<Record<string, string>>;
+  /** The ordered layer roots a bare `$` names — see `ReferenceOptions.rootPath`. */
+  rootPath?: readonly string[];
   /** The canonical id of the state doing the referring — the base for `./` and `../`. */
   from?: string;
 }
 
 const SCHEME = /^([a-zA-Z][a-zA-Z0-9+.-]*):(\/\/)?(.*)$/;
-const ROOT_VAR = /^\$([A-Z_][A-Z0-9_]*)(?:\/(.*))?$/;
+/**
+ * The name is OPTIONAL, matching `reference.ts`. Without it, `$/lib/x` failed this pattern, fell
+ * through to the bare branch, and normalized to the state id `$/lib/x` — a silently wrong id rather
+ * than an error, which is the worst of the three possible outcomes.
+ */
+const ROOT_VAR = /^\$([A-Z_][A-Z0-9_]*)?(?:\/(.*))?$/;
 
 /** Forward slashes, no trailing slash, no `.` segments; `..` is resolved where it is legal to. */
 function normalizeSegments(path: string): string[] {
@@ -104,12 +114,15 @@ export function resolveStateRef(ref: string, options: StateRefOptions = {}): str
 
   const rootVar = ROOT_VAR.exec(body);
   if (rootVar) {
-    const name = rootVar[1]!;
-    const root = options.roots?.[name];
+    // A bare `$` SEARCHES the layer roots for a document reference, but this has no filesystem to
+    // search with, so it takes the first — the same limitation `children[].state` already carries,
+    // and harmless in practice because `underDefaultRoot` folds the result back to a bare id that
+    // is then resolved with an oracle anyway.
+    const root = rootVar[1] === undefined ? (options.rootPath?.[0] ?? options.roots?.["JAIRA"]) : options.roots?.[rootVar[1]];
     if (root === undefined) {
       const known = Object.keys(options.roots ?? {});
       throw new StateRefError(
-        `unknown root '$${name}' in state reference '${ref}'` +
+        `unknown root '$${rootVar[1] ?? ""}' in state reference '${ref}'` +
           (known.length > 0 ? ` — known: ${known.map((r) => `$${r}`).join(", ")}` : ""),
       );
     }
@@ -137,14 +150,28 @@ export function resolveStateRef(ref: string, options: StateRefOptions = {}): str
   return segments.join("/");
 }
 
-/** Fold an absolute path back to its bare spelling when it lands under the default root. */
+/**
+ * Fold an absolute path back to its bare spelling when it lands under ANY configured root.
+ *
+ * The LONGEST match wins, so nesting one root inside another (`…/.jaira/workflows` inside
+ * `…/.jaira`) yields the most specific id rather than whichever happens to be listed first. This is
+ * the same rule document-reference identity uses; the two must agree, or a `children[].state` would
+ * name one id and the file it loads would carry another.
+ */
 function underDefaultRoot(absolute: string, options: StateRefOptions, ref: string): string {
-  const root = options.defaultRoot;
-  if (root === undefined) return absolute;
-  const canonicalRoot = canonicalAbsolute(root);
-  if (absolute === canonicalRoot) throw new StateRefError(`state reference '${ref}' names the workflow root itself`);
-  const prefix = canonicalRoot.endsWith("/") ? canonicalRoot : `${canonicalRoot}/`;
-  return absolute.startsWith(prefix) ? absolute.slice(prefix.length) : absolute;
+  const configured = options.defaultRoot;
+  if (configured === undefined) return absolute;
+  const roots = typeof configured === "string" ? [configured] : configured;
+  let best: string | undefined;
+  for (const root of roots) {
+    const canonicalRoot = canonicalAbsolute(root);
+    if (absolute === canonicalRoot) throw new StateRefError(`state reference '${ref}' names the workflow root itself`);
+    const prefix = canonicalRoot.endsWith("/") ? canonicalRoot : `${canonicalRoot}/`;
+    if (!absolute.startsWith(prefix)) continue;
+    const bare = absolute.slice(prefix.length);
+    if (best === undefined || bare.length < best.length) best = bare;
+  }
+  return best ?? absolute;
 }
 
 /** True when a canonical id lives under the default root (i.e. is a bare, workflow-relative path). */

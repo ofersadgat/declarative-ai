@@ -317,15 +317,50 @@ function operationNodeOf(
   metrics: WorkflowMetrics | undefined,
   model: string | undefined,
   session?: SessionBinding,
+  /** What the call RETURNED — see {@link operationOutputOf}. */
+  returned?: ResolvedValue,
 ): OperationNode {
+  // The END position, not the start: you append AT a position but do not know where the call
+  // finished until the provider resolves, and "append after me" / "fork after me" both want the end.
+  const output = operationOutputOf(returned, session);
   return {
     outcome,
     ...(metrics !== undefined ? { usage: metrics as unknown as Record<string, JsonValue>, cost: metrics.costUsd ?? 0 } : {}),
     ...(model !== undefined ? { model } : {}),
-    // The END position, not the start: you append AT a position but do not know where the call
-    // finished until the provider resolves, and "append after me" / "fork after me" both want the end.
-    ...(session !== undefined ? { outputs: { session: { id: session.id } } } : {}),
+    ...(output !== undefined ? { output } : {}),
   };
+}
+
+/**
+ * What `operation.output` holds: the value the call returned, with `session` alongside it.
+ *
+ * The value ITSELF, not a record built around it — an object return exposes its own properties, an
+ * array return IS the array, a blob return is the bytes. This mirrors {@link outputSchemaOf}, and
+ * the two have to agree or the type would promise a shape the engine never writes.
+ *
+ * `session` is attached where the container can hold a property, which is an object or an array —
+ * both carry named properties in JS, and the array case is exactly why this is not a plain spread.
+ * A scalar return cannot carry one; the author's value wins there rather than being wrapped to make
+ * room for the engine's, since wrapping would break every binding that reads the value.
+ *
+ * Written UNDER a returned value of the same name, for the same reason.
+ */
+function operationOutputOf(value: ResolvedValue | undefined, session?: SessionBinding): JsonValue | undefined {
+  const position = session === undefined ? undefined : { id: session.id };
+  if (value === undefined) return position === undefined ? undefined : ({ session: position } as JsonValue);
+  if (position === undefined) return value as JsonValue;
+  // Not a container — a string, a number, bytes, a live stream. Nothing to hang a property on.
+  if (value === null || typeof value !== "object" || value instanceof Uint8Array || isByteStream(value)) {
+    return value as JsonValue;
+  }
+  if (Array.isArray(value)) {
+    // A copy, so the returned array is not mutated under whoever else is holding it.
+    const withSession = [...value] as unknown as Record<string, JsonValue>;
+    if (withSession["session"] === undefined) withSession["session"] = position;
+    return withSession as unknown as JsonValue;
+  }
+  const record = value as Record<string, JsonValue>;
+  return { ...(record["session"] === undefined ? { session: position } : {}), ...record } as JsonValue;
 }
 
 /** The model an operation resolved to — read off the config the call was actually made with. */
@@ -831,6 +866,15 @@ export class WorkflowEngine {
             },
           };
         }
+        continue;
+      }
+      // An artifact-typed output carries CONTENT; registering it is what turns that content into a
+      // referenceable artifact. `acceptOpOutputs` did this on the way in, which only ever covered an
+      // output the operation filled DIRECTLY — so an output that reaches the same value through a
+      // binding got a raw string where a produced one got a ref. Now every output binds, so the
+      // registration belongs here, where all of them pass.
+      if (isArtifactSlot(slot) && typeof value === "string") {
+        outputs[name] = this.registerArtifact(instance, name, slot, value);
         continue;
       }
       const err = this.validateSlotValue(name, slot, value);
@@ -1389,7 +1433,7 @@ export class WorkflowEngine {
       this.childCost += metrics.costUsd ?? 0;
     }
     // The operation NODE carries no `session`, which is the same fact `operationNodeSchema` states in
-    // the type: `operation.outputs.session` is prompt-only, so reaching for it on a `ui` gate is an
+    // the type: `operation.output.session` is prompt-only, so reaching for it on a `ui` gate is an
     // authoring error rather than a runtime undefined.
     //
     // Not the same claim as "a function op has no conversation" — a delegated agent plainly does, and
@@ -1397,7 +1441,13 @@ export class WorkflowEngine {
     // loader has no registry, so it cannot tell a delegated adapter from a host helper, and widening
     // the type for every function op would trade a load-time error for a value that is usually
     // undefined. Wiring one agent's conversation into a later state is done by NAME today.
-    instance.operation = operationNodeOf(isOk(outcome) ? "success" : "error", metrics, modelOfOp(op));
+    instance.operation = operationNodeOf(
+      isOk(outcome) ? "success" : "error",
+      metrics,
+      modelOfOp(op),
+      undefined,
+      isOk(outcome) ? outcome.value : undefined,
+    );
     if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
     if (!isOk(outcome)) return fail(outcome.error);
     // The op's declared output KIND decides how its value is read — a `blob` output IS the value
@@ -1493,6 +1543,7 @@ export class WorkflowEngine {
       outcome.metrics,
       modelOfOp(resolvedOp),
       session,
+      isOk(outcome) ? outcome.value : undefined,
     );
     if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
 
@@ -1616,7 +1667,7 @@ export class WorkflowEngine {
     const env = instance.def.environment ?? {};
     let declared = env.session as SessionDecl | undefined;
     // The `{ expr }` spelling is the only one evaluated rather than read, and it has to be, because
-    // a ref is a RUN-TIME value: `children.plan.operation.outputs.session` does not exist until
+    // a ref is a RUN-TIME value: `children.plan.operation.output.session` does not exist until
     // `plan` has run, so a static field could never carry one. Evaluated against THIS instance, so
     // a re-entered or looped state re-reads the position its own attempt should continue from.
     if (isSessionExpr(declared)) {
@@ -1662,6 +1713,11 @@ export class WorkflowEngine {
    */
   private acceptOpOutputs(instance: Instance, op: OperationKind, value: ResolvedValue, outputKind?: RefKind): Failure | undefined {
     const produced = this.producedOutputSlots(instance.def);
+    // Nothing to distribute. Every output binds — from `.operation.output`, a child, an expression —
+    // so the call's result reaches them through the operation NODE rather than by being poured into
+    // slots here. Returning early also keeps the blob rule below from firing on a state that
+    // declares no produced slot at all, which is now every state.
+    if (Object.keys(produced).length === 0) return undefined;
 
     // A BLOB-kind operation output is the WHOLE value, not a record of named outputs (§7.1) — the
     // bytes go straight into the state's single produced slot. Without this the `Uint8Array` fell

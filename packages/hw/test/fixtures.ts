@@ -68,14 +68,24 @@ export function specPlanningFiles(): Record<string, StateDef> {
     "feature/plan/goals": {
       label: "Goals",
       inputs: { issue: artifact("markdown") },
-      outputs: { goals: strArray() },
-      operation: { kind: "prompt", prompt: "Extract goals from {{.inputs.issue}}.", model: "planner" },
+      outputs: { goals: { ...strArray(), binding: ".operation.output.goals" } },
+      operation: {
+        kind: "prompt",
+        prompt: "Extract goals from {{.inputs.issue}}.",
+        model: "planner",
+        outputs: { goals: strArray() },
+      },
     },
     "feature/plan/context": {
       label: "Context",
       inputs: { issue: artifact("markdown"), goals: strArray() },
-      outputs: { plan_doc: artifact("markdown") },
-      operation: { kind: "prompt", prompt: "Write the plan for {{.inputs.issue}}.", model: "planner" },
+      outputs: { plan_doc: { ...artifact("markdown"), binding: ".operation.output.plan_doc" } },
+      operation: {
+        kind: "prompt",
+        prompt: "Write the plan for {{.inputs.issue}}.",
+        model: "planner",
+        outputs: { plan_doc: artifact("markdown") },
+      },
     },
     "feature/plan/critique": {
       label: "Critique Plan",
@@ -85,9 +95,12 @@ export function specPlanningFiles(): Record<string, StateDef> {
         severity_threshold: { schema: { type: "string", enum: ["minor", "significant", "critical"] }, default: "significant" },
       },
       outputs: {
-        outcome: { schema: { type: "string", enum: ["clean", "needs_changes", "blocked"] } },
-        weaknesses: strArray(),
-        critique_report: artifact("markdown"),
+        outcome: {
+          schema: { type: "string", enum: ["clean", "needs_changes", "blocked"] },
+          binding: ".operation.output.outcome",
+        },
+        weaknesses: { ...strArray(), binding: ".operation.output.weaknesses" },
+        critique_report: { ...artifact("markdown"), binding: ".operation.output.critique_report" },
         human_decision: {
           schema: { type: "string", enum: ["approve", "request_changes", "block"] },
           optional: true,
@@ -99,41 +112,60 @@ export function specPlanningFiles(): Record<string, StateDef> {
         kind: "prompt",
         model: "critic",
         prompt: "Review the plan document. Find significant weaknesses at or above the configured severity threshold. Return structured output matching this state's output schema.",
+        // What the CALL returns. `human_decision` is not here: it comes from a child when the state
+        // terminates, so asking the model for it would be a contract the model cannot meet.
+        outputs: {
+          outcome: { schema: { type: "string", enum: ["clean", "needs_changes", "blocked"] } },
+          weaknesses: strArray(),
+          critique_report: artifact("markdown"),
+        },
       },
       children: {
         address_weaknesses: {
           state: "feature/plan/critique/address_weaknesses",
           inputs: {
             plan_doc: ".inputs.plan_doc",
-            weaknesses: { expr: ".outputs.weaknesses" },
-            critique_report: { expr: ".outputs.critique_report" },
+            weaknesses: { expr: ".operation.output.weaknesses" },
+            critique_report: { expr: ".operation.output.critique_report" },
           },
         },
         human_review: {
           state: "feature/plan/critique/human_review",
-          inputs: { plan_doc: ".inputs.plan_doc", critique_report: { expr: ".outputs.critique_report" } },
+          inputs: { plan_doc: ".inputs.plan_doc", critique_report: { expr: ".operation.output.critique_report" } },
         },
       },
       transitions: [
         { to: "terminate.success", when: ".children.human_review.outcome === 'success'" },
         { to: "terminate.success", when: ".children.address_weaknesses.outcome === 'success'" },
-        { to: "terminate.success", when: ".outputs.outcome === 'clean'" },
-        { to: "human_review", when: ".outputs.outcome === 'blocked'" },
-        { to: "address_weaknesses", when: ".outputs.outcome === 'needs_changes'" },
+        { to: "terminate.success", when: ".operation.output.outcome === 'clean'" },
+        { to: "human_review", when: ".operation.output.outcome === 'blocked'" },
+        { to: "address_weaknesses", when: ".operation.output.outcome === 'needs_changes'" },
       ],
     },
     "feature/plan/critique/address_weaknesses": {
       label: "Address Weaknesses",
       inputs: { plan_doc: artifact("markdown"), weaknesses: strArray(), critique_report: artifact("markdown") },
-      outputs: { resolution: str() },
-      operation: { kind: "prompt", prompt: "Fix the listed weaknesses.", model: "fixer" },
+      outputs: { resolution: { ...str(), binding: ".operation.output.resolution" } },
+      operation: {
+        kind: "prompt",
+        prompt: "Fix the listed weaknesses.",
+        model: "fixer",
+        outputs: { resolution: str() },
+      },
     },
     "feature/plan/critique/human_review": {
       label: "Human Review",
       inputs: { plan_doc: artifact("markdown"), critique_report: artifact("markdown") },
       outputs: {
-        decision: { schema: { type: "string", enum: ["approve", "request_changes", "block"] } },
-        comments: { schema: { type: "string", format: "markdown" }, optional: true },
+        decision: {
+          schema: { type: "string", enum: ["approve", "request_changes", "block"] },
+          binding: ".operation.output.decision",
+        },
+        comments: {
+          schema: { type: "string", format: "markdown" },
+          optional: true,
+          binding: ".operation.output.comments",
+        },
       },
       // An interactive host function — a plain FunctionOp like any other (§3), with its authored
       // surface bound as the `config` input via `args`.
@@ -141,6 +173,10 @@ export function specPlanningFiles(): Record<string, StateDef> {
         kind: "function",
         function: "choose_option",
         args: { prompt: "Review the critique result.", options: ["approve", "request_changes", "block"] },
+        outputs: {
+          decision: { schema: { type: "string", enum: ["approve", "request_changes", "block"] } },
+          comments: { schema: { type: "string", format: "markdown" }, optional: true },
+        },
       },
     },
   };

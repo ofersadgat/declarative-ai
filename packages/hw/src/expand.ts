@@ -33,11 +33,15 @@ export interface ExpandOptions {
   /** One root, or the ordered search path a bare reference is tried along (EXPRESSIONS.md §4). */
   defaultRoot?: string | readonly string[];
   roots?: Readonly<Record<string, string>>;
+  /** The ordered layer roots a bare `$` searches — see `ReferenceOptions.rootPath`. */
+  rootPath?: readonly string[];
   /** Canonical id of the file being expanded — the base for `./` and for a same-file reference. */
   from: string;
   onWarn?: (message: string) => void;
   /** Files pulled in by expansion, for the snapshot closure (§8.1). Absolute paths. */
   onRead?: (file: string) => void;
+  /** Whether shadowing across path entries is reported — see `ReferenceOptions.shadowing`. */
+  shadowing?: "warn" | "override";
 }
 
 /** The key that spells a reference where a plain string is expected. */
@@ -59,9 +63,11 @@ function refOptions(options: ExpandOptions): ReferenceOptions {
   return {
     ...(options.defaultRoot !== undefined ? { defaultRoot: options.defaultRoot } : {}),
     ...(options.roots !== undefined ? { roots: options.roots } : {}),
+    ...(options.rootPath !== undefined ? { rootPath: options.rootPath } : {}),
     from: options.from,
     vfs: options.vfs,
     ...(options.onWarn !== undefined ? { onWarn: options.onWarn } : {}),
+    ...(options.shadowing !== undefined ? { shadowing: options.shadowing } : {}),
   };
 }
 

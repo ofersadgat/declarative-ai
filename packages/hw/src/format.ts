@@ -218,9 +218,9 @@ export interface ExecEnvironmentDecl {
    *  - a **session ref** (`{ id }`) — an exact position to continue or branch from. Opaque: nothing
    *    outside the session store parses it. Normally reached through the fourth spelling rather than
    *    written literally, since a ref is a run-time value;
-   *  - an **expression** (`{ expr }`, e.g. `{"expr": ".children.plan.operation.outputs.session"}`) —
+   *  - an **expression** (`{ expr }`, e.g. `{"expr": ".children.plan.operation.output.session"}`) —
    *    the same thing computed per instance. This is the one form EVALUATED rather than read, and
-   *    the only practical way to name an exact position, because `operation.outputs.session` does
+   *    the only practical way to name an exact position, because `operation.output.session` does
    *    not exist until that operation has run;
    *  - **`null`** — start a fresh stream, overriding whatever the environment chain supplied.
    *
@@ -291,6 +291,27 @@ export interface OperationFields extends ExecEnvironmentDecl {
    */
   args?: Record<string, JsonValue>;
   input?: Record<string, ParameterDecl>;
+  /**
+   * What the operation RETURNS, by name — and, for a prompt op, the structured-output contract the
+   * model is held to.
+   *
+   * A map, like `input`, because an operation returns named values exactly as it takes them. It used
+   * to be one `output` slot, and the contract was derived from the STATE's unbound outputs instead:
+   * the operation borrowed its own signature from whatever the state around it happened to declare,
+   * which is why the result had no address of its own and could only be received, never renamed or
+   * transformed on the way through.
+   *
+   * These names are what `.operation.output.<name>` exposes, and what a state's outputs bind FROM.
+   */
+  outputs?: Record<string, NamedParameterDecl>;
+  /**
+   * The single lowered output slot, as authored.
+   *
+   * Still here because the executor seam takes ONE output — a prompt op asks the model for one
+   * object, a delegated agent hands back one blob — so `outputs` is lowered INTO this. Declaring it
+   * directly is how an author says something the map cannot: that the whole return value is a blob
+   * (§4.4), rather than a record of named fields.
+   */
   output?: NamedParameterDecl;
   /**
    * The ordered roots a BARE reference is searched along, inherited down the tree (EXPRESSIONS.md
@@ -350,6 +371,7 @@ export const OPERATION_OWN_FIELDS: ReadonlySet<string> = new Set([
   "args",
   "input",
   "output",
+  "outputs",
   "path",
   "session",
   "sessionId",

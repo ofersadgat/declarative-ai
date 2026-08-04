@@ -257,8 +257,8 @@ describe("runtime references", () => {
 
 /**
  * The search PATH (EXPRESSIONS.md §4): a bare reference is tried against each root in turn and the
- * first match wins, with shell `PATH` semantics — and, crucially, with identity anchored to the
- * FIRST entry only.
+ * first match wins, with shell `PATH` semantics — and with identity folding back from EVERY entry,
+ * which is what makes the path a LAYERING mechanism rather than only a convenience.
  */
 describe("a bare reference searches the path", () => {
   const LIB = "/p/.jaira/lib";
@@ -288,15 +288,17 @@ describe("a bare reference searches the path", () => {
   });
 
   /**
-   * §4.1 — the rule that keeps the path from corrupting identity. A canonical id keys the snapshot
-   * hash, the event log and task rows; folding a match at ANY entry back to a bare id would let two
-   * different files collide on the one thing meant to tell them apart.
+   * §4.1 — a canonical id keys the snapshot hash, the event log and task rows, and it folds back
+   * from every entry so that `shared` names one state whichever layer supplied it. Two files at two
+   * entries therefore share an id, which is not a collision but an OVERRIDE: resolution has already
+   * picked the winner before identity is asked. What keeps a RUN honest is that execution reads a
+   * pinned snapshot of the resolved bundle rather than re-resolving the live path.
    */
-  it("gives a bare id only to a match under the FIRST entry", () => {
+  it("gives a bare id to a match under ANY entry, so a layer and its override share one", () => {
     expect(resolveReference("local", withPath()).id).toBe("local");
     expect(resolveReference("both", withPath()).id).toBe("both");
-    // Found further along ⇒ an absolute id, exactly as an out-of-tree reference already gets.
-    expect(resolveReference("shared", withPath()).id).toBe(`${LIB}/shared`);
+    // Found further along ⇒ still bare. This is the rule the base root exists for.
+    expect(resolveReference("shared", withPath()).id).toBe("shared");
   });
 
   it("reports a reference that matches nowhere, naming the roots it tried", () => {

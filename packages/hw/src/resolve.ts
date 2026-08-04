@@ -307,7 +307,7 @@ function runResolver(op: Operation<InlineFamily> & { kind: "function" }, scope: 
     case RESOLVER_REFS.conversation: {
       // A session REF, not a name. The engine mirrors transcripts under the session's id — a
       // POSITION, `planning@3` — so a name only ever matched a conversation that had had no calls,
-      // which is the one nobody wants to read. The ref comes from `.operation.outputs.session`,
+      // which is the one nobody wants to read. The ref comes from `.operation.output.session`,
       // which is how a conversation is addressable at all once it is a position rather than a name.
       const sessionArg = arg("session");
       if (sessionArg === undefined || !isResolvedValue(sessionArg)) return sessionArg ?? { error: "messages() has no session" };

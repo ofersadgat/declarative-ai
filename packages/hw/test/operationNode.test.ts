@@ -7,7 +7,7 @@
  * can read.
  *
  * Two properties are worth pinning: the namespace resolves at run time, and it is TYPED by the
- * operation's kind — so `operation.outputs.session` on a `ui` gate is an authoring error rather than
+ * operation's kind — so `operation.output.session` on a `ui` gate is an authoring error rather than
  * a binding that silently resolves to nothing.
  */
 import { describe, expect, it } from "vitest";
@@ -22,13 +22,13 @@ const errorsFor = (files: Record<string, StateDef>, rootId: string): string[] =>
 describe("the schema is a union over the operation's kind", () => {
   it("gives a prompt op the conversation position it ended at", () => {
     const schema = operationNodeSchema("prompt") as { properties: Record<string, unknown> };
-    expect(Object.keys(schema.properties)).toContain("outputs");
+    expect(Object.keys(schema.properties)).toContain("output");
   });
 
   it("gives a function op no session at all", () => {
     // Not "undefined at run time" — absent from the type, so reaching for it is caught at load.
     const schema = operationNodeSchema("function") as { properties: Record<string, unknown> };
-    expect(Object.keys(schema.properties)).not.toContain("outputs");
+    expect(Object.keys(schema.properties)).not.toContain("output");
     expect(Object.keys(schema.properties)).toContain("cost");
   });
 
@@ -44,12 +44,12 @@ describe("the schema is a union over the operation's kind", () => {
   });
 
   it("treats a session ref as opaque — no reachable structure beyond `id`", () => {
-    // `operation.outputs.session.position` is a plausible thing to reach for given how the notation
+    // `operation.output.session.position` is a plausible thing to reach for given how the notation
     // reads. It must not resolve: only the session store knows a ref has structure.
     const schema = operationNodeSchema("prompt") as {
-      properties: { outputs: { properties: { session: { additionalProperties: boolean; properties: Record<string, unknown> } } } };
+      properties: { output: { properties: { session: { additionalProperties: boolean; properties: Record<string, unknown> } } } };
     };
-    const session = schema.properties.outputs.properties.session;
+    const session = schema.properties.output.properties.session;
     expect(Object.keys(session.properties)).toEqual(["id"]);
     expect(session.additionalProperties).toBe(false);
   });
@@ -61,7 +61,7 @@ describe("the load-time lint", () => {
     operation: { kind: "prompt", prompt: "go", model: "m" },
   });
 
-  it("accepts `.children.<key>.operation.outputs.session` when the child is a prompt op", () => {
+  it("accepts `.children.<key>.operation.output.session` when the child is a prompt op", () => {
     const files: Record<string, StateDef> = {
       root: {
         children: { plan: { state: "leaf" }, review: { state: "leaf" } },
@@ -71,7 +71,7 @@ describe("the load-time lint", () => {
       leaf: promptLeaf(),
     };
     files["root"]!.children!["review"]!.state = "consumer";
-    files["root"]!.children!["review"]!.inputs = { s: { expr: ".children.plan.operation.outputs.session" } };
+    files["root"]!.children!["review"]!.inputs = { s: { expr: ".children.plan.operation.output.session" } };
     files["consumer"] = { ...promptLeaf(), inputs: { s: { schema: {} } } };
     expect(errorsFor(files, "root")).toEqual([]);
   });
@@ -87,7 +87,7 @@ describe("the load-time lint", () => {
       leaf: { ...promptLeaf(), inputs: { s: { schema: {} } } },
     };
     files["root"]!.children!["review"]!.state = "leaf";
-    files["root"]!.children!["review"]!.inputs = { s: { expr: ".children.gate.operation.outputs.session" } };
+    files["root"]!.children!["review"]!.inputs = { s: { expr: ".children.gate.operation.output.session" } };
     const errors = errorsFor(files, "root");
     expect(errors.some((e) => /operation.*outputs/.test(e) || /resolves to no declared value/.test(e))).toBe(true);
   });

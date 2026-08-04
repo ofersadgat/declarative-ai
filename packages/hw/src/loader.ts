@@ -199,10 +199,22 @@ function desugarRuntimeReference(reference: string, where: string, stateId: stri
       if (rest.length !== 1) bad("must name exactly one artifact, as '.artifacts.<name>'");
       return resolverEdge(RESOLVER_REFS.artifact, { name: { text: rest[0]! } });
     }
+    case "operation": {
+      // The state's OWN call, as data: what it returned (`.operation.output.<name>`), and what the
+      // engine measured about it (`outcome`, `cost`, `model`, `usage`).
+      //
+      // Evaluated rather than lowered to a producer edge, exactly as `.children.<key>.outcome` is.
+      // The operation is not a node in the producer graph — it runs AT this state rather than being
+      // resolved for it — so there is no edge to point at; the value is read off the instance once
+      // the call has completed. `operationNodeSchema` types it, so a name the call never returns is
+      // still a load-time error and not a silent undefined.
+      if (rest.length === 0) bad("must name something on the operation, as '.operation.output.<name>'");
+      return desugarBinding({ expr: `.operation.${rest.join(".")}` }, where, stateId);
+    }
     default:
       return bad(
         `starts with '${String(namespace)}', which is not a runtime namespace — ` +
-          `expected inputs, outputs, children or artifacts — a conversation is read with ` +
+          `expected inputs, outputs, operation, children or artifacts — a conversation is read with ` +
           `messages(<session ref>), since a session is a position and not a name`,
       );
   }
@@ -315,11 +327,17 @@ export function desugarOperation(decl: OperationFields, stateId: string, outputs
     input[name] = desugarParameter(p, `operation.input.${name}`, stateId).param;
   }
 
-  // The op's output is the authored one, or a single object slot whose schema is built from the
-  // state's declared outputs — the projection `{ child, output }` selects against.
+  // The op's output, in precedence order: the single slot the author declared outright (the only way
+  // to say "the whole return value is a blob"), then the operation's OWN `outputs` map, then — for a
+  // state that declares neither — the state's unbound outputs.
+  //
+  // The middle case is the one that matters. An operation that names what it returns owns its own
+  // signature, so the model's structured-output contract comes from the call rather than from
+  // whatever the state around it happens to publish, and `.operation.output.<name>` has names to
+  // expose. The last case is the older rule, kept for states that still lean on it.
   const output = decl.output
     ? desugarNamedParameter("output", decl.output, "operation.output", stateId).param
-    : outputSlotFor(outputs);
+    : outputSlotFor(decl.outputs);
 
   if (decl.kind === "prompt") {
     // The template's `{{.inputs.*}}` scope IS the operation's resolved inputs (§3.1: authored render
@@ -359,15 +377,20 @@ function callConfigOf(decl: OperationFields): Record<string, JsonValue> {
 }
 
 /**
- * Build the operation's single object-output slot from the outputs the OPERATION produces — which is
- * the state's declared outputs MINUS the bound ones. An output with a binding is derived when the
- * state terminates (from a child, an expression, …), never returned by the operation, so requiring it
- * of the operation would be a contract the operation cannot meet. This is the same filter the engine
- * applies at run time (`producedOutputSlots`); keeping them in step means a consumer reading
- * `op.output.schema` statically sees the same contract the engine enforces.
+ * Build the operation's single object-output slot from the names it returns.
+ *
+ * The executor seam takes ONE output — a prompt op asks the model for one object — so a map of named
+ * returns is lowered into an object schema here. This is what a prompt operation's structured-output
+ * contract IS.
+ *
+ * Built from the OPERATION's own `outputs` and nothing else. It used to fall back to the state's
+ * unbound outputs, so a call borrowed its signature from whatever the state around it happened to
+ * publish — which is why its result had no address and could only be received, never renamed. A
+ * state now says what it publishes and the operation says what it returns, with a binding between
+ * them.
  */
 function outputSlotFor(outputs: Record<string, NamedParameterDecl> | undefined): NamedParameter<InlineFamily> {
-  const produced = Object.entries(outputs ?? {}).filter(([, decl]) => decl.binding === undefined);
+  const produced = Object.entries(outputs ?? {});
   if (produced.length === 0) return defaultOutput();
   const properties: Record<string, JsonValue> = {};
   const required: string[] = [];
@@ -574,10 +597,19 @@ export interface LoadBundleOptions extends Omit<StateRefOptions, "defaultRoot"> 
    * Where a bare reference hangs off — one root, or an ordered SEARCH PATH (EXPRESSIONS.md §4).
    *
    * A list is searched in order for a *document* reference, where a filesystem is in hand to test a
-   * candidate against. A `children[].state` still resolves against the FIRST entry only: state-id
-   * resolution is pure path arithmetic with nothing to check existence with.
+   * candidate against. A `children[].state` does not search — state-id resolution is pure path
+   * arithmetic with nothing to check existence with — but it does fold a rooted or absolute spelling
+   * back against EVERY entry, so `$BASE/lib/review` and a project's own `lib/review` name one state
+   * rather than two.
    */
   defaultRoot?: string | readonly string[];
+  /**
+   * Whether a bare reference matching at more than one path entry is worth reporting. `"override"`
+   * suits a caller that layers roots deliberately — see `ReferenceOptions.shadowing`.
+   */
+  shadowing?: "warn" | "override";
+  /** The ordered layer roots a bare `$` searches — see `ReferenceOptions.rootPath`. */
+  rootPath?: readonly string[];
   /**
    * Fetch a state the `files` map does not hold, by canonical id — how an out-of-tree reference
    * (`/opt/workflows/lib/review`, `$JAIRA/shared/x`) is read. Sync, because loading is; returning
@@ -608,13 +640,14 @@ export interface LoadBundleOptions extends Omit<StateRefOptions, "defaultRoot"> 
  */
 export function loadBundle(files: Record<string, unknown>, rootRef: string, options: LoadBundleOptions = {}): WorkflowBundle {
   // `resolveStateRef` does path arithmetic with no filesystem in hand, so it cannot SEARCH a path —
-  // it has nothing to test a candidate's existence against and would always take the first entry.
-  // It therefore takes the primary root, which is the one a bare state id folds back against anyway.
-  // Searching for a `children[].state` needs an existence oracle and is a separate decision.
-  const primary = Array.isArray(options.defaultRoot) ? options.defaultRoot[0] : (options.defaultRoot as string | undefined);
+  // it has nothing to test a candidate's existence against. It is given the whole path anyway,
+  // because folding a rooted spelling back to a bare id needs no oracle: `$BASE/lib/review` is
+  // `lib/review` whether or not the file is there. Searching for a `children[].state` would need an
+  // existence oracle and remains a separate decision.
   const refs: StateRefOptions = {
-    ...(primary !== undefined ? { defaultRoot: primary } : {}),
+    ...(options.defaultRoot !== undefined ? { defaultRoot: options.defaultRoot } : {}),
     ...(options.roots !== undefined ? { roots: options.roots } : {}),
+    ...(options.rootPath !== undefined ? { rootPath: options.rootPath } : {}),
   };
   const authored = new Map<string, StateDef>();
   for (const [key, raw] of Object.entries(files)) {
@@ -648,7 +681,9 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
         from: id,
         ...(defaultRoot !== undefined ? { defaultRoot } : {}),
         ...(options.roots !== undefined ? { roots: options.roots } : {}),
+        ...(options.rootPath !== undefined ? { rootPath: options.rootPath } : {}),
         ...(options.onWarn !== undefined ? { onWarn: options.onWarn } : {}),
+        ...(options.shadowing !== undefined ? { shadowing: options.shadowing } : {}),
         ...(options.onReferencedFile !== undefined ? { onRead: options.onReferencedFile } : {}),
       }) as StateDef;
     } catch (e) {

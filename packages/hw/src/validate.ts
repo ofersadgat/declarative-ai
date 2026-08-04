@@ -363,6 +363,13 @@ function checkOperation(
       err(`${path}.function`, "a function operation must name a function");
     } else {
       checkAgainstRegistry(op.functionRef, `${path}.function`, err, warn, env);
+      // The state's OWN call, against the signature its implementation declares.
+      //
+      // This ran only over embedded calls inside bindings — a `{ op }` producer — so the operation a
+      // state exists to run was the one call nobody compared against its impl. A state could name
+      // every parameter wrongly, or pass nothing at all to a function that requires three arguments,
+      // and lint clean right up until dispatch.
+      checkAgainstSignature(op, path, err, env);
     }
   } else if (op.user === undefined || op.user === "") {
     warn(`${path}.prompt`, "prompt operation has an empty prompt (no template and no skill)");
@@ -551,6 +558,21 @@ function checkAgainstSignature(
     if (!check.ok) {
       err(path, `operation '${op.functionRef}' declares parameter '${name}' as a type its implementation does not accept: ${check.reason}`);
     }
+  }
+
+  // The OTHER direction, and the one that actually stops a run: a parameter the impl REQUIRES and the
+  // document never passes. The loop above catches a document naming something the impl has no slot
+  // for — an argument nothing reads, which is untidy — while this catches the impl being handed
+  // nothing for a slot it cannot work without, which fails the call.
+  //
+  // It is the same check `children.<key>.inputs` already gets ("required child input 'x' is not
+  // wired"), asked of an operation. A state that mounts a child badly was a lint error; a state that
+  // calls a function badly was not, and there is no reason for the two to differ.
+  const required = expected?.required;
+  if (!Array.isArray(required)) return;
+  for (const name of required) {
+    if (typeof name !== "string" || Object.hasOwn(op.input, name)) continue;
+    err(path, `operation '${op.functionRef}' requires an input '${name}', which this state does not pass`);
   }
 }
 
@@ -842,6 +864,23 @@ function reachabilityOf(def: LoadedState): Reachability {
 
 // --- Expression scope ---------------------------------------------------------
 
+/**
+ * The operation's declared output, in the shape {@link operationNodeSchema} types `outputs` from.
+ *
+ * Read off the DESUGARED state, so it is the slot the loader actually built — including the one it
+ * synthesizes when the author declared none. Reading the authored file instead would type the
+ * namespace against a declaration that is often absent.
+ */
+function outputDeclOf(def: LoadedState): { name: string; kind?: string; schema?: JsonValue } | undefined {
+  const output = (def as { operation?: { output?: { name?: unknown; kind?: unknown; schema?: unknown } } }).operation?.output;
+  if (output === undefined || typeof output.name !== "string") return undefined;
+  return {
+    name: output.name,
+    ...(typeof output.kind === "string" ? { kind: output.kind } : {}),
+    ...(output.schema !== undefined ? { schema: output.schema as JsonValue } : {}),
+  };
+}
+
 /** Build the typed namespace map an expression is inferred against (§7.2/§7.5). */
 function exprScopeOf(def: LoadedState, bundle: WorkflowBundle): ExprScope {
   const objectOf = (slots: Record<string, { schema?: JsonSchema }> | undefined): JsonSchema => {
@@ -858,9 +897,11 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle): ExprScope {
     const childState = bundle.states[child.state];
     const outputs = childState ? (outputsObjectSchema(childState) ?? ANY_SCHEMA) : ANY_SCHEMA;
     // A child's own operation node, typed by ITS operation's kind — so
-    // `children.plan.operation.outputs.session` is checked against what `plan` actually runs, and
+    // `children.plan.operation.output.session` is checked against what `plan` actually runs, and
     // pointing it at a `ui` gate is a load-time error rather than a runtime undefined.
-    const childOperation = childState ? operationNodeSchema(childState.operation?.kind) : undefined;
+    const childOperation = childState
+      ? operationNodeSchema(childState.operation?.kind, outputDeclOf(childState))
+      : undefined;
     childrenProps[key] = {
       type: "object",
       properties: {
@@ -873,7 +914,7 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle): ExprScope {
 
   // The state's OWN operation node (SPEC.md §6.1). Absent for a pure composite, so
   // `operation.cost` there is an unresolved reference rather than an object of unknowns.
-  const operation = operationNodeSchema(def.operation?.kind);
+  const operation = operationNodeSchema(def.operation?.kind, outputDeclOf(def));
 
   const sequenceKeys = def.sequence ?? [];
 

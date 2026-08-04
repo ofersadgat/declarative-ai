@@ -573,13 +573,13 @@ describe("conversation modes (SPEC §4.7)", () => {
 
   /**
    * A conversation is addressed by REF, so reading a sibling's means the ref flows as data: the
-   * parent wires `.children.goals.operation.outputs.session` in, and the consumer calls `messages()`
+   * parent wires `.children.goals.operation.output.session` in, and the consumer calls `messages()`
    * on it. There is no name to look one up by — a session is a position, and the namespace that
    * pretended otherwise could only ever address a conversation with no messages in it.
    */
   it("messages() wires a prior transcript in as DATA (§7.5)", async () => {
     const files = specPlanningFiles();
-    files[PLAN_ID]!.children!.critique!.inputs!.planners = ".children.goals.operation.outputs.session";
+    files[PLAN_ID]!.children!.critique!.inputs!.planners = ".children.goals.operation.output.session";
     const critique = files["feature/plan/critique"]!;
     critique.inputs = { ...critique.inputs, planners: { kind: "json" } };
     critique.environment = { conversation: { mode: "fresh" } };
@@ -603,7 +603,7 @@ describe("conversation modes (SPEC §4.7)", () => {
 
   it("messages() composes with the array builtins to select one turn", async () => {
     const files = specPlanningFiles();
-    files[PLAN_ID]!.children!.critique!.inputs!.planners = ".children.goals.operation.outputs.session";
+    files[PLAN_ID]!.children!.critique!.inputs!.planners = ".children.goals.operation.output.session";
     const critique = files["feature/plan/critique"]!;
     critique.inputs = { ...critique.inputs, planners: { kind: "json" } };
     critique.environment = { conversation: { mode: "fresh" } };
@@ -1156,7 +1156,7 @@ describe("operation.* resolves during a run", () => {
   });
 
   it("exposes the conversation position the call ENDED at, as a bare `{ id }`", async () => {
-    const { engine } = makeEngine(reading(".children.call.operation.outputs.session"), "root", () => ok({ r: "done" }));
+    const { engine } = makeEngine(reading(".children.call.operation.output.session"), "root", () => ok({ r: "done" }));
     const result = await engine.run({ inputs: {} });
     // ONLY an id: the enumerable shape the events journal and `inputs_json` see. Everything else a
     // resolved session carries is non-enumerable by construction.
@@ -1264,7 +1264,7 @@ describe("the conversation and the resource bundle are different keys", () => {
   /**
    * The EXPLICIT spelling: a ref carried through data flow, rather than a name shared by declaration.
    *
-   * The parent wires `children.plan.operation.outputs.session` into the consumer's declared input —
+   * The parent wires `children.plan.operation.output.session` into the consumer's declared input —
    * an expression only the parent can evaluate, since only the parent can see both children — and
    * the consumer names that input in its `session`. Two scopes, which is why the field has to accept
    * an expression at all: a static value could never carry a position that does not exist until the
@@ -1275,7 +1275,7 @@ describe("the conversation and the resource bundle are different keys", () => {
       root: {
         children: {
           plan: { state: "planner" },
-          review: { state: "reviewer", inputs: { thread: { expr: ".children.plan.operation.outputs.session" } } },
+          review: { state: "reviewer", inputs: { thread: { expr: ".children.plan.operation.output.session" } } },
         },
         sequence: ["plan", "review"],
         outputs: { r: { binding: ".children.review.outputs.r" } },
