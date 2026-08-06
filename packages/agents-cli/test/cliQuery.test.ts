@@ -316,6 +316,112 @@ describe("the argv a permission-gated run actually receives", () => {
   });
 });
 
+/**
+ * The SESSION — the half of `sessionResume: true` that lives on the wire.
+ *
+ * These assertions exist because the adapter declared native resume AND native fork while emitting
+ * neither flag and recording no id, which the session layer reads as licence to skip replay: every
+ * call started a cold conversation and reported it as a successful resume. Both halves are tested,
+ * because either one alone still produces exactly that failure.
+ *
+ * The flags and the `session_id` field were verified against a live `claude 2.1.142` before being
+ * written here — `--resume` returns the same id and appends, `--resume --fork-session` returns a NEW
+ * id and leaves the parent's transcript untouched.
+ */
+describe("the session flags", () => {
+  it("continues a conversation with `--resume <id>`", () => {
+    const argv = cliArgv({ prompt: "go on", resume: "aaaa-0001" });
+    expect(argv[argv.indexOf("--resume") + 1]).toBe("aaaa-0001");
+    // Before the `--`, so it is read as a flag and not as part of the prompt.
+    expect(argv.indexOf("--resume")).toBeLessThan(argv.indexOf("--"));
+    // An APPEND, not a branch: the CLI reuses the id and the parent conversation moves on.
+    expect(argv).not.toContain("--fork-session");
+  });
+
+  it("branches it with `--fork-session`, which the CLI only accepts alongside a resume", () => {
+    const argv = cliArgv({ prompt: "go on", resume: "aaaa-0001", forkSession: true });
+    expect(argv[argv.indexOf("--resume") + 1]).toBe("aaaa-0001");
+    expect(argv).toContain("--fork-session");
+    expect(argv.indexOf("--fork-session")).toBeLessThan(argv.indexOf("--"));
+  });
+
+  it("starts FRESH when there is no handle — no session flag anywhere", () => {
+    const argv = cliArgv({ prompt: "hi" });
+    expect(argv).not.toContain("--resume");
+    expect(argv).not.toContain("--fork-session");
+  });
+
+  // A fork BRANCHES a conversation, so it says nothing without one to branch. The CLI documents
+  // `--fork-session` as "use with --resume or --continue"; emitting it alone would be asking for a
+  // branch of nothing, and the executor never sets it without a handle.
+  it("drops a fork that names no session, rather than asking the CLI to branch nothing", () => {
+    expect(cliArgv({ prompt: "hi", forkSession: true })).not.toContain("--fork-session");
+  });
+
+  it("records the id the run ENDED in, so the next call has something to resume", async () => {
+    // Verified shape: `session_id` rides on the terminal `result` message. Without capturing it, a
+    // correctly-resuming transport still starts fresh every time for want of somewhere to put the id.
+    const { spawn } = fakeSpawn(['{"type":"result","is_error":false,"result":"ZEPHYR","session_id":"51caeb77","total_cost_usd":0.01}']);
+    const seen = [];
+    for await (const m of createCliAgentQuery({ spawn })({ prompt: "what was the codeword?" })) seen.push(m);
+    expect(seen.at(-1)).toEqual({ type: "result", result: { text: "ZEPHYR", costUsd: 0.01, sessionId: "51caeb77" } });
+  });
+
+  it("omits the id entirely when the CLI reported none, rather than inventing one", async () => {
+    const { spawn } = fakeSpawn(['{"type":"result","result":"done"}']);
+    const seen = [];
+    for await (const m of createCliAgentQuery({ spawn })({ prompt: "x" })) seen.push(m);
+    expect(seen.at(-1)).toEqual({ type: "result", result: { text: "done", costUsd: undefined } });
+  });
+
+  // Mutually exclusive by construction upstream; the refusal guards a hand-built seam call, where the
+  // damage is silent — the transcript is rendered into the prompt, so resuming as well duplicates it.
+  it("refuses to both resume and replay, which would put the conversation in twice", async () => {
+    const { spawn, argv } = fakeSpawn(['{"type":"result","result":"done"}']);
+    const seen = [];
+    for await (const m of createCliAgentQuery({ spawn })({ prompt: "x", resume: "s1", messages: [{ role: "user", content: "hi" }] })) seen.push(m);
+    expect(seen).toEqual([{ type: "other", error: expect.stringMatching(/cannot both resume/) }]);
+    expect(argv).toHaveLength(0);
+  });
+});
+
+/**
+ * `is_error` is the CLI's own verdict on the run, and it is INDEPENDENT of both `subtype` and the exit
+ * code. An unauthenticated run comes back as `{"subtype":"success","is_error":true,"result":"Not logged
+ * in · Please run /login"}` on exit 0 — observed, not hypothesised.
+ */
+describe("a result message that reports its own failure", () => {
+  it("is an error, not the agent's answer", async () => {
+    const { spawn } = fakeSpawn(['{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}']);
+    const seen = [];
+    for await (const m of createCliAgentQuery({ spawn })({ prompt: "x" })) seen.push(m);
+    expect(seen.at(-1)).toEqual({ type: "other", error: "Not logged in · Please run /login" });
+    expect(seen).not.toContainEqual(expect.objectContaining({ type: "result" }));
+  });
+
+  it("names the run as failed even when the CLI supplied no text to explain it", async () => {
+    const { spawn } = fakeSpawn(['{"type":"result","is_error":true}']);
+    const seen = [];
+    for await (const m of createCliAgentQuery({ spawn })({ prompt: "x" })) seen.push(m);
+    expect(seen.at(-1)).toEqual({ type: "other", error: expect.stringMatching(/reported a failed run/) });
+  });
+
+  it("reaches the caller as a classified FAILURE, not as a successful empty review", async () => {
+    // The whole point: `finishReason: "stop"` carrying "/login" is indistinguishable from an agent that
+    // ran and found nothing.
+    const { spawn } = fakeSpawn(['{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}']);
+    const result = await createCliAgentFunction({ spawn }).run(inputs(), {});
+    expect(isOk(result)).toBe(false);
+    expect(!isOk(result) && result.error.reason).toMatch(/Not logged in/);
+  });
+
+  it("still resolves a normal run, where `is_error` is false", async () => {
+    const { spawn } = fakeSpawn(['{"type":"result","subtype":"success","is_error":false,"result":"done"}']);
+    const result = await createCliAgentFunction({ spawn }).run(inputs(), {});
+    expect(isOk(result) && result.value).toBe("done");
+  });
+});
+
 describe("the model flag", () => {
   it("passes --model when the caller named one", () => {
     expect(cliArgv({ prompt: "go", model: "sonnet" })).toContain("--model");

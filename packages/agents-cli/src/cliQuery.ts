@@ -5,10 +5,12 @@
  * the other unchanged. What differs is only how the agent is reached — an in-process SDK call, or a
  * subprocess speaking newline-delimited JSON on stdout.
  *
- * ⚠️ UNVERIFIED against a live CLI: the flag names and the stream-json message shape below reflect the
- * documented interface and MUST be confirmed against the installed CLI version — adjust
- * {@link CliAgentOptions} and the two mapping spots if they differ. All adapter LOGIC is tested through
- * the injectable {@link SpawnProcess} seam; only this boundary mapping is untested here.
+ * ✅ VERIFIED against `claude 2.1.142` by running it: the session flags (`--resume`, `--fork-session`,
+ * `--session-id`) and the terminal `result` message's `session_id` / `is_error` / `total_cost_usd`
+ * fields were read off real runs, not off documentation. Everything else here still reflects the
+ * DOCUMENTED interface and should be re-confirmed against the installed CLI version if a run
+ * misbehaves — adjust {@link CliAgentOptions} and the mapping spot if they differ. All adapter LOGIC is
+ * tested through the injectable {@link SpawnProcess} seam; only this boundary mapping is untested here.
  *
  * Permission posture reaches a CLI agent on TWO channels, and which one is load-bearing depends on the
  * run:
@@ -59,6 +61,19 @@ export function needsBridge(opts: AgentQueryOptions): boolean {
  * and `--permission-prompt-tool` (so the CLI ASKS before each gated tool-use rather than deciding on its
  * own).
  *
+ * ✅ OBSERVED (claude 2.1.142), and the reason the session flags below are here at all: this function
+ * used to emit NEITHER, so a transport declaring `sessionResume: true` — which is what tells the session
+ * layer to skip replay and read zero messages — started a brand-new conversation on every call and
+ * reported it as a successful resume. What a live run confirms:
+ *
+ *  - `--resume <id>` continues the conversation in place and comes back under the SAME `session_id`;
+ *  - `--resume <id> --fork-session` mints a NEW `session_id`, seeded with a copy of the parent's history,
+ *    and leaves the parent's transcript untouched — the branch is real, and it costs no replay.
+ *
+ * `--fork-session` is nested inside the resume branch because the CLI documents it as "use with
+ * `--resume` or `--continue`": a fork of nothing is not a request this transport can express, and the
+ * executor only ever sets it alongside a handle.
+ *
  * Two things this deliberately does NOT do:
  *
  *  - **Injected tools do not join `--allowedTools`.** That flag is the CLI's PRE-APPROVAL list: a tool
@@ -82,6 +97,7 @@ export function cliArgv(opts: AgentQueryOptions, config: CliAgentOptions = {}, b
     "stream-json",
     // `stream-json` output requires `--verbose` in non-interactive mode.
     "--verbose",
+    ...(opts.resume !== undefined ? ["--resume", opts.resume, ...(opts.forkSession === true ? ["--fork-session"] : [])] : []),
     ...(bridgeUrl !== undefined ? ["--mcp-config", mcpConfigJson(bridgeUrl)] : []),
     // Only when there is an approver to ask. With tools injected but no approver, the bridge exists to
     // SERVE those tools and the CLI keeps its own permission behaviour.
@@ -104,6 +120,16 @@ export function cliArgv(opts: AgentQueryOptions, config: CliAgentOptions = {}, b
 /** Build a CLI-driven agent query. */
 export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
   return async function* cliAgentQuery(opts: AgentQueryOptions): AsyncIterable<AgentStreamMessage> {
+    // REFUSE BEFORE SPAWNING, exactly as the codex sibling does. `applySession` makes these two
+    // mutually exclusive by construction — a handle is threaded only when the transport is NOT
+    // replaying — so this is unreachable from the executor and guards a hand-built seam call. It stays
+    // because the alternative is silent: the replayed transcript is rendered into the prompt, so
+    // resuming as well would put the whole conversation into the session TWICE.
+    if (opts.resume !== undefined && opts.messages !== undefined) {
+      yield { type: "other", error: "the claude CLI cannot both resume a session and replay a transcript — that would duplicate the conversation" };
+      return;
+    }
+
     // Stand the bridge up BEFORE spawning, and refuse the run if it cannot start. Running the agent
     // anyway would leave it under its own defaults while the caller believes its approver is in force —
     // silence is the failure mode this whole path exists to remove.
@@ -150,12 +176,26 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
         } catch {
           continue; // a non-JSON line is CLI chatter, never a message
         }
-        // ⚠️ VERIFY: the terminal message discriminator + text/cost field names.
+        // ✅ OBSERVED (claude 2.1.142): `{"type":"result","subtype":"success","is_error":false,
+        // "result":"…","session_id":"…","total_cost_usd":0.029}`.
         if (msg["type"] === "result") {
           const text = typeof msg["result"] === "string" ? msg["result"] : typeof msg["text"] === "string" ? msg["text"] : "";
           const costUsd = typeof msg["total_cost_usd"] === "number" ? msg["total_cost_usd"] : undefined;
+          // The session this run ENDED in — a new id after a fork, the resumed one otherwise. Recording
+          // it is not optional: without it there is no handle for the next call, so a transport that
+          // resumes correctly would still start fresh every time for want of somewhere to put the id.
+          const sessionId = typeof msg["session_id"] === "string" ? msg["session_id"] : undefined;
           sawResult = true;
-          yield { type: "result", result: { text, costUsd } };
+          // `is_error` is the CLI's own verdict on the run, and it is INDEPENDENT of `subtype` and of
+          // the exit code: a run that fails to authenticate comes back as
+          // `{"subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}` with
+          // exit 0. Reading only `type` reported that sentence as the agent's answer, with
+          // `finishReason: "stop"` — a failure indistinguishable from a review that found nothing.
+          if (msg["is_error"] === true) {
+            yield { type: "other", error: text.length > 0 ? text : "the agent CLI reported a failed run" };
+            return;
+          }
+          yield { type: "result", result: { text, costUsd, ...(sessionId !== undefined ? { sessionId } : {}) } };
         } else if (typeof msg["error"] === "string") {
           yield { type: "other", error: msg["error"] };
         } else {
