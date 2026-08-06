@@ -36,6 +36,18 @@ export interface InjectedTool {
 /** Options the adapter builds from the op inputs + ctx and hands to the query seam. */
 export interface AgentQueryOptions {
   prompt: string;
+  /**
+   * Which model the agent should use — the PROVIDER-NATIVE name, route prefix already stripped.
+   *
+   * `sonnet`, not `claude-cli/sonnet`: the prefix chose this transport and has no meaning to the
+   * binary, which would reject it as an unknown model. Absent ⇒ the agent's own default, which is the
+   * ordinary case and the whole reason an agent needs no configuration.
+   *
+   * An adapter that cannot honour a specific model must REFUSE rather than drop it. Silently running
+   * a different model than the one asked for is the failure this field exists to make impossible —
+   * and it is expensive as well as wrong, since the models differ by an order of magnitude in price.
+   */
+  model?: string;
   /** Working directory (from `ctx.workspace.root`). */
   cwd?: string;
   /** Tool allow-list (the logical names from `runtime.tools`). Note what this MEANS to an agent: it is a

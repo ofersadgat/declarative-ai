@@ -1216,9 +1216,11 @@ never a second implementation. `newCapabilityRegistry()` is just "three empty ma
 There is **no `runtimes` facet and no `prompt` facet**: a runtime invocation is a plain `FunctionOp`, so
 delegated agent adapters register in `functions` like anything else and are distinguished only by their
 entry's *capabilities*; and a `PromptOp` is dispatched to an `Executor` like everything else, so the llm
-path is not privileged over any other. The `functions` facet **is** the ops
-[`FunctionRegistry`](#the-function-registry), unextended. Permission gating and search refusal read the
-**resolved entry** — never the op, which carries no runtime marker.
+path is not privileged over any other. That an agent can also ANSWER a prompt op — `AgentExecutor` is a
+`PromptExecutor` (DESIGN §4.4) — does not reintroduce one: it is reached by being installed in the
+dispatcher's prompt slot, not by a registry lookup and not by a third op kind. The `functions` facet
+**is** the ops [`FunctionRegistry`](#the-function-registry), unextended. Permission gating and search
+refusal read the **resolved entry** — never the op, which carries no runtime marker.
 
 #### `Tool` and `NativeToolRef`
 

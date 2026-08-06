@@ -10,6 +10,8 @@
  */
 export * from "./contract.js";
 export * from "./handles.js";
+export * from "./inputs.js";
+export * from "./functionExecutor.js";
 export * from "./operationExecutor.js";
 export * from "./resolvedOperation.js";
 export * from "./memo.js";

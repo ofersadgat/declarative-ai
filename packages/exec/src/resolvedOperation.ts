@@ -45,7 +45,7 @@ import type {
 } from "@declarative-ai/ops";
 import { failureOf, isOk } from "@declarative-ai/ops";
 import type { ExecMetrics, ExecResult, ExecServices } from "./contract.js";
-import { resolveLiteralInputs } from "./operationExecutor.js";
+import { resolveLiteralInputs } from "./inputs.js";
 
 /** The entry a resolved operation carries. */
 export type CallTarget = RegisteredFunction<ExecServices, ExecMetrics>;

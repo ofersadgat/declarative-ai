@@ -197,6 +197,30 @@ function isPrompt(op: Operation<InlineFamily>): op is PromptOp<InlineFamily> {
   return op.kind === "prompt";
 }
 
+/**
+ * Does this wrapper's scope predicate claim this model?
+ *
+ * The predicates callers pass are llm's own route readers (`isEmbeddedModel`, `isRemoteModel`), and
+ * those THROW on an id whose prefix is not a serving route — deliberately, so a typo'd provider id is
+ * caught rather than silently mis-routed. That strictness became REACHABLE FROM HERE once a prompt op
+ * could be served by something other than a provider: an agent-served call carries an id like
+ * `claude-cli/sonnet`, which names an EXECUTOR rather than a serving route, and letting the throw out
+ * of `start` would break the never-throws contract at the seam — synchronously, before any handle
+ * exists to carry the failure.
+ *
+ * A predicate that cannot parse an id has, by definition, no opinion about it, so the honest reading
+ * of the throw is "not mine". The scope narrows; nothing is silently governed by the wrong limiter,
+ * and an agent call does not queue behind a residency manager for weights it will never load.
+ */
+function governs(appliesTo: ((modelId: string | undefined) => boolean) | undefined, modelId: string | undefined): boolean {
+  if (appliesTo === undefined) return true;
+  try {
+    return appliesTo(modelId);
+  } catch {
+    return false;
+  }
+}
+
 // --- Rate limiting -------------------------------------------------------------
 
 /** Options for {@link withRateLimit}: the limiter, the models it GOVERNS, plus the config-resolution
@@ -278,7 +302,7 @@ export function withRateLimit<R = ExecServices, M extends ExecMetrics = ExecMetr
       // non-prompt op gets, rather than a wrapped handle that would only forward. Deciding here, before
       // `wrapHandle`, is what keeps the inner handle's event stream identical for a call this limiter
       // has nothing to say about.
-      if (appliesTo !== undefined && !appliesTo(priced.model)) return innerExec.start(op, ctx);
+      if (!governs(appliesTo, priced.model)) return innerExec.start(op, ctx);
       return wrapHandle(async (ctl) => {
         let est = estimateCache.get(op);
         if (!est) {
@@ -372,7 +396,7 @@ export function withModelManager<R = ExecServices, M extends ExecMetrics = ExecM
       }
       // An ungoverned model is handed straight through, untouched — the same passthrough a non-prompt
       // op gets. A model with no residency to manage must not queue behind one that has.
-      if (appliesTo !== undefined && !appliesTo(modelId)) return innerExec.start(op, ctx);
+      if (!governs(appliesTo, modelId)) return innerExec.start(op, ctx);
       if (modelId === undefined) return innerExec.start(op, ctx);
       return wrapHandle(async (ctl) => {
         let lease: ResidencyLease;

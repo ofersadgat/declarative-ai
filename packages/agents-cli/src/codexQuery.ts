@@ -209,6 +209,12 @@ export function codexArgv(opts: AgentQueryOptions, config: CodexAgentOptions = {
     "-c",
     'approval_policy="never"',
     ...(bridgeUrl !== undefined ? ["-c", mcpServerOverride(bridgeUrl, Object.keys(opts.mcpTools ?? {}))] : []),
+    // The model, when the caller named one. As a CONFIG OVERRIDE rather than `-m`, for the same reason
+    // the sandbox is: `-m` exists on `codex exec` and NOT on `codex exec resume`, so a resumed run
+    // built with the flag would fail argument parsing — and a resumed run is the common case once a
+    // conversation is under way. `model` is a documented key, and `--strict-config` would reject it if
+    // it were not.
+    ...(opts.model !== undefined ? ["-c", `model="${opts.model}"`] : []),
     ...(config.args ?? []),
     // Everything after this is an OPERAND, whatever it looks like; `-` is "read the prompt from stdin".
     "--",

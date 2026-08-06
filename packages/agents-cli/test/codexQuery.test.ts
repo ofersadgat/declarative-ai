@@ -360,3 +360,23 @@ describe("sessions — native append, replayed fork (SESSIONS.md §6)", () => {
     expect(replayPreamble([])).toBe("");
   });
 });
+
+describe("the model override", () => {
+  it("travels as a CONFIG key, not as -m", () => {
+    // `-m` exists on `codex exec` and NOT on `codex exec resume`, so a resumed run built with the flag
+    // fails argument parsing — and a resumed run is the common case once a conversation is under way.
+    const argv = codexArgv({ prompt: "go", model: "gpt-5" });
+    expect(argv).not.toContain("-m");
+    expect(argv.join(" ")).toContain('model="gpt-5"');
+  });
+
+  it("survives a RESUME, which is the case the flag form would have broken", () => {
+    const argv = codexArgv({ prompt: "go", model: "gpt-5", resume: "sess-1" });
+    expect(argv.join(" ")).toContain('model="gpt-5"');
+    expect(argv.slice(0, 3)).toEqual(["exec", "resume", "sess-1"]);
+  });
+
+  it("omits it when none was named", () => {
+    expect(codexArgv({ prompt: "go" }).join(" ")).not.toContain("model=");
+  });
+});

@@ -315,3 +315,19 @@ describe("the argv a permission-gated run actually receives", () => {
     expect(valueAfter(flags, "--allowedTools")).toBe("Read");
   });
 });
+
+describe("the model flag", () => {
+  it("passes --model when the caller named one", () => {
+    expect(cliArgv({ prompt: "go", model: "sonnet" })).toContain("--model");
+    expect(cliArgv({ prompt: "go", model: "sonnet" }).join(" ")).toContain("--model sonnet");
+  });
+
+  it("omits it entirely when none was named, so the CLI keeps its own default", () => {
+    expect(cliArgv({ prompt: "go" })).not.toContain("--model");
+  });
+
+  it("puts it before the `--`, so it is read as a flag and not as the prompt", () => {
+    const argv = cliArgv({ prompt: "go", model: "sonnet" });
+    expect(argv.indexOf("--model")).toBeLessThan(argv.indexOf("--"));
+  });
+});

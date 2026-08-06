@@ -52,6 +52,7 @@ export interface CliAgentFunctionOptions extends Omit<ClaudeCodeFunctionOptions,
 export function createCliAgentFunction(options: CliAgentFunctionOptions = {}): ReturnType<typeof createClaudeCodeFunction> {
   const { command, args, spawn, startBridge, ...rest } = options;
   return createClaudeCodeFunction({
+    label: "claude-cli",
     ...rest,
     // Tool injection now means the same thing it does for the SDK adapter — the agent calls OUR impls,
     // reached over the bridge — so the default matches, and a workflow authored against one adapter

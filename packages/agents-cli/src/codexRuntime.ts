@@ -55,6 +55,7 @@ export interface CodexAgentFunctionOptions extends Omit<ClaudeCodeFunctionOption
 export function createCodexAgentFunction(options: CodexAgentFunctionOptions = {}): ReturnType<typeof createClaudeCodeFunction> {
   const { command, args, spawn, startBridge, sandbox, ...rest } = options;
   return createClaudeCodeFunction({
+    label: "codex",
     ...rest,
     capabilities: options.capabilities ?? CODEX_CAPS,
     approvalCallback: false,

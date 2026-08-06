@@ -13,4 +13,7 @@
  */
 export * from "./lowering.js";
 export * from "./executor.js";
+// Dispatch by model ROUTE — the sibling of `exec`'s dispatch by op KIND, and what lets a prompt op be
+// served by an agent transport instead of by a provider endpoint.
+export * from "./routerExecutor.js";
 export * from "./wrappers.js";

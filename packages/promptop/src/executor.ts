@@ -10,6 +10,10 @@
  * depends on `exec`, because this class IMPLEMENTS the `Executor` interface `exec` defines. Both
  * readings hold — `exec` owns the generic machinery (low), `promptop` owns the LLM-specific
  * implementation (high). Nothing in `exec` knows `PromptOp` exists.
+ *
+ * It is also the BASE of the family that answers a `PromptOp`: `AgentExecutor` (DESIGN §4.4) is this
+ * class with a different `invoke`. That is why `run` below is split into `protected` phases rather
+ * than written as one method — the phases are exactly where the family differs, and there is only one.
  */
 import type {
   Capabilities,
@@ -164,15 +168,33 @@ function adaptTools(tools: Record<string, Tool> | undefined, ctx: ExecServices):
   return out;
 }
 
+/**
+ * The PROMPT `Executor` — and the base of the executor family that answers a `PromptOp`.
+ *
+ * `run` is split into `protected` phases rather than written as one method, because the phases are
+ * where the family actually differs. A delegated agent lowers the SAME `LlmCallDefinition` (a
+ * serializable description of one call: system, turns, model, tools, a step budget — which is
+ * precisely what a coding-agent CLI is configured with) and resolves its session the SAME way; it
+ * differs only in {@link PromptExecutor.invoke}, where the call is made. Naming the seams is what
+ * lets that be a subclass rather than a second copy of the whole pipeline — and the copy is not
+ * hypothetical, it is what `agents-api` used to be.
+ *
+ * The phases, in order: {@link lower} → {@link applySession} → {@link invoke} → {@link project}.
+ * Each is behaviour-identical to the single method it came out of.
+ */
 export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecServices, LlmMetrics, Operation<InlineFamily>, Out> {
-  readonly capabilities = CAPABILITIES;
+  /** The hierarchy's serializable discriminant — see `FunctionExecutor.kind` in `exec`. Typed as
+   *  `string` rather than as its own literal so a subclass can narrow it to its own name. */
+  static readonly kind: string = "prompt";
+
+  readonly capabilities: Capabilities = CAPABILITIES;
   /** How two of THIS executor's measurements combine — tokens and money add, the start is the first
    *  observation. exec calls this to fold retry attempts without knowing what a token is. */
   readonly metrics: MetricsAlgebra<LlmMetrics> = { merge: mergeLlmMetrics };
 
   private envRouter: ModelRouter | undefined;
 
-  constructor(private readonly options: PromptExecutorOptions = {}) {}
+  constructor(protected readonly options: PromptExecutorOptions = {}) {}
 
   start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<Out, LlmMetrics> {
     if (op.kind !== "prompt") {
@@ -197,13 +219,142 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
     };
   }
 
-  private resolveRouter(ctx: ExecServices): ModelRouter | undefined {
+  protected resolveRouter(ctx: ExecServices): ModelRouter | undefined {
     if (this.options.router) return this.options.router;
     if (ctx.modelRouter) return ctx.modelRouter;
     // A custom runner needs no router at all — never force env keys on it.
     if (this.options.runner) return undefined;
     this.envRouter ??= createModelRouter();
     return this.envRouter;
+  }
+
+  /**
+   * Does a missing router make this call impossible?
+   *
+   * True for the provider path with no custom runner: there is nothing to send the call to. A
+   * subclass whose {@link invoke} reaches somewhere else entirely — a subprocess, an SDK — answers
+   * false, which is how it opts out of the provider requirement without pretending to have a router.
+   */
+  protected requiresRouter(): boolean {
+    return this.options.runner === undefined;
+  }
+
+  /**
+   * The turns a lowered call sends. Overridable so a transport that speaks a different message shape
+   * can say what its delta is.
+   */
+  protected requestTurns(definition: LlmCallDefinition): ModelMessage[] {
+    return requestTurns(definition);
+  }
+
+  /** Adapt the resolved `Tool`s into the executable form this transport hands to its call. */
+  protected adaptTools(tools: Record<string, Tool> | undefined, ctx: ExecServices): Record<string, ToolExecutor> | undefined {
+    return adaptTools(tools, ctx);
+  }
+
+  /**
+   * PHASE 1 — the op becomes a call declaration.
+   *
+   * ONE tool source for BOTH halves of the declaration/environment split. Reading `ctx.tools` for the
+   * executors while the lowering read `ctx.tools ?? this.options.tools` for the DECLARATIONS meant a
+   * construction-time `createPromptExecutor({ tools })` told the model a tool existed and then supplied
+   * nothing that could run it — `call.ts`'s `executable` check goes false, `stopWhen` is never set, and
+   * the tool LOOP silently degrades to a single turn that returns an unexecuted tool call.
+   * `PromptExecutorOptions extends LoweringOptions`, so that is a documented public path.
+   *
+   * Throws on a malformed config; the caller turns that into a `permanent` refusal, honoring the
+   * never-throws contract at the seam.
+   */
+  protected lower(op: PromptOp<InlineFamily>, tools: Record<string, Tool> | undefined): LlmCallDefinition {
+    return lowerPromptOp(op, { ...this.options, tools });
+  }
+
+  /**
+   * PHASE 2 — THE SESSION, resolved to a position and reserved by the wrapper (DESIGN.md §1.6).
+   *
+   * This is the executor's half of the split: the wrapper decided WHETHER this appends or forks;
+   * shaping the request for that decision is the executor's business, and it is deliberately not
+   * something a rewritten op config could express.
+   *
+   * The strategy branches on ONE declared fact — `capabilities.sessionResume` — rather than on which
+   * class is running, which is what makes this method shared rather than duplicated:
+   *
+   *  - **No native resume ⇒ REPLAY.** The Messages API and everything reached through the AI SDK are
+   *    stateless, so history goes on the wire every call and a fork costs nothing but a different key
+   *    on the way out.
+   *  - **Native resume ⇒ HANDLE.** The remote already holds the conversation, so zero prior messages
+   *    are read and the provider handle is threaded instead. Reading and resending them would pay for
+   *    the whole transcript on every turn to tell the agent what it already knows.
+   *
+   * The handle is threaded only on an APPEND. A fork must never inherit its parent's handle unless
+   * the transport declares native fork, or two branches write into one remote session.
+   */
+  protected async applySession(
+    definition: LlmCallDefinition,
+    ctx: ExecServices,
+  ): Promise<{ definition: LlmCallDefinition; sent: ModelMessage[] }> {
+    const session = ctx.session as ResolvedSession<ModelMessage> | undefined;
+    if (session === undefined) return { definition, sent: [] };
+
+    // Whatever the lowering produced IS the request beyond the stream: the wrapper no longer
+    // injects history into the config, so nothing here is already in `prior`.
+    const sent = this.requestTurns(definition);
+    // Can this transport BRANCH a conversation server-side? Read off its own declared capabilities, so
+    // there is one answer and it is the one the engine also reads. Absent means "the same as resume",
+    // which is what every adapter predating the split meant by `sessionResume: true`.
+    const nativeFork = this.capabilities.sessionFork ?? this.capabilities.sessionResume;
+    // The FORK-WITHOUT-A-FORK-PRIMITIVE case (SESSIONS.md §6, "Strategies") folded into the general
+    // rule: replay when the remote holds nothing for us (no native resume at all), or when it holds a
+    // conversation we are not allowed to branch. `messages()` is a LAZY accessor and this is the only
+    // path that pays for it — the cheap paths read zero messages.
+    const replaying = !this.capabilities.sessionResume || (session.mode === "fork" && !nativeFork);
+
+    if (replaying) {
+      // Resolved from `id` through the store when the accessor is missing: non-enumerable properties
+      // do not survive a spread or a structured clone, and `{ ...session, fork: true }` is a thing
+      // people write. Losing the accessor must cost a store read, never correctness.
+      const prior =
+        typeof session.messages === "function"
+          ? await session.messages()
+          : (((await ctx.sessions?.messages(session.id)) ?? []) as ModelMessage[]);
+      const replayed: LlmCallDefinition = { ...definition, messages: [...prior, ...sent] };
+      delete (replayed as { prompt?: unknown }).prompt; // the SDK rejects both
+      definition = replayed;
+    }
+    // The handle is threaded ONLY where it is safe to: an append always, a fork solely when this
+    // transport can branch server-side. A fork that carried its parent's handle would put two branches
+    // into one remote session — silent and unrecoverable, which is why the `mode` test is kept as the
+    // belt to `MapSessionStore`'s braces (it already withholds the handle on a fork).
+    //
+    // For a transport with no native resume this reduces to "append only", which is exactly the rule
+    // the provider path had before the two were one method: `nativeFork` is false there, so the
+    // disjunction collapses.
+    if (session.providerSessionId !== undefined && (session.mode !== "fork" || nativeFork)) {
+      definition = { ...definition, providerSessionId: session.providerSessionId };
+    }
+    return { definition, sent };
+  }
+
+  /**
+   * PHASE 3 — THE CALL. The one line the family disagrees about.
+   *
+   * Everything above and below this is shared: the same op became the same declaration under the
+   * same session. A subclass overrides only this to reach a subprocess or an SDK instead of a
+   * provider endpoint, and inherits the rest unchanged.
+   */
+  protected async invoke(definition: LlmCallDefinition, env: CallDeps, ctx: ExecServices): Promise<LlmCallResult> {
+    return (this.options.runner ?? defaultRunner)(definition, env, ctx.timeoutMs);
+  }
+
+  /**
+   * PHASE 4 — THE PROJECTION (DESIGN §3.1). An `LlmOutput` — output value, thinking, tool calls,
+   * finish reason — is what the PROVIDER produced. What an EXECUTION returns is the value of the op's
+   * output parameter, and nothing else. So this is the boundary where the model payload stops:
+   * everything past here sees a `ResolvedValue`, which is why `exec` and `hw` no longer name
+   * `thinking` at all.
+   */
+  protected project(op: PromptOp<InlineFamily>, output: LlmOutput | undefined): ResolvedValue | undefined {
+    return projectLlmOutput(op, output);
   }
 
   private async run(
@@ -242,17 +393,11 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
       );
     }
 
-    // ONE tool source for BOTH halves of the declaration/environment split. Reading `ctx.tools` for the
-    // executors while the lowering read `ctx.tools ?? this.options.tools` for the DECLARATIONS meant a
-    // construction-time `createPromptExecutor({ tools })` told the model a tool existed and then supplied
-    // nothing that could run it — `call.ts`'s `executable` check goes false, `stopWhen` is never set, and
-    // the tool LOOP silently degrades to a single turn that returns an unexecuted tool call.
-    // `PromptExecutorOptions extends LoweringOptions`, so that is a documented public path.
     const tools = ctx.tools ?? this.options.tools;
 
     let definition: LlmCallDefinition;
     try {
-      definition = lowerPromptOp(op, { ...this.options, tools });
+      definition = this.lower(op, tools);
     } catch (e) {
       return refuse(`invalid llm config: ${(e as Error).message}`);
     }
@@ -262,47 +407,16 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
       );
     }
 
-    /**
-     * THE SESSION, resolved to a position and reserved by the wrapper (DESIGN.md §1.6).
-     *
-     * This is the executor's half of the split: the wrapper decided WHETHER this appends or forks;
-     * shaping the request for that decision is the executor's business, and it is deliberately not
-     * something a rewritten op config could express.
-     *
-     * Replay is the strategy here — the Messages API and everything reached through the AI SDK are
-     * stateless, so history goes on the wire every call and a fork costs nothing but a different key
-     * on the way out. `messages()` is the lazy accessor; a native-fork adapter would read zero
-     * messages and pass a handle instead.
-     *
-     * The handle is threaded only on an APPEND. A fork must never inherit its parent's handle unless
-     * the adapter declares native fork, or two branches write into one remote session.
-     */
     const session = ctx.session as ResolvedSession<ModelMessage> | undefined;
     /** The request turns this call ADDS beyond the stream it started from — its half of the delta. */
-    let sent: ModelMessage[] = [];
-    if (session !== undefined) {
-      // Resolved from `id` through the store when the accessor is missing: non-enumerable properties
-      // do not survive a spread or a structured clone, and `{ ...session, fork: true }` is a thing
-      // people write. Losing the accessor must cost a store read, never correctness.
-      const prior =
-        typeof session.messages === "function"
-          ? await session.messages()
-          : (((await ctx.sessions?.messages(session.id)) ?? []) as ModelMessage[]);
-      // Whatever the lowering produced IS the request beyond the stream: the wrapper no longer
-      // injects history into the config, so nothing here is already in `prior`.
-      sent = requestTurns(definition);
-      definition = { ...definition, messages: [...prior, ...sent] };
-      delete (definition as { prompt?: unknown }).prompt; // the SDK rejects both
-      if (session.mode === "append" && session.providerSessionId !== undefined) {
-        definition = { ...definition, providerSessionId: session.providerSessionId };
-      }
-    }
+    let sent: ModelMessage[];
+    ({ definition, sent } = await this.applySession(definition, ctx));
 
-    const runner = this.options.runner;
     const router = this.resolveRouter(ctx);
-    // Only the DEFAULT runner needs a provider: a custom runner (a test fake, a recorded transport)
-    // resolves the call itself, so forcing env keys on it would be gratuitous.
-    if (!router && !runner) return refuse("no ModelRouter available (ctx.modelRouter or options.router)");
+    // Only the DEFAULT provider path needs a router: a custom runner (a test fake, a recorded
+    // transport) or a subclass reaching a subprocess resolves the call itself, so forcing env keys on
+    // it would be gratuitous.
+    if (!router && this.requiresRouter()) return refuse("no ModelRouter available (ctx.modelRouter or options.router)");
 
     // Combined abort: internal cancel + the caller's signal (the per-call timeout is applied in `llm`).
     const abortSignal = ctx.abortSignal ? AbortSignal.any([signal, ctx.abortSignal]) : signal;
@@ -310,12 +424,12 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
       modelRouter: router as ModelRouter,
       validator: ctx.validator,
       abortSignal,
-      toolExecutors: adaptTools(tools, ctx),
+      toolExecutors: this.adaptTools(tools, ctx),
     };
 
     let call: LlmCallResult;
     try {
-      call = await (runner ?? defaultRunner)(definition, env, ctx.timeoutMs);
+      call = await this.invoke(definition, env, ctx);
     } catch (err) {
       // A throw means we do not know what the provider saw, so nothing is reported: an invented delta
       // is worse than an absent one, because the mirror would then disagree with the remote silently.
@@ -339,11 +453,6 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
       call = { ...call, value: { ...call.value, messages: [...sent, ...(call.value.messages ?? [])] } };
     }
 
-    // THE PROJECTION (DESIGN §3.1). An `LlmOutput` — output value, thinking, tool calls, finish
-    // reason — is what the PROVIDER produced. What an EXECUTION returns is the value of
-    // the op's output parameter, and nothing else. So this is the boundary where the model payload
-    // stops: everything past here sees a `ResolvedValue`, which is why `exec` and `hw` no longer name
-    // `thinking` at all.
     const output = call.value;
     // RECORD mode: no projection — the execution value IS the payload (see
     // {@link PromptExecutorOptions.record}); the class's `Out` parameter carries that outward.
@@ -355,7 +464,7 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
       const recordError = canceledCall ? { ...call.error, classification: "canceled" as const } : call.error;
       return { error: recordError, value: payload, metrics: recordMetrics };
     }
-    const value = projectLlmOutput(op, output);
+    const value = this.project(op, output);
 
     const metrics: LlmMetrics = { ...call.metrics, startMs };
     if (isOk(call)) return { value: value as ResolvedValue, metrics };

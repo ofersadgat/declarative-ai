@@ -8,4 +8,8 @@
  */
 export * from "./seam.js";
 export * from "./runtime.js";
+// The agent as an `Executor` (DESIGN §4.4) — a `PromptExecutor` whose call reaches an agent, which is
+// what lets a PROMPT op be answered by one. The registry-entry adapters in `runtime.js` remain, and
+// now delegate here rather than carrying their own copy of the session and tool logic.
+export * from "./agentExecutor.js";
 export * from "./sdkQuery.js";

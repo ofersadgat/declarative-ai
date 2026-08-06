@@ -8,9 +8,9 @@
  * and every non-`AbortError` became `permanent` — a 429 inside a function impl was never retried, with
  * the retry machinery sitting right there. All three collapse here.
  *
- * Dispatch is by op kind: `"prompt"` → the prompt executor, `"function"` → a registry lookup by
- * `functionRef` (see {@link OperationExecutor}). Wrapper composition therefore applies UNIFORMLY to
- * prompt and function ops alike.
+ * Dispatch is by op kind: `"prompt"` → the prompt executor, `"function"` → the function executor, a
+ * registry lookup by `functionRef` (see {@link OperationExecutor}, which holds one of each and is
+ * neither). Wrapper composition therefore applies UNIFORMLY to prompt and function ops alike.
  *
  * **What this package does NOT know.** An execution returns the value of the op's output PARAMETER —
  * a `ResolvedValue`, which is ops vocabulary, because executing ops is this package's job. It never
@@ -227,6 +227,11 @@ export interface NativeToolRef {
  * There is no `prompt` facet: a `PromptOp` is dispatched to an `Executor` like everything else (DESIGN §3.1),
  * which is what removed the "the llm runtime is a facet, every other runtime is a registry entry"
  * asymmetry.
+ *
+ * A delegated agent can now ANSWER a prompt op too (`AgentExecutor` is a `PromptExecutor`, DESIGN §4.4)
+ * and that does NOT bring the asymmetry back: it is reached by being installed in the dispatcher's
+ * prompt slot, not by a facet and not by a third op kind. The same agent is still a `functions` entry
+ * when a `FunctionOp` names it — one executor, two ways in.
  */
 export interface CapabilityRegistry<M extends ExecMetrics = ExecMetrics> {
   functions: FunctionRegistry<ExecServices, M>;

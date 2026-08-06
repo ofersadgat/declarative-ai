@@ -1,61 +1,44 @@
 /**
- * The SDK-DRIVEN delegated agent adapter (DESIGN §4.4).
+ * The SDK-driven delegated agent as a `runtime` REGISTRY ENTRY (DESIGN §4.4).
  *
  * There is no `Runtime` interface and no normalized runtime-op payload: a runtime invocation is a
- * **plain `FunctionOp`** naming a registered function, so this factory produces a `runtime` REGISTRY
- * ENTRY carrying the delegated-agent capabilities (`mutatesWorkspace`, `memoizable: false`,
- * `policyEnforcement: "callback"`) — required and total, per §2, so the permission gate reads a definite
- * value instead of falling through an `undefined`. Permission gating and search refusal read that
- * resolved entry; the op shape carries no runtime marker at all.
+ * **plain `FunctionOp`** naming a registered function, so this factory produces a registry entry
+ * carrying the delegated-agent capabilities (`mutatesWorkspace`, `memoizable: false`,
+ * `policyEnforcement: "callback"`) — required and total, per §2, so the permission gate reads a
+ * definite value instead of falling through an `undefined`. Permission gating and search refusal read
+ * that resolved entry; the op shape carries no runtime marker at all.
  *
- * Behavior is unchanged: a delegated agent runs ITS OWN loop, so we configure it (a prompt, a workspace
- * `cwd`, an allowed-tools list, a permission mode) and route its native tool-approval callback back
- * through OUR approver (`ctx.approve`), keeping the human-gate UX uniform across runtimes. The agent is
- * reached through the injectable {@link AgentQuery} seam (default: the real SDK; tests: a fake).
+ * What changed is where the WORK lives. This file used to hold the whole adapter: the tool split, the
+ * deny floor, the approval bridge, and its own copy of the session request-shaping — a copy that could
+ * not be shared with `promptop`'s, so the fork rules had to be maintained in two vocabularies. All of
+ * that now belongs to {@link AgentExecutor}, and this is the ADAPTER that presents it as a function
+ * entry: one shape, two ways in.
  *
- * Register it as `registry.functions.registerFunction("claude-code", createClaudeCodeFunction())`, then
+ * Keeping the entry is not backwards-compatibility theatre. It is what `operation: {kind: "function",
+ * function: "claude-code"}` resolves to in every existing workflow, and it is the subject DESIGN §5.1's
+ * delegated-approval rule needs — the engine decides whether to wrap tools by reading a registry
+ * ENTRY's capabilities. A prompt op reaches the same executor directly; a function op reaches it
+ * through here.
+ *
+ * Register it as `registry.functions.registerRuntime("claude-code", fn.run, fn.capabilities)`, then
  * author a call with the `runtimeOp` builder — which lowers to exactly `{ kind: "function", functionRef:
  * "claude-code", input: { prompt, config } }`.
  */
 import {
-  failureOf,
-  syncOnly,
-  type BudgetMeter,
-  type ExecMetrics,
-  type BudgetMetrics,
+  isOk,
+  promptOp,
   type FunctionResult,
   type ExecServices,
   type FunctionInputs,
-  type JsonSchema,
   type JsonValue,
   type NativeToolRef,
-  type Result,
   type RuntimeCapabilities,
 } from "@declarative-ai/exec";
-import type { Approver } from "@declarative-ai/permissions";
-import { sdkAgentQuery } from "./sdkQuery.js";
-import type { AgentPermissionMode, AgentQuery, AgentQueryOptions, AgentResult, AgentSessionReader, InjectedTool } from "./seam.js";
+import type { LlmOutput } from "@declarative-ai/llm";
+import { AgentExecutor, DELEGATED_CAPS, type AgentExecutorOptions, type AgentMetrics } from "./agentExecutor.js";
+import type { AgentPermissionMode, AgentQuery, AgentSessionReader } from "./seam.js";
 
-/** Delegated agents: schema-constrained output isn't guaranteed (they answer in text), they mutate the
- *  workspace, run their own non-deterministic loop (not memoizable), gate tools via a callback, and are
- *  interactive (tool approvals route to our UI). Carried on the REGISTRY ENTRY, per §3.1. */
-export const DELEGATED_CAPS: RuntimeCapabilities = {
-  interactive: true,
-  readOnly: false,
-  mutatesWorkspace: true,
-  memoizable: false,
-  structuredOutput: false,
-  policyEnforcement: "callback",
-  // NATIVE session resume, and native FORK with it (DESIGN.md §1.6). Declaring it is what tells the
-  // session layer not to reach for the replay strategy: this adapter branches server-side and reads
-  // zero messages, where replay would resend the whole conversation for the same result.
-  sessionResume: true,
-  // Stated rather than left to the default, now that resume and fork are separable: this adapter has
-  // BOTH, and `forkSession` is the primitive that makes the second one true.
-  sessionFork: true,
-  streaming: true,
-  runtime: "node",
-};
+export { DELEGATED_CAPS, debitSpentCost, type AgentMetrics } from "./agentExecutor.js";
 
 const PERMISSION_MODES: readonly AgentPermissionMode[] = ["default", "plan", "acceptEdits", "bypassPermissions"];
 
@@ -68,13 +51,13 @@ export interface ClaudeCodeConfig {
 }
 
 export interface ClaudeCodeFunctionOptions {
-  /** The agent-query seam. Default: {@link sdkAgentQuery} (lazily loads `@anthropic-ai/claude-agent-sdk`). */
+  /** The agent-query seam. Default: `sdkAgentQuery` (lazily loads `@anthropic-ai/claude-agent-sdk`). */
   query?: AgentQuery;
   /** Override the advertised entry capabilities (e.g. a variant that is workspace-read-only). */
   capabilities?: RuntimeCapabilities;
-  /** Inject `ctx.tools` into the agent over MCP so it calls OUR impls (identical behavior to the `llm`
-   *  runtime). Default `true`. Set `false` to instead pass every tool name as a NATIVE allow-list (the agent
-   *  uses its own built-ins by that name). */
+  /** Inject `ctx.tools` into the agent over MCP so it calls OUR impls (identical behavior to a prompt op
+   *  with executable tools). Default `true`. Set `false` to instead pass every tool name as a NATIVE
+   *  allow-list (the agent uses its own built-ins by that name). */
   injectTools?: boolean;
   /** Per-logical-name overrides (DESIGN §5.1, "Tool renames are just overlay bindings"): a tool listed here resolves to the agent's
    *  NATIVE built-in `ref.native` (aliased) instead of being MCP-injected — so a run can use the agent's own
@@ -101,6 +84,9 @@ export interface ClaudeCodeFunctionOptions {
    * this adapter offers no read capability, and a resync starts empty.
    */
   readSession?: AgentSessionReader;
+  /** What this transport is CALLED in a failure reason. Defaults to `claude-code`, which is what this
+   *  factory drives; a CLI sibling passes its own binary's name so a failure says which one produced it. */
+  label?: string;
 }
 
 /** Thrown when the delegated agent fails or is canceled. The invoking executor classifies it (a
@@ -127,196 +113,75 @@ function configOf(inputs: FunctionInputs): Record<string, JsonValue> {
 }
 
 /**
- * Build the `claude-code` adapter as a `runtime` registry entry. Its `prompt` input is the agent
- * instruction and its `config` input the authored runtime surface; `ctx.workspace` is the cwd,
- * `ctx.tools` the resolved tool set, and `ctx.approve` gates the agent's tool calls.
+ * Present the agent executor as a `runtime` registry entry.
  *
- * Register it with `registry.functions.registerRuntime("claude-code", fn.run, fn.capabilities)`, then
- * author a call with the `runtimeOp` builder — which lowers to exactly
- * `{ kind: "function", functionRef: "claude-code", input: { prompt, config } }`.
+ * `build` is the seam a CLI-driven sibling overrides: everything about mapping a `FunctionOp`'s
+ * inputs onto an executor is identical across transports, and only which executor gets built differs.
  */
-/** What a delegated agent measures: execution timing/counts plus the spend it billed itself. */
-export interface AgentMetrics extends ExecMetrics, BudgetMetrics {}
-
-export function createClaudeCodeFunction(options: ClaudeCodeFunctionOptions = {}): {
+export function agentRuntimeEntry(
+  build: (perCall: AgentExecutorOptions) => AgentExecutor,
+  options: ClaudeCodeFunctionOptions = {},
+): {
   capabilities: RuntimeCapabilities;
   run: (inputs: FunctionInputs, ctx: ExecServices) => Promise<FunctionResult<string, AgentMetrics>>;
-  /** The provider read seam a host wires into `ctx.sessionReader`, when this adapter has one. */
+  /** The provider read seam a host wires into `ctx.sessionReader`, when this transport has one. */
   sessionReader?: { read(providerSessionId: string): Promise<readonly unknown[]> };
 } {
-  const query = options.query ?? sdkAgentQuery;
-  const inject = options.injectTools ?? true;
-  const nativeMap = options.nativeTools ?? {};
   const readSession = options.readSession;
-  const capabilities = options.capabilities ?? DELEGATED_CAPS;
-  const wantsApprovalCallback = options.approvalCallback ?? true;
-  // Can this adapter BRANCH a conversation server-side? Read off its own declared capabilities, so
-  // there is one answer and it is the one the engine also reads. Absent means "the same as resume",
-  // which is what every adapter predating the split meant by `sessionResume: true`.
-  const nativeFork = capabilities.sessionFork ?? capabilities.sessionResume;
+  // Built once purely to read the capability record the per-call executors will carry, so the ENTRY
+  // and the EXECUTOR cannot disagree about what this transport enforces (DESIGN §3.2).
+  const capabilities = options.capabilities ?? build({}).capabilities;
   return {
-    capabilities,
-    // Present only when this adapter can actually read a conversation back. The distinction is
+    capabilities: capabilities as RuntimeCapabilities,
+    // Present only when this transport can actually read a conversation back. The distinction is
     // load-bearing: an absent reader means a resync starts EMPTY, and §11 requires that to be visible
     // rather than mistaken for a conversation that happened to have nothing in it.
     ...(readSession !== undefined ? { sessionReader: { read: (id: string) => readSession(id) } } : {}),
-    run: (inputs: FunctionInputs, ctx: ExecServices): Promise<FunctionResult<string, AgentMetrics>> => {
-      // Errors are DATA (§4.2). The adapter still THROWS internally — an agent SDK is an exception-shaped
-      // world — so `liftThrowing`'s classification is applied at the seam, which is what turns a 429 or an
-      // abort inside the agent's own loop into a retriable/canceled outcome rather than a blanket permanent.
-      const startMs = Date.now();
-      const metricsOf = (costUsd?: number): AgentMetrics => ({
-        startMs,
-        durationMs: Date.now() - startMs,
-        // One delegated agent is one child call from the graph's point of view, and its spend is a
-        // child cost — that is how a budget gate sees through the delegation without child records.
-        childLlmCalls: 1,
-        // A delegated agent is the clearest case for cost NOT being an llm concern: it bills inside its
-        // own loop and is the only thing that knows what it spent. `costUsd` is required, so an agent
-        // that reported nothing says 0 with `costSource: "unknown"` rather than leaving it absent.
-        costUsd: costUsd ?? 0,
-        costSource: costUsd !== undefined ? "provider" : "unknown",
-        ...(costUsd !== undefined ? { childCostUsd: costUsd } : {}),
-      });
-      return run(inputs, ctx).then(
-        // The payload shape a session records: the agent's answer, plus the handle the run ACTUALLY
-        // ended in. `messages` carries the answer as one assistant turn — a delegated agent does not
-        // hand back its internal log, so that turn is what a later replay against another provider
-        // has to work from, and saying so here beats leaving the conversation empty.
-        (r) => ({
-          value: r.text,
-          metrics: metricsOf(r.costUsd),
-          ...(r.sessionId !== undefined
-            ? { session: { providerSessionId: r.sessionId, messages: [{ role: "assistant", content: r.text }] } }
-            : {}),
-        }),
-        (e: unknown) => ({ error: failureOf(e, "claude-code"), metrics: metricsOf() }),
-      );
-    },
-  };
-
-  async function run(inputs: FunctionInputs, ctx: ExecServices): Promise<AgentResult> {
+    run: async (inputs: FunctionInputs, ctx: ExecServices): Promise<FunctionResult<string, AgentMetrics>> => {
       const config = configOf(inputs);
       const prompt = typeof inputs.prompt === "string" ? inputs.prompt : String(inputs.prompt ?? "");
-      const approve = ctx.approve;
-      // The APPROVAL SCOPE — a resource-bundle key, not a conversation. The two used to be one string
-      // and cannot be: a conversation moves on every call, so an approval scoped to it would cover
-      // exactly one tool call (DESIGN.md §5.1). The conversation is `ctx.session`, below.
-      const sessionId = typeof config.sessionId === "string" ? config.sessionId : "delegated";
-      const session = ctx.session;
-
-      // The run is driven by the caller's abort signal directly. A run that completes without aborting
-      // must not leave a listener attached to a possibly long-lived, shared `ctx.abortSignal`.
-      const signal = ctx.abortSignal ?? new AbortController().signal;
-
-      // Resolve each logical tool to NATIVE (the agent's built-in, aliased) or MCP-INJECTED (our impl,
-      // ctx-bound). A tool is native when `injectTools:false` or it has a `nativeTools` entry; else it is
-      // injected. The engine hands a delegated runtime RAW tools, and authorization flows through
-      // `canUseTool` → `ctx.approve`, so injected tools are not double-gated.
-      // A per-tool `deny` in the authored baseline needs no human, so it must reach the agent as
-      // CONFIGURATION rather than waiting for an approval that will never be asked for. Native names are
-      // what the agent addresses, so an aliased tool is denied under its `native` name.
-      const denied = Object.entries(ctx.policy?.baseline?.tools ?? {})
-        .filter(([, mode]) => mode === "deny")
-        .map(([name]) => nativeMap[name]?.native ?? name);
-      const denySet = new Set(denied);
-
-      let allowedTools: string[] | undefined;
-      let mcpTools: Record<string, InjectedTool> | undefined;
-      if (ctx.tools) {
-        const native: string[] = [];
-        const injected: Record<string, InjectedTool> = {};
-        for (const [name, tool] of Object.entries(ctx.tools)) {
-          const ref = nativeMap[name];
-          // A `deny` is an unconditional floor: the tool is never OFFERED, native or injected. An injected
-          // tool is addressed as `mcp__dai__<name>`, which no logical-name deny entry matches, so leaving
-          // it injected would route around the floor entirely — drop it here.
-          if (denySet.has(ref ? ref.native : name)) continue;
-          if (!inject || ref) native.push(ref ? ref.native : name);
-          else injected[name] = { description: tool.description, inputSchema: tool.inputSchema as JsonSchema, run: (input) => tool.run(input, ctx) };
-        }
-        // `allowedTools` PRE-APPROVES; denied tools are already excluded above, native and injected alike.
-        allowedTools = native;
-        if (Object.keys(injected).length > 0) mcpTools = injected;
-      }
-
-      // The FORK-WITHOUT-A-FORK-PRIMITIVE case (SESSIONS.md §6, "Strategies"). An adapter that appends
-      // natively but cannot branch has exactly one honest way to start a branch: replay. Materializing
-      // here — rather than in the query — keeps the decision in the one place that knows both what was
-      // asked (`session.mode`) and what this transport can do, and keeps every query free of it.
-      //
-      // `messages()` is a LAZY accessor and this is the only path that pays for it. The cheap path
-      // (append, or a native fork) still reads zero messages.
-      const replay = session?.mode === "fork" && !nativeFork ? await session.messages() : undefined;
-
-      const queryOptions: AgentQueryOptions = {
-        prompt,
-        cwd: ctx.workspace?.root,
-        allowedTools,
-        ...(denied.length > 0 ? { disallowedTools: denied } : {}),
-        mcpTools,
-        // The injected-tool input gate is sync (agents-api `seam.ts`); the ctx seam is maybe-async —
-        // narrow FAIL-CLOSED (json's `syncOnly`) rather than let an async validator read as a pass.
-        ...(ctx.validator !== undefined ? { validator: syncOnly(ctx.validator) } : {}),
-        permissionMode: permissionModeOf(config),
-        // NATIVE FORK (DESIGN.md §1.6). The session layer decided append-vs-fork before the call,
-        // because "is this a fork" and "how do I shape the request" are the same question — and the
-        // answer here is a request shape the replay strategy cannot express.
-        //
-        // The handle is threaded ONLY on an append. `ResolvedSession.providerSessionId` is already
-        // absent on a fork for that reason; the `mode` check is the belt to that braces, because two
-        // branches writing into one remote session is silent and unrecoverable.
-        //
-        // A fork on an adapter with no fork primitive must NOT carry the handle — that is the one rule
-        // SESSIONS.md §6 states outright, because two branches writing into one remote session is
-        // silent and unrecoverable. Such a fork goes out as `messages` instead, below.
-        ...(session?.providerSessionId !== undefined && (session.mode !== "fork" || nativeFork)
-          ? { resume: session.providerSessionId, ...(session.mode === "fork" ? { forkSession: true } : {}) }
+      // A fresh executor per call, because `permissionMode` and the approval scope are per-CALL facts
+      // that arrive on the op's `config` input while the executor takes them at construction. It is an
+      // options bag and a closure — no I/O, no connection, nothing worth pooling.
+      const executor = build({
+        ...(options.query !== undefined ? { query: options.query } : {}),
+        ...(options.capabilities !== undefined ? { capabilities: options.capabilities } : {}),
+        ...(options.injectTools !== undefined ? { injectTools: options.injectTools } : {}),
+        ...(options.nativeTools !== undefined ? { nativeTools: options.nativeTools } : {}),
+        ...(options.approvalCallback !== undefined ? { approvalCallback: options.approvalCallback } : {}),
+        ...(options.readSession !== undefined ? { readSession: options.readSession } : {}),
+        ...(options.label !== undefined ? { label: options.label } : {}),
+        ...(permissionModeOf(config) !== undefined ? { permissionMode: permissionModeOf(config) } : {}),
+        ...(typeof config["sessionId"] === "string" ? { approvalScope: config["sessionId"] } : {}),
+        // RECORD mode: the value is the whole call payload rather than the projection, which is what
+        // carries the provider handle and the conversation delta this entry has to report back.
+        record: true,
+      });
+      const op = promptOp({ user: prompt, output: { name: "result", schema: { type: "string" } } });
+      const result = await executor.start(op, ctx).result;
+      const payload = result.value as LlmOutput | undefined;
+      const metrics = result.metrics as AgentMetrics;
+      if (!isOk(result)) return { error: result.error, metrics };
+      // The payload shape a session records: the agent's answer, plus the handle the run ACTUALLY ended
+      // in. Reported only when there IS a handle — an entry that claimed one unconditionally would make
+      // every stateless call look resumable.
+      const providerSessionId = payload?.providerSessionId;
+      return {
+        value: (payload?.value ?? "") as string,
+        metrics,
+        ...(providerSessionId !== undefined
+          ? { session: { providerSessionId, messages: (payload?.messages ?? []) as readonly JsonValue[] } }
           : {}),
-        ...(replay !== undefined ? { messages: replay } : {}),
-        // Route the agent's native tool-approval callback through our approver (DESIGN §5.1, "Delegated approval fidelity").
-        canUseTool: approve && wantsApprovalCallback
-          ? async (req) => {
-              const decision = await approve({ tool: req.toolName, input: req.input, sessionId });
-              return decision.decision === "allow" ? { allow: true } : { allow: false, reason: `denied by permission policy` };
-            }
-          : undefined,
-        abortSignal: signal,
       };
-
-      let result: AgentResult | undefined;
-      try {
-        for await (const msg of query(queryOptions)) {
-          if (msg.error) throw new ClaudeCodeError(`claude-code agent error: ${msg.error}`);
-          if (msg.type === "result" && msg.result) result = msg.result;
-        }
-      } catch (e) {
-        if (signal.aborted) throw new ClaudeCodeError("aborted", true);
-        if (e instanceof ClaudeCodeError) throw e;
-        throw new ClaudeCodeError(`claude-code query threw: ${(e as Error).message}`);
-      }
-      if (signal.aborted) throw new ClaudeCodeError("aborted", true);
-      if (!result) throw new ClaudeCodeError("claude-code produced no result message");
-
-      // A delegated agent spends real money inside its own loop, so the charge lands after the fact:
-      // settle it against the wallet when one is injected. Absent meter ⇒ unmetered, as everywhere else.
-      if (result.costUsd !== undefined && ctx.meter) await debitSpentCost(ctx.meter, result.costUsd);
-    return result;
-  }
+    },
+  };
 }
 
 /**
- * Record money the agent has ALREADY spent. `reserve` returns `null` when the balance cannot cover the
- * amount — but this spend is a past FACT, not a request, so treating `null` as "nothing to do" leaves
- * the wallet reporting headroom it does not have and admits the next call against a phantom balance.
- * `debit` is the honest path when the meter offers one; without it we fall back to reserve/settle and
- * the overspend stays unrecorded on the ledger.
- *
- * Never throws: the money is gone either way, and failing the operation here would discard the agent's
- * result over a bookkeeping problem. The cost reaches the caller regardless, on `Result.metrics`.
+ * Build the `claude-code` adapter as a `runtime` registry entry. Its `prompt` input is the agent
+ * instruction and its `config` input the authored runtime surface; `ctx.workspace` is the cwd,
+ * `ctx.tools` the resolved tool set, and `ctx.approve` gates the agent's tool calls.
  */
-async function debitSpentCost(meter: BudgetMeter, costUsd: number): Promise<void> {
-  if (meter.debit) return meter.debit(costUsd);
-  const reservation = await meter.reserve(costUsd);
-  await reservation?.settle(costUsd);
+export function createClaudeCodeFunction(options: ClaudeCodeFunctionOptions = {}): ReturnType<typeof agentRuntimeEntry> {
+  return agentRuntimeEntry((perCall) => new AgentExecutor({ capabilities: DELEGATED_CAPS, ...perCall }), options);
 }

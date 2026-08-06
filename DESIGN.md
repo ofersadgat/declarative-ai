@@ -276,9 +276,22 @@ shared error/telemetry vocabulary in `packages/json/src/failure.ts`).
 **What flows through the contract is an `Operation`.** There is ONE execution seam, and its payload is
 the op model of `@declarative-ai/ops`: a `PromptOp` (one structured LLM call) or a `FunctionOp` (a
 registered function). There is no third kind and no separate execution-spec taxonomy: dispatch is
-`op.kind === "prompt"` → the prompt executor, `"function"` → a registry lookup by `functionRef`, and
-that is the whole of it. Because that is one ordinary seam, wrapper composition (§3.2) reaches function
-ops as well as prompt ops.
+`op.kind === "prompt"` → the prompt executor, `"function"` → the function executor (a registry lookup
+by `functionRef`), and that is the whole of it. Because that is one ordinary seam, wrapper composition
+(§3.2) reaches function ops as well as prompt ops.
+
+**`OperationExecutor` dispatches; it is not either half.** `FunctionExecutor` owns the registry lookup,
+the literal-input walk and the call; `PromptExecutor` owns the lowering and the provider call. The
+dispatcher holds a reference to each and reads `op.kind`. It used to BE the function half — the lookup
+and `runFunction` inlined as private methods — while the prompt half was an injected object, so one of
+the two could be wrapped, subclassed and swapped and the other could not. Splitting them removes an
+asymmetry, not a case: dispatch is still exactly two-way.
+
+What the prompt slot holds is now a FAMILY rather than one class. `AgentExecutor` is a `PromptExecutor`
+whose call reaches a delegated agent (§4.4), and `PromptRouterExecutor` chooses between them by the
+`{route}/…` prefix of the op's model — dispatch by ROUTE, the sibling of this dispatch by KIND. None of
+that adds a third op kind or a fourth registry facet: an agent is reached by being INSTALLED IN THE
+PROMPT SLOT, which is exactly what keeps "there is no prompt facet" true.
 
 Everything an op needs sits on the op or on the ctx, never on a wrapper payload in between: an op's
 `input` parameters carry their bindings (so the op IS its inputs), the output schema is the op's
@@ -355,7 +368,9 @@ interface Executor<R = ExecServices, M extends ExecMetrics = ExecMetrics> {
 // `withDeadline()` needs `{ deadline, stepStartMs }` at start, `withDeadline({ deadline })` only `stepStartMs`,
 // `withDeadline({ deadline, stepStartMs })` neither.
 // The capability record is `ops`' — an executor IS what a `runtime` registry entry delegates to, so the
-// two share ONE record and cannot drift. Required and TOTAL, never all-optional.
+// two share ONE record and cannot drift. Required and TOTAL, never all-optional. That sentence is now
+// literally true of the delegated agents: `createClaudeCodeFunction` builds an `AgentExecutor` and
+// reads its capabilities, so the entry cannot claim an enforcement the executor does not perform.
 interface RuntimeCapabilities {
   structuredOutput: boolean;        // native schema-constrained output
   sessionResume: boolean;           // can CONTINUE a conversation server-side
@@ -624,9 +639,19 @@ the split is what makes `llm` usable on its own:
   nothing about `Executor`, `ExecHandle`, or wrappers — a structured call runs with `json + llm` and
   nothing else, and that is asserted by test.
 - **`@declarative-ai/promptop` is the `Executor`.** It owns the `PromptOp → LlmCallDefinition`
-  lowering and the class that applies it. Capabilities: `structuredOutput: true, streaming: true,
-  interactive: false, readOnly: true, mutatesWorkspace: false, memoizable: true, runtime: edge-safe`
-  (the undici long-timeout dispatcher install is node-only and conditional).
+  lowering and the class family that applies it. `PromptExecutor` capabilities: `structuredOutput:
+  true, streaming: true, interactive: false, readOnly: true, mutatesWorkspace: false, memoizable:
+  true, runtime: edge-safe` (the undici long-timeout dispatcher install is node-only and conditional).
+  A SUBCLASS advertises its own record — a delegated agent's is `structuredOutput: false,
+  mutatesWorkspace: true, memoizable: false, runtime: node` — so the record above is this class's, not
+  the family's.
+
+  `run` is split into `protected` phases for that reason: `lower` → `applySession` → `invoke` →
+  `project`. The split is where the family differs, which is one phase. A delegated agent lowers the
+  same `LlmCallDefinition` (a system prompt, a turn list, a model, a tool set, a step budget — exactly
+  what a coding-agent CLI is configured with) and resolves its session by the same rule; only `invoke`
+  reaches somewhere else. A subclass that overrode more than that would be a second pipeline wearing
+  the first one's name.
 
 The declarative model of §1 lands entirely here:
 
@@ -734,12 +759,39 @@ gap between composed and delegated is therefore mostly wiring and supplying tool
 loop — which is what makes "one model for coding, a second for review, a third for Q&A" a composition
 choice rather than an integration project.
 
+**That second consequence is now structural rather than aspirational.** `AgentExecutor extends
+PromptExecutor` (§4.1): a delegated agent ANSWERS A PROMPT OP, lowered the same way, with the same
+session rule, differing only in `invoke`. The wiring the paragraph above called "mostly wiring" was in
+fact a second copy — request shaping existed twice, once in agent vocabulary
+(`resume`/`forkSession`/`messages`) and once in provider vocabulary
+(`messages`/`providerSessionId`) — and neither could reuse the other, so the fork rules had to be
+maintained in two places and could not be tested against each other. They are now ONE inherited method
+branching on ONE declared fact, `capabilities.sessionResume`: a transport that resumes natively reads
+zero messages and carries a handle; one that cannot, replays. `agents-api/test/agentExecutor.test.ts`
+asserts that by running the same expectations over both.
+
+Two things follow that are worth knowing before wiring anything:
+
+- **A prompt state can be served by an agent**, which is what makes a machine with a CLI subscription
+  and no API key able to run a prompt-only workflow at all. `PromptRouterExecutor` selects by the
+  model's route prefix, so `claude-cli/sonnet` picks the agent and `anthropic/claude-sonnet-5` picks
+  the provider — one mechanism, expressed as a model id.
+- **An agent tolerates a call that names no model.** `LlmConfiguration.model` is required because a
+  provider call cannot be ROUTED without one; a delegated agent picks its own, from its own
+  configuration. Refusing there would have made the zero-configuration case — the one an agent is best
+  at — the one it could not serve, so `AgentExecutor` supplies an inert `agent/default` placeholder.
+
 The adapters are built, and split by **invocation mechanism** rather than gathered into one `agents`
 package:
 `agents-api` reaches an agent through an in-process SDK (an optional peer on
 `@anthropic-ai/claude-agent-sdk`), `agents-cli` through a CLI subprocess. Both drive the same
 normalized `AgentQuery` seam and produce the same shape of `runtime` registry entry, so a workflow
-authored against one runs against the other. The `claude` adapters declare `policyEnforcement:
+authored against one runs against the other. The entry is now an ADAPTER over the executor rather than
+a parallel implementation: `createClaudeCodeFunction` builds an `AgentExecutor`, runs a synthetic
+prompt op through it, and maps the result back to `FunctionResult`. Keeping it is not compatibility
+theatre — it is what `operation: {kind: "function", function: "claude-code"}` resolves to in every
+existing workflow, and it is the subject §5.1's delegated-approval rule needs, since the engine decides
+whether to wrap tools by reading a registry ENTRY's capabilities. One executor, two ways in. The `claude` adapters declare `policyEnforcement:
 "callback"` — the SDK path routes each tool approval back through `ctx.approve` in-process, and the CLI
 path does the same over an MCP bridge (`--mcp-config` + `--permission-prompt-tool`), because the
 *guarantee* is what the capability describes, not the mechanism. `CLI_CONFIG_ONLY_CAPS`
@@ -752,7 +804,10 @@ reach `ctx.approve` mid-run: it declares `"config"` — a sandbox pinned on ever
 (`-c sandbox_mode=…`) — and is constructed with `approvalCallback: false`, so an approver is refused
 rather than silently ignored. It also appends a conversation server-side (`codex exec resume <id>`) and
 cannot BRANCH one, which is why `sessionFork` exists separately from `sessionResume`: an adapter that
-replays a fork shapes a different request, not a slower version of the same one (§4.5). Everything else
+replays a fork shapes a different request, not a slower version of the same one. Those two flags are
+the whole of what `AgentCodexExecutor` has to state — the replay-vs-handle branch is read off them by
+the inherited `applySession` (§4.1), so the transport declares the fact and inherits the behaviour.
+Everything else
 this transport cannot honour — a per-tool deny list, a native allow-list, MCP-injected tools, which it
 reaches and then auto-denies — is refused loudly. A delegated agent that answers `user cancelled MCP
 tool call` and reports success is indistinguishable from one that found nothing.

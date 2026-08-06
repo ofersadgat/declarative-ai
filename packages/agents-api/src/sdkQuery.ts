@@ -70,6 +70,9 @@ export const sdkAgentQuery: AgentQuery = async function* (opts): AsyncIterable<A
     prompt: opts.prompt,
     options: {
       ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+      // The model, when the caller named one. Absent ⇒ the SDK's own default, which is the ordinary
+      // case; the prefix that selected this transport is already stripped by the executor.
+      ...(opts.model !== undefined ? { model: opts.model } : {}),
       ...(allowedTools !== undefined ? { allowedTools } : {}),
       // The deny floor MUST reach the agent: dropping it would let a `deny`d tool run while the workflow
       // believes it is blocked (`seam.ts` — "an adapter that cannot honour it must refuse, not drop it").

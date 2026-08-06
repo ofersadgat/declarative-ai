@@ -86,6 +86,9 @@ export function cliArgv(opts: AgentQueryOptions, config: CliAgentOptions = {}, b
     // Only when there is an approver to ask. With tools injected but no approver, the bridge exists to
     // SERVE those tools and the CLI keeps its own permission behaviour.
     ...(bridgeUrl !== undefined && opts.canUseTool !== undefined ? ["--permission-prompt-tool", PERMISSION_PROMPT_TOOL] : []),
+    // The model, when the caller named one. Absent ⇒ the CLI's own configured default, which is the
+    // ordinary case: a transport that needs no API key generally needs no model id either.
+    ...(opts.model !== undefined ? ["--model", opts.model] : []),
     ...(opts.permissionMode !== undefined ? ["--permission-mode", opts.permissionMode] : []),
     ...(allowed.length > 0 ? ["--allowedTools", allowed.join(",")] : []),
     // The deny channel the header has always claimed: a `deny` in the authored baseline reaches the CLI

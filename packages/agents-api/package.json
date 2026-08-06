@@ -45,8 +45,10 @@
   "dependencies": {
     "@declarative-ai/exec": "^0.1.0",
     "@declarative-ai/json": "^0.1.0",
+    "@declarative-ai/llm": "^0.1.0",
     "@declarative-ai/ops": "^0.1.0",
-    "@declarative-ai/permissions": "^0.1.0"
+    "@declarative-ai/permissions": "^0.1.0",
+    "@declarative-ai/promptop": "^0.1.0"
   },
   "peerDependencies": {
     "@anthropic-ai/claude-agent-sdk": "*"
