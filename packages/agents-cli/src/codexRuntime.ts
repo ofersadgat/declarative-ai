@@ -40,6 +40,10 @@ export const CODEX_CAPS: RuntimeCapabilities = {
   // Codex streams JSONL events, but this adapter surfaces only the terminal answer — no partial text
   // reaches a caller, and `streaming: true` is a promise about what a consumer can observe.
   streaming: false,
+  // No graceful turn end. The only mid-run signal a `codex exec` subprocess has is SIGINT, which is a
+  // KILL: the answer it had produced is lost rather than returned. Offering `interrupt` on top of that
+  // would answer "stop and tell me what you found" by discarding what it found.
+  sessionSteering: false,
 };
 
 export interface CodexAgentFunctionOptions extends Omit<ClaudeCodeFunctionOptions, "query" | "approvalCallback">, CodexAgentOptions {}

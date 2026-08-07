@@ -24,11 +24,24 @@ export interface AgentProcess {
   kill(): void;
   /** Resolves with the exit code once the process ends. */
   exit: Promise<number>;
+  /**
+   * Why the process could not be LAUNCHED, when that is what went wrong — read after `exit` settles.
+   *
+   * A failed spawn has no exit code, so it comes back as the sentinel `-1`, and `-1` means nothing to
+   * anyone reading a failure. The real error says `spawn claude ENOENT`, which is the difference
+   * between "the agent is not installed" and "the agent crashed". It was being captured and discarded.
+   *
+   * Optional so a fake process need not model it: absent ⇒ the exit code is the whole story.
+   */
+  launchFailure?: () => Error | undefined;
 }
 
 /** How a process is launched. `stdin` is the second way to hand an agent its instruction. */
 export interface SpawnOptions {
   cwd?: string;
+  /** The environment the child runs under. Absent ⇒ it inherits this process's, which is what a CLI
+   *  needs by default (PATH, HOME, and whatever credential the binary reads). */
+  env?: NodeJS.ProcessEnv;
   /**
    * Written to the child's stdin, which is then CLOSED.
    *
@@ -59,6 +72,9 @@ export interface ProgramDeps {
 
 /** The JS entry an npm `.cmd` shim delegates to, relative to the shim's own directory. */
 const SHIM_ENTRY = /"%dp0%[\\/]([^"]+\.[cm]?js)"/i;
+
+/** A JS file is a program only to an interpreter — Windows cannot spawn one directly. */
+const JS_ENTRY = /\.[cm]?js$/i;
 
 /**
  * Make a command NAME spawnable on Windows, without a shell.
@@ -93,6 +109,10 @@ export function resolveProgram(command: string, deps: ProgramDeps): { file: stri
   const candidates = (ext: string): string[] => dirs.map((dir) => (dir === "" ? `${command}${ext}` : `${dir}\\${command}${ext}`));
 
   const lower = command.toLowerCase();
+  // A JS entry — what `resolveAgentBinary` falls back to for an older `@anthropic-ai/claude-code`, and
+  // what a caller may pin directly. It is not a program: run it under the interpreter, exactly as a
+  // resolved shim is, rather than handing Windows a file it cannot execute.
+  if (JS_ENTRY.test(lower)) return { file: deps.node ?? "node", prefix: [command] };
   if (binary.some((ext) => lower.endsWith(ext))) return { file: command, prefix: [] };
   if (binary.some((ext) => candidates(ext).some((candidate) => deps.exists(candidate)))) return { file: command, prefix: [] };
 
@@ -127,6 +147,10 @@ export async function defaultSpawn(): Promise<SpawnProcess> {
     const { file, prefix } = program(command!);
     const child = spawn(file, [...prefix, ...args], {
       cwd: opts.cwd,
+      // Spread only when the caller supplied one: `env: undefined` is what `child_process` reads as
+      // "inherit", but stating it explicitly invites a later `{...opts.env}` that hands the child an
+      // EMPTY environment and strips its PATH and credentials.
+      ...(opts.env !== undefined ? { env: opts.env } : {}),
       stdio: [opts.stdin === undefined ? "ignore" : "pipe", "pipe", "ignore"],
       windowsHide: true,
     });
@@ -149,6 +173,7 @@ export async function defaultSpawn(): Promise<SpawnProcess> {
     return {
       lines,
       kill: () => void child.kill(),
+      launchFailure: () => spawnError,
       exit: new Promise<number>((resolve) => {
         child.on("error", () => resolve(-1));
         child.on("close", (code) => resolve(spawnError ? -1 : (code ?? 0)));

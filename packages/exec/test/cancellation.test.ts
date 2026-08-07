@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
+  ExecControl,
   ExecEvent,
   ExecHandle,
   ExecMetrics,
@@ -25,6 +26,7 @@ import {
   withDeadline,
   withMemoize,
   withRetry,
+  wrapHandle,
 } from "../src/index.js";
 
 const errorOf = <O>(r: ExecResult<O>): Failure | undefined => (isOk(r) ? undefined : r.error);
@@ -285,5 +287,138 @@ describe("event streams are single-consumer, loudly", () => {
     for await (const e of queue.iterate()) seen.push(e);
     expect(seen).toHaveLength(2); // both events to the ONE consumer, never one each
     expect(() => queue.iterate()[Symbol.asyncIterator]()).toThrow(/single-consumer/i);
+  });
+});
+
+/**
+ * Steering reaches through a wrapper stack, along the path `cancel()` already takes.
+ *
+ * That is the whole reason `control` lives on `ExecHandle` rather than on a side channel: a caller
+ * holds the OUTER handle, and the thing actually running is several wrappers down.
+ */
+describe("wrapHandle — control follows the current inner handle", () => {
+  const inner = (control?: ExecControl): ExecHandle<ResolvedValue> => ({
+    events: emptyStream(),
+    result: Promise.resolve({ value: 1, metrics: { durationMs: 1 } }),
+    cancel: async () => {},
+    ...(control !== undefined ? { control } : {}),
+  });
+
+  it("forwards the inner handle's control to the caller holding the outer one", async () => {
+    let interrupted = false;
+    const control: ExecControl = { interrupt: async () => void (interrupted = true) };
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => (started = resolve));
+    const handle = wrapHandle(async (ctl) => {
+      ctl.started(inner(control));
+      started();
+      await new Promise((r) => setTimeout(r, 0));
+      return { value: 1, metrics: { durationMs: 1 } };
+    });
+    await gate;
+    await handle.control!.interrupt!();
+    await handle.result;
+    expect(interrupted).toBe(true);
+  });
+
+  it("RE-POINTS at the current attempt, which settles the retry question for free", async () => {
+    // Read live rather than snapshotted: a retry replaces the attempt underneath, and steering a dead
+    // one would be worse than not steering at all.
+    const seen: string[] = [];
+    let firstStarted!: () => void;
+    const afterFirst = new Promise<void>((r) => (firstStarted = r));
+    let secondStarted!: () => void;
+    const afterSecond = new Promise<void>((r) => (secondStarted = r));
+    const handle = wrapHandle(async (ctl) => {
+      ctl.started(inner({ interrupt: async () => void seen.push("attempt-1") }));
+      firstStarted();
+      await afterFirst;
+      await new Promise((r) => setTimeout(r, 0));
+      ctl.started(inner({ interrupt: async () => void seen.push("attempt-2") }));
+      secondStarted();
+      await new Promise((r) => setTimeout(r, 0));
+      return { value: 1, metrics: { durationMs: 1 } };
+    });
+    await afterFirst;
+    await handle.control!.interrupt!();
+    await afterSecond;
+    await handle.control!.interrupt!();
+    await handle.result;
+    expect(seen).toEqual(["attempt-1", "attempt-2"]);
+  });
+
+  it("offers NOTHING before an inner handle exists, and nothing for an operation that cannot steer", async () => {
+    const nothing = wrapHandle(async (ctl) => {
+      ctl.started(inner());
+      return { value: 1, metrics: { durationMs: 1 } };
+    });
+    await nothing.result;
+    expect(nothing.control).toBeUndefined();
+  });
+});
+
+/**
+ * The queue is BOUNDED, and says so.
+ *
+ * Attaching to `handle.events` is optional, so the ordinary case is a run whose events nobody is
+ * reading — and a delegated agent turn narrates for minutes. Unbounded, that buffer grows for as long
+ * as the run lasts; bounded silently, a late consumer receives a truncated stream that looks complete.
+ */
+describe("EventQueue — bounded, with the gap made visible", () => {
+  const progress = (message: string): ExecEvent => ({ type: "progress", message });
+
+  it("buffers nothing at all while a consumer is waiting, so the bound never bites", async () => {
+    const queue = new EventQueue(2);
+    const seen: ExecEvent[] = [];
+    const draining = (async () => {
+      for await (const e of queue.iterate()) seen.push(e);
+    })();
+    for (let i = 0; i < 10; i++) {
+      queue.push(progress(`e${i}`));
+      await Promise.resolve(); // let the waiting consumer take it
+    }
+    queue.close();
+    await draining;
+    expect(seen.map((e) => (e as { message: string }).message)).toEqual(["e0", "e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "e9"]);
+  });
+
+  it("drops the OLDEST past the bound, because the tail is where a run's outcome is", async () => {
+    const queue = new EventQueue(2);
+    for (const m of ["a", "b", "c", "d"]) queue.push(progress(m));
+    queue.close();
+    const seen: ExecEvent[] = [];
+    for await (const e of queue.iterate()) seen.push(e);
+    expect(seen).toEqual([{ type: "events_dropped", count: 2 }, progress("c"), progress("d")]);
+  });
+
+  it("reports the gap BEFORE the events that outlived it, never as a footnote", async () => {
+    const queue = new EventQueue(1);
+    queue.push(progress("a"));
+    queue.push(progress("b"));
+    queue.close();
+    const seen: ExecEvent[] = [];
+    for await (const e of queue.iterate()) seen.push(e);
+    expect(seen[0]).toEqual({ type: "events_dropped", count: 1 });
+  });
+
+  it("tells a consumer that attaches AFTER the run finished what it missed", async () => {
+    // The whole point: without this the late consumer sees a short, plausible, silently wrong stream.
+    const queue = new EventQueue(1);
+    for (const m of ["a", "b", "c"]) queue.push(progress(m));
+    queue.close();
+    const seen: ExecEvent[] = [];
+    for await (const e of queue.iterate()) seen.push(e);
+    expect(seen).toEqual([{ type: "events_dropped", count: 2 }, progress("c")]);
+  });
+
+  it("keeps the count when a gap marker is itself evicted", async () => {
+    // A long unattended run drops in waves. Folding an evicted marker's count into the next one is what
+    // stops the report from under-stating the gap.
+    const queue = new EventQueue(1);
+    for (let i = 0; i < 50; i++) queue.push(progress(`e${i}`));
+    queue.close();
+    const seen: ExecEvent[] = [];
+    for await (const e of queue.iterate()) seen.push(e);
+    expect(seen).toEqual([{ type: "events_dropped", count: 49 }, progress("e49")]);
   });
 });

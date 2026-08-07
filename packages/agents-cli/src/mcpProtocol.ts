@@ -13,30 +13,52 @@
  *
  * There is no public prose specification for the permission-prompt tool's request/response contract.
  * The shapes here were read off the SHIPPING CLI implementation (v2.1.215) — its own Zod schemas and
- * call sites — not inferred from documentation or from the Agent SDK's `.d.ts`. Two consequences worth
- * keeping in mind:
+ * call sites — not inferred from documentation or from the Agent SDK's `.d.ts`.
+ *
+ * ✅ RE-CONFIRMED against `claude 2.1.142` by running it, through a real loopback bridge answering a
+ * forced `permissions.ask` on `Bash`. All three observations still hold, and each was checked by
+ * answering the WRONG way and watching what broke:
  *
  *  - `updatedInput` is REQUIRED on an allow. The Agent SDK's TypeScript `PermissionResult` type marks
- *    it optional; the MCP wire path does NOT, and a bare `{"behavior":"allow"}` fails the CLI's parse.
- *    So an allow always echoes the original input back. This is the detail most likely to be wrong if
- *    it is ever "simplified".
- *  - `message` is REQUIRED on a deny.
+ *    it optional; the MCP wire path does NOT. A bare `{"behavior":"allow"}` does not deny — it fails
+ *    the CLI's parse, the tool call comes back as a harness ERROR, and the agent works around it (it
+ *    reached for `PowerShell` when `Bash` "errored"). So an allow always echoes the original input
+ *    back. This is the detail most likely to be wrong if it is ever "simplified".
+ *  - `message` is REQUIRED on a deny. A bare `{"behavior":"deny"}` is likewise a validation error
+ *    rather than a refusal — the agent retried and then reported the harness as broken, which is not
+ *    what a denied tool should look like to it.
+ *  - `type` is REQUIRED on the `--mcp-config` entry. Without it the server is SILENTLY DROPPED
+ *    (`system/init` reports `mcp_servers: []`); with it the same document registers the server.
+ *
+ * One thing that changed and is worth knowing: `--permission-prompt-tool` no longer appears in
+ * `claude --help` on 2.1.142. It is still accepted and still drives the callback — the live runs above
+ * are through it — but an undocumented flag is one version from disappearing, so a run where nothing
+ * ever reaches the approver is the symptom to look for.
  *
  * Being version-pinned observation rather than a published contract, this is the first thing to check
  * if a future CLI rejects our decisions.
  */
-import type { AgentPermissionDecision, AgentToolRequest, InjectedTool, JsonValue, SchemaDocument, SyncOutputValidator } from "./deps.js";
+import {
+  injectedToolDescriptors,
+  MCP_SERVER_NAME,
+  mcpToolName,
+  runInjectedTool,
+  textResult,
+  type AgentPermissionDecision,
+  type AgentToolRequest,
+  type InjectedTool,
+  type JsonValue,
+  type McpToolDescriptor,
+  type McpToolResult,
+  type SyncOutputValidator,
+} from "./deps.js";
 
-/** The MCP server name our tools are exposed under; the agent sees `mcp__dai__<tool>`. */
-export const MCP_SERVER_NAME = "dai";
+// The tool vocabulary is `agents-api`'s (see `./deps`), re-exported here so this module stays the one
+// place a CLI-side caller reads the protocol from.
+export { MCP_SERVER_NAME, mcpToolName, type McpToolDescriptor, type McpToolResult };
 
 /** The tool the CLI asks for a permission decision. */
 export const APPROVAL_TOOL = "approve";
-
-/** An MCP tool's fully-qualified name, as the CLI addresses it. */
-export function mcpToolName(tool: string, server: string = MCP_SERVER_NAME): string {
-  return `mcp__${server}__${tool}`;
-}
 
 /** What `--permission-prompt-tool` is given. */
 export const PERMISSION_PROMPT_TOOL = mcpToolName(APPROVAL_TOOL);
@@ -158,14 +180,6 @@ export function malformedApprovalResponseText(): string {
   return JSON.stringify({ behavior: "deny", message: "the permission request could not be read; denying" });
 }
 
-/** An MCP `tools/list` entry. Raw JSON Schema travels verbatim — the low-level server does not
- *  re-serialize it, which is why our authored schemas need no conversion. */
-export interface McpToolDescriptor {
-  name: string;
-  description?: string;
-  inputSchema: JsonValue;
-}
-
 /**
  * `approve` is RESERVED on this server, whether or not an approver is wired.
  *
@@ -196,13 +210,7 @@ export function toolDescriptors(spec: { tools?: Record<string, InjectedTool>; ap
       inputSchema: APPROVAL_INPUT_SCHEMA as unknown as JsonValue,
     });
   }
-  for (const [name, tool] of Object.entries(spec.tools ?? {})) {
-    out.push({
-      name,
-      ...(tool.description !== undefined ? { description: tool.description } : {}),
-      inputSchema: tool.inputSchema as unknown as JsonValue,
-    });
-  }
+  out.push(...injectedToolDescriptors(spec.tools));
   return out;
 }
 
@@ -220,23 +228,14 @@ export function injectedToolAllowEntries(tools: Record<string, InjectedTool> | u
   return Object.keys(tools ?? {}).map((name) => mcpToolName(name));
 }
 
-/** One MCP tool result. */
-export interface McpToolResult {
-  content: Array<{ type: "text"; text: string }>;
-  isError?: boolean;
-}
-
-const textResult = (text: string, isError?: boolean): McpToolResult => ({
-  content: [{ type: "text", text }],
-  ...(isError === true ? { isError: true } : {}),
-});
-
 /**
  * Serve one `tools/call`. This is the whole server behaviour, independent of transport — which is what
  * makes the permission path testable without spawning anything.
  *
- * A tool that THROWS becomes an `isError` result rather than a transport fault: a tool failure is
- * something the AGENT reads and reacts to (DESIGN §5.1, "Functions and tools"), not a failure of the run.
+ * The APPROVAL branch is this package's; everything else is {@link runInjectedTool}, which both
+ * delegated transports share. A tool that THROWS becomes an `isError` result rather than a transport
+ * fault: a tool failure is something the AGENT reads and reacts to (DESIGN §5.1, "Functions and
+ * tools"), not a failure of the run.
  */
 export async function handleToolCall(
   spec: {
@@ -264,43 +263,7 @@ export async function handleToolCall(
     return textResult(approvalResponseText(decision, request.input));
   }
 
-  const tool = spec.tools?.[name];
-  if (!tool) return textResult(`no tool '${name}' is available`, true);
-  const input = args !== null && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, JsonValue>) : {};
-  // The low-level MCP `Server` advertises our schema and then hands the handler whatever arrived —
-  // it validates NOTHING. So the boundary check is ours, through `json`'s three-line `OutputValidator`
-  // seam (no ajv on the agent path; the caller injects whatever implements it). A malformed call must
-  // fail as a tool error the agent reads, rather than reaching an impl that trusted its declared schema.
-  const invalid = validateToolInput(spec.validator, tool, input);
-  if (invalid) return textResult(`tool '${name}' input is invalid: ${invalid}`, true);
-  try {
-    const value = await tool.run(input);
-    return textResult(typeof value === "string" ? value : JSON.stringify(value ?? null));
-  } catch (e) {
-    return textResult(`tool '${name}' failed: ${e instanceof Error ? e.message : String(e)}`, true);
-  }
-}
-
-/**
- * Check one tool's arguments against its OWN declared schema. Returns the failure text, or `undefined`
- * when there is nothing to check (no validator injected, or a tool that declares no schema — an absent
- * schema constrains nothing, so there is no obligation to enforce).
- *
- * A validator that THROWS counts as a refusal, not as a pass: this is the last thing standing between an
- * arbitrary payload and a host impl, so it fails closed like every other gate in this module.
- */
-function validateToolInput(
-  validator: SyncOutputValidator | undefined,
-  tool: InjectedTool,
-  input: Record<string, JsonValue>,
-): string | undefined {
-  if (!validator) return undefined;
-  const schema = tool.inputSchema as SchemaDocument | undefined;
-  if (schema === undefined || typeof schema !== "object") return undefined;
-  try {
-    const result = validator.validateValue(schema, input);
-    return result.ok ? undefined : (result.errors ?? "does not match the tool's declared input schema");
-  } catch (e) {
-    return `input could not be validated: ${e instanceof Error ? e.message : String(e)}`;
-  }
+  // The low-level MCP `Server` advertises our schema and then hands the handler whatever arrived — it
+  // validates NOTHING — so the boundary check on an injected tool's arguments lives in `runInjectedTool`.
+  return runInjectedTool(spec, name, args);
 }

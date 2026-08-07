@@ -17,7 +17,23 @@ import type { JsonValue } from "@declarative-ai/json";
 import type { ProviderOptions, ReasoningSpec } from "./llmConfig.js";
 
 /** Representative thinking budgets for an effort level, for providers that only accept a budget. */
-const EFFORT_BUDGET: Record<"low" | "medium" | "high", number> = { low: 2048, medium: 8192, high: 16384 };
+const EFFORT_BUDGET: Record<NonNullable<ReasoningSpec["effort"]>, number> = { low: 2048, medium: 8192, high: 16384, xhigh: 32768 };
+
+/**
+ * The effort level a provider that tops out at `high` is asked for.
+ *
+ * `xhigh` exists because a delegated Claude Code run has a tier the three-value vocabulary could not
+ * name. A message-based provider that has never heard of it must not fail the call over it: asking for
+ * more thought than a model offers is satisfied by giving it all of it, so the level CLAMPS. Losing
+ * the request entirely would be the wrong answer; refusing it would make one transport's vocabulary
+ * everyone's problem.
+ */
+const CLAMPED: Record<NonNullable<ReasoningSpec["effort"]>, "low" | "medium" | "high"> = {
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: "high",
+};
 
 export function adaptReasoning(spec: ReasoningSpec | undefined, opts: { anthropic: boolean }): ProviderOptions | undefined {
   if (!spec || (spec.effort === undefined && spec.budgetTokens === undefined)) return undefined;
@@ -27,6 +43,6 @@ export function adaptReasoning(spec: ReasoningSpec | undefined, opts: { anthropi
     return { anthropic: { thinking: { type: "enabled", budgetTokens } } };
   }
   // OpenRouter (default): prefer the effort level; fall back to the token budget as `max_tokens`.
-  const reasoning: Record<string, JsonValue> = spec.effort !== undefined ? { effort: spec.effort } : { max_tokens: spec.budgetTokens ?? null };
+  const reasoning: Record<string, JsonValue> = spec.effort !== undefined ? { effort: CLAMPED[spec.effort] } : { max_tokens: spec.budgetTokens ?? null };
   return { openrouter: { reasoning } };
 }

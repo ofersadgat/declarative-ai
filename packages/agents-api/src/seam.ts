@@ -10,6 +10,11 @@ import type { FunctionInputs, JsonSchema, JsonValue, SyncOutputValidator } from 
 /** The permission mode handed to the delegated agent (its NATIVE profile control). */
 export type AgentPermissionMode = "default" | "plan" | "acceptEdits" | "bypassPermissions";
 
+/** How hard to think, as a level. The neutral `ReasoningSpec.effort`, restated for the reason
+ *  {@link AgentReasoning} gives — `xhigh` is in the vocabulary because a delegated agent is the
+ *  transport that has such a tier. */
+export type AgentEffort = "low" | "medium" | "high" | "xhigh";
+
 /** A tool-use the agent wants to make, surfaced to our approver via {@link AgentPermissionCallback}. */
 export interface AgentToolRequest {
   toolName: string;
@@ -50,6 +55,27 @@ export interface AgentQueryOptions {
   model?: string;
   /** Working directory (from `ctx.workspace.root`). */
   cwd?: string;
+  /**
+   * WHICH binary to run — an absolute path, or a name to resolve.
+   *
+   * Absent ⇒ each transport's own default: the SDK's bundled executable, or the bare `claude` on the
+   * PATH. Present, it is resolved through {@link resolveAgentBinary} before it reaches either, because
+   * on Windows neither transport spawns through a shell and a bare name is therefore not launchable at
+   * all — an npm `claude.cmd` shim fails with `spawn EINVAL` (Node ≥ 20.12) and a bare command name
+   * fails as ENOENT even with the executable on the PATH.
+   *
+   * The point is a host that ships or pins its own build: a workflow must be able to say WHICH agent
+   * answered, not just that one did.
+   */
+  binaryPath?: string;
+  /**
+   * The environment the agent runs under. Absent ⇒ it inherits this process's.
+   *
+   * A whole environment rather than a patch, matching what both transports take underneath — so a
+   * caller that means to ADD one variable passes `{...process.env, X: "y"}`, and one that means to
+   * start clean can. Forwarded verbatim; nothing here interprets a variable's meaning.
+   */
+  env?: NodeJS.ProcessEnv;
   /** Tool allow-list (the logical names from `runtime.tools`). Note what this MEANS to an agent: it is a
    *  PRE-APPROVAL list, so a name here is not put to `canUseTool`/`--permission-prompt-tool`. */
   allowedTools?: string[];
@@ -60,6 +86,42 @@ export interface AgentQueryOptions {
   /** OUR tools to inject into the agent over MCP, keyed by logical name — the agent calls these impls. */
   mcpTools?: Record<string, InjectedTool>;
   permissionMode?: AgentPermissionMode;
+  /**
+   * How hard the agent should think, in the neutral vocabulary (`ReasoningSpec`, restated here for the
+   * reason {@link AgentReasoning} gives).
+   *
+   * `effort` is the level; `budgetTokens` is an explicit thinking budget. A transport that carries one
+   * and not the other honours what it can and REFUSES the rest — dropping a caller's reasoning request
+   * gets a cheaper, worse answer than the one that was paid for, and says nothing about it.
+   */
+  reasoning?: { effort?: AgentEffort; budgetTokens?: number };
+  /**
+   * Cap on the agent's OWN loop — how many model→tool→model turns it may take.
+   *
+   * The neutral `maxSteps`, which means the same thing here that it does for an executed tool loop: it
+   * is the bound on how long the thing may run before it has to answer with what it has.
+   */
+  maxSteps?: number;
+  /**
+   * Whether the agent may use tools at all.
+   *
+   * Only the two ends of `LlmToolChoice` are expressible to an agent: `auto` (its own judgement, the
+   * default) and `none` (answer from what it already knows). `required` and a named tool are choices
+   * about ONE model turn, and an agent runs a whole loop — so a transport handed either refuses.
+   */
+  toolChoice?: "auto" | "none";
+  /**
+   * Transport-specific settings, already selected by provider key and passed through VERBATIM.
+   *
+   * `LlmConfiguration.providerOptions` is documented as "the full escape hatch… passed through to the
+   * provider verbatim", and this is its delegated-agent half: `providerOptions.claudeCode` reaches the
+   * `claude` transports, `providerOptions.codex` reaches codex. The neutral core stays strict-parsed
+   * and nothing agent-specific leaks into `LlmConfiguration`.
+   *
+   * Each transport documents the keys it understands and REFUSES one it does not, because a setting
+   * silently ignored is the failure this whole seam is built to avoid.
+   */
+  providerOptions?: Record<string, JsonValue>;
   canUseTool?: AgentPermissionCallback;
   /** Boundary validation for INJECTED tool arguments. An agent's tool call arrives as untyped JSON and
    *  no MCP server validates it, so an adapter that injects tools checks each call against the tool's
@@ -113,10 +175,78 @@ export interface AgentQueryOptions {
   messages?: readonly JsonValue[];
 }
 
+/**
+ * One reasoning block the agent emitted, kept whole.
+ *
+ * Declared here rather than imported from `@declarative-ai/llm` for the same reason `LlmMetrics`
+ * restates `ExecMetrics`'s fields: this seam is what `agents-cli` compiles against, and that package
+ * has no business depending on the llm layer. The shape is kept structurally compatible by hand, so
+ * the executor maps it onto `ReasoningSegment` with a cast and no translation.
+ *
+ * `providerMetadata` is where the Anthropic thinking-block SIGNATURE rides. That is not decoration: a
+ * signed thinking block must come back byte-identical on the next turn or the provider rejects the
+ * conversation, which is precisely what a lossy round-trip destroys.
+ */
+export interface AgentReasoning {
+  text: string;
+  /** Native provider metadata — open by nature, JSON by construction (§2.2). */
+  providerMetadata?: Record<string, JsonValue>;
+}
+
+/** A tool the agent invoked mid-run. Structurally `llm`'s `ToolCall` — see {@link AgentReasoning}. */
+export interface AgentToolCall {
+  toolCallId?: string;
+  toolName: string;
+  input: JsonValue;
+}
+
+/** The result of a tool the agent ran. Structurally `llm`'s `ToolResult`. */
+export interface AgentToolResult {
+  toolCallId?: string;
+  toolName?: string;
+  output: JsonValue;
+}
+
+/**
+ * What a run consumed, in the neutral vocabulary. Structurally `llm`'s `TokenCounts` — see
+ * {@link AgentReasoning} for why it is restated rather than imported.
+ *
+ * The split matters for MONEY, not for curiosity: a cache read is billed at roughly a tenth of the base
+ * rate and a 1-hour cache write at roughly twice it, so a single `inputTokens` figure cannot be priced.
+ */
+export interface AgentTokenCounts {
+  /** Total input, INCLUDING cache reads and writes — the provider's billed input. */
+  inputTokens?: number;
+  outputTokens?: number;
+  /** Uncached (fresh) input tokens. */
+  noCacheTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  /** The 1-hour-TTL subset of `cacheWriteTokens`. */
+  cacheWrite1hTokens?: number;
+  reasoningTokens?: number;
+  totalTokens?: number;
+}
+
 /** The agent's final answer for a run. */
 export interface AgentResult {
   text: string;
   costUsd?: number;
+  /**
+   * Why the run ENDED, in the same neutral vocabulary a provider call reports
+   * (`stop` / `length` / `tool-calls` / `content-filter` / `error` / `unknown`).
+   *
+   * Absent ⇒ the transport had nothing to say and the caller may assume nothing. What it must not be
+   * is a fabricated `"stop"`: a run that hit its turn cap or its budget ceiling produced a PARTIAL
+   * answer, and reporting that as a clean stop is how a truncated review reads as a complete one.
+   */
+  finishReason?: string;
+  /** What the run consumed. Absent ⇒ the transport reported nothing, which is a different claim
+   *  from zero. */
+  usage?: AgentTokenCounts;
+  /** The provider's exact usage object, kept so `costUsd` stays recomputable when our reading of the
+   *  fields turns out to be wrong or incomplete. Open by nature, JSON by construction (§2.2). */
+  rawUsage?: JsonValue;
   /**
    * The agent's session id as of this run — its own, not ours.
    *
@@ -128,13 +258,70 @@ export interface AgentResult {
   sessionId?: string;
 }
 
-/** A normalized message from the agent stream — the adapter only needs the terminal result + any error. */
+/**
+ * One normalized message from an agent's stream.
+ *
+ * It used to carry the terminal result and nothing else — every other message collapsed to
+ * `{type: "other"}` — which is why a delegated call reported a fabricated `finishReason: "stop"`, a
+ * synthesized one-turn message log, and no tokens at all. None of that was missing at the source: the
+ * agent hands back its whole log, on the same wire, and it was being thrown away at the mapping.
+ *
+ * The variants:
+ *  - `result` — the terminal message. Carries {@link AgentResult}.
+ *  - `assistant` / `user` — a turn the agent appended, with `message` VERBATIM and the projections
+ *    (`thinking`, `toolCalls`, `toolResults`) read off it.
+ *  - `partial` — a text delta while the answer is still being written. `delta` is the new text.
+ *  - `provider_event` — everything with no neutral home, forwarded opaquely (see {@link event}).
+ *  - `other` — a message this mapping recognises and has nothing to say about.
+ */
 export interface AgentStreamMessage {
-  type: "result" | "assistant" | "other";
+  type: "result" | "assistant" | "user" | "partial" | "provider_event" | "other";
   /** Present on the terminal `result` message. */
   result?: AgentResult;
-  /** A run-fatal error the agent reported (mapped to a permanent outcome). */
+  /** A run-fatal error the agent reported, as prose. */
   error?: string;
+  /**
+   * The agent's own MACHINE-READABLE failure code, when it gave one —
+   * `authentication_failed`, `rate_limit`, `overloaded`, `billing_error`, `server_error`, …
+   *
+   * It rides beside {@link error} rather than replacing it because the two answer different
+   * questions. The prose is what a human reads ("Not logged in · Please run /login"); the code is what
+   * decides whether RETRYING is sound. Without it every delegated failure classifies as `permanent`,
+   * since an `AgentError` carries no status and no retryable flag — so a transient overload inside the
+   * agent's own loop looks like a broken workflow and defeats every retry wrapper above it, which is
+   * exactly what {@link AgentExecutor.invoke}'s "classified, not flattened" comment promises not to do.
+   */
+  errorCode?: string;
+  /**
+   * The provider's OWN message object for this turn, verbatim.
+   *
+   * The provider's log rather than a reconstruction, which is what `LlmOutput.messages` is documented
+   * to be and what a later replay has to work from. The projections below are a convenience for a
+   * consumer that wants one field; this is the thing that goes back on the wire.
+   */
+  message?: JsonValue;
+  /** The plain OUTPUT text this turn contributed — the answer, never the reasoning. It is what
+   *  `ReasoningSegment.textOffset` is measured against, so a consumer can place a thinking block
+   *  against the text it accompanies. */
+  text?: string;
+  /** Reasoning blocks this turn emitted, signatures intact. */
+  thinking?: AgentReasoning[];
+  /** Tools this turn asked to call. */
+  toolCalls?: AgentToolCall[];
+  /** Tool results this turn carried back. */
+  toolResults?: AgentToolResult[];
+  /** The new text on a `partial`. */
+  delta?: string;
+  /**
+   * A `provider_event`'s payload, forwarded opaquely.
+   *
+   * The agent emits a great deal that has no neutral home and should not be given one — session init,
+   * compaction boundaries, hook lifecycle, task progress, API retries, rate-limit windows, permission
+   * denials. Naming each of them in the neutral vocabulary would teach `exec` Claude's own vocabulary
+   * for the sake of events it cannot act on. Same precedent as `rawUsage` and `providerMetadata`: open
+   * by nature, JSON by construction.
+   */
+  event?: JsonValue;
 }
 
 /**
@@ -152,5 +339,32 @@ export interface AgentStreamMessage {
  */
 export type AgentSessionReader = (providerSessionId: string, cwd?: string) => Promise<readonly unknown[]>;
 
+/**
+ * A LIVE agent run: its message stream, plus whatever steering the transport can offer.
+ *
+ * It extends `AsyncIterable<AgentStreamMessage>`, which is what the seam used to be, so every existing
+ * `for await` and every `async function*` fake keeps working unchanged — the methods are additions, not
+ * a new shape.
+ *
+ * They are **optional, never throwing stubs**. Absent MEANS unsupported: `if (run.interrupt)` is the
+ * runtime check and `capabilities.sessionSteering` is how a caller knows before the call. codex leaves
+ * every one of them undefined, and correctly — SIGINT to a subprocess is a kill, not a graceful turn
+ * end, and offering `interrupt` that killed the run would answer "stop and tell me what you found" by
+ * throwing the answer away.
+ *
+ * ⚠️ `interrupt()` is NOT cancellation. The turn ends early, a `result` message still arrives, and the
+ * call SUCCEEDS with the partial answer. See {@link ExecControl}.
+ */
+export interface AgentRun extends AsyncIterable<AgentStreamMessage> {
+  /** End the current turn early and let the run settle normally. Idempotent. */
+  interrupt?(): Promise<void>;
+  /** Add a user message to a run already under way. */
+  send?(text: string): Promise<void>;
+  /** Change the permission posture for the rest of the run. */
+  setPermissionMode?(mode: AgentPermissionMode): Promise<void>;
+  /** Change the model used for subsequent responses. */
+  setModel?(model: string): Promise<void>;
+}
+
 /** The seam: run an agent query and yield its message stream. */
-export type AgentQuery = (opts: AgentQueryOptions) => AsyncIterable<AgentStreamMessage>;
+export type AgentQuery = (opts: AgentQueryOptions) => AgentRun;

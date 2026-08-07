@@ -356,7 +356,10 @@ export interface OperationFields extends ExecEnvironmentDecl {
   topK?: number;
   presencePenalty?: number;
   frequencyPenalty?: number;
-  reasoning?: { effort?: "low" | "medium" | "high"; budgetTokens?: number };
+  /** How hard to think. Mirrors `llm`'s `ReasoningSpec` by hand, as everything on this authoring
+   *  surface does — `xhigh` included, because a delegated agent has such a tier and an author must be
+   *  able to write it here or the level cannot be requested at all. */
+  reasoning?: { effort?: "low" | "medium" | "high" | "xhigh"; budgetTokens?: number };
 }
 
 /**

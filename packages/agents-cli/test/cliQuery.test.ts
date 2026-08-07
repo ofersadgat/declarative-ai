@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isOk, type ExecServices, type FunctionInputs } from "@declarative-ai/exec";
-import { cliArgv, createCliAgentQuery } from "../src/cliQuery.js";
+import { cliArgv, cliRefusal, createCliAgentQuery } from "../src/cliQuery.js";
 import type { AgentProcess, SpawnProcess } from "../src/process.js";
 import { CLI_CONFIG_ONLY_CAPS, CLI_DELEGATED_CAPS, createCliAgentFunction } from "../src/runtime.js";
 import { injectedToolAllowEntries, mcpConfigJson, PERMISSION_PROMPT_TOOL } from "../src/mcpProtocol.js";
@@ -39,17 +39,36 @@ describe("cliArgv — the flags one run is configured with", () => {
       "--output-format",
       "stream-json",
       "--verbose",
+      "--include-partial-messages",
       "--permission-mode",
       "plan",
       "--allowedTools",
       "Read,Bash",
+      "--setting-sources",
+      "project",
       "--",
       "hi",
     ]);
   });
 
   it("omits flags the caller did not ask for", () => {
-    expect(cliArgv({ prompt: "hi", allowedTools: [] })).toEqual(["-p", "--output-format", "stream-json", "--verbose", "--", "hi"]);
+    expect(cliArgv({ prompt: "hi", allowedTools: [] })).toEqual([
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      "--setting-sources",
+      "project",
+      "--",
+      "hi",
+    ]);
+  });
+
+  it("always asks for PARTIAL messages, the same request the SDK sibling makes under its own name", () => {
+    // What makes the declared `streaming` capability true on this path. Verified on 2.1.142's `--help`:
+    // "only works with --print and --output-format=stream-json", both of which are already emitted.
+    expect(cliArgv({ prompt: "hi" })).toContain("--include-partial-messages");
   });
 
   // `-p`/`--print` is a BOOLEAN flag in the shipping CLI and the prompt is a positional argument, so
@@ -422,6 +441,83 @@ describe("a result message that reports its own failure", () => {
   });
 });
 
+/**
+ * What the caller configured, in the CLI's own flag vocabulary — and a loud refusal for the two things
+ * this binary genuinely cannot do.
+ */
+describe("the neutral knobs, and what this transport cannot carry", () => {
+  const flagValue = (argv: string[], flag: string): string | undefined => (argv.includes(flag) ? argv[argv.indexOf(flag) + 1] : undefined);
+
+  it("asks for a reasoning LEVEL with --effort, which takes xhigh on 2.1.142", () => {
+    expect(flagValue(cliArgv({ prompt: "go", reasoning: { effort: "xhigh" } }), "--effort")).toBe("xhigh");
+  });
+
+  it("REFUSES a thinking budget, because this binary has no flag for one", () => {
+    // Checked against 2.1.142's own `--help`: `--effort` exists, a thinking-budget flag does not. The
+    // SDK sibling carries it, so the refusal names the transport that can serve the request.
+    expect(cliRefusal({ prompt: "go", reasoning: { budgetTokens: 8192 } })).toMatch(/no thinking-budget flag/);
+  });
+
+  it("REFUSES a step budget, and says what to bound the run with instead", () => {
+    expect(cliRefusal({ prompt: "go", maxSteps: 8 })).toMatch(/no turn-cap flag/);
+  });
+
+  it("disables the agent's tools for `toolChoice: none`", () => {
+    expect(flagValue(cliArgv({ prompt: "go", toolChoice: "none" }), "--tools")).toBe("");
+    expect(cliArgv({ prompt: "go", toolChoice: "auto" })).not.toContain("--tools");
+  });
+
+  it("loads PROJECT settings only, so a run does not inherit whoever's machine it is on", () => {
+    // Omitting the flag loads user + project + local, and a personal `permissions.allow` entry
+    // PRE-APPROVES tools — quietly disarming the approval callback this transport promises.
+    expect(flagValue(cliArgv({ prompt: "go" }), "--setting-sources")).toBe("project");
+    expect(flagValue(cliArgv({ prompt: "go", providerOptions: { settingSources: ["user", "project"] } }), "--setting-sources")).toBe("user,project");
+  });
+
+  it("carries the settings bag, the budget ceiling, and the system-prompt overrides", () => {
+    const argv = cliArgv({
+      prompt: "go",
+      providerOptions: { fastMode: true, ultracode: true, maxBudgetUsd: 2.5, appendSystemPrompt: "Be terse." },
+    });
+    expect(JSON.parse(flagValue(argv, "--settings")!)).toEqual({ fastMode: true, ultracode: true });
+    expect(flagValue(argv, "--max-budget-usd")).toBe("2.5");
+    expect(flagValue(argv, "--append-system-prompt")).toBe("Be terse.");
+  });
+
+  it("spells extraArgs exactly as the SDK does, so one config drives both transports", () => {
+    const argv = cliArgv({ prompt: "go", providerOptions: { extraArgs: { "add-dir": "/repo", bare: null } } });
+    expect(argv).toContain("--add-dir");
+    expect(flagValue(argv, "--add-dir")).toBe("/repo");
+    expect(argv).toContain("--bare");
+  });
+
+  it("REFUSES an unrecognised providerOptions key rather than ignoring it", () => {
+    expect(cliRefusal({ prompt: "go", providerOptions: { fasMode: true } })).toMatch(/unknown key\(s\): fasMode/);
+  });
+
+  it("keeps every generated flag BEFORE the `--`, so none of it is read as the prompt", () => {
+    const argv = cliArgv({
+      prompt: "go",
+      reasoning: { effort: "high" },
+      toolChoice: "none",
+      providerOptions: { maxBudgetUsd: 1, extraArgs: { "add-dir": "/repo" } },
+    });
+    const separator = argv.indexOf("--");
+    for (const flag of ["--effort", "--tools", "--setting-sources", "--max-budget-usd", "--add-dir"]) {
+      expect(argv.indexOf(flag)).toBeGreaterThanOrEqual(0);
+      expect(argv.indexOf(flag)).toBeLessThan(separator);
+    }
+  });
+
+  it("refuses the run BEFORE spawning, so nothing launches under a configuration it cannot honour", async () => {
+    const { spawn, argv } = fakeSpawn(['{"type":"result","result":"done"}']);
+    const seen = [];
+    for await (const m of createCliAgentQuery({ spawn })({ prompt: "go", maxSteps: 4 })) seen.push(m);
+    expect(argv).toHaveLength(0);
+    expect(seen[0]?.error).toMatch(/no turn-cap flag/);
+  });
+});
+
 describe("the model flag", () => {
   it("passes --model when the caller named one", () => {
     expect(cliArgv({ prompt: "go", model: "sonnet" })).toContain("--model");
@@ -435,5 +531,195 @@ describe("the model flag", () => {
   it("puts it before the `--`, so it is read as a flag and not as the prompt", () => {
     const argv = cliArgv({ prompt: "go", model: "sonnet" });
     expect(argv.indexOf("--model")).toBeLessThan(argv.indexOf("--"));
+  });
+});
+
+/**
+ * The CLI stream, normalized the SAME way the SDK's is.
+ *
+ * The Agent SDK drives this binary as a subprocess and hands its `stream-json` lines through untouched,
+ * so these are literally the same objects. Two mappings were two chances to drop the same field — and
+ * both dropped every field but the terminal result.
+ */
+describe("stream-json arrives as the same normalized shape the SDK path produces", () => {
+  const lines = [
+    '{"type":"system","subtype":"init","model":"claude-opus-4-7"}',
+    '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"ZEP"}}}',
+    '{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm","signature":"sig-1"},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"a.txt"}}]}}',
+    '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ZEPHYR"}]}}',
+    '{"type":"result","subtype":"success","is_error":false,"result":"ZEPHYR","stop_reason":"end_turn","session_id":"s1","total_cost_usd":0.02,"usage":{"input_tokens":6,"output_tokens":8}}',
+  ];
+
+  async function collect() {
+    const { spawn } = fakeSpawn(lines);
+    const out = [];
+    for await (const m of createCliAgentQuery({ spawn })({ prompt: "go" })) out.push(m);
+    return out;
+  }
+
+  it("forwards a system message opaquely rather than discarding it", async () => {
+    const seen = await collect();
+    expect(seen[0]).toEqual({ type: "provider_event", event: { type: "system", subtype: "init", model: "claude-opus-4-7" } });
+  });
+
+  it("turns a text delta into a `partial`", async () => {
+    expect((await collect())[1]).toEqual({ type: "partial", delta: "ZEP" });
+  });
+
+  it("carries thinking with its signature, the tool call, and the result that answered it", async () => {
+    const seen = await collect();
+    expect(seen[2]).toMatchObject({
+      type: "assistant",
+      thinking: [{ text: "hmm", providerMetadata: { anthropic: { signature: "sig-1" } } }],
+      toolCalls: [{ toolCallId: "toolu_1", toolName: "Read", input: { path: "a.txt" } }],
+    });
+    expect(seen[3]).toMatchObject({ type: "user", toolResults: [{ toolCallId: "toolu_1", output: "ZEPHYR" }] });
+  });
+
+  it("reads the terminal result's finish reason and token counts, not just its text", async () => {
+    const seen = await collect();
+    expect(seen[4]).toMatchObject({
+      type: "result",
+      result: { text: "ZEPHYR", costUsd: 0.02, sessionId: "s1", finishReason: "stop", usage: { inputTokens: 6, outputTokens: 8 } },
+    });
+  });
+});
+
+/**
+ * A binary that is PRESENT but not logged in.
+ *
+ * The lines below are VERBATIM from `claude 2.1.142` run with an empty `CLAUDE_CONFIG_DIR` — the exact
+ * shape a first-run machine produces. Everything about it says success: exit code 0,
+ * `subtype: "success"`, `terminal_reason: "completed"`, `stop_reason: "stop_sequence"`. Only `is_error`
+ * disagrees, and the sentence explaining it sits where the answer would be.
+ */
+describe("not logged in — the failure that looks exactly like a successful empty answer", () => {
+  const NOT_LOGGED_IN = [
+    '{"type":"system","subtype":"init","apiKeySource":"none","claude_code_version":"2.1.142"}',
+    '{"type":"assistant","message":{"id":"4ce0f2fc","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","content":[{"type":"text","text":"Not logged in · Please run /login"}]},"parent_tool_use_id":null,"session_id":"a47138e2","error":"authentication_failed"}',
+    '{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login","stop_reason":"stop_sequence","session_id":"a47138e2","total_cost_usd":0,"terminal_reason":"completed"}',
+  ];
+
+  it("reads the machine-readable code off the assistant turn that carries the prose", async () => {
+    // The code appears HERE and nowhere else — the terminal result repeats the sentence but not the
+    // classification, so dropping this turn's `error` loses the only part a retry decision can use.
+    const { spawn } = fakeSpawn(NOT_LOGGED_IN);
+    const seen = [];
+    for await (const m of createCliAgentQuery({ spawn })({ prompt: "say hi" })) seen.push(m);
+    expect(seen[1]).toMatchObject({ type: "assistant", errorCode: "authentication_failed" });
+  });
+
+  it("reports the run as a FAILURE despite exit 0 and subtype success", async () => {
+    const { spawn } = fakeSpawn(NOT_LOGGED_IN, 0);
+    const result = await createCliAgentFunction({ spawn }).run(inputs(), {});
+    expect(isOk(result)).toBe(false);
+    expect(!isOk(result) && result.error.reason).toMatch(/Not logged in/);
+    expect(!isOk(result) && result.error.classification).toBe("permanent");
+  });
+
+  it("does NOT charge for it — a run that never reached a model cost nothing", async () => {
+    const { spawn } = fakeSpawn(NOT_LOGGED_IN, 0);
+    const result = await createCliAgentFunction({ spawn }).run(inputs(), {});
+    expect(result.metrics?.costUsd).toBe(0);
+  });
+});
+
+/**
+ * A binary that is NOT THERE — the other half of "is this agent usable".
+ *
+ * A spawn that never happened has no exit code, so it arrives as the sentinel `-1`. "agent CLI exited
+ * with code -1" is the least useful sentence available for what is usually the commonest first-run
+ * outcome, and the real error — `spawn claude ENOENT` — was being captured and thrown away.
+ */
+describe("not installed — named as a launch failure, not as an exit code", () => {
+  /** A spawn that FAILED: no output, the sentinel exit, and the reason it could not start. */
+  const failedLaunch = (message: string): SpawnProcess => () => ({
+    lines: (async function* () {})(),
+    kill: () => {},
+    exit: Promise.resolve(-1),
+    launchFailure: () => new Error(message),
+  });
+
+  it("names the binary and the reason, rather than a sentinel exit code", async () => {
+    const seen = [];
+    const query = createCliAgentQuery({ command: "claude", spawn: failedLaunch("spawn claude ENOENT") });
+    for await (const m of query({ prompt: "hi" })) seen.push(m);
+    expect(seen[0]?.error).toBe("the agent binary 'claude' could not be launched: spawn claude ENOENT");
+  });
+
+  it("still classifies as a permanent failure that cost nothing", async () => {
+    const result = await createCliAgentFunction({ command: "claude", spawn: failedLaunch("spawn claude ENOENT") }).run(inputs(), {});
+    expect(isOk(result)).toBe(false);
+    expect(!isOk(result) && result.error.classification).toBe("permanent");
+    expect(result.metrics?.costUsd).toBe(0);
+  });
+
+  it("leaves an ordinary non-zero exit reported as an exit code", async () => {
+    // The launch succeeded; the run failed. Those are different facts and must read differently.
+    const { spawn } = fakeSpawn([], 2);
+    const seen = [];
+    for await (const m of createCliAgentQuery({ spawn })({ prompt: "hi" })) seen.push(m);
+    expect(seen[0]?.error).toBe("agent CLI exited with code 2");
+  });
+});
+
+/**
+ * WHICH binary answers, and under what environment.
+ *
+ * This was a live defect rather than a gap: `cliQuery` spawned a bare `"claude"` with no way for a
+ * caller to name its own build, and on Windows a bare name is not launchable without a shell at all.
+ */
+describe("binaryPath and env reach the subprocess", () => {
+  const NPM = "C:\\Users\\me\\AppData\\Roaming\\npm";
+  const PACKAGE_EXE = `${NPM}\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe`;
+  /** A fake Windows filesystem holding an npm shim and the package entry it delegates to. */
+  const winFs = { platform: "win32", pathDirs: [NPM], exists: (p: string) => [`${NPM}\\claude.cmd`, PACKAGE_EXE].includes(p) };
+
+  /** A fake spawn that records the environment it was handed as well as the argv. */
+  function recording(): { spawn: SpawnProcess; argv: string[][]; envs: (NodeJS.ProcessEnv | undefined)[] } {
+    const argv: string[][] = [];
+    const envs: (NodeJS.ProcessEnv | undefined)[] = [];
+    const spawn: SpawnProcess = (a, opts) => {
+      argv.push(a);
+      envs.push(opts.env);
+      return { lines: (async function* () { yield '{"type":"result","result":"done"}'; })(), kill: () => {}, exit: Promise.resolve(0) };
+    };
+    return { spawn, argv, envs };
+  }
+
+  it("RESOLVES a named binary before spawning it — an npm shim reaches the package entry", async () => {
+    const { spawn, argv } = recording();
+    const query = createCliAgentQuery({ spawn, binaryDeps: winFs, warn: () => {} });
+    for await (const _ of query({ prompt: "go", binaryPath: "claude" })) void _;
+    expect(argv[0]![0]).toBe(PACKAGE_EXE);
+  });
+
+  it("lets the CALL's binaryPath beat the transport's wired-in command", async () => {
+    // One is how this adapter was constructed, the other is what this run asked for.
+    const { spawn, argv } = recording();
+    const query = createCliAgentQuery({ spawn, command: "claude", binaryDeps: winFs, warn: () => {} });
+    for await (const _ of query({ prompt: "go", binaryPath: "D:\\builds\\claude.exe" })) void _;
+    expect(argv[0]![0]).toBe("D:\\builds\\claude.exe");
+  });
+
+  it("WARNS rather than refusing when the resolution finds nothing, and runs with what it was given", async () => {
+    // A resolution we could not complete is not the same claim as a binary that is definitely absent —
+    // so the run proceeds and the spawn failure names the command the caller actually wrote.
+    const warnings: string[] = [];
+    const { spawn, argv } = recording();
+    const query = createCliAgentQuery({ spawn, binaryDeps: { ...winFs, exists: () => false }, warn: (m) => warnings.push(m) });
+    for await (const _ of query({ prompt: "go", binaryPath: "claude" })) void _;
+    expect(argv[0]![0]).toBe("claude");
+    expect(warnings[0]).toContain("not found on the PATH");
+  });
+
+  it("forwards the environment verbatim, and INHERITS when the caller named none", async () => {
+    const { spawn, envs } = recording();
+    const query = createCliAgentQuery({ spawn });
+    for await (const _ of query({ prompt: "go", env: { PATH: "/usr/bin", CLAUDE_CONFIG_DIR: "/tmp/a" } })) void _;
+    expect(envs[0]).toEqual({ PATH: "/usr/bin", CLAUDE_CONFIG_DIR: "/tmp/a" });
+    // Absent means INHERIT. An empty object here would strip the child's PATH and its credentials.
+    for await (const _ of query({ prompt: "go" })) void _;
+    expect(envs[1]).toBeUndefined();
   });
 });

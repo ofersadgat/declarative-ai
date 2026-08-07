@@ -20,15 +20,31 @@
  * deny floor, and routing the agent's own approval callback to `ctx.approve`.
  */
 import {
+  EventQueue,
   syncOnly,
+  type ExecControl,
+  type ExecHandle,
   type ExecServices,
   type InlineFamily,
   type JsonSchema,
+  type JsonValue,
+  type Operation,
   type PromptOp,
   type ResolvedSession,
+  type ResolvedValue,
   type Tool,
 } from "@declarative-ai/exec";
-import type { CallDeps, LlmCallDefinition, LlmCallResult, LlmMetrics, LlmOutput, ModelMessage } from "@declarative-ai/llm";
+import type {
+  CallDeps,
+  LlmCallDefinition,
+  LlmCallResult,
+  LlmMetrics,
+  LlmOutput,
+  ModelMessage,
+  ReasoningSegment,
+  ToolCall,
+  ToolResult,
+} from "@declarative-ai/llm";
 import { PromptExecutor, type PromptExecutorOptions } from "@declarative-ai/promptop";
 import { failureOf, type Capabilities, type RuntimeCapabilities } from "@declarative-ai/ops";
 import type { BudgetMeter, BudgetMetrics, ExecMetrics } from "@declarative-ai/exec";
@@ -38,7 +54,64 @@ import type { BudgetMeter, BudgetMetrics, ExecMetrics } from "@declarative-ai/ex
 // typecheck as missing while the tests, running on the merged runtime shape, still pass.
 import type { Approver } from "@declarative-ai/permissions";
 import { sdkAgentQuery } from "./sdkQuery.js";
-import type { AgentPermissionMode, AgentQuery, AgentQueryOptions, AgentResult, AgentSessionReader, InjectedTool } from "./seam.js";
+import { isRetriableAgentError } from "./streamMessages.js";
+import type { AgentPermissionMode, AgentQuery, AgentQueryOptions, AgentResult, AgentRun, AgentSessionReader, InjectedTool } from "./seam.js";
+
+/**
+ * The per-call EVENT SINK, threaded on a shallow copy of `ctx`.
+ *
+ * `start` is the phase that owns the handle and `invoke` is the phase that produces events, and the
+ * base class hands nothing between them — so the queue has to travel with the call. It travels on
+ * `ctx` rather than on the instance because one executor serves many concurrent calls, and an instance
+ * field would deliver one call's partial output onto another's stream.
+ *
+ * A SYMBOL rather than a declared `ExecServices` field, deliberately: module augmentation is global and
+ * would put a slot on the public services bundle that no caller should ever set. This is an internal
+ * channel between two phases of one class, and it is spelled like one.
+ */
+const EVENT_SINK = Symbol("declarative-ai.agent.events");
+
+/** The per-call channel between `start` (which owns the handle) and `invoke` (which produces the run). */
+interface AgentChannel {
+  events: EventQueue;
+  /** The live run, once `invoke` has created one. Written once per call; read live by the handle's
+   *  `control` getter, so a caller holding the handle before the run started still steers it after. */
+  run?: AgentRun;
+  /** The stream is over. Every control method becomes a no-op — an interrupt racing the run's own end
+   *  is the ORDINARY case (a user presses Stop as the answer lands) and must not become an error. */
+  finished?: boolean;
+  /**
+   * Control requests made BEFORE the run existed, replayed the moment it does.
+   *
+   * The window is real and not small: `start` returns its handle synchronously, while lowering and
+   * session resolution are awaits that happen before the transport is reached. A caller pressing Stop
+   * in that window is asking for the run to stop, and dropping the request because the object was not
+   * built yet would answer by letting it run to completion — the worst possible response to Stop.
+   */
+  pending: Array<(run: AgentRun) => Promise<void>>;
+}
+
+/** `ctx` carrying this executor's per-call channel. */
+type WithEventSink = { [EVENT_SINK]?: AgentChannel };
+
+/** Everything ONE agent turn produced, accumulated off its stream. */
+interface AgentTurn {
+  result: AgentResult;
+  /**
+   * The OUTPUT text the assistant turns carried, accumulated.
+   *
+   * Normally the same thing the terminal `result` says, and then unused. It earns its place on an
+   * INTERRUPTED run, where the terminal message carries no text at all — the partial answer exists only
+   * in the turns already streamed, and this is what stops "stop and tell me what you found" from
+   * answering with nothing.
+   */
+  text: string;
+  /** The agent's own log, verbatim — assistant and user turns in the order it produced them. */
+  messages: ModelMessage[];
+  thinking: ReasoningSegment[];
+  toolCalls: ToolCall[];
+  toolResults: ToolResult[];
+}
 
 /** Delegated agents: schema-constrained output isn't guaranteed (they answer in text), they mutate the
  *  workspace, run their own non-deterministic loop (not memoizable), gate tools via a callback, and are
@@ -59,6 +132,10 @@ export const DELEGATED_CAPS: RuntimeCapabilities = {
   // BOTH, and `forkSession` is the primitive that makes the second one true.
   sessionFork: true,
   streaming: true,
+  // The run can be STEERED while it runs — interrupted, redirected, given more input. True for this
+  // transport because the SDK's `Query` carries the control requests; a caller reads it to decide
+  // whether to offer a Stop button BEFORE the call, rather than by pressing one and finding out.
+  sessionSteering: true,
   runtime: "node",
 };
 
@@ -84,9 +161,29 @@ export async function debitSpentCost(meter: BudgetMeter, costUsd: number): Promi
 /** Thrown when the delegated agent fails or is canceled. The invoking executor classifies it (a
  *  cancellation carries `name: "AbortError"`, which `classifyError` maps to `canceled`). */
 export class AgentError extends Error {
-  constructor(message: string, readonly canceled = false) {
+  /**
+   * Whether a RETRY could plausibly get past this — read by `classifyError`, which looks for exactly
+   * this field. Absent ⇒ it falls through to `permanent`, which is the right default for a failure
+   * nothing told us about.
+   */
+  readonly retryable?: boolean;
+  /** 429 for a rate limit, so `isRateLimit` sets `rateLimited` on the failure and a limiter upstream
+   *  sees it. The shared classifier reads transport vocabulary; this speaks it. */
+  readonly status?: number;
+
+  /**
+   * @param code the agent's own failure code (`rate_limit`, `authentication_failed`, …), when it gave
+   * one. Without it every delegated failure classified as `permanent` — including a transient overload
+   * inside the agent's own loop, which is precisely the case {@link AgentExecutor.invoke} promises to
+   * classify rather than flatten.
+   */
+  constructor(message: string, readonly canceled = false, readonly code?: string) {
     super(message);
     this.name = canceled ? "AbortError" : "AgentError";
+    if (code !== undefined) {
+      this.retryable = isRetriableAgentError(code);
+      if (code === "rate_limit") this.status = 429;
+    }
   }
 }
 
@@ -108,11 +205,41 @@ export interface AgentExecutorOptions extends PromptExecutorOptions {
    *  `policyEnforcement: "config"` / `sessionFork: false` record). */
   capabilities?: RuntimeCapabilities;
   /** Inject `ctx.tools` into the agent over MCP so it calls OUR impls. Default `true`. Set `false` to
-   *  instead pass every tool name as a NATIVE allow-list (the agent uses its own built-ins by name). */
+   *  instead pass every tool name as a NATIVE allow-list (the agent uses its own built-ins by name).
+   *  This governs `ctx.tools` ONLY — {@link AgentExecutorOptions.extraTools} is the separate question. */
   injectTools?: boolean;
+  /**
+   * Tools to ADD to whatever the agent already has, always injected, whatever `injectTools` says.
+   *
+   * The gap this closes: `injectTools` is one switch over `ctx.tools`, so "the agent's own tools for
+   * everything, plus these extras" was not expressible at all — `false` routed everything native and
+   * `true` replaced the lot. That is precisely what a host exposing its OWN capability to an otherwise
+   * stock agent needs: a preview pane, a build runner, a ticket lookup. Nothing about those wants the
+   * agent to stop using its own `Read`.
+   *
+   * Separating them is the point: `injectTools` answers "replace `ctx.tools`", this answers "add
+   * these", and the two compose.
+   */
+  extraTools?: Record<string, Tool>;
   /** Per-logical-name overrides: a tool listed here resolves to the agent's NATIVE built-in (aliased)
    *  instead of being MCP-injected. Ignored tools default to injection. */
   nativeTools?: Record<string, { native: string }>;
+  /**
+   * Which of the agent's OWN built-ins an injected tool DISPLACES, keyed by logical name.
+   *
+   * ✅ OBSERVED (claude 2.1.142). Injection alone does not displace anything. A live run with
+   * `read_file` injected and no denies gave the agent both `Read` and `mcp__dai__read_file`, and it used
+   * `Read` — every time, because its system prompt steers it there. Disallow `Read` and the SAME run
+   * reaches for `mcp__dai__read_file`, our impl executes, and the call goes through `ctx.approve`.
+   *
+   * So injection without this is not the portable-vocabulary story it exists for (DESIGN §5.1) — it is
+   * a second set of tools the model ignores. Naming the displaced built-ins puts them on
+   * `disallowedTools`, which the agent checks BEFORE its allow-list, so the substitution is real.
+   *
+   * It is the caller's to state rather than a table here: which built-in a logical tool stands in for is
+   * a fact about the agent being driven, and this executor drives more than one.
+   */
+  replacesNative?: Record<string, string | readonly string[]>;
   /**
    * Route the agent's tool approvals to `ctx.approve`. Default `true`.
    *
@@ -125,6 +252,22 @@ export interface AgentExecutorOptions extends PromptExecutorOptions {
   approvalCallback?: boolean;
   /** Reads a provider-side conversation back, for re-syncing after divergence (DESIGN.md §1.6). */
   readSession?: AgentSessionReader;
+  /**
+   * WHICH binary answers — an absolute path, or a name the transport resolves.
+   *
+   * Absent ⇒ each transport's own default. Present, it is a claim about which build ran, which is a
+   * thing a workflow needs to be able to make: "an agent answered" and "the agent we pinned answered"
+   * are different statements, and only one of them is reproducible.
+   */
+  binaryPath?: string;
+  /**
+   * The environment the agent runs under. Absent ⇒ it inherits this process's.
+   *
+   * Forwarded verbatim and interpreted by nothing here. Multi-account isolation — a per-instance
+   * `CLAUDE_CONFIG_DIR`, continuation-group keys — is a policy question for the caller that owns the
+   * accounts; this is only the channel it would travel on.
+   */
+  env?: NodeJS.ProcessEnv;
   /** The agent's NATIVE permission profile, when the caller pins one. */
   permissionMode?: AgentPermissionMode;
   /** Approval scope key for `ctx.approve`. Defaults to `"delegated"`. */
@@ -176,6 +319,78 @@ export class AgentExecutor extends PromptExecutor {
   }
 
   /**
+   * The handle, with a REAL event stream behind it.
+   *
+   * The base returns `emptyEvents()`, which was honest for a provider call resolved in one await and
+   * dishonest here: a delegated agent runs for minutes, narrating the whole way, and
+   * `DELEGATED_CAPS.streaming: true` promised a caller could watch. So this wraps the inherited handle
+   * with a queue the {@link AgentExecutor.invoke} phase pushes into — output deltas as the answer is
+   * written, and the agent's own events forwarded opaquely.
+   *
+   * The queue is CLOSED when the result settles, however it settles. A stream left open after the
+   * operation finished leaves a `for await` parked forever on a run that is already over.
+   */
+  override start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue, LlmMetrics> {
+    const channel: AgentChannel = { events: new EventQueue(), pending: [] };
+    const inner = super.start(op, { ...ctx, [EVENT_SINK]: channel } as ExecServices & WithEventSink) as ExecHandle<ResolvedValue, LlmMetrics>;
+    const close = (): void => {
+      channel.finished = true;
+      // A request queued for a run that never started is dropped here rather than replayed at nothing —
+      // a refused call has no turn to interrupt.
+      channel.pending.length = 0;
+      channel.events.close();
+    };
+    // `result` never rejects for a unit failure, but a wiring fault is not a unit failure — and a
+    // stream that stays open because of one is a hang rather than an error.
+    const result = inner.result.then(
+      (r) => (close(), r),
+      (e: unknown) => {
+        close();
+        throw e;
+      },
+    );
+    /**
+     * STEERING, and deliberately NOT cancellation.
+     *
+     * `interrupt` is forwarded to the transport's own interrupt and never to the abort controller.
+     * `handles.ts` unifies `cancel()` and `ctx.abortSignal` into one event that settles the handle with
+     * a `canceled` failure — and an interrupted agent turn is the opposite of that: the turn ends
+     * early, the `result` message still arrives, and the call SUCCEEDS with the partial answer. Wiring
+     * the two together would throw away an answer the agent actually produced, which is precisely what
+     * a user pressing Stop on a long run does NOT want.
+     *
+     * Every method reads `channel.run` live and is a no-op once the run is over, so a control request
+     * racing the stream's end is nothing rather than a second settle.
+     */
+    const steer = async (apply: (run: AgentRun) => Promise<void> | undefined): Promise<void> => {
+      if (channel.finished) return;
+      // Already running ⇒ straight through. Not yet ⇒ QUEUED, and this resolves now: the method is a
+      // request, and blocking a caller's Stop until the transport happens to exist would be a worse
+      // answer than acknowledging it.
+      if (channel.run) await apply(channel.run);
+      else channel.pending.push(async (run) => void (await apply(run)));
+    };
+    const control: ExecControl = {
+      interrupt: () => steer((run) => run.interrupt?.()),
+      send: (text) => steer((run) => run.send?.(text)),
+      setPermissionMode: (mode) => steer((run) => run.setPermissionMode?.(mode as AgentPermissionMode)),
+      setModel: (model) => steer((run) => run.setModel?.(model)),
+    };
+    return {
+      events: channel.events.iterate(),
+      result,
+      // Present only when this transport actually steers. `capabilities.sessionSteering` is the
+      // BEFORE-the-call answer; this is the runtime one, and the two must agree — a handle offering
+      // `control` on a transport that declares no steering would be a stub that silently did nothing.
+      ...(this.capabilities.sessionSteering === true ? { control } : {}),
+      cancel: async () => {
+        await inner.cancel();
+        close();
+      },
+    };
+  }
+
+  /**
    * Lower the op — tolerating a call that names no model.
    *
    * `LlmConfiguration.model` is required because a provider call cannot be ROUTED without one. A
@@ -212,20 +427,31 @@ export class AgentExecutor extends PromptExecutor {
   protected override async invoke(definition: LlmCallDefinition, env: CallDeps, ctx: ExecServices): Promise<LlmCallResult> {
     const startMs = Date.now();
     try {
-      const result = await this.runAgent(definition, ctx);
+      const turn = await this.runAgent(definition, ctx);
+      const result = turn.result;
       // A delegated agent spends real money inside its own loop, so the charge lands after the fact:
       // settle it against the wallet when one is injected. Absent meter ⇒ unmetered, as everywhere else.
       if (result.costUsd !== undefined && ctx.meter) await debitSpentCost(ctx.meter, result.costUsd);
       const output: LlmOutput = {
-        value: result.text,
-        finishReason: "stop",
-        // The payload shape a session records: the agent's answer as one assistant turn. A delegated
-        // agent does not hand back its internal log, so that turn is what a later replay against
-        // another transport has to work from — saying so beats leaving the conversation empty.
-        messages: [{ role: "assistant", content: result.text }] as ModelMessage[],
+        // The terminal message's answer, falling back to what the turns themselves carried. An
+        // INTERRUPTED run is the case: its terminal message has no text, and the partial answer exists
+        // only in the assistant turns already streamed. Reporting an empty string there would answer
+        // "stop and tell me what you found" with nothing.
+        value: result.text.length > 0 ? result.text : turn.text,
+        // The agent's OWN verdict on how its run ended. Hardcoding `"stop"` here reported a run that
+        // exhausted its turn cap or its budget ceiling — a PARTIAL answer — as a clean finish, which is
+        // how a truncated review reads as a complete one.
+        finishReason: result.finishReason ?? "unknown",
+        // The agent's own log, verbatim. It used to be one synthesized assistant turn carrying the
+        // final text, under a comment claiming a delegated agent hands back nothing else. It does hand
+        // it back — every turn, on the same wire — and we were discarding it.
+        ...(turn.messages.length > 0 ? { messages: turn.messages } : {}),
+        ...(turn.thinking.length > 0 ? { thinking: turn.thinking } : {}),
+        ...(turn.toolCalls.length > 0 ? { toolCalls: turn.toolCalls } : {}),
+        ...(turn.toolResults.length > 0 ? { toolResults: turn.toolResults } : {}),
         ...(result.sessionId !== undefined ? { providerSessionId: result.sessionId } : {}),
       };
-      return { value: output, metrics: this.agentMetrics(startMs, result.costUsd) };
+      return { value: output, metrics: this.agentMetrics(startMs, result) };
     } catch (e) {
       // CLASSIFIED, not flattened. An agent SDK is an exception-shaped world, and the exception still
       // carries what happened: a 429 raised inside the agent's own loop is retriable, an abort is a
@@ -239,6 +465,13 @@ export class AgentExecutor extends PromptExecutor {
     }
   }
 
+  /** The per-call event sink, when this executor's own {@link AgentExecutor.start} supplied one. Absent
+   *  for a subclass or test that drove `invoke` directly, in which case events go nowhere — which is
+   *  the same thing that happened before there was a stream at all. */
+  private sink(ctx: ExecServices): AgentChannel | undefined {
+    return (ctx as ExecServices & WithEventSink)[EVENT_SINK];
+  }
+
   /**
    * What a delegated agent measures.
    *
@@ -248,7 +481,8 @@ export class AgentExecutor extends PromptExecutor {
    * agent is one child call from the graph's point of view, which is how a budget gate sees through
    * the delegation without child records.
    */
-  protected agentMetrics(startMs: number, costUsd: number | undefined): LlmMetrics {
+  protected agentMetrics(startMs: number, result: AgentResult | undefined): LlmMetrics {
+    const costUsd = result?.costUsd;
     return {
       startMs,
       durationMs: Date.now() - startMs,
@@ -256,11 +490,26 @@ export class AgentExecutor extends PromptExecutor {
       costUsd: costUsd ?? 0,
       costSource: costUsd !== undefined ? "provider" : "unknown",
       ...(costUsd !== undefined ? { childCostUsd: costUsd } : {}),
+      // What the run CONSUMED, split the way it is billed — a cache read costs a tenth of the base
+      // rate and a 1-hour cache write roughly twice it, so a single input figure cannot be priced.
+      // These used to be absent entirely, which made a delegated call the one kind of call whose spend
+      // could not be checked against anything.
+      ...(result?.usage ?? {}),
+      // The provider's exact object, so `costUsd` stays recomputable if our reading of the fields is
+      // wrong or incomplete — the same reason the provider path keeps it.
+      ...(result?.rawUsage !== undefined ? { rawUsage: result.rawUsage } : {}),
     } as LlmMetrics;
   }
 
-  /** Build the query options from the lowered call, run the agent, and return its terminal result. */
-  private async runAgent(definition: LlmCallDefinition, ctx: ExecServices): Promise<AgentResult> {
+  /** Build the query options from the lowered call, run the agent, and accumulate everything its
+   *  stream produced. */
+  private async runAgent(definition: LlmCallDefinition, ctx: ExecServices): Promise<AgentTurn> {
+    // REFUSE BEFORE CONFIGURING. `resolveConfig`, `defaults` and `op.config` all merge into this
+    // declaration, so a field that reached here was ASKED FOR — and reading three of them off it while
+    // dropping the rest is how a call that paid for a reasoning budget quietly got none.
+    const refusal = this.agentRefusal(definition);
+    if (refusal !== undefined) throw new AgentError(`${this.label()}: ${refusal}`);
+
     const inject = this.agent.injectTools ?? true;
     const nativeMap = this.agent.nativeTools ?? {};
     const wantsApprovalCallback = this.agent.approvalCallback ?? true;
@@ -287,11 +536,17 @@ export class AgentExecutor extends PromptExecutor {
     // ctx-bound). The engine hands a delegated runtime RAW tools, and authorization flows through
     // `canUseTool` → `ctx.approve`, so injected tools are not double-gated.
     const tools = (ctx.tools ?? this.options.tools) as Record<string, Tool> | undefined;
+    const extraTools = this.agent.extraTools;
+    const bind = (tool: Tool): InjectedTool => ({
+      description: tool.description,
+      inputSchema: tool.inputSchema as JsonSchema,
+      run: (input) => tool.run(input, ctx),
+    });
     let allowedTools: string[] | undefined;
     let mcpTools: Record<string, InjectedTool> | undefined;
+    const native: string[] = [];
+    const injected: Record<string, InjectedTool> = {};
     if (tools) {
-      const native: string[] = [];
-      const injected: Record<string, InjectedTool> = {};
       for (const [name, tool] of Object.entries(tools)) {
         const ref = nativeMap[name];
         // A `deny` is an unconditional floor: the tool is never OFFERED, native or injected. An injected
@@ -299,11 +554,40 @@ export class AgentExecutor extends PromptExecutor {
         // it injected would route around the floor entirely — drop it here.
         if (denySet.has(ref ? ref.native : name)) continue;
         if (!inject || ref) native.push(ref ? ref.native : name);
-        else injected[name] = { description: tool.description, inputSchema: tool.inputSchema as JsonSchema, run: (input) => tool.run(input, ctx) };
+        else injected[name] = bind(tool);
       }
       // `allowedTools` PRE-APPROVES; denied tools are already excluded above, native and injected alike.
+      //
+      // ✅ An EMPTY list means "pre-approve nothing", NOT "allow nothing" — checked on a live run, where
+      // `--allowedTools ""` still let the agent use its native `Read`. So this and `cliArgv`'s
+      // omit-when-empty are the same request, and neither silently disarms the agent.
       allowedTools = native;
-      if (Object.keys(injected).length > 0) mcpTools = injected;
+    }
+    // EXTRA tools ride on top, whatever `injectTools` decided about `ctx.tools`. This is the "natives
+    // plus extras" case: a host exposing its own capability to an otherwise stock agent, which the one
+    // switch could not express. The deny floor still applies — an extra tool is a tool.
+    for (const [name, tool] of Object.entries(extraTools ?? {})) {
+      if (denySet.has(nativeMap[name]?.native ?? name)) continue;
+      injected[name] = bind(tool);
+    }
+    if (Object.keys(injected).length > 0) mcpTools = injected;
+
+    // DISPLACE what an injected tool stands in for. Without this, injection adds a second set of tools
+    // the model ignores: a live run with `read_file` injected and `Read` still available used `Read`
+    // every time. Denying the built-in is what makes the substitution real — and it is denied under the
+    // agent's own name, since that is what it addresses.
+    //
+    // A built-in that some OTHER logical tool is aliased to (`nativeTools`) is exempt: the caller asked
+    // for that one natively, and disallowing it would refuse a tool it just requested.
+    const aliased = new Set(Object.values(nativeMap).map((ref) => ref.native));
+    for (const name of Object.keys(injected)) {
+      const replaced = this.agent.replacesNative?.[name];
+      for (const builtin of replaced === undefined ? [] : typeof replaced === "string" ? [replaced] : replaced) {
+        if (!aliased.has(builtin) && !denySet.has(builtin)) {
+          denied.push(builtin);
+          denySet.add(builtin);
+        }
+      }
     }
 
     // The session decision was already made by `applySession`, which is the point of the refactor:
@@ -317,6 +601,10 @@ export class AgentExecutor extends PromptExecutor {
       prompt: this.renderPrompt(definition),
       ...(this.agentModel(definition) !== undefined ? { model: this.agentModel(definition)! } : {}),
       cwd: ctx.workspace?.root,
+      // WHICH binary, and under what environment. Both are transport-level facts the caller pinned at
+      // construction, so they travel on every call this executor makes rather than being re-stated.
+      ...(this.agent.binaryPath !== undefined ? { binaryPath: this.agent.binaryPath } : {}),
+      ...(this.agent.env !== undefined ? { env: this.agent.env } : {}),
       allowedTools,
       ...(denied.length > 0 ? { disallowedTools: denied } : {}),
       mcpTools,
@@ -324,6 +612,18 @@ export class AgentExecutor extends PromptExecutor {
       // FAIL-CLOSED (json's `syncOnly`) rather than let an async validator read as a pass.
       ...(ctx.validator !== undefined ? { validator: syncOnly(ctx.validator) } : {}),
       permissionMode: this.permissionMode(),
+      // THE NEUTRAL KNOBS a delegated transport can actually carry. This used to read three fields off
+      // the lowered declaration and drop everything else — so a state authored with `reasoning: {effort:
+      // "xhigh"}` and a step budget ran at the agent's own defaults, silently, and cost what the deeper
+      // run would have cost only if you were unlucky.
+      ...("reasoning" in definition && definition.reasoning !== undefined ? { reasoning: definition.reasoning } : {}),
+      ...(definition.maxSteps !== undefined ? { maxSteps: definition.maxSteps } : {}),
+      ...(definition.toolChoice === "none" || definition.toolChoice === "auto" ? { toolChoice: definition.toolChoice } : {}),
+      // Only THIS transport's bag: `providerOptions` is keyed by provider so one config can carry
+      // settings for several, and each takes only its own.
+      ...(definition.providerOptions?.[this.providerOptionsKey()] !== undefined
+        ? { providerOptions: definition.providerOptions[this.providerOptionsKey()]! }
+        : {}),
       ...(resume !== undefined ? { resume, ...(session?.mode === "fork" ? { forkSession: true } : {}) } : {}),
       ...(replayed !== undefined ? { messages: replayed as never } : {}),
       // Route the agent's native tool-approval callback through our approver (DESIGN §5.1,
@@ -338,11 +638,69 @@ export class AgentExecutor extends PromptExecutor {
       abortSignal: signal,
     };
 
+    // THE ACCUMULATION. Everything below used to be `if (msg.type === "result") result = msg.result`,
+    // with every other message discarded — which is where the trace, the tool log, the token counts and
+    // the conversation went. None of it was missing at the source.
+    const channel = this.sink(ctx);
+    const events = channel?.events;
+    const turn: AgentTurn = { result: { text: "" }, text: "", messages: [], thinking: [], toolCalls: [], toolResults: [] };
     let result: AgentResult | undefined;
+    // The last machine-readable failure code the agent gave. It arrives on the ASSISTANT turn that
+    // carries the failure text, one message BEFORE the terminal result that repeats the prose — so it
+    // has to be remembered to still be in hand when the run is failed below.
+    let errorCode: string | undefined;
+    // The LIVE run, published to the handle before a single message is read — a caller pressing Stop
+    // one tick into a five-minute turn must reach something.
+    const run = this.query()(queryOptions);
+    if (channel) {
+      channel.run = run;
+      // Replay whatever was asked for while the run was still being built — a Stop pressed one tick
+      // into a five-minute turn lands in that window, and dropping it would answer by letting the run
+      // finish. Fire-and-forget: a control request is a request, and the stream below is what reports
+      // what came of it.
+      for (const queued of channel.pending.splice(0)) void queued(run);
+    }
     try {
-      for await (const msg of this.query()(queryOptions)) {
-        if (msg.error) throw new AgentError(`${this.label()} agent error: ${msg.error}`);
-        if (msg.type === "result" && msg.result) result = msg.result;
+      for await (const msg of run) {
+        if (msg.errorCode !== undefined) errorCode = msg.errorCode;
+        if (msg.error) throw new AgentError(`${this.label()} agent error: ${msg.error}`, false, msg.errorCode ?? errorCode);
+        switch (msg.type) {
+          case "result":
+            if (msg.result) result = msg.result;
+            break;
+          case "partial":
+            // The answer as it is written. This is what makes the declared `streaming` capability true.
+            if (msg.delta !== undefined && msg.delta.length > 0) events?.push({ type: "output_partial", text: msg.delta });
+            break;
+          case "provider_event":
+            // Forwarded OPAQUELY. `exec` must not learn this agent's vocabulary, and a host that wants
+            // to render a compaction boundary must not be stopped because we had no neutral name for it.
+            if (msg.event !== undefined) events?.push({ type: "provider_event", payload: msg.event });
+            break;
+          default:
+            break;
+        }
+        // The provider's own turn objects, kept whole. `LlmOutput.messages` is documented as the
+        // provider's log rather than a reconstruction; an Anthropic message and a `ModelMessage` are
+        // both `{role, content}` with provider-shaped parts, so this is a cast and not a translation —
+        // and a translation is precisely what would break the signed thinking blocks inside it.
+        if (msg.message !== undefined) turn.messages.push(msg.message as unknown as ModelMessage);
+        for (const block of msg.thinking ?? []) {
+          turn.thinking.push({
+            type: "reasoning",
+            text: block.text,
+            // Positioned against the OUTPUT text accumulated so far — `ReasoningSegment` is placed
+            // against the answer, which is what lets a consumer show thinking where it happened rather
+            // than in a heap at the end.
+            textOffset: turn.text.length,
+            ...(block.providerMetadata !== undefined ? { providerMetadata: block.providerMetadata } : {}),
+          });
+        }
+        for (const call of msg.toolCalls ?? []) turn.toolCalls.push(call as ToolCall);
+        for (const toolResult of msg.toolResults ?? []) turn.toolResults.push(toolResult as ToolResult);
+        // Accumulated from the finished turns rather than from the deltas: a `partial` and the
+        // `assistant` message that follows it carry the SAME text, so adding both would double it.
+        if (msg.type === "assistant") turn.text += msg.text ?? "";
       }
     } catch (e) {
       if (signal.aborted) throw new AgentError("aborted", true);
@@ -351,7 +709,8 @@ export class AgentExecutor extends PromptExecutor {
     }
     if (signal.aborted) throw new AgentError("aborted", true);
     if (!result) throw new AgentError(`${this.label()} produced no result message`);
-    return result;
+    turn.result = result;
+    return turn;
   }
 
   /**
@@ -372,6 +731,61 @@ export class AgentExecutor extends PromptExecutor {
     const slash = id.indexOf("/");
     const native = slash > 0 ? id.slice(slash + 1) : id;
     return native.length > 0 ? native : undefined;
+  }
+
+  /**
+   * The `providerOptions` key whose bag reaches THIS transport.
+   *
+   * `providerOptions` is keyed by provider precisely so one config can carry settings for several and
+   * each takes only its own. The codex sibling overrides this with `"codex"`; nothing else about the
+   * forwarding differs, which is why it is one string rather than a second code path.
+   */
+  protected providerOptionsKey(): string {
+    return "claudeCode";
+  }
+
+  /**
+   * What this call asks for that NO delegated transport can honour — the reason to refuse, or
+   * `undefined` to proceed.
+   *
+   * The rule the seam already states for `model` and `disallowedTools`, applied to the rest of the
+   * declaration: a transport may lack a capability, but it may never pretend to have one. These are the
+   * knobs that are meaningless to an agent rather than merely unimplemented — a decoding parameter has
+   * no channel because the agent, not us, issues the model calls.
+   *
+   * Per-transport gaps are refused by the transport (see `codexRefusal`, `cliRefusal`), not here: this
+   * is the floor they share.
+   */
+  protected agentRefusal(definition: LlmCallDefinition): string | undefined {
+    const sampling = definition as unknown as Record<string, unknown>;
+    const knobs = ["temperature", "topP", "topK", "presencePenalty", "frequencyPenalty", "seed"].filter((k) => sampling[k] !== undefined);
+    if (knobs.length > 0) {
+      return (
+        `a delegated agent issues its own model calls, so the decoding knobs [${knobs.join(", ")}] never reach one. ` +
+        `Express how hard it should think as \`reasoning\`, or run this state on a provider transport`
+      );
+    }
+    if (definition.maxOutputTokens !== undefined) {
+      return (
+        "a delegated agent runs a multi-turn loop with no per-response token cap, so `maxOutputTokens` cannot be honoured. " +
+        "Bound the run with `maxSteps`, or with `providerOptions.claudeCode.maxBudgetUsd`"
+      );
+    }
+    if (definition.stopSequences !== undefined) {
+      return "a delegated agent has no stop-sequence channel — `stopSequences` cannot be honoured on this transport";
+    }
+    if (definition.outputModalities !== undefined) {
+      return "a delegated agent answers in text; `outputModalities` cannot be honoured on this transport";
+    }
+    const choice = definition.toolChoice;
+    if (choice !== undefined && choice !== "auto" && choice !== "none") {
+      const named = typeof choice === "object" ? ` (${choice.toolName})` : "";
+      return (
+        `\`toolChoice: ${typeof choice === "object" ? "{ type: 'tool' }" : choice}\`${named} constrains ONE model turn, and a delegated agent runs a whole loop — ` +
+        `it cannot be honoured. Use "auto" or "none"`
+      );
+    }
+    return undefined;
   }
 
   /** An author-supplied permission mode, ignoring an unknown value. */

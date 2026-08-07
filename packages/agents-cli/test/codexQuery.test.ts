@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { isOk, type ExecServices, type FunctionInputs, type ResolvedSession } from "@declarative-ai/exec";
+import { isOk, promptOp, type ExecServices, type FunctionInputs, type ResolvedSession } from "@declarative-ai/exec";
+import type { AgentQuery, AgentQueryOptions } from "@declarative-ai/agents-api";
 import { codexArgv, codexRefusal, createCodexAgentQuery, mcpServerOverride, readCodexEvent, replayPreamble, sandboxFor } from "../src/codexQuery.js";
+import { AgentCodexExecutor } from "../src/cliExecutor.js";
 import { CODEX_CAPS, createCodexAgentFunction } from "../src/codexRuntime.js";
 import type { AgentProcess, SpawnOptions, SpawnProcess } from "../src/process.js";
 
@@ -116,8 +118,51 @@ describe("codexRefusal — what this transport will not pretend to do", () => {
     expect(codexRefusal({ prompt: "x", allowedTools: ["Read"] })).toMatch(/no native tool allow-list/);
   });
 
+  it("refuses a reasoning request it has no verified channel for", () => {
+    // The neutral knobs now REACH every transport, which makes "this one cannot carry it" a thing that
+    // has to be said. Codex exposes model behaviour through `-c` overrides and this adapter maps none
+    // of them, so a caller asking for effort would otherwise get the binary's default and no warning.
+    expect(codexRefusal({ prompt: "x", reasoning: { effort: "high" } })).toMatch(/no verified reasoning channel/);
+    expect(codexRefusal({ prompt: "x", reasoning: { budgetTokens: 8192 } })).toMatch(/no verified reasoning channel/);
+  });
+
+  it("refuses a step budget, having no turn-cap option", () => {
+    expect(codexRefusal({ prompt: "x", maxSteps: 8 })).toMatch(/no turn-cap option/);
+  });
+
+  it("refuses `toolChoice: none`, having no way to run with its tools off", () => {
+    expect(codexRefusal({ prompt: "x", toolChoice: "none" })).toMatch(/tools disabled/);
+    // `auto` is what codex does anyway, so it asks for nothing and is not a refusal.
+    expect(codexRefusal({ prompt: "x", toolChoice: "auto" })).toBeUndefined();
+  });
+
+  it("refuses a providerOptions bag it maps NONE of, naming where codex settings really go", () => {
+    expect(codexRefusal({ prompt: "x", providerOptions: { sandbox: "read-only" } })).toMatch(/providerOptions\.codex carries \[sandbox\]/);
+    // An empty bag asks for nothing.
+    expect(codexRefusal({ prompt: "x", providerOptions: {} })).toBeUndefined();
+  });
+
   it("passes an ordinary run through", () => {
     expect(codexRefusal({ prompt: "x", allowedTools: [], disallowedTools: [] })).toBeUndefined();
+  });
+});
+
+describe("the codex executor takes its OWN providerOptions bag", () => {
+  it("reads `codex`, never claude's — that keying is why providerOptions is per-provider", async () => {
+    // One config can carry settings for several transports; each must take only what is addressed to
+    // it, or a `claudeCode` bag would reach codex and be refused as unknown.
+    let seen: AgentQueryOptions | undefined;
+    const query: AgentQuery = () => ({
+      // eslint-disable-next-line require-yield
+      [Symbol.asyncIterator]: async function* () {
+        throw new Error("unreachable");
+      },
+    });
+    const capturing: AgentQuery = (opts) => ((seen = opts), query(opts));
+    const executor = new AgentCodexExecutor({ query: capturing });
+    const config = { providerOptions: { claudeCode: { fastMode: true }, codex: { sandbox: "read-only" } } };
+    await executor.start(promptOp({ user: "go", config: config as never, output: { name: "a", schema: { type: "string" } } }), {}).result;
+    expect(seen?.providerOptions).toEqual({ sandbox: "read-only" });
   });
 });
 

@@ -7,6 +7,14 @@
  * enforced (`callback` here, `config` there).
  */
 export * from "./seam.js";
+// Making a NAMED binary launchable — the Windows resolution both transports run a `binaryPath` through.
+export * from "./binary.js";
+// Serving OUR tools to an agent over MCP — the half that is the same on both transports, so the CLI
+// sibling shares this implementation instead of keeping its own.
+export * from "./mcpTools.js";
+// Reading an agent's stream — ONE mapping, shared by both transports because both carry the same
+// messages: the SDK drives the CLI as a subprocess and passes its lines through untouched.
+export * from "./streamMessages.js";
 export * from "./runtime.js";
 // The agent as an `Executor` (DESIGN §4.4) — a `PromptExecutor` whose call reaches an agent, which is
 // what lets a PROMPT op be answered by one. The registry-entry adapters in `runtime.js` remain, and

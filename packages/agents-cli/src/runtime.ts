@@ -27,7 +27,7 @@ import { createCliAgentQuery, type CliAgentOptions } from "./cliQuery.js";
  * wrapping. Both gates open. The two facts are one invariant: declare `callback` only where a call really
  * does reach `ctx.approve`.
  */
-export const CLI_DELEGATED_CAPS: RuntimeCapabilities = { ...DELEGATED_CAPS, policyEnforcement: "callback" };
+export const CLI_DELEGATED_CAPS: RuntimeCapabilities = { ...DELEGATED_CAPS, policyEnforcement: "callback", sessionSteering: false };
 
 /**
  * The honest record when the agent uses its OWN built-in tools (`injectTools: false`, or a `nativeTools`
@@ -41,7 +41,18 @@ export const CLI_DELEGATED_CAPS: RuntimeCapabilities = { ...DELEGATED_CAPS, poli
  * adapter just as it does to a `callback` one, so the declaration makes no difference — a pre-existing
  * gap in the engine, not one this record can close.
  */
-export const CLI_CONFIG_ONLY_CAPS: RuntimeCapabilities = { ...DELEGATED_CAPS, policyEnforcement: "config" };
+export const CLI_CONFIG_ONLY_CAPS: RuntimeCapabilities = { ...DELEGATED_CAPS, policyEnforcement: "config", sessionSteering: false };
+
+/**
+ * Neither CLI adapter STEERS, and saying so is the point.
+ *
+ * The Agent SDK carries `interrupt` / `setPermissionMode` / `setModel` because it speaks the control
+ * protocol over a streaming-input channel. A `-p` subprocess does not: the only mid-run signal this
+ * adapter has is `kill()`, which ends the PROCESS, not the turn — so the agent's partial answer is lost
+ * rather than returned. Offering `interrupt` on top of that would answer "stop and tell me what you
+ * found" by throwing away what it found, which is exactly the confusion `sessionSteering` exists to
+ * prevent: a caller reads the record and decides whether to render a Stop button, before pressing one.
+ */
 
 export interface CliAgentFunctionOptions extends Omit<ClaudeCodeFunctionOptions, "query">, CliAgentOptions {}
 

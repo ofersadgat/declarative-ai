@@ -90,6 +90,12 @@ export class AgentCodexExecutor extends AgentExecutor {
     });
   }
 
+  /** Codex takes its OWN bag out of `providerOptions`, not claude's — that keying is the whole reason
+   *  `providerOptions` is per-provider, so one config can carry settings for several transports. */
+  protected override providerOptionsKey(): string {
+    return "codex";
+  }
+
   protected override query(): AgentQuery {
     if (this.cli.query !== undefined) return this.cli.query;
     const { command, args, spawn, sandbox } = this.cli;

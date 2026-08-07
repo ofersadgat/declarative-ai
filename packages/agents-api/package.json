@@ -51,10 +51,14 @@
     "@declarative-ai/promptop": "^0.1.0"
   },
   "peerDependencies": {
-    "@anthropic-ai/claude-agent-sdk": "*"
+    "@anthropic-ai/claude-agent-sdk": "*",
+    "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "peerDependenciesMeta": {
     "@anthropic-ai/claude-agent-sdk": {
+      "optional": true
+    },
+    "@modelcontextprotocol/sdk": {
       "optional": true
     }
   }

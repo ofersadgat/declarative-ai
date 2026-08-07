@@ -38,6 +38,7 @@
  */
 import type { AgentQuery, AgentQueryOptions, AgentResult, AgentStreamMessage } from "@declarative-ai/agents-api";
 import type { JsonValue } from "./deps.js";
+import { launchError } from "./cliQuery.js";
 import { defaultStartMcpBridge, type McpBridge, type StartMcpBridge } from "./mcpBridge.js";
 import { MCP_SERVER_NAME } from "./mcpProtocol.js";
 import { defaultSpawn, type SpawnProcess } from "./process.js";
@@ -122,6 +123,25 @@ export function codexRefusal(opts: AgentQueryOptions): string | undefined {
     return (
       "codex exec has no mid-run permission callback (no --permission-prompt-tool analogue), so an approver cannot be honoured. " +
       "This adapter declares policyEnforcement: 'config' and must be constructed with approvalCallback: false"
+    );
+  }
+  if (opts.reasoning !== undefined) {
+    return (
+      "this adapter has no verified reasoning channel for codex, so `reasoning` cannot be honoured. " +
+      "Codex exposes model behaviour through `-c` config overrides, which is `providerOptions.codex.args` territory — " +
+      "state it there once the key is confirmed against the installed binary, or run the state on a claude transport"
+    );
+  }
+  if (opts.maxSteps !== undefined) {
+    return "`codex exec` has no turn-cap option, so `maxSteps` cannot be honoured — run the state on a transport that carries one";
+  }
+  if (opts.toolChoice === "none") {
+    return "`codex exec` has no way to run with its tools disabled, so `toolChoice: \"none\"` cannot be honoured";
+  }
+  if (opts.providerOptions !== undefined && Object.keys(opts.providerOptions).length > 0) {
+    return (
+      `providerOptions.codex carries [${Object.keys(opts.providerOptions).join(", ")}], and this adapter maps none of them. ` +
+      "Pass codex settings as `args` on the transport instead, where they reach argv verbatim"
     );
   }
   if (opts.forkSession === true) {
@@ -383,8 +403,13 @@ export function createCodexAgentQuery(config: CodexAgentOptions = {}): AgentQuer
     try {
       const spawn = config.spawn ?? (await defaultSpawn());
       const preamble = opts.messages !== undefined ? replayPreamble(opts.messages) : "";
-      const c = spawn([config.command ?? CODEX_COMMAND, ...codexArgv(opts, config, bridge?.url)], {
+      // The call's `binaryPath` beats the transport's wired-in `command`, exactly as it does for the
+      // `claude` sibling. No Windows resolution here: `codex` is spawned through the process seam, whose
+      // `resolveProgram` already follows an npm `.cmd` shim to its JS entry — the resolution this
+      // transport needs, and the one it has had since it was written.
+      const c = spawn([opts.binaryPath ?? config.command ?? CODEX_COMMAND, ...codexArgv(opts, config, bridge?.url)], {
         ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+        ...(opts.env !== undefined ? { env: opts.env } : {}),
         stdin: preamble.length > 0 ? `${preamble}\n${opts.prompt}` : opts.prompt,
       });
       child = c;
@@ -418,7 +443,10 @@ export function createCodexAgentQuery(config: CodexAgentOptions = {}): AgentQuer
       // has no single event that carries the answer: the text arrives as an item and the process
       // ending is what makes it final.
       if (code !== 0) {
-        yield { type: "other", error: `codex exited with code ${code}` };
+        // A failed LAUNCH is named as one, for the same reason the `claude` sibling does it: a spawn
+        // that never happened has no exit code, so it arrives as `-1`, which says nothing about the
+        // binary being absent.
+        yield { type: "other", error: launchError(c, config.command ?? CODEX_COMMAND) ?? `codex exited with code ${code}` };
         return;
       }
       if (run.text === undefined) {

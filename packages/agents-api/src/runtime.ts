@@ -33,6 +33,7 @@ import {
   type JsonValue,
   type NativeToolRef,
   type RuntimeCapabilities,
+  type Tool,
 } from "@declarative-ai/exec";
 import type { LlmOutput } from "@declarative-ai/llm";
 import { AgentExecutor, DELEGATED_CAPS, type AgentExecutorOptions, type AgentMetrics } from "./agentExecutor.js";
@@ -59,10 +60,17 @@ export interface ClaudeCodeFunctionOptions {
    *  with executable tools). Default `true`. Set `false` to instead pass every tool name as a NATIVE
    *  allow-list (the agent uses its own built-ins by that name). */
   injectTools?: boolean;
+  /** Tools to ADD to whatever the agent already has, always injected, whatever `injectTools` says —
+   *  the "natives plus extras" case a single switch could not express. See
+   *  {@link AgentExecutorOptions.extraTools}. */
+  extraTools?: Record<string, Tool>;
   /** Per-logical-name overrides (DESIGN §5.1, "Tool renames are just overlay bindings"): a tool listed here resolves to the agent's
    *  NATIVE built-in `ref.native` (aliased) instead of being MCP-injected — so a run can use the agent's own
    *  `Read` for `read_file` while still injecting our `bash`. Ignored tools default to injection. */
   nativeTools?: Record<string, NativeToolRef>;
+  /** Which of the agent's OWN built-ins an injected tool DISPLACES. Without it, injection adds a second
+   *  set of tools the model ignores — see {@link AgentExecutorOptions.replacesNative}. */
+  replacesNative?: Record<string, string | readonly string[]>;
   /**
    * Route the agent's tool approvals to `ctx.approve`. Default `true`.
    *
@@ -84,6 +92,11 @@ export interface ClaudeCodeFunctionOptions {
    * this adapter offers no read capability, and a resync starts empty.
    */
   readSession?: AgentSessionReader;
+  /** WHICH binary answers — an absolute path, or a name the transport resolves. Absent ⇒ the
+   *  transport's own default. See {@link AgentExecutorOptions.binaryPath}. */
+  binaryPath?: string;
+  /** The environment the agent runs under. Absent ⇒ it inherits this process's. Forwarded verbatim. */
+  env?: NodeJS.ProcessEnv;
   /** What this transport is CALLED in a failure reason. Defaults to `claude-code`, which is what this
    *  factory drives; a CLI sibling passes its own binary's name so a failure says which one produced it. */
   label?: string;
@@ -147,9 +160,13 @@ export function agentRuntimeEntry(
         ...(options.query !== undefined ? { query: options.query } : {}),
         ...(options.capabilities !== undefined ? { capabilities: options.capabilities } : {}),
         ...(options.injectTools !== undefined ? { injectTools: options.injectTools } : {}),
+        ...(options.extraTools !== undefined ? { extraTools: options.extraTools } : {}),
         ...(options.nativeTools !== undefined ? { nativeTools: options.nativeTools } : {}),
+        ...(options.replacesNative !== undefined ? { replacesNative: options.replacesNative } : {}),
         ...(options.approvalCallback !== undefined ? { approvalCallback: options.approvalCallback } : {}),
         ...(options.readSession !== undefined ? { readSession: options.readSession } : {}),
+        ...(options.binaryPath !== undefined ? { binaryPath: options.binaryPath } : {}),
+        ...(options.env !== undefined ? { env: options.env } : {}),
         ...(options.label !== undefined ? { label: options.label } : {}),
         ...(permissionModeOf(config) !== undefined ? { permissionMode: permissionModeOf(config) } : {}),
         ...(typeof config["sessionId"] === "string" ? { approvalScope: config["sessionId"] } : {}),

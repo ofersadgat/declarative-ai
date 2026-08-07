@@ -18,7 +18,7 @@
  */
 import type { Failure, ResolvedValue } from "@declarative-ai/ops";
 import { isOk } from "@declarative-ai/ops";
-import type { ExecEvent, ExecHandle, ExecMetrics, ExecResult } from "./contract.js";
+import type { ExecControl, ExecEvent, ExecHandle, ExecMetrics, ExecResult } from "./contract.js";
 
 /** An empty, already-completed event stream (for executors that emit no events). */
 export function emptyEvents(): AsyncIterable<ExecEvent> {
@@ -321,6 +321,14 @@ export function wrapHandle<M extends ExecMetrics = ExecMetrics>(
       },
     },
     result,
+    // The CURRENT inner handle's control, read live — the same target `cancel()` above aims at via
+    // `ctl.started`. A getter rather than a snapshot because `current` moves: a retry replaces the
+    // attempt underneath, and a caller holding this handle must end up steering the one that is
+    // actually running rather than a dead one. It also settles the retry question for free — control
+    // targets the current attempt, because there is nothing else it could mean.
+    get control(): ExecControl | undefined {
+      return current?.control;
+    },
     cancel: async () => {
       abort.abort();
       // Already settled by the abort listener above; awaiting it is a formality that also lets a caller
@@ -336,23 +344,55 @@ export const SINGLE_CONSUMER_REASON =
   "an ExecHandle event stream is SINGLE-CONSUMER: events are delivered to one iterator, so a second `for await` would steal them from the first. Fan out downstream of the single drain (e.g. push into your own broadcaster) rather than attaching twice.";
 
 /**
+ * How many undelivered events a {@link EventQueue} holds before it starts shedding.
+ *
+ * Large enough that an ordinary operation never reaches it, small enough that a long unattended run
+ * cannot grow the buffer without limit. A delegated agent turn is the case that made this necessary:
+ * it narrates for minutes, and nothing obliges a caller to attach to `handle.events` at all.
+ */
+export const DEFAULT_EVENT_QUEUE_LIMIT = 1024;
+
+/**
  * A simple event queue an executor pushes into while it runs.
  *
  * SINGLE-CONSUMER, like the handles that expose it: `buffer`/`waiters` are the QUEUE's, so two iterators
  * would each shift from the same buffer and split the stream between them. The second attach throws
- * ({@link SINGLE_CONSUMER_REASON}) instead of silently delivering half the events to each.
+ * ({@link SINGLE_CONSUMER_REASON}) instead of silently delivering half the events to each. Fan-out stays
+ * the consumer's job — it drains once and broadcasts.
+ *
+ * BOUNDED, and loudly. An event pushed while a consumer is waiting goes straight to it and is never
+ * buffered, so the bound only ever bites when nothing is draining — which is the ordinary case, since
+ * attaching to `events` is optional. Past {@link DEFAULT_EVENT_QUEUE_LIMIT} the OLDEST events are
+ * dropped, and the queue emits an `events_dropped` marker ahead of everything that survived. Dropping
+ * the newest would be worse (the tail is where a run's outcome is), and dropping silently would be worse
+ * still: a late consumer would receive a truncated stream indistinguishable from a complete one.
  */
 export class EventQueue {
   private buffer: ExecEvent[] = [];
   private waiters: Array<(v: IteratorResult<ExecEvent>) => void> = [];
   private closed = false;
   private consumed = false;
+  /** Events shed since the last marker was delivered. Reported BEFORE the events that outlived them. */
+  private dropped = 0;
+
+  constructor(private readonly limit: number = DEFAULT_EVENT_QUEUE_LIMIT) {}
 
   push(event: ExecEvent): void {
     if (this.closed) return;
     const waiter = this.waiters.shift();
-    if (waiter) waiter({ value: event, done: false });
-    else this.buffer.push(event);
+    if (waiter) {
+      waiter({ value: event, done: false });
+      return;
+    }
+    this.buffer.push(event);
+    // Only reachable with NOTHING attached: a waiting consumer took the event above without it ever
+    // touching the buffer.
+    while (this.buffer.length > this.limit) {
+      const evicted = this.buffer.shift()!;
+      // A marker that is itself evicted keeps its count — the events it stood for are still missing, and
+      // folding it in is what stops a long unattended run from under-reporting the gap.
+      this.dropped += evicted.type === "events_dropped" ? evicted.count : 1;
+    }
   }
 
   close(): void {
@@ -368,6 +408,13 @@ export class EventQueue {
         self.consumed = true;
         return {
           next(): Promise<IteratorResult<ExecEvent>> {
+            // The gap FIRST, ahead of the events that outlived it and ahead of the closed check — a
+            // consumer that attaches late, or after the run finished, still learns what it missed.
+            if (self.dropped > 0) {
+              const count = self.dropped;
+              self.dropped = 0;
+              return Promise.resolve({ value: { type: "events_dropped", count }, done: false });
+            }
             const buffered = self.buffer.shift();
             if (buffered !== undefined) return Promise.resolve({ value: buffered, done: false });
             if (self.closed) return Promise.resolve({ value: undefined as never, done: true });

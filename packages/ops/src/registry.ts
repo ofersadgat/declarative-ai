@@ -155,6 +155,19 @@ export interface RuntimeCapabilities extends HostCapabilities {
    * silent and unrecoverable (SESSIONS.md §6).
    */
   sessionFork?: boolean;
+  /**
+   * A RUNNING call can be steered — interrupted, redirected, given more input mid-turn.
+   *
+   * Separate from `streaming`, which is about watching, and from `interactive`, which is about being
+   * asked. This is about talking back: `ExecHandle.control`.
+   *
+   * It is declared rather than discovered because the alternative is a caller finding out by calling.
+   * A UI decides whether to render a Stop button BEFORE the run starts, and "the method was absent so
+   * nothing happened" is the worst possible answer to a user pressing it. Absent ⇒ no steering, which
+   * is the honest default for a transport whose only mid-run signal is a kill (codex is the case:
+   * SIGINT to a subprocess ends the process, not the turn).
+   */
+  sessionSteering?: boolean;
   /** Emits incremental output. */
   streaming: boolean;
   /** Where it can run. */

@@ -119,9 +119,58 @@ export type ExecEvent =
   | { type: "child_result"; ref: { label?: string }; metrics: ExecMetrics }
   | { type: "command_request"; command: string; parsed?: JsonValue } // process units
   | { type: "command_result"; decision: "allowed" | "blocked" | "approved" | "denied" }
-  | { type: "output_partial"; text: string };
+  | { type: "output_partial"; text: string }
+  /**
+   * A provider's own event, forwarded OPAQUELY.
+   *
+   * A delegated agent narrates a great deal that has no neutral home and should not be given one:
+   * session init, compaction boundaries, hook lifecycle, task progress, API retries, rate-limit
+   * windows, permission denials. Naming each in this union would teach `exec` one provider's
+   * vocabulary for the sake of events it cannot act on — and the list is open, so the next version
+   * would add to it.
+   *
+   * So the payload is JSON and nothing here interprets it. A host that wants to render a compaction
+   * boundary can; a host that does not can ignore the whole variant. Same precedent as `rawUsage` and
+   * `providerMetadata`: open by nature, JSON by construction (§2.2).
+   */
+  | { type: "provider_event"; payload: JsonValue }
+  /**
+   * Events were DROPPED because nothing was draining the stream — `count` of them, oldest first.
+   *
+   * A bounded queue has to shed something, and shedding it silently is the failure this variant
+   * exists to prevent: a late consumer would otherwise receive a truncated stream that looks
+   * complete. See `EventQueue`.
+   */
+  | { type: "events_dropped"; count: number };
 
 // --- Executor -----------------------------------------------------------------
+
+/**
+ * Steering a RUNNING operation — the channel that is neither watching it nor stopping it.
+ *
+ * Every method is OPTIONAL and none of them throws when absent: absent MEANS unsupported, `if
+ * (handle.control?.interrupt)` is the runtime check, and `capabilities.sessionSteering` is how a caller
+ * knows before the call rather than by trying. A throwing stub would make "this transport cannot do
+ * that" indistinguishable from "that failed", which is the distinction the whole record exists for.
+ *
+ * ⚠️ **`interrupt` is NOT `cancel`.** `handles.ts` deliberately unifies `cancel()` and `ctx.abortSignal`
+ * into one event that settles the handle with a `canceled` failure. Interrupt is a third thing: the turn
+ * ends EARLY, the operation still produces its answer, and the call SUCCEEDS. Wiring it to the abort
+ * controller would throw away an answer that was actually produced — which is the opposite of what a
+ * user pressing Stop on a long agent run is asking for. They want it to stop and tell them what it
+ * found.
+ */
+export interface ExecControl {
+  /** End the current turn early and let it settle NORMALLY. Idempotent: a call racing the operation's
+   *  own completion is a no-op, never a second settle. */
+  interrupt?(): Promise<void>;
+  /** Add input to a run already under way. */
+  send?(text: string): Promise<void>;
+  /** Change the permission posture for the rest of the run. */
+  setPermissionMode?(mode: string): Promise<void>;
+  /** Change the model for subsequent responses. */
+  setModel?(model: string): Promise<void>;
+}
 
 export interface ExecHandle<O, M extends ExecMetrics = ExecMetrics> {
   /**
@@ -139,6 +188,14 @@ export interface ExecHandle<O, M extends ExecMetrics = ExecMetrics> {
    * operation is parked on. Equivalent to aborting `ctx.abortSignal`: both are the same event.
    */
   cancel(): Promise<void>;
+  /**
+   * Steer the run, when the executor underneath offers it (see {@link ExecControl}).
+   *
+   * Absent ⇒ nothing to steer, which is the case for every ordinary operation. Through a wrapper stack
+   * this follows the CURRENT inner handle — the same path `cancel()` takes — so it targets the attempt
+   * actually running and a retry re-points it without the caller re-reading the handle.
+   */
+  readonly control?: ExecControl;
 }
 
 /**

@@ -11,8 +11,8 @@
  * vocabulary — so a test like this could not be written at all.
  */
 import { describe, expect, it } from "vitest";
-import { isOk, promptOp, resolveSessionRef, type ExecServices, type ResolvedSession } from "@declarative-ai/exec";
-import type { ModelMessage } from "@declarative-ai/llm";
+import { isOk, promptOp, resolveSessionRef, type ExecEvent, type ExecServices, type ResolvedSession, type Tool } from "@declarative-ai/exec";
+import type { LlmOutput, ModelMessage } from "@declarative-ai/llm";
 import { PromptExecutor } from "@declarative-ai/promptop";
 import { AgentApiExecutor, AgentExecutor, DELEGATED_CAPS } from "../src/index.js";
 import type { AgentQuery, AgentQueryOptions } from "../src/index.js";
@@ -193,6 +193,459 @@ describe("one session implementation, two transports (the point of the split)", 
     await new AgentExecutor({ query }).start(op(), {}).result;
     expect(seen()?.resume).toBeUndefined();
     expect(seen()?.messages).toBeUndefined();
+  });
+});
+
+/**
+ * The losslessness claim, end to end.
+ *
+ * `llmConfig.ts` states the goal on the way IN — a stored config "transforms losslessly into a real
+ * call" — and `output.ts` implements it on the way OUT. The agent boundary honoured neither: every
+ * non-`result` message collapsed to `{type: "other"}`, `invoke` fabricated `finishReason: "stop"` and
+ * synthesized a one-turn message log, and not one token was reported. The information was all there.
+ */
+describe("lossless output — what the agent produced reaches the caller", () => {
+  /** A fake stream carrying everything a real turn carries. */
+  const fullTurn: AgentQuery = async function* () {
+    yield { type: "provider_event", event: { type: "system", subtype: "init", model: "claude-opus-4-7" } };
+    yield { type: "partial", delta: "The " };
+    yield { type: "partial", delta: "answer" };
+    yield {
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "thinking", thinking: "check the file" }] },
+      thinking: [{ text: "check the file", providerMetadata: { anthropic: { signature: "sig-1" } } }],
+    };
+    yield {
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "Read", input: { path: "a.txt" } }] },
+      toolCalls: [{ toolCallId: "toolu_1", toolName: "Read", input: { path: "a.txt" } }],
+    };
+    yield {
+      type: "user",
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ZEPHYR" }] },
+      toolResults: [{ toolCallId: "toolu_1", output: "ZEPHYR" }],
+    };
+    yield { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "The answer" }] }, text: "The answer" };
+    yield {
+      type: "result",
+      result: {
+        text: "The answer",
+        costUsd: 0.19,
+        sessionId: "sess-1",
+        finishReason: "length",
+        usage: { inputTokens: 30283, outputTokens: 8, noCacheTokens: 6, cacheWriteTokens: 30277, cacheWrite1hTokens: 30277, totalTokens: 30291 },
+        rawUsage: { usage: { input_tokens: 6 } },
+      },
+    };
+  };
+
+  /** The RECORD-mode payload — the full `LlmOutput`, which is what a session persists. */
+  const payloadOf = async (query: AgentQuery, ctx: ExecServices = {}) =>
+    (await new AgentExecutor({ query, record: true }).start(op(), ctx).result).value as unknown as LlmOutput;
+
+  it("reports the agent's OWN finish reason, so a truncated run does not read as a clean one", async () => {
+    expect((await payloadOf(fullTurn)).finishReason).toBe("length");
+  });
+
+  it("falls back to `unknown` rather than to a fabricated `stop` when the transport said nothing", async () => {
+    const { query } = capturing({ text: "done" });
+    expect((await payloadOf(query)).finishReason).toBe("unknown");
+  });
+
+  it("hands back the agent's OWN log, verbatim — not one synthesized assistant turn", async () => {
+    const messages = (await payloadOf(fullTurn)).messages ?? [];
+    expect(messages).toHaveLength(4);
+    expect(messages[0]).toEqual({ role: "assistant", content: [{ type: "thinking", thinking: "check the file" }] });
+    expect(messages[2]).toEqual({ role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ZEPHYR" }] });
+  });
+
+  it("keeps thinking with its signature, positioned against the output text it accompanies", async () => {
+    const payload = await payloadOf(fullTurn);
+    expect(payload.thinking).toEqual([
+      { type: "reasoning", text: "check the file", textOffset: 0, providerMetadata: { anthropic: { signature: "sig-1" } } },
+    ]);
+  });
+
+  it("keeps the tool calls and the results that answered them", async () => {
+    const payload = await payloadOf(fullTurn);
+    expect(payload.toolCalls).toEqual([{ toolCallId: "toolu_1", toolName: "Read", input: { path: "a.txt" } }]);
+    expect(payload.toolResults).toEqual([{ toolCallId: "toolu_1", output: "ZEPHYR" }]);
+  });
+
+  it("carries every token count plus rawUsage, so costUsd stays recomputable", async () => {
+    const result = await new AgentExecutor({ query: fullTurn, record: true }).start(op(), {}).result;
+    expect(result.metrics).toMatchObject({
+      costUsd: 0.19,
+      costSource: "provider",
+      inputTokens: 30283,
+      outputTokens: 8,
+      noCacheTokens: 6,
+      cacheWriteTokens: 30277,
+      cacheWrite1hTokens: 30277,
+      totalTokens: 30291,
+      rawUsage: { usage: { input_tokens: 6 } },
+    });
+  });
+
+  it("delivers output deltas and provider events to a `for await` over the handle", async () => {
+    // `DELEGATED_CAPS.streaming: true` was aspirational: the base returns `emptyEvents()`, so nothing
+    // could be watched at all. For a run that takes minutes that is indistinguishable from a hang.
+    const handle = new AgentExecutor({ query: fullTurn, record: true }).start(op(), {});
+    const seen: ExecEvent[] = [];
+    for await (const event of handle.events) seen.push(event);
+    await handle.result;
+    expect(seen.filter((e) => e.type === "output_partial").map((e) => (e as { text: string }).text)).toEqual(["The ", "answer"]);
+    // Opaque passthrough: `exec` never learns what an `init` message is.
+    expect(seen.filter((e) => e.type === "provider_event")).toEqual([
+      { type: "provider_event", payload: { type: "system", subtype: "init", model: "claude-opus-4-7" } },
+    ]);
+  });
+
+  it("CLOSES the event stream when the run settles, so a consumer is never left parked", async () => {
+    const handle = new AgentExecutor({ query: capturing().query }).start(op(), {});
+    const drained: ExecEvent[] = [];
+    for await (const event of handle.events) drained.push(event);
+    expect(drained).toEqual([]);
+  });
+});
+
+/**
+ * The losslessness claim on the way IN.
+ *
+ * `resolveConfig`, `PromptExecutorOptions.defaults` and `op.config` all merge into one declaration, so a
+ * field that reached the executor was ASKED FOR. `runAgent` used to read three of them — model,
+ * providerSessionId, messages — and drop the rest, which meant a state authored with a reasoning level
+ * and a step budget ran at the agent's own defaults and said nothing about it.
+ */
+describe("lossless input — what the caller configured reaches the transport", () => {
+  it("forwards a reasoning request, xhigh included", async () => {
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query }).start(op("do it", { reasoning: { effort: "xhigh" } }), {}).result;
+    expect(seen()?.reasoning).toEqual({ effort: "xhigh" });
+  });
+
+  it("forwards a step budget and a tool choice", async () => {
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query }).start(op("do it", { maxSteps: 8, toolChoice: "none" }), {}).result;
+    expect(seen()?.maxSteps).toBe(8);
+    expect(seen()?.toolChoice).toBe("none");
+  });
+
+  it("hands the transport ONLY its own providerOptions bag", async () => {
+    // Keyed by provider precisely so one config can carry settings for several transports and each
+    // takes what is addressed to it.
+    const { query, seen } = capturing();
+    const config = { providerOptions: { claudeCode: { fastMode: true }, openrouter: { reasoning: { effort: "high" } } } };
+    await new AgentExecutor({ query }).start(op("do it", config), {}).result;
+    expect(seen()?.providerOptions).toEqual({ fastMode: true });
+  });
+
+  it("REFUSES a decoding knob rather than dropping it — the agent issues its own model calls", async () => {
+    const { query } = capturing();
+    const result = await new AgentExecutor({ query }).start(op("do it", { temperature: 0.2 }), {}).result;
+    expect(isOk(result)).toBe(false);
+    expect(!isOk(result) && result.error.reason).toMatch(/temperature/);
+  });
+
+  it("REFUSES maxOutputTokens and stopSequences, naming what to use instead", async () => {
+    const tokens = await new AgentExecutor({ query: capturing().query }).start(op("do it", { maxOutputTokens: 500 }), {}).result;
+    expect(!isOk(tokens) && tokens.error.reason).toMatch(/maxOutputTokens.*cannot be honoured/s);
+    const stops = await new AgentExecutor({ query: capturing().query }).start(op("do it", { stopSequences: ["END"] }), {}).result;
+    expect(!isOk(stops) && stops.error.reason).toMatch(/stopSequences/);
+  });
+
+  it("REFUSES a toolChoice that constrains ONE turn, since an agent runs a whole loop", async () => {
+    const result = await new AgentExecutor({ query: capturing().query }).start(op("do it", { toolChoice: "required" }), {}).result;
+    expect(!isOk(result) && result.error.reason).toMatch(/whole loop/);
+  });
+
+  it("classifies a refusal, it does not throw — the Result envelope never throws for a unit failure", async () => {
+    const handle = new AgentExecutor({ query: capturing().query }).start(op("do it", { seed: 7 }), {});
+    await expect(handle.result).resolves.toBeDefined();
+  });
+});
+
+/**
+ * Tool injection, and the two things it could not do.
+ *
+ * ✅ OBSERVED (claude 2.1.142) through a real loopback bridge: with `read_file` injected and `Read`
+ * still available, the agent used `Read` — every time, because its system prompt steers it there. Deny
+ * `Read` and the SAME run reaches for `mcp__dai__read_file`, our impl executes, and the call goes
+ * through the approver. Injection on its own was adding a second set of tools the model ignored.
+ */
+describe("injectTools — displacing the natives, and adding to them", () => {
+  const tool = (name: string): Tool => ({ description: name, readOnly: true, inputSchema: { type: "object" } as never, run: () => name });
+  const ctxWith = (tools: Record<string, Tool>): ExecServices => ({ tools });
+
+  it("DISPLACES the built-in an injected tool stands in for, so the substitution is real", async () => {
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query, replacesNative: { read_file: "Read" } }).start(op(), ctxWith({ read_file: tool("read_file") })).result;
+    expect(seen()?.mcpTools).toHaveProperty("read_file");
+    expect(seen()?.disallowedTools).toEqual(["Read"]);
+  });
+
+  it("takes a list, because one logical tool can stand in for several built-ins", async () => {
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query, replacesNative: { search: ["Grep", "Glob"] } }).start(op(), ctxWith({ search: tool("search") })).result;
+    expect(seen()?.disallowedTools).toEqual(["Grep", "Glob"]);
+  });
+
+  it("displaces NOTHING when the tool is routed natively — that built-in was just requested", async () => {
+    const { query, seen } = capturing();
+    const agent = new AgentExecutor({ query, nativeTools: { read_file: { native: "Read" } }, replacesNative: { read_file: "Read" } });
+    await agent.start(op(), ctxWith({ read_file: tool("read_file") })).result;
+    expect(seen()?.allowedTools).toEqual(["Read"]);
+    expect(seen()?.disallowedTools).toBeUndefined();
+  });
+
+  it("displaces nothing when the caller never said what a tool stands in for", async () => {
+    // Which built-in a logical tool replaces is a fact about the agent being driven, and this executor
+    // drives more than one — so it is stated, never guessed.
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query }).start(op(), ctxWith({ read_file: tool("read_file") })).result;
+    expect(seen()?.disallowedTools).toBeUndefined();
+  });
+
+  it("adds EXTRA tools without giving up the agent's built-ins", async () => {
+    // The case the single switch could not express: a host exposing its own capability — a preview
+    // pane, a build runner — to an otherwise stock agent. `false` routed everything native; `true`
+    // replaced the lot.
+    const { query, seen } = capturing();
+    const agent = new AgentExecutor({ query, injectTools: false, extraTools: { preview: tool("preview") } });
+    await agent.start(op(), ctxWith({ read_file: tool("read_file") })).result;
+    expect(seen()?.allowedTools).toEqual(["read_file"]); // the agent's own, by name
+    expect(Object.keys(seen()?.mcpTools ?? {})).toEqual(["preview"]); // plus ours
+  });
+
+  it("injects extras even when the run declares no ctx.tools at all", async () => {
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query, extraTools: { preview: tool("preview") } }).start(op(), {}).result;
+    expect(Object.keys(seen()?.mcpTools ?? {})).toEqual(["preview"]);
+  });
+
+  it("keeps the deny floor over an extra tool — an extra tool is a tool", async () => {
+    const { query, seen } = capturing();
+    const agent = new AgentExecutor({ query, extraTools: { preview: tool("preview") } });
+    await agent.start(op(), { policy: { baseline: { tools: { preview: "deny" } } } } as unknown as ExecServices).result;
+    expect(seen()?.mcpTools).toBeUndefined();
+  });
+
+  it("pre-approves NOTHING with an empty allow-list, which is what the binary reads it as", async () => {
+    // Checked on a live run: `--allowedTools ""` still let the agent use its native `Read`. So an empty
+    // list is "pre-approve nothing", not "allow nothing", and the two transports agree about it.
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query }).start(op(), ctxWith({ read_file: tool("read_file") })).result;
+    expect(seen()?.allowedTools).toEqual([]);
+  });
+});
+
+/**
+ * Steering a live turn.
+ *
+ * The seam was a one-shot created and consumed inside a private method, so nothing outside could touch
+ * a running agent — and the thing a caller most wants from a five-minute run is to stop it and keep
+ * what it found.
+ *
+ * ⚠️ The distinction the whole design turns on: `interrupt` is NOT `cancel`. Cancellation settles the
+ * handle with a `canceled` failure and discards the work. An interrupted agent turn ends early, still
+ * emits its `result`, and SUCCEEDS.
+ */
+/**
+ * A binary that is PRESENT but cannot run — and the difference between the kinds.
+ *
+ * ✅ CAPTURED from `claude 2.1.142` driven with an empty `CLAUDE_CONFIG_DIR`. Note what the run looks
+ * like from outside: exit code 0, `subtype: "success"`, `terminal_reason: "completed"`. Only `is_error`
+ * says anything is wrong, and the sentence explaining it sits where the answer would be — so reading
+ * the discriminator reports "Not logged in · Please run /login" as a review that found nothing.
+ */
+describe("present but not usable — detection and classification", () => {
+  /** The real assistant turn: `<synthetic>` model, the failure text, and the machine-readable code. */
+  const authFailure = (code = "authentication_failed", text = "Not logged in · Please run /login"): AgentQuery =>
+    () => ({
+      [Symbol.asyncIterator]: async function* () {
+        yield {
+          type: "assistant",
+          message: { role: "assistant", model: "<synthetic>", content: [{ type: "text", text }] },
+          text,
+          errorCode: code,
+        } as const;
+        yield { type: "other", error: text } as const;
+      },
+    });
+
+  it("DETECTS a not-logged-in run, which otherwise looks like a successful empty answer", async () => {
+    const result = await new AgentExecutor({ query: authFailure() }).start(op(), {}).result;
+    expect(isOk(result)).toBe(false);
+    expect(!isOk(result) && result.error.reason).toMatch(/Not logged in/);
+  });
+
+  it("classifies it PERMANENT, so no retry wrapper burns its budget on it", async () => {
+    // Logging in is not something a retry can accomplish.
+    const result = await new AgentExecutor({ query: authFailure() }).start(op(), {}).result;
+    expect(!isOk(result) && result.error.classification).toBe("permanent");
+  });
+
+  it("classifies a transient overload as RETRIABLE, which is what the code is for", async () => {
+    // Without the code every delegated failure was `permanent`: an `AgentError` carries no status and
+    // no retryable flag, so a rate limit inside the agent's own loop looked like a broken workflow and
+    // defeated every retry wrapper above — the exact thing `invoke` promises not to do.
+    const limited = await new AgentExecutor({ query: authFailure("rate_limit", "rate limited") }).start(op(), {}).result;
+    expect(!isOk(limited) && limited.error.classification).toBe("network-retriable");
+    expect(!isOk(limited) && limited.error.rateLimited).toBe(true);
+    const overloaded = await new AgentExecutor({ query: authFailure("overloaded", "overloaded") }).start(op(), {}).result;
+    expect(!isOk(overloaded) && overloaded.error.classification).toBe("network-retriable");
+  });
+
+  it("defaults an UNRECOGNISED code to permanent rather than retrying an unknown condition", async () => {
+    const result = await new AgentExecutor({ query: authFailure("invented_next_release", "something") }).start(op(), {}).result;
+    expect(!isOk(result) && result.error.classification).toBe("permanent");
+  });
+
+  it("names WHICH transport produced it, so three wired agents are tellable apart", async () => {
+    const result = await new AgentExecutor({ query: authFailure(), label: "claude-cli" }).start(op(), {}).result;
+    expect(!isOk(result) && result.error.reason).toMatch(/^claude-cli:/);
+  });
+});
+
+describe("the control channel", () => {
+  /** A run that streams until interrupted, then answers with what it had. */
+  function interruptible() {
+    let stop!: () => void;
+    const stopped = new Promise<void>((resolve) => (stop = resolve));
+    let interrupts = 0;
+    const query: AgentQuery = () => ({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: "partial", delta: "half an " } as const;
+        await stopped;
+        yield { type: "result", result: { text: "half an answer", finishReason: "stop" } } as const;
+      },
+      interrupt: async () => {
+        interrupts++;
+        stop();
+      },
+    });
+    return { query, interrupts: () => interrupts };
+  }
+
+  it("ends the turn and settles as a SUCCESS carrying the partial answer", async () => {
+    const { query } = interruptible();
+    const handle = new AgentExecutor({ query }).start(op(), {});
+    await handle.control!.interrupt!();
+    const result = await handle.result;
+    // NOT a cancellation. Routing interrupt through the abort controller would settle this handle with
+    // a `canceled` failure and throw away an answer the agent actually produced.
+    expect(isOk(result)).toBe(true);
+    expect(isOk(result) && result.value).toBe("half an answer");
+  });
+
+  it("answers with what the TURNS carried when an aborted run's terminal message has no text", async () => {
+    // ✅ OBSERVED: an interrupted run comes back with `terminal_reason: "aborted_streaming"` and an
+    // EMPTY result. The partial answer exists only in the assistant turns already streamed, so
+    // reporting `result.text` verbatim would answer "stop and tell me what you found" with nothing.
+    const query: AgentQuery = () => ({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "1\n2\n3" }] }, text: "1\n2\n3" } as const;
+        yield { type: "result", result: { text: "", finishReason: "aborted" } } as const;
+      },
+    });
+    const result = await new AgentExecutor({ query, record: true }).start(op(), {}).result;
+    expect(isOk(result)).toBe(true);
+    expect((result.value as unknown as LlmOutput).value).toBe("1\n2\n3");
+    expect((result.value as unknown as LlmOutput).finishReason).toBe("aborted");
+  });
+
+  it("is IDEMPOTENT, so a Stop that races the answer landing is a no-op", async () => {
+    const { query, interrupts } = interruptible();
+    const handle = new AgentExecutor({ query }).start(op(), {});
+    await handle.control!.interrupt!();
+    await handle.result;
+    await handle.control!.interrupt!();
+    await handle.control!.interrupt!();
+    expect(interrupts()).toBe(1);
+  });
+
+  it("reaches the run one tick in, before a single message has been read", async () => {
+    // A caller pressing Stop at the start of a five-minute turn must reach something.
+    const { query, interrupts } = interruptible();
+    const handle = new AgentExecutor({ query }).start(op(), {});
+    await handle.control!.interrupt!();
+    await handle.result;
+    expect(interrupts()).toBe(1);
+  });
+
+  it("forwards send / setPermissionMode / setModel to the transport", async () => {
+    const seen: string[] = [];
+    const query: AgentQuery = () => ({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: "result", result: { text: "ok" } } as const;
+      },
+      send: async (t) => void seen.push(`send:${t}`),
+      setPermissionMode: async (m) => void seen.push(`mode:${m}`),
+      setModel: async (m) => void seen.push(`model:${m}`),
+    });
+    const handle = new AgentExecutor({ query }).start(op(), {});
+    await handle.control!.send!("also check the tests");
+    await handle.control!.setPermissionMode!("plan");
+    await handle.control!.setModel!("opus");
+    await handle.result;
+    expect(seen).toEqual(["send:also check the tests", "mode:plan", "model:opus"]);
+  });
+
+  it("does NOTHING rather than throwing when the transport offers no interrupt", async () => {
+    // Absent MEANS unsupported. A throwing stub would make "this transport cannot" indistinguishable
+    // from "that failed".
+    const { query } = capturing({ text: "done" });
+    const handle = new AgentExecutor({ query }).start(op(), {});
+    await expect(handle.control!.interrupt!()).resolves.toBeUndefined();
+    expect(isOk(await handle.result)).toBe(true);
+  });
+
+  it("declares the capability, so a caller decides BEFORE the call whether to offer a Stop button", () => {
+    expect(DELEGATED_CAPS.sessionSteering).toBe(true);
+    // And a transport that cannot steer says so, rather than exposing a control surface that does
+    // nothing: killing a subprocess is not a graceful turn end.
+    const unsteerable = new AgentExecutor({ query: capturing().query, capabilities: { ...DELEGATED_CAPS, sessionSteering: false } });
+    expect(unsteerable.start(op(), {}).control).toBeUndefined();
+  });
+
+  it("DROPS a queued request when the run never started, rather than replaying it at nothing", async () => {
+    // A refused call has no turn to interrupt. Holding the request would leave it pending on a channel
+    // that is already closed; replaying it would reach a transport that was never built.
+    const handle = new AgentExecutor({ query: capturing().query }).start(op("do it", { temperature: 0.2 }), {});
+    await handle.control!.interrupt!();
+    const result = await handle.result;
+    expect(isOk(result)).toBe(false);
+    // And a request made AFTER the refusal settles is a no-op, not a throw.
+    await expect(handle.control!.interrupt!()).resolves.toBeUndefined();
+  });
+
+  it("leaves an ordinary handle with no control at all", () => {
+    // `control` is optional on `ExecHandle` precisely so the ordinary operation carries nothing.
+    const prompt = new PromptExecutor({ runner: async () => ({ value: { value: "x", finishReason: "stop" }, metrics: { durationMs: 0, costUsd: 0, costSource: "table" } }) });
+    expect(prompt.start(op("do it", { model: "anthropic/claude-sonnet-5" }), {}).control).toBeUndefined();
+  });
+});
+
+describe("which binary, and under what environment", () => {
+  it("carries a pinned binaryPath to the transport on every call", async () => {
+    // "An agent answered" and "the agent we pinned answered" are different statements, and only one of
+    // them is reproducible.
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query, binaryPath: "D:\\builds\\claude.exe" }).start(op(), {}).result;
+    expect(seen()?.binaryPath).toBe("D:\\builds\\claude.exe");
+  });
+
+  it("carries the environment verbatim, interpreting nothing about it", async () => {
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query, env: { CLAUDE_CONFIG_DIR: "/tmp/acct-a" } }).start(op(), {}).result;
+    expect(seen()?.env).toEqual({ CLAUDE_CONFIG_DIR: "/tmp/acct-a" });
+  });
+
+  it("says nothing about either when the caller pinned neither, so each transport keeps its default", async () => {
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query }).start(op(), {}).result;
+    expect(seen()?.binaryPath).toBeUndefined();
+    expect(seen()?.env).toBeUndefined();
   });
 });
 

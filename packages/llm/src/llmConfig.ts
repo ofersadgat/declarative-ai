@@ -135,9 +135,22 @@ export interface SamplingConfiguration extends LlmConfiguration {
  *  call boundary (`adaptReasoning`, `providers/reasoning.ts`); provider specifics never leak into the search
  *  config or the stored config JSON. */
 export interface ReasoningSpec {
-  effort?: "low" | "medium" | "high";
+  /**
+   * How hard to think, as a LEVEL.
+   *
+   * `xhigh` is above `high` and exists because a transport we drive has a level the three-value
+   * vocabulary cannot name: Claude Code takes `low | medium | high | xhigh | max`, and a call asking
+   * for its deepest tier had nowhere to say so — it either lost the request or had to smuggle it
+   * through `providerOptions`, which is exactly the provider-shape leak `ReasoningSpec` exists to
+   * prevent. A provider that tops out at `high` clamps it there rather than refusing, since asking for
+   * more thought than a model offers is satisfied by giving it all of it.
+   */
+  effort?: "low" | "medium" | "high" | "xhigh";
   budgetTokens?: number;
 }
+
+/** Every effort level, in ascending order — shared by the parse and by the adapters that clamp. */
+export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 
 /** Reasoning models — accept a `reasoning` request (effort/budget) and REJECT the sampling knobs (so a
  *  reasoning model simply has no temperature/top-p branch, §config-as-dimensions). `reasoning` is REQUIRED:
@@ -204,14 +217,14 @@ function requireObject(v: unknown, what: string, hint = ""): RawBag {
  *  FIXED order so re-serialization is content-stable. */
 export function parseReasoningSpec(v: unknown): ReasoningSpec {
   const o = requireObject(v, "reasoning") as { effort?: unknown; budgetTokens?: unknown };
-  if (o.effort !== undefined && o.effort !== "low" && o.effort !== "medium" && o.effort !== "high") {
-    throw new LlmConfigParseError('reasoning.effort must be one of "low" | "medium" | "high"');
+  if (o.effort !== undefined && !(REASONING_EFFORTS as readonly unknown[]).includes(o.effort)) {
+    throw new LlmConfigParseError(`reasoning.effort must be one of ${REASONING_EFFORTS.map((e) => `"${e}"`).join(" | ")}`);
   }
   const budgetTokens = numField(o.budgetTokens, "reasoning.budgetTokens");
   if (o.effort === undefined && budgetTokens === undefined) {
     throw new LlmConfigParseError("reasoning must specify effort and/or budgetTokens");
   }
-  return { ...(o.effort !== undefined ? { effort: o.effort } : {}), ...(budgetTokens !== undefined ? { budgetTokens } : {}) };
+  return { ...(o.effort !== undefined ? { effort: o.effort as ReasoningSpec["effort"] } : {}), ...(budgetTokens !== undefined ? { budgetTokens } : {}) };
 }
 
 /** Parse a `toolChoice` value, THROWING on anything outside the allowed shapes. */
