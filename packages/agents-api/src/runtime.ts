@@ -26,6 +26,7 @@
  */
 import {
   isOk,
+  sessionOutcomeOf,
   promptOp,
   type FunctionResult,
   type ExecServices,
@@ -39,7 +40,7 @@ import type { LlmOutput } from "@declarative-ai/llm";
 import { AgentExecutor, DELEGATED_CAPS, type AgentExecutorOptions, type AgentMetrics } from "./agentExecutor.js";
 import type { AgentPermissionMode, AgentQuery, AgentSessionReader } from "./seam.js";
 
-export { DELEGATED_CAPS, debitSpentCost, type AgentMetrics } from "./agentExecutor.js";
+export { DELEGATED_CAPS, type AgentMetrics } from "./agentExecutor.js";
 
 const PERMISSION_MODES: readonly AgentPermissionMode[] = ["default", "plan", "acceptEdits", "bypassPermissions"];
 
@@ -170,24 +171,26 @@ export function agentRuntimeEntry(
         ...(options.label !== undefined ? { label: options.label } : {}),
         ...(permissionModeOf(config) !== undefined ? { permissionMode: permissionModeOf(config) } : {}),
         ...(typeof config["sessionId"] === "string" ? { approvalScope: config["sessionId"] } : {}),
-        // RECORD mode: the value is the whole call payload rather than the projection, which is what
-        // carries the provider handle and the conversation delta this entry has to report back.
-        record: true,
       });
       const op = promptOp({ user: prompt, output: { name: "result", schema: { type: "string" } } });
       const result = await executor.start(op, ctx).result;
-      const payload = result.value as LlmOutput | undefined;
       const metrics = result.metrics as AgentMetrics;
       if (!isOk(result)) return { error: result.error, metrics };
-      // The payload shape a session records: the agent's answer, plus the handle the run ACTUALLY ended
-      // in. Reported only when there IS a handle — an entry that claimed one unconditionally would make
-      // every stateless call look resumable.
-      const providerSessionId = payload?.providerSessionId;
+      // Read off the DECLARED channel rather than out of a record-mode payload.
+      //
+      // This used to construct the executor with `record: true` purely to reach `providerSessionId` and
+      // `messages`, then re-project the answer out of the payload by hand. That is no longer necessary:
+      // a value-mode core reports both on `SessionOutcome`, which is the channel this entry has to
+      // forward them on anyway. Dropping record mode here also removes the last place where `Out` is
+      // swapped, which is what made the agent classes' pinned `Out` a lie worth casting around.
+      const reported = sessionOutcomeOf(result);
       return {
-        value: (payload?.value ?? "") as string,
+        value: (result.value ?? "") as string,
         metrics,
-        ...(providerSessionId !== undefined
-          ? { session: { providerSessionId, messages: (payload?.messages ?? []) as readonly JsonValue[] } }
+        // Reported only when the run ACTUALLY ended in one — an entry that claimed a handle
+        // unconditionally would make every stateless call look resumable.
+        ...(reported?.providerSessionId !== undefined
+          ? { session: { providerSessionId: reported.providerSessionId, messages: (reported.messages ?? []) as readonly JsonValue[] } }
           : {}),
       };
     },

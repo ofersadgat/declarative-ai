@@ -26,7 +26,7 @@ import {
   type ResolvedValue,
   type Tool,
 } from "@declarative-ai/exec";
-import { mergeWorkflowMetrics, type WorkflowMetrics } from "../src/ports.js";
+import { emptyWorkflowMetrics, mergeWorkflowMetrics, type WorkflowMetrics } from "../src/ports.js";
 
 const CAPS: Capabilities = {
   structuredOutput: true,
@@ -73,7 +73,7 @@ export function deferred<T>(): Deferred<T> {
 
 /** A fake prompt `Executor` backed by ONE script, sharing a call log. */
 export class FakePromptExecutor implements Executor<ExecServices, WorkflowMetrics> {
-  readonly metrics = { merge: mergeWorkflowMetrics };
+  readonly metrics = { merge: mergeWorkflowMetrics, empty: emptyWorkflowMetrics };
   readonly calls: FakeCall[] = [];
   readonly capabilities = CAPS;
   constructor(private readonly script: Script) {}

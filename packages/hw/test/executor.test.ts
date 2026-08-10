@@ -145,7 +145,10 @@ describe("hierarchical-workflow executor", () => {
     {
       const { registry, fake } = makeRegistry(hanging);
       const executor = createWorkflowExecutor({ definition: planningDefinition(), registry, prompt: fake });
-      const handle = executor.start(opFor({ issue: "i" }), { ...CTX, timeoutMs: 40 });
+      // The window arrives as a bounded SIGNAL, not a number this executor sets its own timer for.
+      // `AbortSignal.timeout` puts a `TimeoutError` on `signal.reason`, which is how "the window ran
+      // out" stays distinguishable from "somebody cancelled" without a parallel flag.
+      const handle = executor.start(opFor({ issue: "i" }), { ...CTX, abortSignal: AbortSignal.timeout(40) });
       const outcome = await handle.result;
       expect(errorOf(outcome)?.classification).toBe("deadline");
     }

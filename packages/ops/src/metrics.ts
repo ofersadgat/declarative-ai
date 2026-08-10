@@ -33,6 +33,32 @@ export type PartialMetrics = Partial<Metrics>;
  */
 export interface MetricsAlgebra<M> {
   merge(a: M, b: M): M;
+  /**
+   * The NEUTRAL measurement: what a step that ran nothing measured.
+   *
+   * `merge` alone makes this a semigroup, and a semigroup cannot answer "no work happened" — so every
+   * layer that had to say it invented its own answer. `withRetry` hand-rolls the identity as an
+   * `accumulated === undefined ?` branch. Worse, a wrapper that SYNTHESIZES a failure — a deadline
+   * refusal, a capability gate — had no way to build the caller's `M` at all, so `exec`'s failure
+   * constructors hardcoded the floor (`{ durationMs: 0 }`). That is why `withDeadline`, `withMemoize`
+   * and `createOperationExecutor` are pinned to `ExecMetrics` while their siblings are generic: a
+   * wrapper cannot be polymorphic in a type it cannot construct.
+   *
+   * With an identity it can: `metrics.empty()` is a valid `M` in whatever algebra the inner executor
+   * registered, so a refusal measures nothing IN THE CALLER'S OWN VOCABULARY.
+   *
+   * A FUNCTION rather than a constant, so an algebra whose `M` carries anything mutable (an open usage
+   * bag, an array) hands out a fresh one per call rather than a shared instance every caller can write
+   * through.
+   *
+   * ## The law
+   *
+   * `merge(x, empty())` and `merge(empty(), x)` must both measure the same as `x`. That is not
+   * decoration — it is what lets a caller fold in an identity without perturbing a real measurement.
+   * A field that takes "the latest" rather than summing has to RANK its values for this to hold, which
+   * is what `mergeLlmMetrics` already does for `costSource` and what any comparable field must do.
+   */
+  empty(): M;
 }
 
 /** Sum two optional numbers, preserving "neither was reported" as `undefined`. */

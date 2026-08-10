@@ -83,7 +83,12 @@ function bytesToBase64(bytes: Uint8Array): string {
  * Nondeterminism (draw indices, retry scopes) is the caller's concern via unhashed scope tokens — this
  * key deliberately has no place for them.
  */
-export function memoKey(params: { operationHash: string; workspaceTreeHash?: string; executorId?: string; sessionRef?: string }): string {
+export function memoKey(params: {
+  operationHash: string;
+  workspaceTreeHash?: string;
+  executorId?: string;
+  sessionRef?: string;
+}): string {
   const { operationHash, workspaceTreeHash, executorId, sessionRef } = params;
   return sha256Hex(
     canonicalize({
@@ -210,17 +215,17 @@ function cacheHitMetrics(metrics: ExecMetrics, nowMs: number): ExecMetrics {
  * instead — sound, because that layer recomputes the sent op from the full transcript, so the memo key
  * inside sees the real content identity.
  */
-export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>, Out = ResolvedValue>(
+export function withMemoize<R = ExecServices, M extends ExecMetrics = ExecMetrics, Op = Operation<InlineFamily>, Out = ResolvedValue>(
   config: { cache: MemoCache } & MemoizeOptions<Op>,
-): ExecutorWrapper<R, R, ExecMetrics, Op, Out>;
-export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>, Out = ResolvedValue>(
+): ExecutorWrapper<R, R, M, Op, Out>;
+export function withMemoize<R = ExecServices, M extends ExecMetrics = ExecMetrics, Op = Operation<InlineFamily>, Out = ResolvedValue>(
   config: { cache: MemoCache } & MemoizeOptions<Op>,
-  inner: Executor<R, ExecMetrics, Op, Out>,
-): Executor<R, ExecMetrics, Op, Out>;
-export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>, Out = ResolvedValue>(
+  inner: Executor<R, M, Op, Out>,
+): Executor<R, M, Op, Out>;
+export function withMemoize<R = ExecServices, M extends ExecMetrics = ExecMetrics, Op = Operation<InlineFamily>, Out = ResolvedValue>(
   config: { cache: MemoCache } & MemoizeOptions<Op>,
-  inner?: Executor<R, ExecMetrics, Op, Out>,
-): ExecutorWrapper<R, R, ExecMetrics, Op, Out> | Executor<R, ExecMetrics, Op, Out> {
+  inner?: Executor<R, M, Op, Out>,
+): ExecutorWrapper<R, R, M, Op, Out> | Executor<R, M, Op, Out> {
   const { cache, identify } = config;
   const strictCacheWrites = config.strictCacheWrites ?? false;
   const wrap = ((innerExec: Executor<ExecServices, ExecMetrics, Op>): Executor<ExecServices, ExecMetrics, Op> => {
@@ -248,7 +253,7 @@ export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>, Out 
         // answers are not reproducible: the entry says so, and the wrapper becomes a passthrough rather
         // than caching a value the entry told us not to reuse.
         if (!caps.memoizable) return innerExec.start(op, ctx);
-        if (caps.sessionResume) return finishedHandle(permanentFailure(SESSION_REFUSAL));
+        if (caps.sessionResume) return finishedHandle(permanentFailure(SESSION_REFUSAL, innerExec.metrics.empty()));
         // A workspace snapshot is part of the identity whenever there IS one — not only when the
         // executor mutates it. An op that merely READS the workspace (grep, read-file, a workflow over
         // a checkout) produces a different answer per tree, so keying without the hash replays a stale
@@ -261,6 +266,7 @@ export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>, Out 
           return finishedHandle(
             permanentFailure(
               "withMemoize: this operation's entry declares mutatesWorkspace, but ctx.workspace.treeHash is absent — a side-effecting run is only memoizable against a pinned workspace snapshot",
+              innerExec.metrics.empty(),
             ),
           );
         }
@@ -283,8 +289,24 @@ export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>, Out 
               // and must key on it — the same op text at two positions is two different questions.
               ...(ctx.session?.id !== undefined ? { sessionRef: ctx.session.id } : {}),
             });
+            // NORMALIZE the request, shape the ANSWER. `ctx.returnRecord` changes what an execution
+            // hands back but not what it computes, so caching it as part of the question would store
+            // the same work twice — and caching only what THIS caller asked for would leave an entry
+            // that cannot serve the other kind. So: note what was asked, ask for everything, store
+            // everything, and give back what was asked for. The same shape `withRecord` uses when it
+            // requests unconditionally, and `withDeadline` when it consumes its own trigger.
+            const wanted = ctx.returnRecord === true;
+            const asked = wanted ? ctx : { ...ctx, returnRecord: true };
+            /** A cached answer, narrowed to what this caller actually requested. */
+            const served = (r: ExecResult<ResolvedValue, ExecMetrics>): ExecResult<ResolvedValue, ExecMetrics> =>
+              wanted ? r : withoutRecord(r);
+
             const hit = await cache.get(key);
-            if (hit) return withMetrics(hit, cacheHitMetrics(hit.metrics, clock.now()));
+            // WITHOUT the session outcome. A hit executed nothing, so it produced none — and replaying a
+            // cached one hands the session layer a `providerSessionId` this call never earned, so the
+            // next turn resumes a conversation belonging to whoever filled the cache. The key is the
+            // logical session NAME, not the position, so that collision is by design.
+            if (hit) return served(withoutSession(withMetrics(hit, cacheHitMetrics(hit.metrics, clock.now()))));
             // IN-FLIGHT dedup. The cache is written on COMPLETION, so without this the fan-out case
             // memoization exists for — N identical calls issued together — misses N times and executes
             // N times, every one of them paid for. Followers share the leader's promise and, like a
@@ -297,11 +319,13 @@ export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>, Out 
             const pending = inFlight.get(key);
             if (pending) {
               const shared = await raceCancellation(pending, ctl);
-              if (shared === undefined) return canceledFailure("canceled while waiting on an identical in-flight call");
-              return isOk(shared) ? withMetrics(shared, cacheHitMetrics(shared.metrics, clock.now())) : shared;
+              if (shared === undefined) return canceledFailure("canceled while waiting on an identical in-flight call", innerExec.metrics.empty());
+              // Same reasoning as the cache hit above: a follower shared the LEADER's execution, so
+              // the leader's provider handle is not the follower's to claim.
+              return isOk(shared) ? served(withoutSession(withMetrics(shared, cacheHitMetrics(shared.metrics, clock.now())))) : shared;
             }
-            if (ctl.canceled()) return canceledFailure("canceled before the call started");
-            const run = ctl.started(innerExec.start(op, ctx)).result;
+            if (ctl.canceled()) return canceledFailure("canceled before the call started", innerExec.metrics.empty());
+            const run = ctl.started(innerExec.start(op, asked)).result;
             inFlight.set(key, run);
             try {
               const result = await run;
@@ -318,7 +342,10 @@ export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>, Out 
                   }
                 }
               }
-              return result;
+              // Shaped on the MISS path too. The entry is cached WITH the payload — that is what makes
+              // one entry serve either caller — but this caller only gets it if it asked, or a miss and
+              // a hit would hand back different things for the same request.
+              return served(result);
             } finally {
               inFlight.delete(key);
             }
@@ -327,7 +354,7 @@ export function withMemoize<R = ExecServices, Op = Operation<InlineFamily>, Out 
         );
       },
     };
-  }) as unknown as ExecutorWrapper<R, R, ExecMetrics, Op, Out>;
+  }) as unknown as ExecutorWrapper<R, R, M, Op, Out>;
   return inner ? wrap(inner) : wrap;
 }
 
@@ -349,3 +376,29 @@ async function raceCancellation(
 
 /** Re-exported so a consumer keying its own cache does not have to reach past `exec`. */
 export type { JsonValue };
+
+/**
+ * Strip the PAYLOAD from a result whose caller did not ask for one.
+ *
+ * The wrapper always requests it (see the normalize note above) so that one cache entry can serve
+ * either kind of caller. Handing the payload to a caller that did not ask would make a hit
+ * distinguishable from the call it replaces — which is the one thing memoization must never be.
+ */
+function withoutRecord<O, M extends ExecMetrics>(result: ExecResult<O, M>): ExecResult<O, M> {
+  if ((result as { record?: unknown }).record === undefined) return result;
+  const { record: _dropped, ...rest } = result as ExecResult<O, M> & { record?: unknown };
+  return rest as ExecResult<O, M>;
+}
+
+/**
+ * Strip the session outcome from a REPLAYED result.
+ *
+ * `withMetrics` carries `session` across, which is right for a wrapper re-reporting a real execution
+ * (retry, dispatch) and wrong for one replaying a stored answer: nothing ran, so nothing ended in a
+ * provider conversation, and claiming otherwise moves a handle to a caller that never opened it.
+ */
+function withoutSession<O, M extends ExecMetrics>(result: ExecResult<O, M>): ExecResult<O, M> {
+  if ((result as { session?: unknown }).session === undefined) return result;
+  const { session: _dropped, ...rest } = result as ExecResult<O, M> & { session?: unknown };
+  return rest as ExecResult<O, M>;
+}

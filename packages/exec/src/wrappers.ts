@@ -56,14 +56,14 @@ type DeadlineSeams = { deadline: DeadlineConfig; stepStartMs: number };
  * than on a spec AND on a definition, there is no longer a "definition budget above the spec limit"
  * conflict for the core to refuse — one field, one clamp.
  */
-export function withDeadline<R = ExecServices, Out = ResolvedValue>(inner: Executor<R, ExecMetrics, Operation<InlineFamily>, Out>): Executor<R & DeadlineSeams, ExecMetrics, Operation<InlineFamily>, Out>;
-export function withDeadline<R = ExecServices, P extends Partial<DeadlineSeams> = {}, Out = ResolvedValue>(
+export function withDeadline<R = ExecServices, M extends ExecMetrics = ExecMetrics, Out = ResolvedValue>(inner: Executor<R, M, Operation<InlineFamily>, Out>): Executor<R & DeadlineSeams, M, Operation<InlineFamily>, Out>;
+export function withDeadline<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<DeadlineSeams> = {}, Out = ResolvedValue>(
   config?: P,
-): ExecutorWrapper<R, R & Omit<DeadlineSeams, keyof P>, ExecMetrics, Operation<InlineFamily>, Out>;
-export function withDeadline<R = ExecServices, P extends Partial<DeadlineSeams> = {}, Out = ResolvedValue>(
+): ExecutorWrapper<R, R & Omit<DeadlineSeams, keyof P>, M, Operation<InlineFamily>, Out>;
+export function withDeadline<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<DeadlineSeams> = {}, Out = ResolvedValue>(
   config: P,
-  inner: Executor<R, ExecMetrics, Operation<InlineFamily>, Out>,
-): Executor<R & Omit<DeadlineSeams, keyof P>, ExecMetrics, Operation<InlineFamily>, Out>;
+  inner: Executor<R, M, Operation<InlineFamily>, Out>,
+): Executor<R & Omit<DeadlineSeams, keyof P>, M, Operation<InlineFamily>, Out>;
 export function withDeadline<R = ExecServices>(
   configOrInner?: Partial<DeadlineSeams> | Executor<R>,
   maybeInner?: Executor<R>,
@@ -77,13 +77,21 @@ export function withDeadline<R = ExecServices>(
     metrics: innerExec.metrics,
     ...forwardCapabilitiesFor(innerExec),
     start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue> {
-      const { deadline: ctxDeadline, stepStartMs: ctxStep, ...restCtx } = ctx;
-      const deadline = config?.deadline ?? ctxDeadline; // construction config wins; else read from ctx
-      const stepStartMs = config?.stepStartMs ?? ctxStep;
+      // CONSTRUCTION only. Both used to be readable off ctx as well, and nothing in either repo ever
+      // wrote them there — every caller supplies the window where it composes the wrapper, which is
+      // the only place that knows what the step is. A window is not something the executor being
+      // wrapped needs to run a call; it is the wrapper's whole subject.
+      const restCtx = ctx;
+      const deadline = config?.deadline;
+      const stepStartMs = config?.stepStartMs;
       if (!deadline) return innerExec.start(op, restCtx);
+      // `empty()` rather than the hardcoded floor: this wrapper is generic in what its inner executor
+      // measures, and a refusal has to be reported in THAT vocabulary or the metric type it claims to
+      // pass through is a lie. A refusal genuinely measured nothing, which is exactly the identity.
+      const zero = (): ExecMetrics => innerExec.metrics.empty();
       if (stepStartMs === undefined) {
         return finishedHandle(
-          permanentFailure("the deadline is set without a stepStartMs — deadline arithmetic needs the step-start origin"),
+          permanentFailure("the deadline is set without a stepStartMs — deadline arithmetic needs the step-start origin", zero()),
         );
       }
       const clock = ctx.clock ?? systemClock;
@@ -95,14 +103,22 @@ export function withDeadline<R = ExecServices>(
             classification: "deadline",
             reason: `${DEADLINE_FLOOR_REASON}: ${decision.remainingMs}ms remaining is below the start floor`,
           },
-          metrics: { startMs: now, durationMs: 0 },
+          metrics: { ...zero(), startMs: now, durationMs: 0 },
         });
       }
-      const ceiling = Math.min(restCtx.timeoutMs ?? Number.POSITIVE_INFINITY, decision.remainingMs);
+      const ceiling = decision.remainingMs;
       return wrapHandle(
         async (ctl): Promise<ExecResult<ResolvedValue, ExecMetrics>> => {
-          if (ctl.canceled()) return canceledFailure("canceled before the call started");
-          const handle = ctl.started(innerExec.start(op, { ...restCtx, timeoutMs: ceiling }));
+          if (ctl.canceled()) return canceledFailure("canceled before the call started", zero());
+          // The window reaches the call as CANCELLATION, not as a number for it to honour.
+          //
+          // This used to lower `ctx.timeoutMs`, which the llm layer then turned back into
+          // `AbortSignal.timeout(...)` and folded into the signal — so the number was a second spelling
+          // of a bound the abort channel already carries, and one that only an executor speaking llm
+          // vocabulary knew to read. Composing the timer here means the same enforcement reaches an
+          // executor that reads nothing but `abortSignal`, which is every executor.
+          const bounded = AbortSignal.any([...(restCtx.abortSignal ? [restCtx.abortSignal] : []), AbortSignal.timeout(ceiling)]);
+          const handle = ctl.started(innerExec.start(op, { ...restCtx, abortSignal: bounded }));
           // The window is enforced HERE, not delegated: `timeoutMs` is advisory to an inner executor
           // that may not read it at all. `raceWork` clears the timer on the branch that did not win, so
           // a call finishing in 5ms does not strand a 290s timer holding the event loop. The enforcement
@@ -110,7 +126,7 @@ export function withDeadline<R = ExecServices>(
           // measured against wall-clock `setTimeout` ms; absent a `wait` seam, `raceWork` uses a real timer.
           const raced = await raceWork(handle.result, ceiling, ctl.signal, clock.wait?.bind(clock));
           if (raced.status === "done") return raced.value;
-          if (raced.status === "canceled") return canceledFailure("canceled while the call was in flight");
+          if (raced.status === "canceled") return canceledFailure("canceled while the call was in flight", zero());
           void handle.cancel(); // stop the overrunning call; do not wait for it to agree
           // Carries the SAME `deadline-floor` marker as the start refusal: both mean "this window ran
           // out of TIME" (yield to the next window), as opposed to running out of money — which is the
@@ -120,7 +136,7 @@ export function withDeadline<R = ExecServices>(
               classification: "deadline",
               reason: `${DEADLINE_FLOOR_REASON}: the call exceeded its ${ceiling}ms window and was cut off in flight`,
             },
-            metrics: { startMs: now, durationMs: clock.now() - now },
+            metrics: { ...zero(), startMs: now, durationMs: clock.now() - now },
           };
         },
         { signal: ctx.abortSignal, canceledReason: "canceled while the call was in flight" },

@@ -33,7 +33,7 @@ import { emptyEvents, finishedHandle, isOk, systemClock } from "@declarative-ai/
 import {
   createModelRouter,
   executeLlmCall,
-  mergeLlmMetrics,
+  emptyLlmMetrics, mergeLlmMetrics,
   type CallDeps,
   type LlmCallResult,
   type LlmMetrics,
@@ -96,18 +96,6 @@ export interface PromptExecutorOptions extends LoweringOptions {
   router?: ModelRouter;
   /** The call seam; defaults to the real `executeLlmCall` pipeline. */
   runner?: CallRunner;
-  /**
-   * RECORD mode: the execution value is the FULL `LlmOutput` payload — value, `thinking`,
-   * `finishReason`, tool trace — instead of the projection down to the op's output value. The mode is
-   * a TYPE-LEVEL fact carried on the executor's `Out` parameter, so a wrapper stack composed around a
-   * record-mode core yields `LlmCallResult`-shaped results outward (`ExecResult<LlmOutput, LlmMetrics>`
-   * ≡ `LlmCallResult`) — the interface and the pipeline are unchanged; only what the value IS differs.
-   *
-   * For consumers that PERSIST what the model produced (an `OperationRecord`'s `R` is the payload).
-   * NB `withSession` composes over VALUE-mode executors only — its transcript fold reads the op's
-   * output value, which in record mode is buried inside the payload.
-   */
-  record?: boolean;
 }
 
 const CAPABILITIES: Capabilities = {
@@ -190,7 +178,7 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
   readonly capabilities: Capabilities = CAPABILITIES;
   /** How two of THIS executor's measurements combine — tokens and money add, the start is the first
    *  observation. exec calls this to fold retry attempts without knowing what a token is. */
-  readonly metrics: MetricsAlgebra<LlmMetrics> = { merge: mergeLlmMetrics };
+  readonly metrics: MetricsAlgebra<LlmMetrics> = { merge: mergeLlmMetrics, empty: emptyLlmMetrics };
 
   private envRouter: ModelRouter | undefined;
 
@@ -313,10 +301,7 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
       // Resolved from `id` through the store when the accessor is missing: non-enumerable properties
       // do not survive a spread or a structured clone, and `{ ...session, fork: true }` is a thing
       // people write. Losing the accessor must cost a store read, never correctness.
-      const prior =
-        typeof session.messages === "function"
-          ? await session.messages()
-          : (((await ctx.sessions?.messages(session.id)) ?? []) as ModelMessage[]);
+      const prior = await priorMessages(session);
       const replayed: LlmCallDefinition = { ...definition, messages: [...prior, ...sent] };
       delete (replayed as { prompt?: unknown }).prompt; // the SDK rejects both
       definition = replayed;
@@ -343,7 +328,12 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
    * provider endpoint, and inherits the rest unchanged.
    */
   protected async invoke(definition: LlmCallDefinition, env: CallDeps, ctx: ExecServices): Promise<LlmCallResult> {
-    return (this.options.runner ?? defaultRunner)(definition, env, ctx.timeoutMs);
+    // No per-call timeout ARGUMENT. A window reaches the call as cancellation now — `withDeadline`
+    // and `hw` fold `AbortSignal.timeout(...)` into `ctx.abortSignal`, which `env.abortSignal` already
+    // carries — so passing a number as well would be a second spelling of the same bound. The llm
+    // layer keeps its own `def.timeoutMs ?? DEFAULT_TIMEOUT_MS` floor, so a call is still never
+    // unbounded.
+    return (this.options.runner ?? defaultRunner)(definition, env);
   }
 
   /**
@@ -384,14 +374,11 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
       metrics: { startMs, durationMs: (ctx.clock ?? systemClock).now() - startMs, costUsd: 0, costSource: "unknown" },
     });
 
-    // LOUD-FAILURE contract: fields this bare core does NOT implement must never arrive silently. Each
-    // wrapper CONSUMES (and strips) its own field, so anything still present here means the caller
-    // relied on behavior that is not composed into the stack.
-    if (ctx.deadline !== undefined) {
-      return refuse(
-        "ctx.deadline is set, but the bare prompt executor does not implement deadline handling — compose withDeadline() around it (the wrapper consumes ctx.deadline/ctx.stepStartMs)",
-      );
-    }
+    // The LOUD-FAILURE check that used to stand here — refusing a `ctx.deadline` this bare core cannot
+    // honour — is gone because the misconfiguration it caught is now unrepresentable. A window is a
+    // construction option of `withDeadline` and no longer a field on `ExecServices`, so "set a
+    // deadline without composing the wrapper" does not typecheck. A compile error beats a runtime
+    // refusal, and neither beats a shape that cannot express the mistake.
 
     const tools = ctx.tools ?? this.options.tools;
 
@@ -454,35 +441,97 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
     }
 
     const output = call.value;
-    // RECORD mode: no projection — the execution value IS the payload (see
-    // {@link PromptExecutorOptions.record}); the class's `Out` parameter carries that outward.
-    if (this.options.record) {
-      const payload = (output ?? { finishReason: "error" }) as unknown as ResolvedValue;
-      const recordMetrics: LlmMetrics = { ...call.metrics, startMs };
-      if (isOk(call)) return { value: payload, metrics: recordMetrics };
-      const canceledCall = wasCanceled() || ctx.abortSignal?.aborted === true;
-      const recordError = canceledCall ? { ...call.error, classification: "canceled" as const } : call.error;
-      return { error: recordError, value: payload, metrics: recordMetrics };
-    }
+    // THE PAYLOAD, alongside the value — when the recorder asked for it.
+    //
+    // This replaced a `record` CONSTRUCTION option that swapped what the execution's value IS. That
+    // could not be typed: `Out` is a static parameter, `AgentExecutor` drops it, and every agent class
+    // therefore claimed to return a projection while returning a payload. Reported on its own channel
+    // the value never changes, so there is no type to be wrong about — and the decision moves to the
+    // layer that actually needs the payload, per call, instead of being fixed when the executor is built.
+    const record = ctx.returnRecord === true ? { record: (output ?? { finishReason: "error" }) as unknown } : {};
     const value = this.project(op, output);
 
     const metrics: LlmMetrics = { ...call.metrics, startMs };
-    if (isOk(call)) return { value: value as ResolvedValue, metrics };
+    // THE DELTA, on the declared channel — because in VALUE mode the payload does not survive this
+    // line and the record would otherwise hold a position with no conversation in it.
+    //
+    // "The response IS the delta" (SESSIONS.md §7) holds only in RECORD mode, where the payload IS the
+    // execution value and `withRecord` stores it whole. In value mode the projection above is the last
+    // thing that sees `messages`, so a host composing `withRecord` around a value-mode core — which is
+    // every host that uses exec's `withSessionPosition` rather than this package's `withSession` —
+    // recorded the answer and lost the conversation. Silently: nothing failed, transcripts were just
+    // always empty, and only a scripted fake (which reports here) ever produced one.
+    //
+    // Gated on `ctx.session` rather than on an option: a resolved position means a position layer is
+    // composed, and a position layer is only ever composed with `withRecord` beneath it. So this is
+    // exactly "somebody is recording", already known, needing no new seam. The cost when true is a
+    // reference to an array that already exists.
+    const reported = sessionOutcomeOfCall(ctx, output);
+
+    if (isOk(call)) return { value: value as ResolvedValue, metrics, ...reported, ...record };
 
     // A cancel that raced the call re-classifies the provider's failure without discarding it.
     const canceled = wasCanceled() || ctx.abortSignal?.aborted === true;
     const error = canceled ? { ...call.error, classification: "canceled" as const } : call.error;
-    return { error, ...(value !== undefined ? { value } : {}), metrics };
+    // Reported on failure TOO: turns the provider appended before it failed exist remotely whether or
+    // not we kept them, and not recording them is divergence on the very next call.
+    return { error, ...(value !== undefined ? { value } : {}), metrics, ...reported, ...record };
   }
+}
+
+/**
+ * The conversation at a position, for a transport that has to REPLAY it.
+ *
+ * `ResolvedSession.messages` is non-enumerable, so it does not survive an object spread, a structured
+ * clone, or a JSON round-trip. This used to fall back to `ctx.sessions.messages(id)` when it went
+ * missing — which meant every executor had to be handed the whole store for a case that should not
+ * happen, and which silently replayed NOTHING when the store was absent too.
+ *
+ * REFUSING is the honest answer. A replay that quietly sends no history is a call the provider answers
+ * from an empty conversation while the workflow believes it continued one — the exact silent-divergence
+ * failure the session model exists to prevent. Losing the accessor must cost an error, not correctness.
+ */
+async function priorMessages(session: ResolvedSession<ModelMessage>): Promise<ModelMessage[]> {
+  if (typeof session.messages !== "function") {
+    throw new Error(
+      `session ${session.id} arrived without its messages accessor — it is non-enumerable and does not survive a spread or a clone, so pass the resolved session through untouched rather than copying it`,
+    );
+  }
+  return await session.messages();
+}
+
+/**
+ * What a value-mode call added to its conversation, as a `SessionOutcome` — absent when it added
+ * nothing, or when no conversation was in play.
+ *
+ * Absent rather than empty is load-bearing: `withRecord` passes a reported outcome to `records.close`,
+ * and a store reads `messages` there to decide whether the stored payload IS the conversation. An empty
+ * report would claim a call that produced nothing, which is a different fact from a call that reported
+ * nothing — a lowering refusal, say, where no provider was ever reached.
+ */
+function sessionOutcomeOfCall(
+  ctx: ExecServices,
+  output: LlmOutput | undefined,
+): { session?: { messages?: readonly ModelMessage[]; providerSessionId?: string } } {
+  if (output === undefined) return {};
+  const { messages, providerSessionId } = output;
+  if ((messages === undefined || messages.length === 0) && providerSessionId === undefined) return {};
+  // Reported when a conversation is in play, OR whenever there is a PROVIDER HANDLE at all. The second
+  // clause is not redundant: a handle is the one thing a caller cannot recover by any other means — it
+  // is minted remotely and never appears in the projected value — so withholding it because no local
+  // position was resolved would discard the only record that a remote conversation exists.
+  if (ctx.session === undefined && providerSessionId === undefined) return {};
+  return {
+    session: {
+      ...(messages !== undefined && messages.length > 0 ? { messages } : {}),
+      ...(providerSessionId !== undefined ? { providerSessionId } : {}),
+    },
+  };
 }
 
 /** Convenience factory mirroring the class constructor — the BARE core (no wrappers). Compose the
  *  cross-cutting behaviors you want with `compose(core).with(withRateLimit(...)).with(withRetry(...))`. */
-export function createPromptExecutor(options?: PromptExecutorOptions & { record?: false }): Executor<ExecServices, LlmMetrics>;
-export function createPromptExecutor(
-  options: PromptExecutorOptions & { record: true },
-): Executor<ExecServices, LlmMetrics, Operation<InlineFamily>, LlmOutput>;
-export function createPromptExecutor(options: PromptExecutorOptions = {}): Executor<ExecServices, LlmMetrics, Operation<InlineFamily>, never> {
+export function createPromptExecutor(options: PromptExecutorOptions = {}): Executor<ExecServices, LlmMetrics> {
   // `never` is assignable to BOTH overloads' Out; the constructed instance's true Out is the flag's.
   return new PromptExecutor(options) as PromptExecutor<never>;
 }

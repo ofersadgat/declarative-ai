@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ExecResult, ExecServices, Executor, Failure, InlineFamily, Operation, ResolvedValue } from "../src/index.js";
-import { EXEC_METRICS_ALGEBRA, MapMemoCache, RUNTIME_CAPABILITIES, compose, isOk, withHydration, withMemoize } from "../src/index.js";
+import { EXEC_METRICS_ALGEBRA, MapMemoCache, RUNTIME_CAPABILITIES, compose, isOk, withHydration, withMemoize , type ExecMetrics } from "../src/index.js";
 
 const errorOf = <O,>(r: ExecResult<O>): Failure | undefined => (isOk(r) ? undefined : r.error);
 
@@ -61,7 +61,7 @@ describe("withHydration — the family-transition wrapper", () => {
     const loads: string[] = [];
     const exec = compose(core)
       .with(withHydration<IdOp>(hydrate(loads)))
-      .with(withMemoize<ExecServices, IdOp>({ cache: new MapMemoCache(), identify: (op) => op.id }));
+      .with(withMemoize<ExecServices, ExecMetrics, IdOp>({ cache: new MapMemoCache(), identify: (op) => op.id }));
     const first = await exec.start({ id: "op1", userTextId: "t1" }, {}).result;
     const second = await exec.start({ id: "op1", userTextId: "t1" }, {}).result;
     expect(first.value).toBe("ran:what is 2+2?");

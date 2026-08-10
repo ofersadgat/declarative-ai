@@ -35,7 +35,9 @@ import type {
   SessionStore,
   CallEstimate,
 } from "@declarative-ai/exec";
-import { canceledFailure, curryOrApply, forwardCapabilitiesFor, isExecutor, isOk, isPositionTaken, systemClock, wrapHandle } from "@declarative-ai/exec";
+import { canceledFailure, curryOrApply, forwardCapabilitiesFor, isExecutor, isOk, isPositionTaken, systemClock, wrapHandle,
+  withSessionPosition,
+} from "@declarative-ai/exec";
 import {
   DEFAULT_HOLD_OUTPUT_MULTIPLIER,
   MIN_USEFUL_OUTPUT_TOKENS,
@@ -435,10 +437,10 @@ export function withModelManager<R = ExecServices, M extends ExecMetrics = ExecM
 
 // --- Budget --------------------------------------------------------------------
 
-/** Options for {@link withBudget}. All optional — with no `meter` (here or on `ctx.meter`) the wrapper
+/** Options for {@link withBudget}. All optional — with no `meter` the wrapper
  *  is a pure passthrough (an absent service is a no-op, like the rest of the stack). */
 export interface BudgetOptions extends ResolutionOptions {
-  /** The metered wallet. Defaults to `ctx.meter`; supplied here it drops the ctx dependency. */
+  /** The metered wallet. Absent ⇒ the wrapper is a passthrough, as every absent seam is. */
   meter?: BudgetMeter;
   /** Runtime-tunable output-token headroom for the pre-call reserve estimate (default 2×). */
   headroomMultiplier?: number;
@@ -518,7 +520,10 @@ export function withBudget<R = ExecServices, M extends BudgetReadable = BudgetRe
     // {@link withRateLimit}).
     ...forwardCapabilitiesFor(innerExec),
     start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue, BudgetReadable> {
-      const meter = config?.meter ?? ctx.meter;
+      // CONSTRUCTION only. A wallet is what this wrapper spends from; a caller composing it has one in
+      // hand. It was never something the executor needed to make a call — and while it was reachable
+      // from ctx, an executor did reach for it, and charged money the wrapper was already charging.
+      const meter = config?.meter;
       const computeCost = config?.computeCost;
       if (computeCost) {
         if (!meter) return innerExec.start(op, ctx);
@@ -649,75 +654,56 @@ export function withSession<R = ExecServices, M extends ExecMetrics = ExecMetric
 ): ExecutorWrapper<R, R, M> | Executor<R, M> {
   const config = (isExecutor(configOrInner) ? undefined : configOrInner) as (Partial<SessionSeams> & SessionOptions) | undefined;
   const inner = (isExecutor(configOrInner) ? configOrInner : maybeInner) as Executor<R, M> | undefined;
-  const wrap = ((innerExec: Executor): Executor => ({
-    capabilities: { ...innerExec.capabilities, sessionResume: true },
-    metrics: innerExec.metrics,
-    // A session layer resumes state, so a `withMemoize` above it must refuse to cache. Unlike the other
-    // wrappers we cannot forward the inner accessor verbatim: the per-op record has to carry
-    // `sessionResume: true` (mirroring `capabilities` above), or a memoize checking per-op caps would see
-    // the inner entry's record — which knows nothing about the session — and wrongly cache the call.
-    capabilitiesFor: (op: Operation<InlineFamily>): Capabilities => ({
-      ...(innerExec.capabilitiesFor?.(op) ?? innerExec.capabilities),
-      sessionResume: true,
-    }),
-    start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue> {
-      if (!isPrompt(op)) return innerExec.start(op, ctx);
-      // Store from construction (standalone) OR the run-scoped `ctx.sessions` (e.g. a workflow run).
-      // One store is shared across consumers that pin different message shapes, so `ExecServices`
-      // declares it at the JSON base and this is the llm-side view of it — the messages this wrapper
-      // reads are exactly the ones its executor wrote.
-      const sessions = (config?.sessions ?? ctx.sessions) as SessionStore<ModelMessage> | undefined;
-      const cfg = configOf(op);
-      const ref = stringField(cfg, "sessionId");
-      const providerHandle = stringField(cfg, "providerSessionId");
-      const fork = cfg.fork === true;
-      // No session named anywhere ⇒ nothing to do. `fork` alone is meaningless — it says how to
-      // consume a position, and there is no position.
-      if (ref === undefined && providerHandle === undefined) return innerExec.start(op, ctx);
-      if (sessions === undefined) {
-        return finished(
-          `the declaration carries session "${ref ?? providerHandle}" but no SessionStore is available — provide it via withSession({ sessions }) or ctx.sessions`,
-        );
-      }
-      // The session fields are CONSUMED — the bare core refuses leftovers, which is what stops a
-      // declaration quietly relying on a layer that is not composed in.
-      const sentOp = withConfig(op, { sessionId: undefined, providerSessionId: undefined, fork: undefined });
-      return wrapHandle(async (ctl) => {
-        /** One attempt at a resolved position. `withRecord` below claims it by writing its stub. */
-        const attempt = async (session: ResolvedSession<ModelMessage>): Promise<ExecResult<ResolvedValue, ExecMetrics>> => {
-          const result = await ctl.started(innerExec.start(sentOp, { ...ctx, session: session as never })).result;
-          // PROJECT HERE, not below. The core runs in record mode so that the layers between it and
-          // this one — `withRecord` above all — see the payload the provider produced, which is what a
-          // conversation is made of. Narrowing to the output-parameter value any earlier destroys it,
-          // and the layer that needed it then has to smuggle it back down some side channel. This is
-          // the last layer that wants the payload, so this is where it stops.
-          const projected = project(sentOp, result);
-          // The END position, and the EFFECTIVE one. `+ 1` because a call is exactly one record, which
-          // is what makes a position a record index rather than a message index — one call may add
-          // several messages, and forking is per-operation anyway. It has to be the end because
-          // "append after me" and "fork after me" both mean AFTER; and it has to be effective because
-          // a call that had to fork ended up somewhere the caller has no other way to learn.
-          return withSessionOutcome(projected, `${session.at.id}@${session.at.seq + 1}`);
-        };
-        if (ctl.canceled()) return canceledFailure("canceled before the call started");
-        const resolved = await sessions.resolve({
-          ...(ref !== undefined ? { ref } : {}),
-          ...(fork ? { fork: true } : {}),
-          ...(config?.seedFor !== undefined ? { seed: config.seedFor(op) } : {}),
-          ...(config?.provider !== undefined ? { provider: config.provider } : {}),
+  const wrap = ((innerExec: Executor): Executor => {
+    // ONE implementation of the session policy, in `exec`. This wrapper used to carry a second copy —
+    // its own resolve, its own fork-on-`PositionTaken`, its own position stamping — which meant two
+    // places to keep the fork rules right and only one of them (the `exec` one) reachable from `hw`.
+    // What is genuinely THIS layer's is the FRONT-END: reading a session out of an op's `config`,
+    // which is llm vocabulary. So that is all that is left here; the policy is delegated.
+    const positioned = withSessionPosition(
+      config?.sessions !== undefined ? { sessions: config.sessions } : {},
+      innerExec as never,
+    ) as unknown as Executor;
+    return {
+      capabilities: positioned.capabilities,
+      metrics: innerExec.metrics,
+      capabilitiesFor: (op: Operation<InlineFamily>): Capabilities =>
+        positioned.capabilitiesFor?.(op) ?? positioned.capabilities,
+      start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue> {
+        if (!isPrompt(op)) return innerExec.start(op, ctx);
+        const sessions = config?.sessions as SessionStore<ModelMessage> | undefined;
+        const cfg = configOf(op);
+        const ref = stringField(cfg, "sessionId");
+        const providerHandle = stringField(cfg, "providerSessionId");
+        const fork = cfg.fork === true;
+        // No session named anywhere ⇒ nothing to do. `fork` alone is meaningless — it says how to
+        // consume a position, and there is no position.
+        if (ref === undefined && providerHandle === undefined) return innerExec.start(op, ctx);
+        if (sessions === undefined) {
+          return finished(
+            `the declaration carries session "${ref ?? providerHandle}" but no SessionStore is available — provide it via withSession({ sessions })`,
+          );
+        }
+        // The session fields are CONSUMED — the bare core refuses leftovers, which is what stops a
+        // declaration quietly relying on a layer that is not composed in.
+        const sentOp = withConfig(op, { sessionId: undefined, providerSessionId: undefined, fork: undefined });
+        // RESOLVE, then delegate. The declaration names a conversation; the policy layer below wants a
+        // position. Looking it up here is this wrapper's whole job — reading a session out of
+        // `op.config` is llm vocabulary, and everything after the lookup (claim, fork on conflict,
+        // detect divergence) is the one implementation in `exec`.
+        return wrapHandle(async (ctl) => {
+          if (ctl.canceled()) return canceledFailure("canceled before the call started");
+          const resolved = await sessions.resolve({
+            ...(ref !== undefined ? { ref } : {}),
+            ...(fork ? { fork: true } : {}),
+            ...(config?.seedFor !== undefined ? { seed: config.seedFor(op) } : {}),
+            ...(config?.provider !== undefined ? { provider: config.provider } : {}),
+          });
+          return await ctl.started(positioned.start(sentOp, { ...ctx, session: resolved as never })).result;
         });
-        const first = await attempt(resolved);
-        if (!isPositionTaken(first)) return first;
-        // FORK, not retry-at-the-next-slot. Something already claimed this position, so continuing
-        // here would mean continuing a conversation containing a turn this call never saw. Branching
-        // from where we started is the only answer that means anything — and nothing had to ask for
-        // it. (findmyprompt's `appendDraw` answers the same conflict by retrying at the next index,
-        // which is right for a draw list and wrong for a conversation.)
-        const forked = await sessions.fork(resolved.id, config?.seedFor?.(op));
-        return await attempt(await sessions.resolve({ ref: forked }));
-      });
-    },
-  })) as unknown as ExecutorWrapper<R, R, M>;
+      },
+    };
+  }) as unknown as ExecutorWrapper<R, R, M>;
   return curryOrApply(wrap, inner);
 }
 

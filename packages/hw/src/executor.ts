@@ -24,6 +24,7 @@ import {
   type JsonValue,
   type Operation,
   type ExecResult,
+  type SessionStore,
 } from "@declarative-ai/exec";
 import { syncOnly } from "@declarative-ai/exec";
 import { WorkflowEngine, type CallCache } from "./engine.js";
@@ -31,7 +32,7 @@ import type { WorkflowBundle } from "./format.js";
 import { isByteStream, materialize, MaterializeError } from "./materialize.js";
 import { snapshotHash } from "./loader.js";
 import type { Persistence, WorkflowMetrics } from "./ports.js";
-import { mergeWorkflowMetrics } from "./ports.js";
+import { emptyWorkflowMetrics, mergeWorkflowMetrics } from "./ports.js";
 import { validateBundle } from "./validate.js";
 
 /**
@@ -60,6 +61,15 @@ export interface WorkflowExecutorOptions {
    *  keeps the AI SDK out of this package's dependency graph. */
   prompt?: Executor<ExecServices, WorkflowMetrics>;
   persistence?: Persistence;
+  /**
+   * The conversation store this run's transcripts live in.
+   *
+   * Forwarded for the same reason `callCache` and `operations` are: the engine is constructed INSIDE
+   * this executor, so without this the seam exists and nothing outside hw can reach it. The engine
+   * resolves each operation's position from this store and hands the executor the position — a host
+   * that composes a session layer gives that layer its own reference at construction.
+   */
+  sessions?: SessionStore;
   /**
    * Where the results of CALLS are remembered (EXPRESSIONS.md §3), and what they dispatch through.
    *
@@ -103,7 +113,7 @@ export function workflowMemoKey(definition: HierarchicalWorkflowDefinition, op: 
 }
 
 export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics> {
-  readonly metrics = { merge: mergeWorkflowMetrics };
+  readonly metrics = { merge: mergeWorkflowMetrics, empty: emptyWorkflowMetrics };
   readonly capabilities = CAPABILITIES;
 
   constructor(private readonly options: WorkflowExecutorOptions) {}
@@ -166,14 +176,14 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
     }
 
     // --- Abort / timeout wiring -------------------------------------------
-    let timedOutByLimit = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    if (ctx.timeoutMs !== undefined) {
-      timer = setTimeout(() => {
-        timedOutByLimit = true;
-        abort.abort();
-      }, ctx.timeoutMs);
-    }
+    // The window arrives as a BOUNDED SIGNAL, not as a number this executor re-implements a timer for.
+    //
+    // `ctx.timeoutMs` used to carry it, and this set its own `setTimeout` to abort — a second timer for
+    // a bound the caller had already expressed. Whoever imposes the window composes it into the signal
+    // (`AbortSignal.timeout`), and the reason survives on the signal, so "the window ran out" is still
+    // distinguishable from "somebody cancelled" without a parallel flag.
+    const timedOut = (): boolean => (ctx.abortSignal?.reason as { name?: string } | undefined)?.name === "TimeoutError";
+    const timer: ReturnType<typeof setTimeout> | undefined = undefined;
     const onCtxAbort = (): void => abort.abort();
     if (ctx.abortSignal?.aborted) abort.abort();
     else ctx.abortSignal?.addEventListener("abort", onCtxAbort, { once: true });
@@ -193,6 +203,7 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
       // constructed in here, so without this they exist and nothing can supply them.
       ...(this.options.callCache !== undefined ? { callCache: this.options.callCache } : {}),
       ...(this.options.operations !== undefined ? { operations: this.options.operations } : {}),
+      ...(this.options.sessions !== undefined ? { sessions: this.options.sessions } : {}),
       services: ctx,
       clock: ctx.clock,
       onEvent: (event) => {
@@ -243,7 +254,7 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
       childCostUsd: result.metrics.childCost,
     };
 
-    if (result.outcome === "timeout" || (result.outcome === "canceled" && timedOutByLimit)) {
+    if (result.outcome === "timeout" || (result.outcome === "canceled" && timedOut())) {
       return { metrics, error: { classification: "deadline", reason: "workflow exceeded its time limit" } };
     }
     if (result.outcome === "canceled") {

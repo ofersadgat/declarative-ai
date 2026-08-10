@@ -97,7 +97,14 @@ export function mergeExecMetrics<M extends ExecMetrics>(a: M, b: M): M {
 }
 
 /** The algebra for a bare {@link ExecMetrics} — the default an executor uses when its `M` adds nothing. */
-export const EXEC_METRICS_ALGEBRA: MetricsAlgebra<ExecMetrics> = { merge: mergeExecMetrics };
+/** The neutral {@link ExecMetrics}: no time, and no claim about anything optional. */
+export function emptyExecMetrics(): ExecMetrics {
+  // `startMs` is deliberately ABSENT rather than zero. `mergeExecMetrics` takes the first observation,
+  // so a zero would win and date every merged measurement to the epoch.
+  return { durationMs: 0 };
+}
+
+export const EXEC_METRICS_ALGEBRA: MetricsAlgebra<ExecMetrics> = { merge: mergeExecMetrics, empty: emptyExecMetrics };
 
 // --- Result -------------------------------------------------------------------
 
@@ -358,25 +365,11 @@ export interface Workspace {
  * go-to-definition lands in the owning package.
  */
 export interface ExecServices {
-  /** The metered wallet, when one is wired in. Declared by `budget.ts` and read ONLY by the layer whose
-   *  job is money — `exec` itself never touches it. */
-  meter?: import("./budget.js").BudgetMeter;
   /** Boundary schema validation. */
   validator?: OutputValidator;
   clock?: Clock;
-  deadline?: DeadlineConfig;
-  /** Step-start origin for deadline arithmetic (ms epoch). */
-  stepStartMs?: number;
-  /** Composite ops execute children through this. */
-  executor?: Executor;
   /** Executable tools the current operation may call mid-loop, keyed by name. */
   tools?: Record<string, Tool>;
-  /** Conversation lineage and resolution — a workflow run injects one so ops naming the same
-   *  conversation continue it. Absent ⇒ sessions unavailable. */
-  sessions?: SessionStore;
-  /** Where executions are RECORDED (`withRecord`). Also where a session's messages come from, since a
-   *  session is the records sharing a `session.id`. Absent ⇒ nothing is recorded. */
-  records?: import("./record.js").RecordStore;
   /**
    * The session this call runs in, already resolved to a position and RESERVED (see
    * {@link SessionLease}).
@@ -392,40 +385,24 @@ export interface ExecServices {
    * exactly the messages it wrote.
    */
   session?: ResolvedSession;
-  /**
-   * The conversation the CALLER wants this call to run in — a request, not a resolution.
-   *
-   * The two are deliberately separate seams. A requester (`hw`, say) knows which conversation an
-   * operation was authored against and whether the author asked to branch; it does NOT know where
-   * that conversation currently is, and should not, because only the store does. `withSessionPosition`
-   * turns this into {@link ExecServices.session}.
-   *
-   * That split is also what lets `hw` participate at all: it can state a request using nothing but
-   * `exec`, where resolving one would drag in the layer it is not allowed to depend on.
-   */
-  sessionRequest?: SessionRequest;
-  /**
-   * Reads a conversation back FROM the provider, for re-syncing after divergence (DESIGN.md §1.6).
-   *
-   * Per-adapter and optional, because the capability genuinely is: Claude Code has
-   * `getSessionMessages()`, Managed Agents has `events.list`, and the Messages API has neither — and
-   * needs neither, being stateless and therefore unable to diverge. Absent ⇒ a resync starts EMPTY,
-   * which the edge records rather than passing off as a conversation that happened to be empty.
-   */
-  sessionReader?: { read(providerSessionId: string): Promise<readonly unknown[]> };
-  /**
-   * Told when the remote moved underneath us, before anything is done about it.
-   *
-   * §11 says to log and then resync, in that order and both: the resync keeps the run going, and the
-   * log is what stops a silently-diverging provider looking like normal operation.
-   */
-  onDivergence?: (event: { session: string; resumed: string; reported: string; reason: string }) => void;
   /** The workspace the current operation acts within — a Session-owned resource. */
   workspace?: Workspace;
-  /** Per-call wall-clock budget (ms). Was `PromptOpEnvironment.timeoutMs`. */
-  timeoutMs?: number;
-  /** Per-call cost ceiling (USD). */
-  maxCostUsd?: number;
+  /**
+   * Ask the execution to hand back the FULL payload it produced, alongside the op's output value.
+   *
+   * Set by {@link withRecord}, because the recorder is the layer that needs it: a prompt executor
+   * projects its `LlmOutput` down to the op's output value inside the call, so by the time a record is
+   * written the messages, the reasoning and the tool trace no longer exist. This is how the layer that
+   * wants them asks, per call, instead of the executor being built in a mode that answers differently
+   * forever.
+   *
+   * ALONGSIDE, never instead of. The op's output value is unchanged whether this is set or not, which
+   * is the whole reason it is a ctx flag and not the old `record` construction option: that one swapped
+   * the executor's `Out` type, and `Out` is a static parameter that a runtime flag cannot honestly
+   * change — `AgentExecutor` drops it entirely, so `new AgentCliExecutor({ record: true })` typechecked
+   * as returning something it did not return. A side channel adds information without touching a type.
+   */
+  returnRecord?: boolean;
   /** Cancellation for the operation in flight. */
   abortSignal?: AbortSignal;
 }
@@ -496,6 +473,16 @@ export interface ResolvedSession<Msg = JsonValue> extends SessionRef {
   readonly at: { id: string; seq: number };
   /** The provider handle to resume from, when the adapter can and the mode allows it. */
   readonly providerSessionId?: string;
+  /**
+   * The stable discriminator this position was resolved UNDER — carried so a fork does not need the
+   * original request back.
+   *
+   * Without it, forking on a taken position needs `SessionRequest.seed`, which is why the request had
+   * to survive alongside the resolution all the way down the stack. A fork's name is derived from the
+   * seed, and a seed that goes missing means `mint()` falls back to a counter — lineage names then
+   * change between runs, which is precisely the observability durable sessions exist for.
+   */
+  readonly seed?: string;
   /** The conversation's contents at this position. LAZY because the cheap path never needs them: an
    *  adapter that branches server-side reads zero messages. Only replay strategies materialize. */
   messages(): Promise<Msg[]>;
@@ -614,6 +601,8 @@ export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
       mode,
       at: { id, seq },
       ...(handle !== undefined ? { providerSessionId: handle } : {}),
+      // Carried so a FORK does not need the original request back — see `ResolvedSession.seed`.
+      ...(request.seed !== undefined ? { seed: request.seed } : {}),
       messages: async () => this.materialize(id, seq),
     });
   }
@@ -653,10 +642,22 @@ export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
       for (const row of rows.values()) {
         if (row.id === id) {
           // An executor whose payload IS a conversation needs nothing further; one whose payload is
-          // not — a delegated agent, a fake — reports its delta on the session channel, and that is
-          // what the conversation is made of. Preferring it keeps `messagesOf` reading one shape.
+          // not — a delegated agent, a value-mode prompt core, a fake — reports its delta on the
+          // session channel, and that is what the conversation is made of.
+          //
+          // The PAYLOAD WINS when it already is one. Preferring the report unconditionally was safe
+          // only while a record-mode core reported nothing; now that a value-mode core reports too, a
+          // record-mode host would have had its `LlmOutput` replaced by a bare `{ messages }` and lost
+          // the `thinking`, `toolCalls` and `toolResults` it went to record mode to keep. Fidelity
+          // beats uniformity here — `messagesOf` reads `value.messages`, which both shapes have.
           const reported = settled.sessionOutcome?.messages;
-          row.result = reported !== undefined ? { value: { messages: reported } } : settled.result;
+          const payload = settled.result as { value?: { messages?: unknown } } | undefined;
+          row.result =
+            payload?.value?.messages !== undefined
+              ? settled.result
+              : reported !== undefined
+                ? { value: { messages: reported } }
+                : settled.result;
           // The handle the call ENDED in. Kept per record rather than per conversation so that reading
           // it at an earlier position reports what was true THEN — which is what makes a mismatch on
           // the next call detectable as divergence rather than invisible.

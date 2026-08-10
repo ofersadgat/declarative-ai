@@ -35,14 +35,14 @@ import { isResolvedCall } from "./resolvedOperation.js";
 import { EventQueue, canceledFailure, failure, finishedHandle, linkAbort, raceWork } from "./handles.js";
 import { systemClock } from "./deadline.js";
 
-export interface FunctionExecutorOptions {
+export interface FunctionExecutorOptions<M extends ExecMetrics = ExecMetrics> {
   /** The one registry of discriminated entries (§2) — host code, sub-workflows, and delegated runtime
    *  adapters alike. */
-  functions: FunctionRegistry<ExecServices, ExecMetrics>;
+  functions: FunctionRegistry<ExecServices, M>;
   /** Override the advertised capabilities (defaults to the conservative function-only record). */
   capabilities?: Capabilities;
   /** How this executor's measurements combine. Defaults to timing/counts. */
-  metrics?: MetricsAlgebra<ExecMetrics>;
+  metrics?: MetricsAlgebra<M>;
 }
 
 /** The capability floor for a registry-dispatched function op, and the fallback when a `functionRef`
@@ -59,7 +59,7 @@ export function entryCapabilities(entry: RegisteredFunction<ExecServices, ExecMe
   return { ...RUNTIME_CAPABILITIES, ...entry.capabilities };
 }
 
-export class FunctionExecutor implements Executor {
+export class FunctionExecutor<M extends ExecMetrics = ExecMetrics> implements Executor<ExecServices, M> {
   /**
    * The hierarchy's own discriminant.
    *
@@ -71,16 +71,19 @@ export class FunctionExecutor implements Executor {
   static readonly kind = "function";
 
   readonly capabilities: Capabilities;
-  readonly metrics: MetricsAlgebra<ExecMetrics>;
+  readonly metrics: MetricsAlgebra<M>;
 
-  constructor(private readonly options: FunctionExecutorOptions) {
+  constructor(private readonly options: FunctionExecutorOptions<M>) {
     this.capabilities = options.capabilities ?? FUNCTION_CAPABILITIES;
-    this.metrics = options.metrics ?? EXEC_METRICS_ALGEBRA;
+    // The floor is the honest default for a registry of impls: a function op measures time, not money.
+    // A caller whose `M` is richer supplies its own algebra, which is what keeps the dispatcher above
+    // from flattening what its prompt half measured.
+    this.metrics = options.metrics ?? (EXEC_METRICS_ALGEBRA as MetricsAlgebra<M>);
   }
 
   /** The registry this executor dispatches against, for a caller that must resolve an entry without
    *  running it (the dispatcher's `capabilitiesFor`). */
-  get functions(): FunctionRegistry<ExecServices, ExecMetrics> {
+  get functions(): FunctionRegistry<ExecServices, M> {
     return this.options.functions;
   }
 
@@ -95,7 +98,7 @@ export class FunctionExecutor implements Executor {
     return fn ? entryCapabilities(fn) : this.capabilities;
   }
 
-  start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue> {
+  start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue, M> {
     // Cancellation is checked BEFORE any work starts, on every path: an already-aborted caller must not
     // get one more call out of a dispatch that happened to be in flight.
     if (ctx.abortSignal?.aborted) return finishedHandle(canceledFailure("canceled before the operation started"));
@@ -111,9 +114,15 @@ export class FunctionExecutor implements Executor {
     // A caller that resolved this op ahead of time carries the entry on it; anyone else gets the
     // lookup. Both paths exist on purpose — resolution is an optimization a holder may have done, so
     // the executor can always do it itself and never requires anyone to have done it first.
-    const fn = isResolvedCall(op) ? op.call : this.options.functions.get(op.functionRef);
+    // The PRE-RESOLVED entry (`op.call`) is typed at the floor, because a resolved call travels through
+    // layers that never learn what `M` is. The registry lookup is already `M`; this asserts the other
+    // path back to it rather than widening the whole executor to the floor, which is what pinned this
+    // class before.
+    const fn = (isResolvedCall(op) ? op.call : this.options.functions.get(op.functionRef)) as
+      | RegisteredFunction<ExecServices, M>
+      | undefined;
     if (!fn) {
-      return finishedHandle(failure("permanent", `no function '${op.functionRef}' is registered`));
+      return finishedHandle(failure("permanent", `no function '${op.functionRef}' is registered`, this.metrics.empty()));
     }
     const resolved = resolveLiteralInputs(op);
     if ("error" in resolved) {
@@ -135,9 +144,9 @@ export class FunctionExecutor implements Executor {
           ? outcome.value
           : // Abandoned, not awaited: an impl that ignores its signal must not be able to hold the
             // handle (and its caller's `cancel()`) open for as long as it feels like running.
-            (canceledFailure("the operation was canceled") as ExecResult<ResolvedValue>),
+            (canceledFailure("the operation was canceled", this.metrics.empty()) as ExecResult<ResolvedValue, M>),
       )
-      .catch((e: unknown) => ({ metrics: { startMs, durationMs: 0 }, error: failureOf(e) }) as ExecResult<ResolvedValue>)
+      .catch((e: unknown) => ({ metrics: { ...this.metrics.empty(), startMs, durationMs: 0 }, error: failureOf(e) }) as ExecResult<ResolvedValue, M>)
       .finally(() => {
         unlink();
         events.close();
@@ -153,24 +162,24 @@ export class FunctionExecutor implements Executor {
   }
 
   private async runFunction(
-    fn: RegisteredFunction<ExecServices, ExecMetrics>,
+    fn: RegisteredFunction<ExecServices, M>,
     inputs: FunctionInputs,
     ctx: ExecServices,
     startMs: number,
-  ): Promise<ExecResult<ResolvedValue>> {
+  ): Promise<ExecResult<ResolvedValue, M>> {
     const clock = ctx.clock ?? systemClock;
-    let produced: FunctionResult<ResolvedValue, ExecMetrics>;
+    let produced: FunctionResult<ResolvedValue, M>;
     try {
       produced = await runFunction(fn, inputs, ctx);
     } catch (e) {
       // Belt and braces: `runFunction` already classifies a throwing impl (§4.2), so this is unreachable
       // for a registered entry. Kept so the never-rejects contract of `outcome` holds structurally,
       // not by trusting a guarantee one package away.
-      return { metrics: { startMs, durationMs: clock.now() - startMs }, error: failureOf(e) };
+      return { metrics: { ...this.metrics.empty(), startMs, durationMs: clock.now() - startMs }, error: failureOf(e) };
     }
     // The impl's own report (an agent's spend) wins over our timing frame, which only knows the wall
     // clock; `startMs`/`durationMs` stay ours so they measure the dispatch, not the impl's opinion.
-    const metrics: ExecMetrics = { ...produced.metrics, startMs, durationMs: clock.now() - startMs };
+    const metrics: M = { ...this.metrics.empty(), ...produced.metrics, startMs, durationMs: clock.now() - startMs };
     // The CONVERSATION report rides along, on the failure path too. This result is REBUILT rather than
     // spread, so a field not named here is dropped — and the field that was being dropped is the
     // provider session id a delegated agent ended in. Losing it is silent and expensive: `withRecord`

@@ -27,7 +27,7 @@ async function seed(store: SessionStore, id: string, ...messages: ModelMessage[]
 type WideMetrics = ExecMetrics & BudgetMetrics;
 function countingInner(perOp: Partial<Capabilities>): { inner: Executor<ExecServices, WideMetrics>; starts: () => number } {
   let n = 0;
-  const algebra: MetricsAlgebra<WideMetrics> = { merge: (_a, b) => b };
+  const algebra: MetricsAlgebra<WideMetrics> = { merge: (_a, b) => b, empty: () => ({ durationMs: 0, costUsd: 0, costSource: "unknown" }) };
   const inner: Executor<ExecServices, WideMetrics> = {
     capabilities: { ...RUNTIME_CAPABILITIES, memoizable: true },
     capabilitiesFor: () => ({ ...RUNTIME_CAPABILITIES, memoizable: true, ...perOp }),
@@ -313,7 +313,7 @@ describe("withRateLimit", () => {
       reportOutcome: () => {},
     };
     const { runner, calls } = fakeRunner([okOutcome()]);
-    const stack = sessionStack(seam, withRateLimit({ limiter }, createPromptExecutor({ runner, record: true })));
+    const stack = sessionStack(seam, withRateLimit({ limiter }, createPromptExecutor({ runner })));
     await stack.start(promptOp({}, { sessionId: head }), {}).result;
     // The transcript really is on the wire (chars/4 ⇒ ≳2000 tokens), and the estimate says so.
     expect(JSON.stringify(calls[0]!.def.messages).length).toBeGreaterThan(8000);
@@ -374,10 +374,16 @@ describe("withBudget — per-call reserve → settle", () => {
     expect("ledgerId" in out.metrics).toBe(false);
   });
 
-  it("reads the meter from ctx.meter when none is given at construction", async () => {
+  it("is a PASSTHROUGH with no wallet, rather than reaching for one on the services bundle", async () => {
+    // The wallet used to be readable off ctx as well. That is how an executor came to charge it —
+    // `AgentExecutor` debited `ctx.meter` for money this wrapper was already settling, so a delegated
+    // call under a budget was billed twice. A wallet is what this wrapper spends from; nothing below
+    // it needs one, so nothing below it can see one.
     const { meter, settled } = meterOf([1]);
     const { runner } = fakeRunner([okOutcome()]);
-    await withBudget({ pricing }, createPromptExecutor({ runner })).start(promptOp(), { meter }).result;
+    await withBudget({ pricing }, createPromptExecutor({ runner })).start(promptOp(), {}).result;
+    expect(settled).toEqual([]);
+    await withBudget({ pricing, meter }, createPromptExecutor({ runner })).start(promptOp(), {}).result;
     expect(settled).toEqual([0.001]);
   });
 
@@ -440,7 +446,7 @@ describe("withBudget — per-call reserve → settle", () => {
     const { seam } = transcripts();
     const head = await seed(seam, "chat-1", { role: "user", content: "y".repeat(5000) });
     const { runner } = fakeRunner([okOutcome()]);
-    const stack = sessionStack(seam, withBudget({ meter, pricing }, createPromptExecutor({ runner, record: true })));
+    const stack = sessionStack(seam, withBudget({ meter, pricing }, createPromptExecutor({ runner })));
     await stack.start(promptOp({}, { sessionId: head }), {}).result;
     // `pricing` charges (input + output)/1000. Blind to the transcript the reserve was priced on ~107
     // tokens (~$0.107); the 5000 chars actually sent are ~1250 input tokens, so a correct reserve is >$1.
@@ -470,7 +476,7 @@ describe("withSession — append-only conversation", () => {
   it("no session named anywhere → passthrough, store untouched", async () => {
     const { store, seam } = transcripts();
     const { runner, calls } = fakeRunner([okOutcome()]);
-    await sessionStack(seam, createPromptExecutor({ runner, record: true })).start(promptOp(), {}).result;
+    await sessionStack(seam, createPromptExecutor({ runner })).start(promptOp(), {}).result;
     expect(calls[0]!.def.prompt).toBe("What is 2+2?");
     expect(contentsOf(store, "s_chat-1")).toEqual([]);
   });
@@ -478,7 +484,7 @@ describe("withSession — append-only conversation", () => {
   it("folds the turn the call SENT plus what the provider said it appended", async () => {
     const { store, seam } = transcripts();
     const { runner } = fakeRunner([okOutcome()]);
-    await sessionStack(seam, createPromptExecutor({ runner, record: true })).start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
+    await sessionStack(seam, createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
     expect(contentsOf(store, "chat-1")).toEqual([
       { role: "user", content: "What is 2+2?" },
       { role: "assistant", content: '{"answer":"4"}' },
@@ -501,14 +507,14 @@ describe("withSession — append-only conversation", () => {
       { role: "assistant", content: [{ type: "text", text: '{"answer":"4"}' }] },
     ];
     const { runner } = fakeRunner([okOutcome({ messages: appended })]);
-    await sessionStack(seam, createPromptExecutor({ runner, record: true })).start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
+    await sessionStack(seam, createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
     expect(contentsOf(store, "chat-1").slice(1)).toEqual(appended);
   });
 
   it("replays the stored stream, and STRIPS the session fields the core would refuse", async () => {
     const { store, seam } = transcripts();
     const { runner, calls } = fakeRunner([okOutcome(), okOutcome()]);
-    const stack = sessionStack(seam, createPromptExecutor({ runner, record: true }));
+    const stack = sessionStack(seam, createPromptExecutor({ runner }));
     await stack.start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
     await stack.start(promptOp({}, { sessionId: "chat-1@1" }), {}).result;
     // The second call carried the first exchange on the wire — replay, because the Messages API and
@@ -527,7 +533,7 @@ describe("withSession — append-only conversation", () => {
     // divergence on the very next call.
     const { store, seam } = transcripts();
     const { runner } = fakeRunner([okOutcome({ error: { classification: "permanent", reason: "model exploded" } })]);
-    const out = await sessionStack(seam, createPromptExecutor({ runner, record: true })).start(promptOp({}, { sessionId: "chat-1@0" }), {})
+    const out = await sessionStack(seam, createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1@0" }), {})
       .result;
     expect(errorOf(out)?.reason).toMatch(/model exploded/);
     expect(contentsOf(store, "chat-1")).toHaveLength(2);
@@ -536,7 +542,7 @@ describe("withSession — append-only conversation", () => {
   it("reports the EFFECTIVE position on the outcome, not the key it was handed", async () => {
     const { seam } = transcripts();
     const { runner } = fakeRunner([okOutcome()]);
-    const out = await sessionStack(seam, createPromptExecutor({ runner, record: true })).start(promptOp({}, { sessionId: "chat-1@0" }), {})
+    const out = await sessionStack(seam, createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1@0" }), {})
       .result;
     // Two entries went in, so the call ENDED at position 2 — "append after me" needs that, and the
     // caller has no other way to learn it.
@@ -546,7 +552,7 @@ describe("withSession — append-only conversation", () => {
   it("FORKS when the position is no longer the head, leaving the original untouched", async () => {
     const { store, seam } = transcripts();
     const { runner } = fakeRunner([okOutcome(), okOutcome()]);
-    const stack = sessionStack(seam, createPromptExecutor({ runner, record: true }));
+    const stack = sessionStack(seam, createPromptExecutor({ runner }));
     await stack.start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
     // The same position again: it has since been appended to, so forking is the only answer that
     // means anything — and nothing had to ask for it.
@@ -559,7 +565,7 @@ describe("withSession — append-only conversation", () => {
     // Deliberate divergence — fan variants out of one point — cannot be inferred from stream state.
     const { store, seam } = transcripts();
     const { runner } = fakeRunner([okOutcome(), okOutcome()]);
-    const stack = sessionStack(seam, createPromptExecutor({ runner, record: true }));
+    const stack = sessionStack(seam, createPromptExecutor({ runner }));
     await stack.start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
     const forked = await stack.start(promptOp({}, { sessionId: "chat-1@1", fork: true }), {}).result;
     expect(forked.metrics.sessionRef).not.toMatch(/^chat-1@/);
@@ -590,7 +596,7 @@ describe("withSession — append-only conversation", () => {
     // there was no way to say "resume this handle" instead of "here is the transcript again".
     const { seam } = transcripts();
     const { runner } = fakeRunner([okOutcome()]);
-    const out = await sessionStack(seam, createPromptExecutor({ runner, record: true })).start(promptOp({}, { providerSessionId: "p1" }), {})
+    const out = await sessionStack(seam, createPromptExecutor({ runner })).start(promptOp({}, { providerSessionId: "p1" }), {})
       .result;
     expect(errorOf(out)).toBeUndefined();
   });
@@ -605,15 +611,15 @@ describe("withSession — append-only conversation", () => {
     expect(errorOf(out)?.reason).toMatch(/no SessionStore is available/);
   });
 
-  it("falls back to the run-scoped ctx.sessions store when none was constructed", async () => {
+  it("takes its store at CONSTRUCTION — nothing session-shaped is left on the services bundle", async () => {
     const { store, seam } = transcripts();
     const { runner } = fakeRunner([okOutcome()]);
-    // Both seams from ctx rather than construction — the store AND the record sink, since recording
-    // is what a session append IS.
-    await sessionStack(seam, createPromptExecutor({ runner, record: true }) as never).start(promptOp({}, { sessionId: "chat-1@0" }), {
-      sessions: seam,
-      records: seam as never,
-    }).result;
+    // Both halves used to be readable off ctx. Neither is: `withRecord` needs the store to write and
+    // `withSession` needs it to resolve, and a caller composing either has it in hand. What the
+    // executor gets is a resolved POSITION — the provider handle and the append/fork decision, which
+    // are the only session facts a prompt call consumes.
+    await sessionStack(seam, createPromptExecutor({ runner }) as never).start(promptOp({}, { sessionId: "chat-1@0" }), {})
+      .result;
     expect(contentsOf(store, "chat-1")).toHaveLength(2);
   });
 
@@ -670,7 +676,7 @@ describe("withBudget — post-charge mode (computeCost)", () => {
   /** An inner executor resolving a fixed result — a memo layer serving a hit, say. */
   const stubInner = (metrics: WideMetrics & Reuse, value: unknown = "cached"): Executor<ExecServices, WideMetrics> => ({
     capabilities: { ...RUNTIME_CAPABILITIES },
-    metrics: { merge: (_a, b) => b },
+    metrics: { merge: (_a, b) => b, empty: () => ({ durationMs: 0, costUsd: 0, costSource: "unknown" }) },
     start: () => wrapHandle(async () => ({ value: value as never, metrics })),
   });
   const chargeReuse = (me: string) => (_op: Operation<InlineFamily>, r: { metrics: WideMetrics & Reuse }): number => {

@@ -43,18 +43,27 @@ export function emptyEvents(): AsyncIterable<ExecEvent> {
  * were fabricated LLM fields on a result that may have come from a shell command or a sub-workflow;
  * they went away with `Outcome`.
  */
-export function failure(classification: Failure["classification"], reason: string): ExecResult<never> {
-  return { error: { classification, reason }, metrics: { durationMs: 0 } };
+export function failure<M extends ExecMetrics = ExecMetrics>(
+  classification: Failure["classification"],
+  reason: string,
+  metrics?: M,
+): ExecResult<never, M> {
+  // `metrics` is how a wrapper stays POLYMORPHIC in what it measures. Without it the floor was
+  // hardcoded here, so every wrapper that can synthesize a failure — a deadline refusal, a capability
+  // gate, a dispatcher — was pinned to `ExecMetrics` and its caller had to cast the whole executor
+  // back. A caller with an inner executor passes `inner.metrics.empty()` and stays generic; a caller
+  // with no algebra to hand gets the floor, which is what the default preserves.
+  return { error: { classification, reason }, metrics: (metrics ?? { durationMs: 0 }) as M };
 }
 
 /** A zero-cost permanent failure (wrapper-level refusals and normalized wiring faults). */
-export function permanentFailure(reason: string): ExecResult<never> {
-  return failure("permanent", reason);
+export function permanentFailure<M extends ExecMetrics = ExecMetrics>(reason: string, metrics?: M): ExecResult<never, M> {
+  return failure("permanent", reason, metrics);
 }
 
 /** A zero-cost canceled result (cancel landed before any inner call started). */
-export function canceledFailure(reason: string): ExecResult<never> {
-  return failure("canceled", reason);
+export function canceledFailure<M extends ExecMetrics = ExecMetrics>(reason: string, metrics?: M): ExecResult<never, M> {
+  return failure("canceled", reason, metrics);
 }
 
 /**
@@ -69,11 +78,34 @@ export function withMetrics<O, MIn extends ExecMetrics, MOut extends ExecMetrics
   result: ExecResult<O, MIn>,
   metrics: MOut,
 ): ExecResult<O, MOut> {
+  // The SESSION OUTCOME is carried across, and it has to be carried EXPLICITLY. `SessionOutcome`'s own
+  // doc says why it is a declared field rather than a structural extra — "an undeclared extra field
+  // typechecks by leniency and would be dropped by anything that rebuilt the result" — and this is the
+  // thing that rebuilds the result. Every outcome an executor reported was dropped whenever a retry or
+  // repair wrapper sat above it, which for a host that wraps its prompt executor in one is always.
+  //
+  // The damage was silent and specific: a delegated agent reports its `providerSessionId` here, so it
+  // never reached the store, and the next call resumed nothing and opened a fresh conversation while
+  // the workflow read as though `session: "review"` had joined them up.
+  const session = (result as { session?: unknown }).session;
+  // The RECORD payload rides across for the same reason and with the same fragility: it is an extra an
+  // executor reports when `ctx.returnRecord` asked for it, and this function rebuilds the result, so a
+  // field not named here is dropped. Two channels, one rule — name them or lose them.
+  const record = (result as { record?: unknown }).record;
+  const carried = {
+    ...(session !== undefined ? { session } : {}),
+    ...(record !== undefined ? { record } : {}),
+  };
   // Narrowed with `isOk`, not `result.error === undefined`: the union discriminates on an OPTIONAL
   // `error?: undefined` against a non-literal `Failure`, which is not a unit-type discriminant, so only
   // the type predicate narrows it. Raw property checks silently widen `value` to `O | undefined`.
-  if (isOk(result)) return { value: result.value, metrics };
-  return { error: result.error, ...(result.value !== undefined ? { value: result.value } : {}), metrics };
+  if (isOk(result)) return { value: result.value, metrics, ...carried } as ExecResult<O, MOut>;
+  return {
+    error: result.error,
+    ...(result.value !== undefined ? { value: result.value } : {}),
+    metrics,
+    ...carried,
+  } as ExecResult<O, MOut>;
 }
 
 /** A completed handle wrapping a ready result (for wrappers that short-circuit, e.g. deadline fail-fast). */

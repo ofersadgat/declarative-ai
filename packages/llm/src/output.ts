@@ -120,6 +120,16 @@ const COST_SOURCE_RANK: Record<LlmMetrics["costSource"], number> = { provider: 2
 /** Sum two calls' measurements: tokens and money add, the trace-level facts take the latest, the start
  *  time is the FIRST observation. This is the algebra a prompt executor registers, so exec can
  *  aggregate retry attempts without knowing what any of these fields mean. */
+/**
+ * The neutral {@link LlmMetrics}: nothing ran, so nothing was spent and nothing is known about price.
+ *
+ * `costSource: "unknown"` is the identity BECAUSE `mergeLlmMetrics` ranks the sources and takes the
+ * better one — `unknown` is rank 0, so folding this in never downgrades a real observation.
+ */
+export function emptyLlmMetrics(): LlmMetrics {
+  return { durationMs: 0, costUsd: 0, costSource: "unknown" };
+}
+
 export function mergeLlmMetrics(a: LlmMetrics, b: LlmMetrics): LlmMetrics {
   const sum = (x: number | undefined, y: number | undefined): number | undefined =>
     x === undefined && y === undefined ? undefined : (x ?? 0) + (y ?? 0);

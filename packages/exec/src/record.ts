@@ -155,7 +155,11 @@ export function withRecord<R = ExecServices, M extends ExecMetrics = ExecMetrics
     metrics: innerExec.metrics,
     ...forward(innerExec),
     start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue> {
-      const records = config?.records ?? ctx.records;
+      // CONSTRUCTION only. It used to fall back to `ctx.records`, which was a second way to say the
+      // same thing: a caller composing this wrapper necessarily has the store in hand, and nothing
+      // else in any package ever read the ctx field. Two channels for one dependency is how a bundle
+      // meant to carry SERVICES turns into a bag of whatever a wrapper felt like passing sideways.
+      const records = config?.records;
       if (records === undefined) return innerExec.start(op, ctx);
       return wrapHandle(async (ctl) => {
         const startMs = (ctx.clock ?? { now: () => Date.now() }).now();
@@ -185,14 +189,25 @@ export function withRecord<R = ExecServices, M extends ExecMetrics = ExecMetrics
             metrics: { durationMs: 0 },
           } as never;
         }
-        const result = await ctl.started(innerExec.start(op, ctx)).result;
+        // ASK for the payload. This is the point of the flag: the recorder is the layer that needs
+        // what the executor would otherwise project away inside the call, and the only layer that
+        // knows a record is about to be written. Requesting it per call beats an executor built in a
+        // mode that answers differently forever — which is what `record: true` was, and which could
+        // not be typed, since it swapped an `Out` that every agent subclass had already pinned.
+        const result = await ctl.started(innerExec.start(op, { ...ctx, returnRecord: true })).result;
+        // The PAYLOAD when one was reported, else the value. A record says what the call PRODUCED, and
+        // for a prompt op that is the whole `LlmOutput` — messages, reasoning, tool trace — not the one
+        // field the op happened to declare as its output.
+        const produced = (result as { record?: unknown }).record;
+        const recorded = (produced !== undefined ? produced : result.value) as ResolvedValue | undefined;
         // Filled whichever way it went. A failed call is a record: it is evidence, it cost money, and
         // for a session its turns may already exist remotely.
         const settled: StoredRecord["result"] = isOk(result)
-          ? { value: result.value }
-          : { error: result.error, ...(result.value !== undefined ? { value: result.value } : {}) };
-        // The session outcome rides along when the executor reported one. A prompt op reports none
-        // and needs none — its payload IS the conversation — so this is empty on the common path.
+          ? { value: recorded as ResolvedValue }
+          : { error: result.error, ...(recorded !== undefined ? { value: recorded } : {}) };
+        // The session outcome rides along when the executor reported one — the handle and the delta,
+        // which every recorded call needs, as against the payload above, which only a persisting
+        // caller does.
         const session = sessionOutcomeOf(result);
         await records.close(id, { result: settled, metrics: result.metrics, ...(session !== undefined ? { sessionOutcome: session } : {}) });
         return result;
@@ -204,6 +219,36 @@ export function withRecord<R = ExecServices, M extends ExecMetrics = ExecMetrics
 
 /** The ctx seam {@link withSessionPosition} consumes. */
 type PositionSeams = { sessions: SessionStore };
+
+/**
+ * The DIVERGENCE half of {@link withSessionPosition}'s configuration — construction options, not ctx
+ * fields.
+ *
+ * Both used to sit on `ExecServices` as `sessionReader` and `onDivergence`, read by exactly one
+ * private function in this file and written by exactly the host that composes this wrapper. That is a
+ * handoff between two adjacent layers travelling through a bundle meant to carry SERVICES — the
+ * capabilities an executor at arbitrary depth needs and no wrapper can know about. A wrapper's own
+ * dependency belongs in the wrapper's own options, where a reader can see what it needs without
+ * grepping for who might set a field.
+ */
+export interface DivergenceOptions {
+  /**
+   * Reads a conversation back FROM the provider, for re-syncing after divergence (DESIGN.md §1.6).
+   *
+   * Per-adapter and optional, because the capability genuinely is: Claude Code has
+   * `getSessionMessages()`, the Messages API has neither and needs neither, being stateless and
+   * therefore unable to diverge. Absent ⇒ a resync starts EMPTY, which the edge records rather than
+   * passing off as a conversation that happened to be empty.
+   */
+  readSession?: { read(providerSessionId: string): Promise<readonly unknown[]> };
+  /**
+   * Told when the remote moved underneath us, before anything is done about it.
+   *
+   * §11 says to log and then resync, in that order and both: the resync keeps the run going, and the
+   * log is what stops a silently-diverging provider looking like normal operation.
+   */
+  onDivergence?: (event: { session: string; resumed: string; reported: string; reason: string }) => void;
+}
 
 /**
  * Resolve the conversation a call runs in, and fork when its position turns out to be taken.
@@ -220,18 +265,18 @@ type PositionSeams = { sessions: SessionStore };
  * `hw` deliberately does not.
  */
 export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics>(inner: Executor<R, M>): Executor<R & PositionSeams, M>;
-export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<PositionSeams> = {}>(
+export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<PositionSeams> & DivergenceOptions = {}>(
   config?: P,
 ): ExecutorWrapper<R, R & Omit<PositionSeams, keyof P>, M>;
-export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<PositionSeams> = {}>(
+export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<PositionSeams> & DivergenceOptions = {}>(
   config: P,
   inner: Executor<R, M>,
 ): Executor<R & Omit<PositionSeams, keyof P>, M>;
 export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics>(
-  configOrInner?: Partial<PositionSeams> | Executor<R, M>,
+  configOrInner?: (Partial<PositionSeams> & DivergenceOptions) | Executor<R, M>,
   maybeInner?: Executor<R, M>,
 ): ExecutorWrapper<R, R, M> | Executor<R, M> {
-  const config = (isExecutor(configOrInner) ? undefined : configOrInner) as Partial<PositionSeams> | undefined;
+  const config = (isExecutor(configOrInner) ? undefined : configOrInner) as (Partial<PositionSeams> & DivergenceOptions) | undefined;
   const inner = (isExecutor(configOrInner) ? configOrInner : maybeInner) as Executor<R, M> | undefined;
   const wrap = ((innerExec: Executor): Executor => ({
     // A session layer resumes state, so a `withMemoize` above must refuse to cache — and the per-op
@@ -244,11 +289,18 @@ export function withSessionPosition<R = ExecServices, M extends ExecMetrics = Ex
       sessionResume: true,
     }),
     start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue> {
-      const sessions = config?.sessions ?? ctx.sessions;
-      const request = ctx.sessionRequest;
-      // No conversation asked for, or nowhere to keep one ⇒ nothing to do. Silence is right here: a
-      // run without sessions wired is an ordinary run, not a misconfiguration.
-      if (request === undefined || sessions === undefined) return innerExec.start(op, ctx);
+      // CONSTRUCTION only: the store is what this wrapper FORKS with, and a caller composing it has
+      // the store in hand. It was never something the executor below needed to make a call.
+      const sessions = config?.sessions;
+      // ALREADY RESOLVED — this layer no longer looks a conversation up, it only enforces what happens
+      // to one. Whoever knows which conversation an operation belongs to resolves it and hands the
+      // POSITION over: `hw` in `servicesFor`, `withSession` from an op's declaration. That is why
+      // `sessionRequest` is gone from `ExecServices` — a request is not something a prompt call
+      // consumes, and a bundle of services is for what the executor needs to make the call.
+      const resolved = ctx.session;
+      // No conversation in play, or nowhere to fork into ⇒ nothing to do. Silence is right here: a run
+      // without sessions wired is an ordinary run, not a misconfiguration.
+      if (resolved === undefined || sessions === undefined) return innerExec.start(op, ctx);
       return wrapHandle(async (ctl) => {
         const attempt = async (session: ResolvedSession): Promise<ExecResult<ResolvedValue, ExecMetrics>> => {
           const result = await ctl.started(innerExec.start(op, { ...ctx, session })).result;
@@ -257,16 +309,18 @@ export function withSessionPosition<R = ExecServices, M extends ExecMetrics = Ex
           return { ...result, metrics: { ...result.metrics, sessionRef: `${session.at.id}@${session.at.seq + 1}` } };
         };
         if (ctl.canceled()) return canceledFailure("canceled before the call started");
-        const resolved = await sessions.resolve(request);
         const first = await attempt(resolved);
         if (isPositionTaken(first)) {
           // FORK, not retry-at-the-next-slot. Something already claimed this position, so continuing
           // here would mean continuing a conversation containing a turn this call never saw.
-          const forked = await sessions.fork(resolved.id, request.seed);
-          const second = await attempt(await sessions.resolve({ ...request, ref: forked, fork: false }));
-          return await checkDivergence(sessions, resolved, second, ctx);
+          // Forked from the RESOLUTION, not from the request. The seed rides on `ResolvedSession` now,
+          // which is what lets a caller hand this layer a position it already resolved — the request
+          // no longer has to survive alongside the resolution just so a fork can name itself.
+          const forked = await sessions.fork(resolved.id, resolved.seed);
+          const second = await attempt(await sessions.resolve({ ref: forked, ...(resolved.seed !== undefined ? { seed: resolved.seed } : {}) }));
+          return await checkDivergence(sessions, resolved, second, config ?? {});
         }
-        return await checkDivergence(sessions, resolved, first, ctx);
+        return await checkDivergence(sessions, resolved, first, config ?? {});
       });
     },
   })) as unknown as ExecutorWrapper<R, R, M>;
@@ -297,21 +351,21 @@ async function checkDivergence(
   sessions: SessionStore,
   resolved: ResolvedSession,
   result: ExecResult<ResolvedValue, ExecMetrics>,
-  ctx: ExecServices,
+  options: DivergenceOptions,
 ): Promise<ExecResult<ResolvedValue, ExecMetrics>> {
   const resumed = resolved.providerSessionId;
   const reported = sessionOutcomeOf(result)?.providerSessionId;
   if (resolved.mode !== "append" || resumed === undefined || reported === undefined || reported === resumed) return result;
 
   const reason = `session ${resolved.id} diverged: resumed provider session ${resumed}, but the call ran in ${reported}`;
-  ctx.onDivergence?.({ session: resolved.id, resumed, reported, reason });
+  options.onDivergence?.({ session: resolved.id, resumed, reported, reason });
 
   if (sessions.resync === undefined) return result;
   // Re-read from the provider when it offers a way to. `read` is per-adapter and optional — the
   // Messages API has none and, being stateless, cannot diverge in the first place.
   let contents: readonly unknown[] = [];
   try {
-    contents = (await ctx.sessionReader?.read(reported)) ?? [];
+    contents = (await options.readSession?.read(reported)) ?? [];
   } catch {
     // A failed re-read is still a resync, just an empty one. Losing the conversation is bad; carrying
     // on against a mirror we know is wrong is worse.

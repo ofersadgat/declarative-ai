@@ -11,7 +11,7 @@
  * vocabulary — so a test like this could not be written at all.
  */
 import { describe, expect, it } from "vitest";
-import { isOk, promptOp, resolveSessionRef, type ExecEvent, type ExecServices, type ResolvedSession, type Tool } from "@declarative-ai/exec";
+import { isOk, sessionOutcomeOf, promptOp, resolveSessionRef, type ExecEvent, type ExecServices, type ResolvedSession, type Tool } from "@declarative-ai/exec";
 import type { LlmOutput, ModelMessage } from "@declarative-ai/llm";
 import { PromptExecutor } from "@declarative-ai/promptop";
 import { AgentApiExecutor, AgentExecutor, DELEGATED_CAPS } from "../src/index.js";
@@ -21,15 +21,25 @@ const op = (user = "do it", config: Record<string, unknown> = {}) =>
   promptOp({ user, config: config as never, output: { name: "answer", schema: { type: "string" } } });
 
 /** A query that records what it was handed and answers with a fixed result. */
-function capturing(result: { text?: string; costUsd?: number; sessionId?: string } = {}) {
+function capturing(result: { text?: string; costUsd?: number; sessionId?: string; structured?: unknown } = {}) {
   let seen: AgentQueryOptions | undefined;
   const query: AgentQuery = async function* (opts) {
     seen = opts;
     yield { type: "assistant" };
-    yield { type: "result", result: { text: result.text ?? "done", ...result } };
+    yield { type: "result", result: { text: result.text ?? "done", ...result } as never };
   };
   return { query, seen: () => seen };
 }
+
+/** A prompt op declaring an OBJECT output — the shape a state with declared outputs lowers to. */
+const objectOp = () =>
+  promptOp({
+    user: "extract them",
+    output: {
+      name: "answer",
+      schema: { type: "object", properties: { items: { type: "array", items: { type: "string" } } }, required: ["items"] },
+    },
+  });
 
 /** A resolved session with the non-enumerable half attached, exactly as a store hands one over. */
 /** Typed as the ctx slot is (`JsonValue`), since that is where it gets assigned; the executor casts
@@ -67,8 +77,50 @@ describe("AgentExecutor — a delegated agent answering a PROMPT op", () => {
   it("declares the delegated capability record, not the provider one", () => {
     const agent = new AgentExecutor();
     expect(agent.capabilities).toEqual(DELEGATED_CAPS);
-    expect(agent.capabilities.structuredOutput).toBe(false);
+    // Structured output is NATIVE here: both transports carry the schema and retry inside their own
+    // loop until the value validates. What stays false is memoizability — an agent runs its own
+    // non-deterministic loop, and two runs of it are not the same call.
+    expect(agent.capabilities.structuredOutput).toBe(true);
     expect(agent.capabilities.memoizable).toBe(false);
+  });
+
+  /**
+   * THE OUTPUT SCHEMA, which is what lets a delegated agent serve a state that declares outputs.
+   *
+   * It was read off the lowered declaration by every other transport and dropped by this one, so the
+   * agent answered in prose and the engine found none of the slots the state declared — reported as
+   * "prompt operation did not produce required output 'x'", which names the state and not the reason.
+   */
+  it("hands the output schema to the transport, which is what constrains the answer", async () => {
+    const { query, seen } = capturing({ structured: { items: ["a", "b"] } });
+    await new AgentExecutor({ query }).start(objectOp(), {}).result;
+    expect(seen()?.schema).toMatchObject({ type: "object", required: ["items"] });
+  });
+
+  it("answers with the STRUCTURED value, not with the prose beside it", async () => {
+    // Both arrive on the terminal message and they are not the same thing: `result` summarizes the
+    // work. Answering with it where an object was declared fills none of the state's slots.
+    const { query } = capturing({ text: "I found two items.", structured: { items: ["a", "b"] } });
+    const result = await new AgentExecutor({ query }).start(objectOp(), {}).result;
+    expect(isOk(result) && result.value).toEqual({ items: ["a", "b"] });
+  });
+
+  it("says nothing about a schema when the op declares no object output", async () => {
+    const { query, seen } = capturing({ text: "the answer" });
+    await new AgentExecutor({ query }).start(op(), {}).result;
+    // A `{type: "string"}` output is a TEXT call — there is nothing to constrain, and sending a schema
+    // would make the agent wrap a plain answer in JSON nobody asked for.
+    expect(seen()?.schema).toBeUndefined();
+  });
+
+  it("fails, retriably, when a schema was asked for and no structured value came back", async () => {
+    // NOT a fall back to the prose. The caller cannot tell that apart from an agent that ignored the
+    // request, and the engine would reject it one layer further from the transport that knows why.
+    const { query } = capturing({ text: "I found two items." });
+    const result = await new AgentExecutor({ query }).start(objectOp(), {}).result;
+    expect(isOk(result)).toBe(false);
+    expect(!isOk(result) && result.error).toMatchObject({ classification: "api-retriable" });
+    expect(!isOk(result) && result.error.reason).toMatch(/no structured output/);
   });
 
   it("needs no ModelRouter — there is no provider endpoint in the picture", async () => {
@@ -180,12 +232,14 @@ describe("one session implementation, two transports (the point of the split)", 
   });
 
   it("reports the handle the run ENDED in, so a fork's new id is not lost", async () => {
-    // Losing it would put two branches into one remote session — silent and unrecoverable. In RECORD
-    // mode the payload IS the call output, which is where the handle rides.
+    // Losing it would put two branches into one remote session — silent and unrecoverable. It rides on
+    // the SESSION channel, which is where `withRecord` reads it and therefore where it has to be:
+    // every recorded call needs the handle, where only a persisting caller needs the reasoning and the
+    // tool trace, so the two are reported separately.
     const { query } = capturing({ sessionId: "sess-after" });
-    const agent = new AgentExecutor({ query, record: true });
+    const agent = new AgentExecutor({ query });
     const result = await agent.start(op(), { session: session({ mode: "fork", providerSessionId: "sess-abc" }) }).result;
-    expect((result.value as { providerSessionId?: string }).providerSessionId).toBe("sess-after");
+    expect(sessionOutcomeOf(result)?.providerSessionId).toBe("sess-after");
   });
 
   it("passes nothing session-shaped when no conversation is in play", async () => {
@@ -239,9 +293,16 @@ describe("lossless output — what the agent produced reaches the caller", () =>
     };
   };
 
-  /** The RECORD-mode payload — the full `LlmOutput`, which is what a session persists. */
+  /**
+   * The full `LlmOutput`, ASKED FOR on the record channel — which is what a session persists.
+   *
+   * This used to construct the executor with `record: true` and read the payload off the execution
+   * VALUE. That mode swapped `Out`, and `AgentExecutor` drops `PromptExecutor`'s `Out` parameter, so
+   * the class typechecked as returning a projection while returning a payload. Asking per call leaves
+   * the value alone and puts the payload beside it, where no type has to lie.
+   */
   const payloadOf = async (query: AgentQuery, ctx: ExecServices = {}) =>
-    (await new AgentExecutor({ query, record: true }).start(op(), ctx).result).value as unknown as LlmOutput;
+    (await new AgentExecutor({ query }).start(op(), { ...ctx, returnRecord: true }).result as { record?: LlmOutput }).record!;
 
   it("reports the agent's OWN finish reason, so a truncated run does not read as a clean one", async () => {
     expect((await payloadOf(fullTurn)).finishReason).toBe("length");
@@ -273,7 +334,7 @@ describe("lossless output — what the agent produced reaches the caller", () =>
   });
 
   it("carries every token count plus rawUsage, so costUsd stays recomputable", async () => {
-    const result = await new AgentExecutor({ query: fullTurn, record: true }).start(op(), {}).result;
+    const result = await new AgentExecutor({ query: fullTurn }).start(op(), {}).result;
     expect(result.metrics).toMatchObject({
       costUsd: 0.19,
       costSource: "provider",
@@ -290,7 +351,7 @@ describe("lossless output — what the agent produced reaches the caller", () =>
   it("delivers output deltas and provider events to a `for await` over the handle", async () => {
     // `DELEGATED_CAPS.streaming: true` was aspirational: the base returns `emptyEvents()`, so nothing
     // could be watched at all. For a run that takes minutes that is indistinguishable from a hang.
-    const handle = new AgentExecutor({ query: fullTurn, record: true }).start(op(), {});
+    const handle = new AgentExecutor({ query: fullTurn }).start(op(), {});
     const seen: ExecEvent[] = [];
     for await (const event of handle.events) seen.push(event);
     await handle.result;
@@ -548,10 +609,12 @@ describe("the control channel", () => {
         yield { type: "result", result: { text: "", finishReason: "aborted" } } as const;
       },
     });
-    const result = await new AgentExecutor({ query, record: true }).start(op(), {}).result;
+    const result = await new AgentExecutor({ query }).start(op(), {}).result;
     expect(isOk(result)).toBe(true);
-    expect((result.value as unknown as LlmOutput).value).toBe("1\n2\n3");
-    expect((result.value as unknown as LlmOutput).finishReason).toBe("aborted");
+    // The op's OUTPUT VALUE directly — projection is the default, so there is no payload to
+    // reach through unless a caller asked for one.
+    expect(result.value).toBe("1\n2\n3");
+    expect(((await new AgentExecutor({ query }).start(op(), { returnRecord: true }).result) as { record?: LlmOutput }).record?.finishReason).toBe("aborted");
   });
 
   it("is IDEMPOTENT, so a Stop that races the answer landing is a no-op", async () => {

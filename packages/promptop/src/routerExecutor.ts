@@ -21,7 +21,7 @@
  */
 import type { Capabilities, InlineFamily, MetricsAlgebra, Operation, ResolvedValue } from "@declarative-ai/exec";
 import { finishedHandle, type ExecHandle, type ExecServices, type Executor } from "@declarative-ai/exec";
-import { mergeLlmMetrics, type LlmMetrics } from "@declarative-ai/llm";
+import { emptyLlmMetrics, mergeLlmMetrics, type LlmMetrics } from "@declarative-ai/llm";
 
 export interface PromptRouterExecutorOptions {
   /**
@@ -61,7 +61,7 @@ export class PromptRouterExecutor implements Executor<ExecServices, LlmMetrics, 
   static readonly kind: string = "prompt-router";
 
   readonly capabilities: Capabilities;
-  readonly metrics: MetricsAlgebra<LlmMetrics> = { merge: mergeLlmMetrics };
+  readonly metrics: MetricsAlgebra<LlmMetrics> = { merge: mergeLlmMetrics, empty: emptyLlmMetrics };
 
   constructor(private readonly options: PromptRouterExecutorOptions) {
     const first = options.fallback ?? Object.values(options.routes)[0];

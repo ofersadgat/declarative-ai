@@ -77,21 +77,19 @@ describe("PromptExecutor (core) — outcome mapping", () => {
     expect(calls[0]!.env.validator).toBe(validator);
   });
 
-  it("passes ctx.timeoutMs through as the per-call budget (the field PromptOpEnvironment used to carry)", async () => {
+  it("takes no timeout ARGUMENT — a window arrives as cancellation, on the signal", async () => {
+    // `ctx.timeoutMs` used to ride alongside `ctx.abortSignal` and the llm layer turned it straight
+    // back into `AbortSignal.timeout(...)`, folding it into the same signal. Two spellings of one
+    // bound, and only the executors that knew to read the number honoured it.
     const { runner, calls } = fakeRunner([okOutcome()]);
-    await createPromptExecutor({ runner }).start(promptOp(), { timeoutMs: 1234 }).result;
-    expect(calls[0]!.timeoutMs).toBe(1234);
+    const signal = AbortSignal.timeout(60_000);
+    await createPromptExecutor({ runner }).start(promptOp(), { abortSignal: signal }).result;
+    expect(calls[0]!.timeoutMs).toBeUndefined();
+    expect(calls[0]!.env.abortSignal).toBeDefined();
   });
 });
 
 describe("core — loud failure on unconsumed wrapper fields", () => {
-  it("refuses a ctx.deadline the bare core cannot honor (compose withDeadline)", async () => {
-    const { runner, calls } = fakeRunner([okOutcome()]);
-    const out = await createPromptExecutor({ runner }).start(promptOp(), { deadline: { maxDurationMs: 1000 }, stepStartMs: 0 }).result;
-    expect(errorOf(out)?.classification).toBe("permanent");
-    expect(errorOf(out)?.reason).toMatch(/compose withDeadline/);
-    expect(calls).toHaveLength(0);
-  });
 
   it("refuses a sessionId no session layer consumed (compose withSession)", async () => {
     const { runner, calls } = fakeRunner([okOutcome()]);
@@ -210,30 +208,43 @@ describe("executePromptOp — the op-level call (no projection)", () => {
   });
 });
 
-describe("record mode — the projection as a TYPE-LEVEL mode (Out = LlmOutput)", () => {
-  it("a record-mode core returns the FULL payload as the execution value, through a wrapper stack", async () => {
+describe("returnRecord — the payload ALONGSIDE the value, never instead of it", () => {
+  it("hands back the full payload when the recorder asks, without changing the value", async () => {
     const { runner } = fakeRunner([okOutcome({ thinking: [{ type: "reasoning", text: "hmm", textOffset: 0 }] })]);
     const { compose } = await import("@declarative-ai/exec");
     const { withBudget, withRateLimit } = await import("../src/wrappers.js");
     const { PassthroughRateLimiter } = await import("@declarative-ai/exec");
-    const core = createPromptExecutor({ runner, record: true });
-    const stack = compose(core)
+    const stack = compose(createPromptExecutor({ runner }))
       .with(withRateLimit({ limiter: new PassthroughRateLimiter() }))
       .with(withBudget({}));
-    const result = await stack.start(promptOp(), {}).result;
-    // The outward result IS an LlmCallResult: ExecResult<LlmOutput, LlmMetrics> — no smuggling, no
-    // side channel; the wrapping executors' result type carries the payload.
-    expectTypeOf(result).toEqualTypeOf<ExecResult<LlmOutput, LlmMetrics>>();
-    expect("error" in result ? result.error : undefined).toBeUndefined();
-    expect(result.value?.value).toEqual({ answer: "4" });
-    expect(result.value?.thinking?.[0]?.text).toBe("hmm");
-    expect(result.value?.finishReason).toBe("stop");
+
+    const result = await stack.start(promptOp(), { returnRecord: true }).result;
+
+    // The VALUE is the op's output either way. This is the difference from the `record` construction
+    // option it replaced: that swapped the execution value, which meant swapping `Out` — a static
+    // parameter `AgentExecutor` drops, so every agent class typechecked as returning a projection
+    // while returning a payload. Alongside, there is no type to be wrong about.
+    expect(result.value).toEqual({ answer: "4" });
+    const payload = (result as { record?: LlmOutput }).record;
+    expect(payload?.value).toEqual({ answer: "4" });
+    expect(payload?.thinking?.[0]?.text).toBe("hmm");
+    expect(payload?.finishReason).toBe("stop");
+    // …and it SURVIVES the wrapper stack, which is the property that has to hold: `withMetrics`
+    // rebuilds the result on every re-report, so an unnamed extra would be silently dropped.
     expect(result.metrics.costUsd).toBe(0.001);
   });
 
-  it("value mode (the default) still projects — the two modes are the same pipeline", async () => {
+  it("reports no payload when nobody asked — the default is unchanged", async () => {
     const { runner } = fakeRunner([okOutcome({ thinking: [{ type: "reasoning", text: "hmm", textOffset: 0 }] })]);
     const out = await createPromptExecutor({ runner }).start(promptOp(), {}).result;
     expect(out.value).toEqual({ answer: "4" }); // the op's output value, payload projected away
+    expect(out).not.toHaveProperty("record");
+  });
+
+  it("reports the payload on a FAILURE too, which is when it is most worth having", async () => {
+    // A call that produced turns and then failed still produced them; the record is evidence.
+    const { runner } = fakeRunner([okOutcome({ error: { classification: "api-retriable", reason: "overloaded" } })]);
+    const out = await createPromptExecutor({ runner }).start(promptOp(), { returnRecord: true }).result;
+    expect((out as { record?: LlmOutput }).record?.messages).toHaveLength(1);
   });
 });

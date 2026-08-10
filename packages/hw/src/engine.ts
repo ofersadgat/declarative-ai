@@ -150,6 +150,15 @@ export interface EngineConfig {
   /** Forwarded to runtimes/functions (rate limiter, meter, ...) as their `services`. `validator`/session
    *  store are supplied by the engine. */
   services?: ExecServices;
+  /**
+   * The conversation store this run's transcripts live in.
+   *
+   * Config rather than a field on `services`, because it is the ENGINE's dependency and not an
+   * executor's: the engine resolves each operation's position from it and hands the executor the
+   * position. Nothing below needs the store — a host composing a session layer gives that layer its
+   * own copy at construction, which is where the code that forks with it can see it.
+   */
+  sessions?: SessionStore;
   clock?: Clock;
   onEvent?: (event: EngineEvent) => void;
   /** Tool-call permissions (DESIGN §5.1, "Permissions: two orthogonal axes"). `approve` collects a human decision on `ask`
@@ -1338,7 +1347,7 @@ export class WorkflowEngine {
     const rendered = op.kind === "prompt" ? { ...op, user: this.renderTemplate(op.user, instance, literal.values) } : op;
     let outcome;
     try {
-      outcome = await this.operations.start(rendered, this.servicesFor(resourceKey, instance, toolsOrFailure.tools)).result;
+      outcome = await this.operations.start(rendered, (await this.servicesFor(resourceKey, instance, toolsOrFailure.tools))).result;
     } catch (e) {
       return { error: `executor rejected: ${(e as Error).message}` };
     }
@@ -1407,7 +1416,7 @@ export class WorkflowEngine {
     const toolsOrFailure = this.resolveTools(env, resourceKey, delegates);
     if ("failure" in toolsOrFailure) return fail(toolsOrFailure.failure);
 
-    const services = this.servicesFor(resourceKey, instance, toolsOrFailure.tools, session);
+    const services = await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, session);
     // Errors are DATA (§4.2): the impl RESOLVES value-or-failure, so a 429 raised inside a registered
     // function keeps its classification instead of being reconstructed from `err.name` — which is what
     // made every non-`AbortError` permanently failed, retry machinery and all.
@@ -1523,8 +1532,15 @@ export class WorkflowEngine {
 
     // The per-call ENVIRONMENT the old `PromptOpEnvironment` carried — tools, the time budget,
     // cancellation — are `ExecServices` fields now, which is why that type could be deleted outright.
-    const services = this.servicesFor(session.resourceKey, instance, tools, session);
-    if (instance.def.limits?.timeout !== undefined) services.timeoutMs = instance.def.limits.timeout * 1000;
+    const services = await this.servicesFor(session.resourceKey, instance, tools, session);
+    // An authored `limits.timeout` reaches the call as CANCELLATION. It used to be published as
+    // `services.timeoutMs`, which only an executor that knew to read it honoured — and which the llm
+    // layer turned straight back into `AbortSignal.timeout(...)` anyway. Folding it into the signal
+    // bounds every executor, including ones that read nothing but `abortSignal`.
+    if (instance.def.limits?.timeout !== undefined) {
+      const bound = AbortSignal.timeout(instance.def.limits.timeout * 1000);
+      services.abortSignal = services.abortSignal ? AbortSignal.any([services.abortSignal, bound]) : bound;
+    }
     let outcome;
     try {
       outcome = await promptExecutor.start(resolvedOp, services).result;
@@ -1617,21 +1633,34 @@ export class WorkflowEngine {
   }
 
   /** The services one operation runs with: its resource bundle's workspace, its tools, its cancellation. */
-  private servicesFor(resourceKey: string, instance: Instance, tools?: Record<string, Tool>, session?: SessionBinding): ExecServices {
+  private async servicesFor(
+    resourceKey: string,
+    instance: Instance,
+    tools?: Record<string, Tool>,
+    session?: SessionBinding,
+  ): Promise<ExecServices> {
     const services = this.childServices();
-    // The conversation this operation was AUTHORED against, stated as a request rather than resolved.
-    // The engine knows which conversation and whether the author asked to branch; it does not know
-    // where that conversation currently is, and must not — only the store does. A composed session
-    // layer turns this into `ctx.session`; with none composed, no session is in play, which is the
-    // honest reading of a run that never wired one.
-    if (session !== undefined) {
-      services.sessionRequest = {
+    // RESOLVED HERE, not stated as a request for a layer below to resolve.
+    //
+    // The engine used to publish `ctx.sessionRequest` — which conversation, and whether to branch —
+    // and leave the lookup to a composed layer, on the principle that a requester must not claim to
+    // know where a conversation currently sits. The principle holds; what changed is that resolving
+    // IMMEDIATELY BEFORE dispatch is not claiming anything: nothing is stored, nothing is guessed, and
+    // the answer is a frame old rather than a stack-depth old.
+    //
+    // What it buys is that the executor is handed a POSITION — a provider handle and an append/fork
+    // decision, which are the only session facts a prompt call actually consumes — instead of a
+    // request it has no use for. A services bundle should carry what the executor needs to make the
+    // call, and `sessionRequest` never met that test.
+    const sessions = this.sessions();
+    if (session !== undefined && sessions !== undefined) {
+      services.session = await sessions.resolve({
         ref: session.id,
         ...(session.fork ? { fork: true } : {}),
         // Stable across replays, so a re-run lands on the conversation it landed on before rather
         // than minting a second one beside it (DESIGN.md §5.1).
         seed: `${instance.stateId}:${session.id}`,
-      };
+      });
     }
     // Per-BUNDLE workspace (DESIGN §5.1, "Sessions: the run-scoped resource bundle"): states sharing a
     // resource key share one; a fan-out can isolate each branch (e.g. its own worktree) via
@@ -1696,7 +1725,6 @@ export class WorkflowEngine {
     return {
       ...this.config.services,
       validator: this.validator,
-      sessions: this.sessions(),
       // A delegated adapter reads this to route its native permission callback through our approval
       // UI; the engine wraps a composed runtime's tools directly, so this is inert for a prompt op.
       // `approve` is `@declarative-ai/permissions`' seam on `ExecServices` — `exec` does not know it
@@ -1858,10 +1886,16 @@ export class WorkflowEngine {
     });
   }
 
-  /** The run's session store — the SINGLE transcript home (an app-provided `services.sessions` wins), shared
-   *  with the llm `withSession` path via `ctx.sessions` (childServices). */
+  /**
+   * The run's session store — the SINGLE transcript home, and the engine's own.
+   *
+   * It used to be republished on every child's `ExecServices` so a composed llm layer could find it.
+   * It is not published any more: the engine RESOLVES positions itself (`servicesFor`) and hands each
+   * executor the position, so nothing downstream needs the store. A host that composes a session layer
+   * passes the store to that layer at construction, where the layer that forks with it can see it.
+   */
   private sessions(): SessionStore {
-    return this.config.services?.sessions ?? this.sessionStore;
+    return this.config.sessions ?? this.sessionStore;
   }
 
   /**

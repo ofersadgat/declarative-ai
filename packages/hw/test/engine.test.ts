@@ -87,20 +87,27 @@ function makeEngine(files: Record<string, StateDef>, rootId: string, script: Scr
   // transcript stays empty. Composing them here is what makes these tests exercise the real path
   // rather than an engine-private shortcut production never takes.
   const store = new MapSessionStore();
-  const extra = { ...opts.extra, services: { records: store as never, ...opts.extra?.services, sessions: opts.extra?.services?.sessions ?? store } };
+  // ONE store for both halves. `records` is where a call's payload lands and `sessions` is what reads
+  // it back, so a harness that recorded into its own store while the caller read another would report
+  // an empty transcript for a run that produced one — which is exactly what happened when `records`
+  // stopped being a second, independently-overridable ctx field.
+  // The store is ENGINE config now, not a service. The engine resolves each operation's position from
+  // it and hands the executor the position; nothing below needs the store itself.
+  const sessions = ((opts.extra as { sessions?: typeof store } | undefined)?.sessions ?? store) as typeof store;
+  const extra = { ...opts.extra, sessions };
   // Around the DISPATCHER, so a FUNCTION op reaches the layer too. One layer, both paths: composing
   // it here AND around the prompt executor would put two position layers on one prompt call, and the
   // inner one would find its position already claimed and fork on every call.
   const operations = opts.sessionDispatcher
     ? (withSessionPosition(
-        { sessions: store },
-        withRecord({ records: store as never }, createOperationExecutor({ functions: registry.functions as never, prompt: (opts.prompt ?? fake) as never })),
+        { sessions },
+        withRecord({ records: sessions as never }, createOperationExecutor({ functions: registry.functions as never, prompt: (opts.prompt ?? fake) as never })),
       ) as never)
     : undefined;
   const engine = new WorkflowEngine({
     bundle: loadBundle(files, rootId),
     registry,
-    prompt: withSessionPosition(withRecord(((opts.prompt ?? fake) as never))) as never,
+    prompt: withSessionPosition(withRecord({ records: sessions as never }, (opts.prompt ?? fake) as never)) as never,
     persistence,
     ...(operations !== undefined ? { operations } : {}),
     ...extra,
@@ -283,13 +290,22 @@ describe("SPEC §9 — planning parent: sequence, re-plan loop, iteration limit"
     expect(fake.calls.map(modelOf)).toEqual(["planner", "planner", "critic"]);
   });
 
-  it("exposes a run-scoped session store shared across all states (ctx.sessions)", async () => {
-    const { engine, fake } = makeEngine(specPlanningFiles(), PLAN_ID, planningScript());
+  it("resolves every state's position out of ONE run-scoped store", async () => {
+    // This used to assert that every state was handed the STORE on `ctx.sessions`. It is not: the
+    // engine resolves each operation's position itself and hands over the position, so what a state
+    // receives is `ctx.session` — the provider handle and the append/fork decision, which are the only
+    // session facts a prompt call consumes. The property worth keeping is the one underneath: all of
+    // them come from a single run-scoped conversation store.
+    const { engine, fake } = makeEngine(specPlanningFiles(), PLAN_ID, planningScript(), { sessionDispatcher: true });
     await engine.run({ inputs: { issue: "the issue" } });
-    const stores = fake.calls.map((c: FakeCall) => c.ctx).map((c) => c.sessions);
-    expect(stores.length).toBeGreaterThan(1);
-    expect(stores.every((s) => s !== undefined)).toBe(true);
-    expect(new Set(stores).size).toBe(1); // one run-scoped store, shared by every state
+    const positions = fake.calls.map((c: FakeCall) => c.ctx.session).filter((s) => s !== undefined);
+    expect(positions.length).toBeGreaterThan(1);
+    // ONE conversation — the fixture declares `environment: { session: "planning" }`, so every state
+    // inherits it — at DISTINCT positions, which is the append-only stream doing its job. That pair is
+    // what the old "one shared store" assertion was really about, said in the vocabulary that survives
+    // now that a state is handed a position rather than a store.
+    expect(new Set(positions.map((p) => p!.at.id)).size).toBe(1);
+    expect(new Set(positions.map((p) => p!.at.seq)).size).toBe(positions.length);
   });
 
   it("needs_changes triggers a re-plan with FRESH instances (sequence reset, SPEC §3.3)", async () => {
@@ -630,7 +646,7 @@ describe("conversation modes (SPEC §4.7)", () => {
       specPlanningFiles(),
       PLAN_ID,
       () => ({ error: { classification: "permanent", reason: "model exploded" }, metrics: { durationMs: 1, costUsd: 0, costSource: "unknown" } }),
-      { extra: { services: { sessions: store, records: store as never } } },
+      { extra: { sessions: store } },
     );
     const result = await engine.run({ inputs: { issue: "the issue" } });
     expect(result.outcome).toBe("error");
@@ -639,7 +655,7 @@ describe("conversation modes (SPEC §4.7)", () => {
 
   it("records the transcript into the shared session store (unified with the withSession path)", async () => {
     const store = new MapSessionStore();
-    const { engine } = makeEngine(specPlanningFiles(), PLAN_ID, planningScript(), { extra: { services: { sessions: store, records: store as never } } });
+    const { engine } = makeEngine(specPlanningFiles(), PLAN_ID, planningScript(), { extra: { sessions: store } });
     await engine.run({ inputs: { issue: "the issue" } });
     // The built-in transcript lives in the SAME store a runtime's withSession reads — one source of truth.
     const messages = store.messages("planning@99") as unknown as Array<{ role: string; content: string }>;
@@ -1002,12 +1018,12 @@ describe("tool permissions (DESIGN §5.1, \"Permissions: two orthogonal axes\")"
 describe("a delegated agent runs in a CONVERSATION (SESSIONS.md §6)", () => {
   /** Captures what the engine handed the runtime: the request it stated, and what it resolved to. */
   function capturingAgent(capabilities: Partial<RuntimeCapabilities>) {
-    const seen: Array<{ request?: SessionRequest; session?: ResolvedSession }> = [];
+    const seen: Array<{ session?: ResolvedSession }> = [];
     const entry: FakeEntry = {
       runtime: true,
       capabilities,
       run: ((_inputs: never, ctx: ExecServices): FunctionResult<ResolvedValue, WorkflowMetrics> => {
-        seen.push({ ...(ctx.sessionRequest ? { request: ctx.sessionRequest } : {}), ...(ctx.session ? { session: ctx.session } : {}) });
+        seen.push({ ...(ctx.session ? { session: ctx.session } : {}) });
         return { value: { r: "done" } };
       }) as FakeImpl,
     };
@@ -1033,9 +1049,14 @@ describe("a delegated agent runs in a CONVERSATION (SESSIONS.md §6)", () => {
     const { entry, seen } = capturingAgent({ sessionResume: true });
     const { engine } = makeEngine(agentFiles("review"), "s", () => ok({}), { functions: { agent: entry } });
     expect((await engine.run({ inputs: {} })).outcome).toBe("success");
-    expect(seen[0]!.request?.ref).toBe("review");
-    // Stable across replays, so a re-run lands on the conversation it landed on before.
-    expect(seen[0]!.request?.seed).toBe("s:review");
+    // A RESOLVED position, not a request. The engine looks the conversation up in `servicesFor` now,
+    // immediately before dispatch, so what reaches an executor is the provider handle and the
+    // append/fork decision it actually consumes — never a request it has no use for.
+    // `at.id` is the CONVERSATION; `id` is that conversation AT a position (`review@0`).
+    expect(seen[0]!.session?.at.id).toBe("review");
+    // Stable across replays, so a re-run lands on the conversation it landed on before. Carried on the
+    // resolution so a fork can name itself without the request being kept alive alongside it.
+    expect(seen[0]!.session?.seed).toBe("s:review");
   });
 
   it("mints a per-instance conversation when the state declares none", async () => {
@@ -1044,7 +1065,7 @@ describe("a delegated agent runs in a CONVERSATION (SESSIONS.md §6)", () => {
     await engine.run({ inputs: {} });
     // An undeclared conversation is private to the instance, never an implicit shared transcript —
     // that is the growth the append-only model exists to stop.
-    expect(seen[0]!.request?.ref).toMatch(/^#i\d+$/);
+    expect(seen[0]!.session?.at.id).toMatch(/^#i\d+$/);
   });
 
   // The gate is the entry's own claim to HAVE a transcript. Minting conversations for pure helpers
@@ -1053,13 +1074,13 @@ describe("a delegated agent runs in a CONVERSATION (SESSIONS.md §6)", () => {
     const cannotResume = capturingAgent({ sessionResume: false });
     const { engine } = makeEngine(agentFiles("review"), "s", () => ok({}), { functions: { agent: cannotResume.entry } });
     await engine.run({ inputs: {} });
-    expect(cannotResume.seen[0]!.request).toBeUndefined();
+    expect(cannotResume.seen[0]!.session).toBeUndefined();
 
     const host = capturingAgent({});
     host.entry.runtime = false;
     const plain = makeEngine(agentFiles("review"), "s", () => ok({}), { functions: { agent: host.entry } });
     await plain.engine.run({ inputs: {} });
-    expect(host.seen[0]!.request).toBeUndefined();
+    expect(host.seen[0]!.session).toBeUndefined();
   });
 
   it("resolves to a POSITION once the host composes the session layer around the dispatcher", async () => {

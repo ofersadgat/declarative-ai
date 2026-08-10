@@ -16,6 +16,12 @@ import type { BudgetMetrics, ExecMetrics, Failure, ResolvedValue } from "@declar
  */
 export type WorkflowMetrics = ExecMetrics & BudgetMetrics;
 
+/**
+ * How well a cost figure is known — `mergeLlmMetrics`'s ranking, restated here for the same reason
+ * `durationMs` is: hw does not import the llm layer, and the two records are kept compatible by hand.
+ */
+const COST_SOURCE_RANK: Record<WorkflowMetrics["costSource"], number> = { provider: 2, table: 1, unknown: 0 };
+
 /** How two workflow measurements combine: durations and spend add, the start is the first observation. */
 export function mergeWorkflowMetrics(a: WorkflowMetrics, b: WorkflowMetrics): WorkflowMetrics {
   return {
@@ -23,9 +29,18 @@ export function mergeWorkflowMetrics(a: WorkflowMetrics, b: WorkflowMetrics): Wo
     startMs: a.startMs ?? b.startMs,
     childLlmCalls: (a.childLlmCalls ?? 0) + (b.childLlmCalls ?? 0),
     costUsd: a.costUsd + b.costUsd,
-    costSource: b.costSource,
+    // The BETTER-KNOWN source, not the right-hand one. Taking `b` blindly meant any zero-cost step
+    // merged after a real call downgraded that call's provenance to whatever the step happened to
+    // claim — a provider-authoritative figure reported as a guess, and the roll-up saying so. It also
+    // makes `empty()` below a true identity: `unknown` ranks lowest, so folding it in changes nothing.
+    costSource: COST_SOURCE_RANK[a.costSource] >= COST_SOURCE_RANK[b.costSource] ? a.costSource : b.costSource,
     childCostUsd: (a.childCostUsd ?? 0) + (b.childCostUsd ?? 0),
   };
+}
+
+/** The neutral {@link WorkflowMetrics}: no time, no spend, and no claim about where a price came from. */
+export function emptyWorkflowMetrics(): WorkflowMetrics {
+  return { durationMs: 0, costUsd: 0, costSource: "unknown" };
 }
 import type { TerminationOutcome } from "./format.js";
 

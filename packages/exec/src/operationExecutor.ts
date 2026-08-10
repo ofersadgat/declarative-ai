@@ -38,7 +38,7 @@ import { hasEmbeddedOperation } from "./inputs.js";
 import { carryCall } from "./resolvedOperation.js";
 import { canceledFailure, failure, finishedHandle, withMetrics, wrapHandle } from "./handles.js";
 
-export interface OperationExecutorOptions {
+export interface OperationExecutorOptions<M extends ExecMetrics = ExecMetrics> {
   /**
    * Where a `FunctionOp` goes.
    *
@@ -46,32 +46,41 @@ export interface OperationExecutorOptions {
    * wraps in a {@link FunctionExecutor} for you — or an already-built function executor, for a caller
    * that wants to wrap or subclass that half.
    */
-  functions: FunctionRegistry<ExecServices, ExecMetrics> | FunctionExecutor;
-  /** The executor `PromptOp`s dispatch to. Absent ⇒ a prompt op fails permanently with that reason,
-   *  which is the honest answer for a graph that has no LLM wired in. Typed as a plain `Executor`, so
-   *  this package never learns that `PromptOp` HAS a lowering. */
-  prompt?: Executor;
+  functions: FunctionRegistry<ExecServices, M> | FunctionExecutor<M>;
+  /**
+   * The executor `PromptOp`s dispatch to. Absent ⇒ a prompt op fails permanently with that reason,
+   * which is the honest answer for a graph that has no LLM wired in. Typed as a plain `Executor` in
+   * every respect but `M`, so this package never learns that `PromptOp` HAS a lowering.
+   *
+   * `M` is threaded so the DISPATCHER inherits what its prompt half measures. It is the half that
+   * measures money — the function registry reports timing — so a dispatcher fixed at `ExecMetrics`
+   * flattened every cost its own leaf produced, and its caller then had to cast the whole executor
+   * back to the type it never stopped being.
+   */
+  prompt?: Executor<ExecServices, M>;
   /** Override the advertised capabilities (defaults to the prompt executor's, else a conservative
    *  function-only record). */
   capabilities?: Capabilities;
-  /** How this executor's measurements combine. Defaults to timing/counts. */
-  metrics?: MetricsAlgebra<ExecMetrics>;
+  /** How this executor's measurements combine. Defaults to the prompt half's, else timing/counts. */
+  metrics?: MetricsAlgebra<M>;
 }
 
-export class OperationExecutor implements Executor {
+export class OperationExecutor<M extends ExecMetrics = ExecMetrics> implements Executor<ExecServices, M> {
   /** The hierarchy's serializable discriminant — see {@link FunctionExecutor.kind}. */
   static readonly kind = "operation";
 
   readonly capabilities: Capabilities;
-  readonly metrics: MetricsAlgebra<ExecMetrics>;
+  readonly metrics: MetricsAlgebra<M>;
   /** The function half, built from a bare registry when the caller passed one. */
-  private readonly functions: FunctionExecutor;
+  private readonly functions: FunctionExecutor<M>;
 
-  constructor(private readonly options: OperationExecutorOptions) {
+  constructor(private readonly options: OperationExecutorOptions<M>) {
     this.functions =
       options.functions instanceof FunctionExecutor ? options.functions : new FunctionExecutor({ functions: options.functions });
     this.capabilities = options.capabilities ?? options.prompt?.capabilities ?? FUNCTION_CAPABILITIES;
-    this.metrics = options.metrics ?? options.prompt?.metrics ?? EXEC_METRICS_ALGEBRA;
+    // The PROMPT half's algebra by default: it is the half that measures money, and a dispatcher that
+    // reported timing-only would flatten every metric its own leaf produced.
+    this.metrics = options.metrics ?? (options.prompt?.metrics as MetricsAlgebra<M> | undefined) ?? (EXEC_METRICS_ALGEBRA as MetricsAlgebra<M>);
   }
 
   /**
@@ -102,21 +111,21 @@ export class OperationExecutor implements Executor {
    * lookups against a scope this layer cannot see. That is the whole contract at this boundary: an
    * operation handed to an executor is READY TO RUN, meaning literals and embedded operations only.
    */
-  start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue> {
+  start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue, M> {
     if (!hasEmbeddedOperation(op)) return this.dispatch(op, ctx);
     return wrapHandle(
-      async (ctl): Promise<ExecResult<ResolvedValue, ExecMetrics>> => {
-        if (ctl.canceled()) return canceledFailure("canceled before the operation started");
+      async (ctl): Promise<ExecResult<ResolvedValue, M>> => {
+        if (ctl.canceled()) return canceledFailure("canceled before the operation started", this.metrics.empty());
         const input: Record<string, Parameter<InlineFamily>> = { ...op.input };
         // Nested metrics roll up rather than being discarded: an embedded operation can be the
         // expensive half of the work, and a caller reading only the outer frame would never see it.
-        let nested: ExecMetrics | undefined;
+        let nested: M | undefined;
         for (const [name, param] of Object.entries(op.input)) {
           const binding = param.binding;
           if (binding === undefined || !("op" in binding) || typeof binding.op === "string") continue;
           if (param.kind === "prompt" || param.kind === "function") continue; // higher-order: the definition IS the value
           const outcome = await ctl.started(this.start(binding.op, ctx)).result;
-          nested = nested === undefined ? outcome.metrics : this.metrics.merge(nested, outcome.metrics);
+          nested = nested === undefined ? (outcome.metrics as M) : this.metrics.merge(nested, outcome.metrics as M);
           if (!isOk(outcome)) {
             // The nested failure travels WHOLE. Restating it as "an input failed" would drop the
             // classification, so a retriable provider error inside a nested call would arrive
@@ -129,18 +138,26 @@ export class OperationExecutor implements Executor {
         // dispatch that would have used it.
         const resolved = carryCall(op, { ...op, input } as Operation<InlineFamily>);
         const result = await ctl.started(this.dispatch(resolved, ctx)).result;
-        return nested === undefined ? result : withMetrics(result, this.metrics.merge(nested, result.metrics));
+        return nested === undefined ? (result as ExecResult<ResolvedValue, M>) : withMetrics(result, this.metrics.merge(nested, result.metrics as M));
       },
       { signal: ctx.abortSignal, canceledReason: "canceled while an embedded operation was in flight" },
     );
   }
 
   /** Dispatch a READY operation by kind — the one place `prompt` and `function` part ways. */
-  private dispatch(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue> {
+  /**
+   * Dispatch in the CALLER'S metric algebra.
+   *
+   * The two halves measure differently — a prompt leaf reports money, the function registry reports
+   * timing — and this frames whichever answered. The assertion is on the half that cannot be proven
+   * statically: a registry entry is looked up by name, so its algebra is not known here. `metrics` is
+   * the prompt half's by default precisely so that the common path is honest.
+   */
+  private dispatch(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue, M> {
     // Cancellation is checked BEFORE any work starts, on every path: an already-aborted caller must not
     // get one more provider call out of a dispatch that happened to be in flight. Both halves check it
     // again on entry; this one covers the branch that refuses before reaching either.
-    if (ctx.abortSignal?.aborted) return finishedHandle(canceledFailure("canceled before the operation started"));
+    if (ctx.abortSignal?.aborted) return finishedHandle(canceledFailure("canceled before the operation started", this.metrics.empty()));
 
     if (op.kind === "prompt") {
       const prompt = this.options.prompt;
@@ -149,13 +166,13 @@ export class OperationExecutor implements Executor {
           failure("permanent", "this graph contains a prompt operation but no prompt executor is wired in (OperationExecutor.prompt)"),
         );
       }
-      return prompt.start(op, ctx);
+      return prompt.start(op, ctx) as ExecHandle<ResolvedValue, M>;
     }
-    return this.functions.start(op, ctx);
+    return this.functions.start(op, ctx) as ExecHandle<ResolvedValue, M>;
   }
 }
 
 /** Convenience factory mirroring the class constructor. */
-export function createOperationExecutor(options: OperationExecutorOptions): Executor {
+export function createOperationExecutor<M extends ExecMetrics = ExecMetrics>(options: OperationExecutorOptions<M>): Executor<ExecServices, M> {
   return new OperationExecutor(options);
 }

@@ -15,6 +15,7 @@ import {
   resolveLiteralInputs,
   withDeadline,
   withMemoize,
+  withMetrics,
   withRetry,
 } from "../src/index.js";
 
@@ -404,20 +405,35 @@ describe("withDeadline", () => {
     expect(errorOf(out)?.reason).toMatch(/^deadline-floor/);
   });
 
-  it("clamps ctx.timeoutMs to the remaining window — ONE field, ONE clamp", async () => {
+  it("bounds the call by CANCELLATION, on the signal an executor already reads", async () => {
+    // This replaced a test that asserted the wrapper clamped `ctx.timeoutMs` to the remaining window.
+    // That number was a second spelling of a bound the abort channel already carries — the llm layer
+    // turned it straight back into `AbortSignal.timeout(...)` and folded it into the signal — and only
+    // an executor that knew to read it got the window at all. An abort reaches every executor.
     const { core, calls } = scripted([ok()]);
+    const outer = new AbortController();
     await withDeadline({ deadline: { maxDurationMs: 100_000, safetyMarginMs: 0 }, stepStartMs: 0 }, core).start(op(), {
       clock: { now: () => 40_000 },
-      timeoutMs: 90_000,
+      abortSignal: outer.signal,
     }).result;
-    expect(calls[0]!.ctx.timeoutMs).toBe(60_000);
+    const seen = calls[0]!.ctx.abortSignal;
+    expect(seen).toBeDefined();
+    expect(seen).not.toBe(outer.signal); // combined, not passed through
+    // …and the CALLER's cancellation still reaches the call through it.
+    expect(seen!.aborted).toBe(false);
+    outer.abort();
+    expect(seen!.aborted).toBe(true);
   });
 
-  it("CONSUMES ctx.deadline — the core inside never sees it", async () => {
+  it("takes its window at CONSTRUCTION, so no deadline field reaches the core at all", async () => {
+    // This replaced a test that put the window on ctx and asserted the wrapper stripped it back off.
+    // The strip existed because the window was readable from two places; with one place there is
+    // nothing to consume — a window is the wrapper's subject, not a service the core needs to run.
     const { core, calls } = scripted([ok()]);
-    await withDeadline(core).start(op(), { deadline: { maxDurationMs: 100_000 }, stepStartMs: 0, clock: { now: () => 0 } }).result;
-    expect(calls[0]!.ctx.deadline).toBeUndefined();
-    expect(calls[0]!.ctx.stepStartMs).toBeUndefined();
+    await withDeadline({ deadline: { maxDurationMs: 100_000 }, stepStartMs: 0 }, core).start(op(), { clock: { now: () => 0 } })
+      .result;
+    expect(calls[0]!.ctx).not.toHaveProperty("deadline");
+    expect(calls[0]!.ctx).not.toHaveProperty("stepStartMs");
   });
 });
 
@@ -522,5 +538,46 @@ describe("composition — two forms + typed requirements", () => {
     // @ts-expect-error — the deadline came from construction, but `stepStartMs` is still required.
     needsStep.start(op(), {});
     compose(core).with(withDeadline({ deadline: { maxDurationMs: 1 }, stepStartMs: 0 })).start(op(), {});
+  });
+});
+
+/**
+ * The session outcome survives a wrapper that re-reports metrics.
+ *
+ * `SessionOutcome` is a DECLARED field precisely so it cannot be dropped — its own doc says "an
+ * undeclared extra field typechecks by leniency and would be dropped by anything that rebuilt the
+ * result". `withMetrics` is the thing that rebuilds the result, and it dropped it anyway.
+ *
+ * The damage was silent and specific. A delegated agent's whole conversation lives server-side, and
+ * the one thing it hands back is the `providerSessionId` the run ended in. Lose that and the next
+ * call resumes nothing — it opens a fresh remote conversation while the workflow reads as though
+ * `session: "review"` had joined them up. Any host wrapping its prompt executor in a repair or retry
+ * loop hit this on every single call.
+ */
+describe("withMetrics — what a re-reported result keeps", () => {
+  const metrics = { durationMs: 1 };
+
+  it("carries a success's session outcome across", () => {
+    const result = withMetrics(
+      { value: "ok", metrics: { durationMs: 0 }, session: { providerSessionId: "prov-1" } } as never,
+      metrics,
+    );
+    expect((result as { session?: unknown }).session).toEqual({ providerSessionId: "prov-1" });
+    expect(isOk(result) && result.value).toBe("ok");
+  });
+
+  it("carries a FAILURE's session outcome across too", () => {
+    // A failed call is still a record: it ran, it cost money, and for a session its turns may already
+    // exist remotely — so the handle it ended on matters exactly as much.
+    const result = withMetrics(
+      { error: { classification: "permanent", reason: "no" }, metrics: { durationMs: 0 }, session: { messages: [1] } } as never,
+      metrics,
+    );
+    expect((result as { session?: unknown }).session).toEqual({ messages: [1] });
+  });
+
+  it("adds nothing when the execution reported none", () => {
+    const result = withMetrics({ value: "ok", metrics: { durationMs: 0 } }, metrics);
+    expect("session" in result).toBe(false);
   });
 });

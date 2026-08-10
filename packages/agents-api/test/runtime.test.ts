@@ -63,44 +63,19 @@ describe("createClaudeCodeFunction — delegated agent as a registered async fun
     expect(captured?.permissionMode).toBe("plan");
   });
 
-  it("settles the agent's reported spend against an injected wallet", async () => {
-    const settled: number[] = [];
-    const reserved: number[] = [];
+  it("REPORTS what it spent instead of charging a wallet itself", async () => {
+    // It used to reach for `ctx.meter` and debit the agent's cost directly. That was an executor doing
+    // a metering layer's job, and it double-charged whenever the layer was composed: `withBudget`
+    // settles its reservation against `result.metrics.costUsd` — the same money — so a delegated call
+    // under a budget was billed twice for one run.
+    //
+    // The cost travels on the MEASUREMENT, which is where a metering layer already reads it. An agent
+    // run with no budget wrapper is unmetered, the same answer every absent seam gives.
     const query: AgentQuery = async function* () {
       yield { type: "result", result: { text: "done", costUsd: 0.05 } };
     };
-    await createClaudeCodeFunction({ query }).run(inputs(), {
-      meter: {
-        reserve: async (est) => {
-          reserved.push(est);
-          return { settle: async (actual) => void settled.push(actual) };
-        },
-        availableCostUsd: async () => 100,
-      },
-    });
-    expect(reserved).toEqual([0.05]);
-    expect(settled).toEqual([0.05]);
-  });
-
-  // The agent bills inside its own loop, so its charge arrives as a FACT. `reserve` returning null
-  // (balance can't cover it) meant `reservation?.settle(...)` no-opped and the spend vanished — the
-  // wallet then kept reporting headroom it did not have and admitted the next call on it.
-  it("debits spend the wallet could not have reserved, rather than dropping it", async () => {
-    const debited: number[] = [];
-    const query: AgentQuery = async function* () {
-      yield { type: "result", result: { text: "done", costUsd: 5 } };
-    };
-    const result = await createClaudeCodeFunction({ query }).run(inputs(), {
-      meter: {
-        reserve: async () => null, // over budget — the money is already spent regardless
-        availableCostUsd: async () => 0,
-        debit: async (actual) => void debited.push(actual),
-      },
-    });
-    expect(debited).toEqual([5]);
-    // The result survives: failing the op here would discard the agent's work over bookkeeping.
-    expect(isOk(result) && result.value).toBe("done");
-    expect(result.metrics?.costUsd).toBe(5);
+    const result = await createClaudeCodeFunction({ query }).run(inputs(), {});
+    expect(result.metrics?.costUsd).toBe(0.05);
   });
 
   it("reports cost on metrics even with no wallet wired at all", async () => {

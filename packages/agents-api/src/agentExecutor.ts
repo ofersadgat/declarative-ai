@@ -113,16 +113,26 @@ interface AgentTurn {
   toolResults: ToolResult[];
 }
 
-/** Delegated agents: schema-constrained output isn't guaranteed (they answer in text), they mutate the
- *  workspace, run their own non-deterministic loop (not memoizable), gate tools via a callback, and are
- *  interactive (tool approvals route to our UI). Carried on the REGISTRY ENTRY, per §3.1 — and on the
- *  EXECUTOR, which is the same record because an entry is what an executor delegates to (DESIGN §3.2). */
+/** Delegated agents: they mutate the workspace, run their own non-deterministic loop (not memoizable),
+ *  gate tools via a callback, and are interactive (tool approvals route to our UI). Carried on the
+ *  REGISTRY ENTRY, per §3.1 — and on the EXECUTOR, which is the same record because an entry is what an
+ *  executor delegates to (DESIGN §3.2). */
 export const DELEGATED_CAPS: RuntimeCapabilities = {
   interactive: true,
   readOnly: false,
   mutatesWorkspace: true,
   memoizable: false,
-  structuredOutput: false,
+  /**
+   * TRUE, and natively so. Both `claude` transports carry the output schema — `--json-schema` on argv,
+   * `outputFormat: {type: "json_schema"}` through the SDK — and retry inside their own loop until the
+   * value validates, answering on the terminal message's `structured_output`.
+   *
+   * It read `false` while this was unimplemented, with the note "they answer in text". That was true of
+   * the adapter rather than of the transports, and the cost of leaving it there was a whole class of
+   * workflow: any state declaring outputs failed on an agent route with "did not produce required
+   * output", which names the state and not the reason.
+   */
+  structuredOutput: true,
   policyEnforcement: "callback",
   // NATIVE session resume, and native FORK with it (DESIGN.md §1.6). Declaring it is what tells the
   // session layer not to reach for the replay strategy: this transport branches server-side and reads
@@ -142,21 +152,6 @@ export const DELEGATED_CAPS: RuntimeCapabilities = {
 /** What a delegated agent measures: execution timing/counts plus the spend it billed itself. */
 export interface AgentMetrics extends ExecMetrics, BudgetMetrics {}
 
-/**
- * Record money the agent has ALREADY spent. `reserve` returns `null` when the balance cannot cover the
- * amount — but this spend is a past FACT, not a request, so treating `null` as "nothing to do" leaves
- * the wallet reporting headroom it does not have and admits the next call against a phantom balance.
- * `debit` is the honest path when the meter offers one; without it we fall back to reserve/settle and
- * the overspend stays unrecorded on the ledger.
- *
- * Never throws: the money is gone either way, and failing the operation here would discard the agent's
- * result over a bookkeeping problem. The cost reaches the caller regardless, on `Result.metrics`.
- */
-export async function debitSpentCost(meter: BudgetMeter, costUsd: number): Promise<void> {
-  if (meter.debit) return meter.debit(costUsd);
-  const reservation = await meter.reserve(costUsd);
-  await reservation?.settle(costUsd);
-}
 
 /** Thrown when the delegated agent fails or is canceled. The invoking executor classifies it (a
  *  cancellation carries `name: "AbortError"`, which `classifyError` maps to `canceled`). */
@@ -429,15 +424,34 @@ export class AgentExecutor extends PromptExecutor {
     try {
       const turn = await this.runAgent(definition, ctx);
       const result = turn.result;
-      // A delegated agent spends real money inside its own loop, so the charge lands after the fact:
-      // settle it against the wallet when one is injected. Absent meter ⇒ unmetered, as everywhere else.
-      if (result.costUsd !== undefined && ctx.meter) await debitSpentCost(ctx.meter, result.costUsd);
+      // NOT charged here. A delegated agent spends real money inside its own loop, and this used to
+      // reach for `ctx.meter` and debit it — an executor doing a wrapper's job, and a DOUBLE CHARGE
+      // whenever the wrapper was actually composed: `withBudget` settles its reservation against
+      // `result.metrics.costUsd`, which is the same money, so the wallet was hit twice for one call.
+      //
+      // The cost is reported on the measurement, which is where a metering layer reads it. A run with
+      // no budget wrapper composed is unmetered — the same answer every other cross-cutting concern
+      // gives when its wrapper is absent.
+      // A run that was given a schema is ANSWERED by the constrained value, not by the prose beside it.
+      // The two are both present and they are not the same thing: `result` summarizes the work, and a
+      // caller handed that where it declared an object output gets a string that fills none of its
+      // slots. A schema asked for and not produced is a FAILURE — falling back to the prose would hand
+      // the engine an answer it must then reject, one layer further from the transport that knows why.
+      if (definition.schema !== undefined && result.structured === undefined) {
+        return {
+          error: {
+            classification: "api-retriable",
+            reason: "the agent produced no structured output for a call that declared an output schema",
+          },
+          metrics: this.agentMetrics(startMs, result),
+        };
+      }
       const output: LlmOutput = {
         // The terminal message's answer, falling back to what the turns themselves carried. An
         // INTERRUPTED run is the case: its terminal message has no text, and the partial answer exists
         // only in the assistant turns already streamed. Reporting an empty string there would answer
         // "stop and tell me what you found" with nothing.
-        value: result.text.length > 0 ? result.text : turn.text,
+        value: result.structured ?? (result.text.length > 0 ? result.text : turn.text),
         // The agent's OWN verdict on how its run ended. Hardcoding `"stop"` here reported a run that
         // exhausted its turn cap or its budget ceiling — a PARTIAL answer — as a clean finish, which is
         // how a truncated review reads as a complete one.
@@ -619,6 +633,11 @@ export class AgentExecutor extends PromptExecutor {
       ...("reasoning" in definition && definition.reasoning !== undefined ? { reasoning: definition.reasoning } : {}),
       ...(definition.maxSteps !== undefined ? { maxSteps: definition.maxSteps } : {}),
       ...(definition.toolChoice === "none" || definition.toolChoice === "auto" ? { toolChoice: definition.toolChoice } : {}),
+      // The output SCHEMA, which is what makes a delegated agent able to serve a state that declares
+      // outputs. It was read off the lowered declaration by every other transport and dropped by this
+      // one: the agent answered in prose, the engine found none of the declared slots, and the run
+      // failed with "did not produce required output" — naming the state rather than the omission.
+      ...(definition.schema !== undefined ? { schema: definition.schema as JsonValue } : {}),
       // Only THIS transport's bag: `providerOptions` is keyed by provider so one config can carry
       // settings for several, and each takes only its own.
       ...(definition.providerOptions?.[this.providerOptionsKey()] !== undefined
