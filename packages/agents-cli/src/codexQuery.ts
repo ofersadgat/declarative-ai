@@ -37,6 +37,9 @@
  * sandbox mode has to answer for.
  */
 import type { AgentQuery, AgentQueryOptions, AgentResult, AgentStreamMessage } from "@declarative-ai/agents-api";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import type { JsonValue } from "./deps.js";
 import { launchError } from "./cliQuery.js";
 import { defaultStartMcpBridge, type McpBridge, type StartMcpBridge } from "./mcpBridge.js";
@@ -210,7 +213,12 @@ export function codexRefusal(opts: AgentQueryOptions): string | undefined {
  * the environment it is launching into. A host path in `-C` would arrive inside the distro unmapped
  * and land the agent somewhere that does not exist.
  */
-export function codexArgv(opts: AgentQueryOptions, config: CodexAgentOptions = {}, bridgeUrl?: string): string[] {
+export function codexArgv(
+  opts: AgentQueryOptions,
+  config: CodexAgentOptions = {},
+  bridgeUrl?: string,
+  schemaFile?: string,
+): string[] {
   return [
     "exec",
     // `resume <id>` continues the conversation server-side — codex's native append (DESIGN.md §1.6).
@@ -235,6 +243,13 @@ export function codexArgv(opts: AgentQueryOptions, config: CodexAgentOptions = {
     // conversation is under way. `model` is a documented key, and `--strict-config` would reject it if
     // it were not.
     ...(opts.model !== undefined ? ["-c", `model="${opts.model}"`] : []),
+    // The answer's SHAPE. Codex takes a FILE where the `claude` sibling takes the schema inline, so the
+    // caller writes one and passes its path — which keeps this builder pure and directly assertable.
+    //
+    // ✅ `codex exec --help`: `--output-schema <FILE>  Path to a JSON Schema file describing the
+    // model's final response shape`. The constrained value arrives as the final `agent_message`, which
+    // is why the reader parses that text rather than looking for a field of its own.
+    ...(schemaFile !== undefined ? ["--output-schema", schemaFile] : []),
     ...(config.args ?? []),
     // Everything after this is an OPERAND, whatever it looks like; `-` is "read the prompt from stdin".
     "--",
@@ -400,6 +415,7 @@ export function createCodexAgentQuery(config: CodexAgentOptions = {}): AgentQuer
 
     let child: ReturnType<SpawnProcess> | undefined;
     let onAbort: (() => void) | undefined;
+    let schemaFile: string | undefined;
     try {
       const spawn = config.spawn ?? (await defaultSpawn());
       const preamble = opts.messages !== undefined ? replayPreamble(opts.messages) : "";
@@ -407,7 +423,14 @@ export function createCodexAgentQuery(config: CodexAgentOptions = {}): AgentQuer
       // `claude` sibling. No Windows resolution here: `codex` is spawned through the process seam, whose
       // `resolveProgram` already follows an npm `.cmd` shim to its JS entry — the resolution this
       // transport needs, and the one it has had since it was written.
-      const c = spawn([opts.binaryPath ?? config.command ?? CODEX_COMMAND, ...codexArgv(opts, config, bridge?.url)], {
+      // The schema, on disk, because that is the only way codex takes one. Written beside the OS temp
+      // dir and removed in the `finally` below — a run must not leave one behind, and a crash leaves at
+      // most one small file where the OS already collects them.
+      if (opts.schema !== undefined) {
+        schemaFile = join(await mkdtemp(join(tmpdir(), "codex-schema-")), "schema.json");
+        await writeFile(schemaFile, JSON.stringify(opts.schema), "utf8");
+      }
+      const c = spawn([opts.binaryPath ?? config.command ?? CODEX_COMMAND, ...codexArgv(opts, config, bridge?.url, schemaFile)], {
         ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
         ...(opts.env !== undefined ? { env: opts.env } : {}),
         stdin: preamble.length > 0 ? `${preamble}\n${opts.prompt}` : opts.prompt,
@@ -456,7 +479,16 @@ export function createCodexAgentQuery(config: CodexAgentOptions = {}): AgentQuer
       // NO `costUsd`: codex reports token counts, not money. Inventing a number from a price table
       // this package has no access to would corrupt the run's roll-up — the adapter records
       // `costSource: "unknown"` instead, which is the truth.
-      const result: AgentResult = { text: run.text, ...(run.sessionId !== undefined ? { sessionId: run.sessionId } : {}) };
+      // With `--output-schema`, the final agent message IS the constrained value — codex has no field
+      // of its own for it, unlike the `claude` sibling's `structured_output`. So it is parsed here, and
+      // a schema that was asked for and came back unparseable is reported as no structured answer at
+      // all rather than as a string that happens to look like one.
+      const structured = opts.schema === undefined ? undefined : parseStructured(run.text);
+      const result: AgentResult = {
+        text: run.text,
+        ...(structured !== undefined ? { structured } : {}),
+        ...(run.sessionId !== undefined ? { sessionId: run.sessionId } : {}),
+      };
       yield { type: "result", result };
     } finally {
       if (onAbort) opts.abortSignal?.removeEventListener("abort", onAbort);
@@ -467,4 +499,25 @@ export function createCodexAgentQuery(config: CodexAgentOptions = {}): AgentQuer
       await bridge?.close();
     }
   };
+}
+
+/**
+ * The final agent message as the value a schema asked for.
+ *
+ * Tolerant of the two things a model does to JSON it was told to produce: wrapping it in a fenced
+ * block, and saying a sentence first. Neither is a reason to discard a correct answer — but an answer
+ * that will not parse at all is reported as ABSENT rather than as text, because the caller asked for a
+ * shape and a string is not one.
+ */
+function parseStructured(text: string): JsonValue | undefined {
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
+  const candidates = [text.trim(), fenced?.[1]?.trim()].filter((c): c is string => c !== undefined && c.length > 0);
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate) as JsonValue;
+    } catch {
+      // Try the next shape.
+    }
+  }
+  return undefined;
 }

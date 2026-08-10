@@ -5,14 +5,25 @@ import type { AgentProcess, SpawnProcess } from "../src/process.js";
 import { CLI_CONFIG_ONLY_CAPS, CLI_DELEGATED_CAPS, createCliAgentFunction } from "../src/runtime.js";
 import { injectedToolAllowEntries, mcpConfigJson, PERMISSION_PROMPT_TOOL } from "../src/mcpProtocol.js";
 
-/** A fake process that replays scripted stdout lines and records the argv it was launched with. */
-function fakeSpawn(lines: string[], exitCode = 0): { spawn: SpawnProcess; argv: string[][]; killed: () => boolean; cwds: (string | undefined)[] } {
+/** A fake process that replays scripted stdout lines and records how it was launched. */
+function fakeSpawn(
+  lines: string[],
+  exitCode = 0,
+): {
+  spawn: SpawnProcess;
+  argv: string[][];
+  stdins: (string | undefined)[];
+  killed: () => boolean;
+  cwds: (string | undefined)[];
+} {
   const argv: string[][] = [];
   const cwds: (string | undefined)[] = [];
+  const stdins: (string | undefined)[] = [];
   let wasKilled = false;
   const spawn: SpawnProcess = (a, opts) => {
     argv.push(a);
     cwds.push(opts.cwd);
+    stdins.push(opts.stdin);
     const proc: AgentProcess = {
       lines: (async function* () {
         for (const l of lines) {
@@ -27,13 +38,13 @@ function fakeSpawn(lines: string[], exitCode = 0): { spawn: SpawnProcess; argv: 
     };
     return proc;
   };
-  return { spawn, argv, cwds, killed: () => wasKilled };
+  return { spawn, argv, stdins, cwds, killed: () => wasKilled };
 }
 
 const inputs = (): FunctionInputs => ({ prompt: "do it", config: {} });
 
 describe("cliArgv — the flags one run is configured with", () => {
-  it("maps the normalized options onto CLI flags, with the prompt as a POSITIONAL after `--`", () => {
+  it("maps the normalized options onto CLI flags, and puts the prompt in NONE of them", () => {
     expect(cliArgv({ prompt: "hi", permissionMode: "plan", allowedTools: ["Read", "Bash"] })).toEqual([
       "-p",
       "--output-format",
@@ -46,8 +57,6 @@ describe("cliArgv — the flags one run is configured with", () => {
       "Read,Bash",
       "--setting-sources",
       "project",
-      "--",
-      "hi",
     ]);
   });
 
@@ -60,8 +69,6 @@ describe("cliArgv — the flags one run is configured with", () => {
       "--include-partial-messages",
       "--setting-sources",
       "project",
-      "--",
-      "hi",
     ]);
   });
 
@@ -74,13 +81,25 @@ describe("cliArgv — the flags one run is configured with", () => {
   // `-p`/`--print` is a BOOLEAN flag in the shipping CLI and the prompt is a positional argument, so
   // `["-p", prompt]` handed the prompt to the option parser: `--verbose` as the first token would have
   // been APPLIED as a flag, and `--nonsense` would have failed the run as an unknown option. Prompts are
-  // rendered from workflow data, so both are reachable from content.
-  it("does not let a prompt that begins with `--` be parsed as an option", () => {
+  // rendered from workflow data, so both are reachable from content. Off argv entirely, neither is.
+  it("does not let a prompt that begins with `--` reach the option parser", () => {
     const argv = cliArgv({ prompt: "--verbose --dangerously-skip-permissions do the thing" });
-    // Exactly one `--`, and everything the parser could have eaten is behind it.
-    expect(argv.filter((a) => a === "--")).toHaveLength(1);
-    expect(argv.at(-1)).toBe("--verbose --dangerously-skip-permissions do the thing");
-    expect(argv.indexOf("--")).toBe(argv.length - 2);
+    expect(argv).not.toContain("--dangerously-skip-permissions");
+    expect(argv.join(" ")).not.toContain("do the thing");
+    // And no `--` separator either: with nothing positional to protect, it protects nothing.
+    expect(argv).not.toContain("--");
+  });
+
+  it("emits `--json-schema` when the call declared an output schema", () => {
+    // The CLI's own structured-output flag — the argv spelling of the SDK's `outputFormat`. Without it
+    // the agent answers in prose and a state that declared outputs gets none of them filled.
+    const schema = { type: "object", properties: { items: { type: "array" } }, required: ["items"] };
+    const argv = cliArgv({ prompt: "go", schema });
+    expect(argv[argv.indexOf("--json-schema") + 1]).toBe(JSON.stringify(schema));
+  });
+
+  it("omits it when nothing asked, so a plain text answer stays plain", () => {
+    expect(cliArgv({ prompt: "go" })).not.toContain("--json-schema");
   });
 
   it("emits the deny channel the header has always advertised", () => {
@@ -351,8 +370,6 @@ describe("the session flags", () => {
   it("continues a conversation with `--resume <id>`", () => {
     const argv = cliArgv({ prompt: "go on", resume: "aaaa-0001" });
     expect(argv[argv.indexOf("--resume") + 1]).toBe("aaaa-0001");
-    // Before the `--`, so it is read as a flag and not as part of the prompt.
-    expect(argv.indexOf("--resume")).toBeLessThan(argv.indexOf("--"));
     // An APPEND, not a branch: the CLI reuses the id and the parent conversation moves on.
     expect(argv).not.toContain("--fork-session");
   });
@@ -361,7 +378,6 @@ describe("the session flags", () => {
     const argv = cliArgv({ prompt: "go on", resume: "aaaa-0001", forkSession: true });
     expect(argv[argv.indexOf("--resume") + 1]).toBe("aaaa-0001");
     expect(argv).toContain("--fork-session");
-    expect(argv.indexOf("--fork-session")).toBeLessThan(argv.indexOf("--"));
   });
 
   it("starts FRESH when there is no handle — no session flag anywhere", () => {
@@ -495,18 +511,17 @@ describe("the neutral knobs, and what this transport cannot carry", () => {
     expect(cliRefusal({ prompt: "go", providerOptions: { fasMode: true } })).toMatch(/unknown key\(s\): fasMode/);
   });
 
-  it("keeps every generated flag BEFORE the `--`, so none of it is read as the prompt", () => {
+  it("emits every generated flag, and nothing positional for them to run into", () => {
     const argv = cliArgv({
       prompt: "go",
       reasoning: { effort: "high" },
       toolChoice: "none",
       providerOptions: { maxBudgetUsd: 1, extraArgs: { "add-dir": "/repo" } },
     });
-    const separator = argv.indexOf("--");
     for (const flag of ["--effort", "--tools", "--setting-sources", "--max-budget-usd", "--add-dir"]) {
-      expect(argv.indexOf(flag)).toBeGreaterThanOrEqual(0);
-      expect(argv.indexOf(flag)).toBeLessThan(separator);
+      expect(argv.indexOf(flag), flag).toBeGreaterThanOrEqual(0);
     }
+    expect(argv).not.toContain("go");
   });
 
   it("refuses the run BEFORE spawning, so nothing launches under a configuration it cannot honour", async () => {
@@ -528,9 +543,35 @@ describe("the model flag", () => {
     expect(cliArgv({ prompt: "go" })).not.toContain("--model");
   });
 
-  it("puts it before the `--`, so it is read as a flag and not as the prompt", () => {
-    const argv = cliArgv({ prompt: "go", model: "sonnet" });
-    expect(argv.indexOf("--model")).toBeLessThan(argv.indexOf("--"));
+});
+
+/**
+ * WHERE THE PROMPT GOES, which is the one thing about this argv that is not a flag.
+ *
+ * On stdin, which `-p` reads when nothing positional was given. It used to be a `--` operand, and that
+ * failed on length: Windows caps a command line at 32,767 characters, so a prompt rendering a document
+ * or a replayed transcript died as `spawn ENAMETOOLONG` — before the agent started, reported as a
+ * launch failure that said nothing about the prompt. The codex sibling has always used stdin, for this
+ * reason, through the same seam.
+ */
+describe("the prompt channel", () => {
+  it("writes the prompt to stdin rather than argv", async () => {
+    const { spawn, argv, stdins } = fakeSpawn(['{"type":"result","result":"done"}']);
+    for await (const _ of createCliAgentQuery({ spawn })({ prompt: "summarise this" })) void _;
+
+    expect(stdins[0]).toBe("summarise this");
+    expect(argv[0]).not.toContain("summarise this");
+  });
+
+  it("carries a prompt far longer than a command line can hold", async () => {
+    // The failing case, at the size that produced it: a 66 KB workflow description, twice over the
+    // 32,767-character Windows limit. As an operand this never reached the agent at all.
+    const huge = "x".repeat(66_000);
+    const { spawn, argv, stdins } = fakeSpawn(['{"type":"result","result":"done"}']);
+    for await (const _ of createCliAgentQuery({ spawn })({ prompt: huge })) void _;
+
+    expect(stdins[0]).toHaveLength(66_000);
+    expect(argv[0]!.join(" ").length).toBeLessThan(1_000);
   });
 });
 

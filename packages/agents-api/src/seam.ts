@@ -111,6 +111,20 @@ export interface AgentQueryOptions {
    */
   toolChoice?: "auto" | "none";
   /**
+   * A JSON Schema the agent's ANSWER must satisfy — the delegated half of a prompt op's output schema.
+   *
+   * Both `claude` transports carry it natively (`--json-schema` on argv, `outputFormat: {type:
+   * "json_schema"}` through the SDK) and both answer on {@link AgentResult.structured}, retrying inside
+   * their own loop until the value validates. That is what makes an agent able to serve a state with a
+   * declared output at all: without it the agent answers in prose, the engine finds none of the slots
+   * the state declared, and the run fails with "did not produce required output".
+   *
+   * A transport that cannot constrain its output must REFUSE rather than drop it, like every other
+   * field here. Answering in prose when a schema was asked for is not a lesser answer — it is a
+   * different one, and the caller cannot tell it apart from a model that ignored the request.
+   */
+  schema?: JsonValue;
+  /**
    * Transport-specific settings, already selected by provider key and passed through VERBATIM.
    *
    * `LlmConfiguration.providerOptions` is documented as "the full escape hatch… passed through to the
@@ -231,6 +245,18 @@ export interface AgentTokenCounts {
 /** The agent's final answer for a run. */
 export interface AgentResult {
   text: string;
+  /**
+   * The SCHEMA-CONSTRAINED answer, when {@link AgentQueryOptions.schema} asked for one.
+   *
+   * A separate field rather than a parse of `text`, because that is how both transports report it: the
+   * terminal message carries prose on `result` AND the constrained value on `structured_output`. The
+   * prose summarizes the work; it is not a serialization of the value, so reading the value out of it
+   * would parse the wrong thing on every run that produced both.
+   *
+   * Absent ⇒ no schema was asked for, or the agent could not produce one. The second is a FAILURE to
+   * answer rather than an invitation to fall back to the prose — a schema was the request.
+   */
+  structured?: JsonValue;
   costUsd?: number;
   /**
    * Why the run ENDED, in the same neutral vocabulary a provider call reports

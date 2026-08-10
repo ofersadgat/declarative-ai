@@ -257,6 +257,10 @@ export function readAgentMessage(msg: Record<string, unknown>): AgentStreamMessa
         type: "result",
         result: {
           text,
+          // The schema-constrained answer, on its OWN field beside the prose — which is how both
+          // transports report it when `--json-schema` / `outputFormat` asked for one. `result` stays a
+          // summary of the work, so a caller that wanted the value must read this and not parse that.
+          ...(msg["structured_output"] !== undefined ? { structured: msg["structured_output"] as JsonValue } : {}),
           ...(num(msg["total_cost_usd"]) !== undefined ? { costUsd: num(msg["total_cost_usd"])! } : {}),
           // The id this run ENDED in — a new one after a fork. Dropping it leaves the next call with no
           // handle to resume, which is the half of the session story that fails silently.

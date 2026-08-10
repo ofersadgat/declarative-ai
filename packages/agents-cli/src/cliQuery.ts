@@ -110,11 +110,16 @@ export function needsBridge(opts: AgentQueryOptions): boolean {
  *    wrapping for an adapter declaring `policyEnforcement: "callback"` precisely because the callback is
  *    supposed to be the gate. A caller that really means to pre-approve them can pass
  *    `injectedToolAllowEntries(tools)` in `allowedTools` itself, which is at least visible.
- *  - **The prompt is not passed as an option value.** `-p`/`--print` is a BOOLEAN flag in the shipping
- *    CLI and the prompt is a positional argument (`claude [options] [command] [prompt]`), so a prompt
- *    whose first token starts with `-` was parsed as a flag: an exact match silently APPLIED, anything
- *    else failed the run as an unknown option. Prompts are rendered from workflow data, so that is
- *    reachable from content. The `--` end-of-options separator puts the prompt beyond the parser.
+ *  - **The prompt is not in argv AT ALL.** It goes on STDIN, which `-p` reads when no positional prompt
+ *    is given (`--input-format text`, the default). It was a `--` operand, and that failed two ways.
+ *    The fatal one is length: Windows caps a command line at 32,767 characters, and a prompt rendering
+ *    a document or a replayed transcript passes that easily — `spawn ENAMETOOLONG`, before the agent
+ *    starts, reported as a launch failure with nothing in it about the prompt. The other is parsing:
+ *    `-p`/`--print` is a BOOLEAN flag and the prompt is positional (`claude [options] [command]
+ *    [prompt]`), so a prompt whose first token starts with `-` was read as a flag — an exact match
+ *    silently APPLIED, anything else failed the run as an unknown option. Prompts are rendered from
+ *    workflow data, so both are reachable from content. Stdin answers both, and it is the channel the
+ *    codex sibling has always used for the same reason.
  */
 /**
  * What this run asks for that the CLI cannot honour — the reason to refuse, or `undefined` to proceed.
@@ -214,6 +219,11 @@ export function cliArgv(opts: AgentQueryOptions, config: CliAgentOptions = {}, b
     // `toolChoice: "none"` — answer from what you already know. `--tools ""` is the CLI's documented
     // "disable all tools"; `auto` is the default and says nothing.
     ...(opts.toolChoice === "none" ? ["--tools", ""] : []),
+    // The answer's shape. `--json-schema` is the CLI's own structured-output flag (the argv spelling of
+    // the SDK's `outputFormat: {type: "json_schema"}`), and the agent retries inside its own loop until
+    // the value validates. The value comes back on the terminal message's `structured_output`, NOT on
+    // `result` — which stays a prose summary of the work either way.
+    ...(opts.schema !== undefined ? ["--json-schema", JSON.stringify(opts.schema)] : []),
     // WHAT THE AGENT LOADS, decided rather than inherited — see {@link settingSources}.
     "--setting-sources",
     settingSources(opts),
@@ -230,9 +240,6 @@ export function cliArgv(opts: AgentQueryOptions, config: CliAgentOptions = {}, b
       value === null ? [`--${flag}`] : [`--${flag}`, String(value)],
     ),
     ...(config.args ?? []),
-    // Everything after this is an OPERAND, whatever it looks like.
-    "--",
-    opts.prompt,
   ];
 }
 
@@ -303,6 +310,8 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
       const c = spawn([command, ...cliArgv(opts, config, bridge?.url)], {
         cwd: opts.cwd,
         ...(opts.env !== undefined ? { env: opts.env } : {}),
+        // The prompt, on the channel that has no length limit — see {@link cliArgv}.
+        stdin: opts.prompt,
       });
       child = c;
 

@@ -104,6 +104,25 @@ describe("readAgentMessage — one message, normalized", () => {
     expect(msg.result?.rawUsage).toEqual({ usage: { input_tokens: 6, output_tokens: 8 }, modelUsage: { "claude-opus-4-7": { costUSD: 0.189 } } });
   });
 
+  it("reads the constrained value off `structured_output`, beside the prose rather than instead of it", () => {
+    // ✅ OBSERVED (claude 2.1.142) on a `--json-schema` run: `result` came back as the prose
+    // "Red, yellow, and blue." while the value rode on `structured_output`. A caller that parsed
+    // `result` would be parsing the summary of the work rather than the answer.
+    const msg = readAgentMessage({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "Red, yellow, and blue.",
+      structured_output: { colors: ["red", "yellow", "blue"] },
+    });
+    expect(msg.result?.structured).toEqual({ colors: ["red", "yellow", "blue"] });
+    expect(msg.result?.text).toBe("Red, yellow, and blue.");
+  });
+
+  it("leaves it absent when the run was not asked for a shape", () => {
+    expect(readAgentMessage({ type: "result", subtype: "success", is_error: false, result: "hi" }).result?.structured).toBeUndefined();
+  });
+
   it("treats a run reported as FAILED as an error, not as the agent's answer", () => {
     // `is_error` is independent of `subtype` AND of the exit code, so reading only the discriminator
     // reported "Not logged in · Please run /login" as a successful answer.

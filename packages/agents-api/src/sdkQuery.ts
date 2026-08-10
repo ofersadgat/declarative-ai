@@ -226,6 +226,10 @@ export function sdkOptions(opts: AgentQueryOptions, binaryPath: string | undefin
     // `toolChoice: "none"` — answer from what you already know. `[]` is the SDK's documented "disable
     // all built-in tools"; `auto` is the default and says nothing.
     ...(opts.toolChoice === "none" ? { tools: [] } : {}),
+    // The answer's shape — the SDK spelling of the CLI's `--json-schema`, and the same mechanism: the
+    // agent retries inside its own loop until the value validates, and returns it on the terminal
+    // message's `structured_output` rather than on `result`.
+    ...(opts.schema !== undefined ? { outputFormat: { type: "json_schema" as const, schema: opts.schema } } : {}),
     // DECIDED, not inherited — see {@link DEFAULT_SETTING_SOURCES} for both, and for why omitting
     // `systemPrompt` was running this transport with no system prompt at all.
     settingSources: Array.isArray(sources) ? sources : [...DEFAULT_SETTING_SOURCES],
