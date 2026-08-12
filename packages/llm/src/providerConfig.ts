@@ -77,14 +77,48 @@ export const OPENROUTER_CONFIG_SCHEMA: JsonSchemaDoc = {
 };
 
 /**
+ * Native OpenAI config space.
+ *
+ * Its OWN document rather than an alias of OpenRouter's, even though OpenRouter speaks this protocol.
+ * Two things diverge, and both are the kind that fail quietly:
+ *
+ *  - `topK` is not a parameter OpenAI's API HAS. The compatible client drops it with an `unsupported`
+ *    warning nobody reads — and {@link LOCAL_CONFIG_SCHEMA} states the principle already: a
+ *    silently-ignored knob is worse than an absent one. OpenRouter's schema can offer it because
+ *    OpenRouter translates it for the upstreams that take it.
+ *  - The TITLE is what a picker prints and what a content hash keys on. Sharing one object made an
+ *    author who chose this family read `openrouter-config`, and made the two families hash alike.
+ *
+ * `reasoning` IS declared, and unlike the local routes it is honoured: `adaptReasoning` has a native
+ * OpenAI arm that lowers the neutral spec to `reasoningEffort`.
+ */
+export const OPENAI_CONFIG_SCHEMA: JsonSchemaDoc = {
+  type: "object",
+  title: "openai-config",
+  properties: {
+    model: { type: "string", description: "OpenAI model id, e.g. gpt-5-mini" },
+    temperature: { type: "number", minimum: 0, maximum: 2 },
+    topP: { type: "number", minimum: 0, maximum: 1 },
+    maxOutputTokens: { type: "integer", minimum: 1 },
+    frequencyPenalty: { type: "number", minimum: -2, maximum: 2 },
+    presencePenalty: { type: "number", minimum: -2, maximum: 2 },
+    seed: { type: "integer" },
+    stopSequences: { type: "array", items: { type: "string" } },
+    reasoning: REASONING_PROPERTY,
+  },
+  required: ["model"],
+  additionalProperties: false,
+};
+
+/**
  * Local OpenAI-compatible SERVER config space (Ollama, LM Studio, `llama-server`, vLLM). The sampling
  * knobs are llama.cpp's, which is a superset of OpenAI's in one direction (`minP`) and a subset in
  * another: no `frequencyPenalty`/`presencePenalty` here, because the OpenAI-compatible shims in front
  * of llama.cpp accept them inconsistently and a silently-ignored knob is worse than an absent one.
  *
  * No `reasoning`: the neutral spec is adapted on the way out by `adaptReasoning`, which knows the
- * Anthropic and OpenRouter shapes only. Declaring it here would let an author request thinking that
- * nothing translates. It is additive to add once a local adapter can honor it.
+ * Anthropic, native-OpenAI and OpenRouter shapes only. Declaring it here would let an author request
+ * thinking that nothing translates. It is additive to add once a local adapter can honor it.
  */
 export const LOCAL_CONFIG_SCHEMA: JsonSchemaDoc = {
   type: "object",
@@ -147,6 +181,7 @@ export const EMBEDDED_CONFIG_SCHEMA: JsonSchemaDoc = {
 
 const SCHEMAS: Record<ModelFamily, JsonSchemaDoc> = {
   anthropic: ANTHROPIC_CONFIG_SCHEMA,
+  openai: OPENAI_CONFIG_SCHEMA,
   openrouter: OPENROUTER_CONFIG_SCHEMA,
   local: LOCAL_CONFIG_SCHEMA,
   embedded: EMBEDDED_CONFIG_SCHEMA,

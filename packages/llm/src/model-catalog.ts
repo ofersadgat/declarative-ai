@@ -533,7 +533,36 @@ export class ModelInfo<const Rows extends readonly ModelInfoInterface[] = readon
  * these (completed) rows and then overlays the live refresh, so the core models survive even if a source
  * is down. The generator's output — {@link DEFAULT_MODELS} — is what the runtime actually uses.
  */
-export const CORE_SEED_MODELS: ModelInfoInterface[] = [
+export const CORE_SEED_MODELS = [
+  // OpenAI — native route (input / output $/MTok). Hand-seeded like the Anthropic rows below, and it
+  // has to be: the generator refreshes from Anthropic's docs and OpenRouter's API, and neither of
+  // those publishes OpenAI's own catalog. A hand row still prices correctly and still lets the picker
+  // offer the model.
+  //
+  // Every cache rate is EXPLICIT here, unlike the Anthropic rows, because the class defaults are
+  // Anthropic's ratios and OpenAI does not share them. Two divergences, both silent:
+  //  - the cached-read discount is 0.1x on the GPT-5 family but 0.25x on 4.1/o3/o4-mini and 0.5x on
+  //    4o, so the inherited 0.1x would under-report a cached call by up to fivefold;
+  //  - there is NO cache-WRITE charge at all — caching is automatic and free — while the inherited
+  //    multipliers would bill a write at 1.25x/2x of input for tokens nobody was charged for.
+  { route: "openai", model: "gpt-5", inputPerMillion: 1.25, outputPerMillion: 10,
+    cacheReadPerMillion: 0.125, cacheWritePerMillion: 0, cacheWrite1hPerMillion: 0 },
+  { route: "openai", model: "gpt-5-mini", inputPerMillion: 0.25, outputPerMillion: 2,
+    cacheReadPerMillion: 0.025, cacheWritePerMillion: 0, cacheWrite1hPerMillion: 0 },
+  { route: "openai", model: "gpt-5-nano", inputPerMillion: 0.05, outputPerMillion: 0.4,
+    cacheReadPerMillion: 0.005, cacheWritePerMillion: 0, cacheWrite1hPerMillion: 0 },
+  { route: "openai", model: "gpt-4.1", inputPerMillion: 2, outputPerMillion: 8,
+    cacheReadPerMillion: 0.5, cacheWritePerMillion: 0, cacheWrite1hPerMillion: 0 },
+  { route: "openai", model: "gpt-4.1-mini", inputPerMillion: 0.4, outputPerMillion: 1.6,
+    cacheReadPerMillion: 0.1, cacheWritePerMillion: 0, cacheWrite1hPerMillion: 0 },
+  { route: "openai", model: "gpt-4o", inputPerMillion: 2.5, outputPerMillion: 10,
+    cacheReadPerMillion: 1.25, cacheWritePerMillion: 0, cacheWrite1hPerMillion: 0 },
+  { route: "openai", model: "gpt-4o-mini", inputPerMillion: 0.15, outputPerMillion: 0.6,
+    cacheReadPerMillion: 0.075, cacheWritePerMillion: 0, cacheWrite1hPerMillion: 0 },
+  { route: "openai", model: "o3", inputPerMillion: 2, outputPerMillion: 8,
+    cacheReadPerMillion: 0.5, cacheWritePerMillion: 0, cacheWrite1hPerMillion: 0 },
+  { route: "openai", model: "o4-mini", inputPerMillion: 1.1, outputPerMillion: 4.4,
+    cacheReadPerMillion: 0.275, cacheWritePerMillion: 0, cacheWrite1hPerMillion: 0 },
   // Anthropic — native route (input / output $/MTok; cache rates derive 0.1x/1.25x/2x).
   { route: "anthropic", model: "claude-opus-4-8", inputPerMillion: 5, outputPerMillion: 25 },
   { route: "anthropic", model: "claude-opus-4-7", inputPerMillion: 5, outputPerMillion: 25 },
@@ -571,21 +600,42 @@ export const CORE_SEED_MODELS: ModelInfoInterface[] = [
   // Embeddings (§3.6 kernel) — via OpenRouter.
   { route: "openrouter", model: "openai/text-embedding-3-small", inputPerMillion: 0.02, outputPerMillion: 0 },
   { route: "openrouter", model: "openai/text-embedding-3-large", inputPerMillion: 0.13, outputPerMillion: 0 },
-];
+] as const satisfies readonly ModelInfoInterface[];
 
 /**
- * The default constructor data for {@link ModelInfo} — the committed snapshot produced by
- * `npm run update:model-info` ({@link GENERATED_MODELS} in `model-catalog-data.generated.ts`). It is a
- * strongly-typed `as const` tuple, so `new ModelInfo(DEFAULT_MODELS)` (and any literal construction) gets
- * compile-time-checked model keys; `ModelInfo.instance` widens it to the weak (string-keyed) case so the
- * runtime consumers that pass a `string` model id still compile. Re-run the generator to refresh prices +
- * capabilities from the live sources.
+ * What the runtime uses: the committed snapshot produced by `npm run update:model-info`
+ * ({@link GENERATED_MODELS}), plus any {@link CORE_SEED_MODELS} row it does not already carry.
+ *
+ * The union matters for a route the GENERATOR cannot see. It refreshes from Anthropic's docs and
+ * OpenRouter's API, so a native OpenAI row exists only in the seed — and a plain
+ * `= GENERATED_MODELS` would drop it on every regeneration, silently emptying the `openai` route
+ * while the code that added it still looked right.
+ *
+ * The seed half is passed through {@link deriveIdentity}, which the GENERATED half already went
+ * through on the way in (`model-catalog-source`). Without it a folded-in row reaches the catalog
+ * with no `provider`, `label` or `canonicalId` — so it prices correctly and then shows up in a picker
+ * that groups by vendor as an unnamed row under no heading. That was invisible while the only seed
+ * rows were Anthropic ones, because a generated row of the same key masked every one of them.
+ *
+ * This is a WEAKLY-typed array by annotation, unlike the two tuples it is built from: a value spliced
+ * at runtime has no literal type to offer, and {@link KnownModelKey} is where the compile-time enum
+ * lives instead. `ModelInfo.instance` is the weak (string-keyed) case anyway, so nothing regresses —
+ * a caller who wants checked keys constructs `new ModelInfo(GENERATED_MODELS)` from a tuple directly.
  */
-export const DEFAULT_MODELS = GENERATED_MODELS;
+export const DEFAULT_MODELS: readonly ModelInfoInterface[] = (() => {
+  const have = new Set(GENERATED_MODELS.map((row) => keyForModel(row)));
+  const seeded = CORE_SEED_MODELS.filter((row) => !have.has(keyForModel(row))).map((row) => deriveIdentity(row));
+  return [...GENERATED_MODELS, ...seeded];
+})();
 
-/** The union of every `${route}/${model}` key present in the committed snapshot — a compile-time enum of
- *  the models the runtime knows about out of the box. */
-export type KnownModelKey = ModelKeyOf<typeof GENERATED_MODELS>;
+/**
+ * The union of every `${route}/${model}` key the runtime knows out of the box — a compile-time enum.
+ *
+ * BOTH halves of {@link DEFAULT_MODELS}, which is why `CORE_SEED_MODELS` is `as const`: a key that
+ * exists only in the seed — every native `openai/…` id — is as known as one the refresh wrote, and a
+ * union naming only the snapshot would call it unknown.
+ */
+export type KnownModelKey = ModelKeyOf<typeof GENERATED_MODELS> | ModelKeyOf<typeof CORE_SEED_MODELS>;
 
 /** Seed rows (a fresh copy per call). */
 export function modelsSeed(): ModelInfoInterface[] {

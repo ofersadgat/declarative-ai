@@ -20,7 +20,7 @@ const log = createLogger("engine.providers.router");
  *
  * `ModelRouter` is the seam §6.1's `RunCtx` depends on — a swappable interface, not a hardcoded call.
  */
-export type ModelFamily = "anthropic" | "openrouter" | "local" | "embedded";
+export type ModelFamily = "anthropic" | "openai" | "openrouter" | "local" | "embedded";
 /** The serving ROUTES a model id may name in its `{route}/…` prefix (same set as {@link ModelFamily}). */
 export type ModelRoute = ModelFamily;
 
@@ -40,7 +40,7 @@ export type ModelRoute = ModelFamily;
  * That is a deployment fact about lifecycle ownership, not a fact about the model, and the id names
  * the model.
  */
-export const MODEL_ROUTES = ["anthropic", "openrouter", "local", "embedded"] as const satisfies readonly ModelRoute[];
+export const MODEL_ROUTES = ["anthropic", "openai", "openrouter", "local", "embedded"] as const satisfies readonly ModelRoute[];
 
 /** A model id's parsed serving route + the provider-native id that route serves. */
 export interface ParsedModel {
@@ -83,7 +83,7 @@ export function parseModelRoute(modelId: string): ParsedModel {
  */
 export function isRemoteModel(modelId: string): boolean {
   const { route } = parseModelRoute(modelId);
-  return route === "anthropic" || route === "openrouter";
+  return route === "anthropic" || route === "openai" || route === "openrouter";
 }
 
 /** True iff the model runs on YOUR hardware — an OpenAI-compatible server on this box (`local`) or
@@ -193,6 +193,14 @@ export interface ModelRouter {
 
 export interface ModelRouterOptions {
   anthropicApiKey?: string;
+  openAiApiKey?: string;
+  /**
+   * Where the `openai` route points. Defaults to OpenAI itself.
+   *
+   * Overridable because the same protocol is what Azure OpenAI and every gateway in front of it
+   * speak — pointing this at one is a config change rather than a new route.
+   */
+  openAiBaseURL?: string;
   openRouterApiKey?: string;
   /** Skip installing the long-timeout undici dispatcher (tests with mock models). */
   skipDispatcher?: boolean;
@@ -308,6 +316,8 @@ export function createModelRouter(options: ModelRouterOptions = {}): ModelRouter
   if (!options.skipDispatcher) installLongTimeoutDispatcher();
 
   let anthropic: ReturnType<typeof createAnthropic> | undefined;
+  /** One client per strict-flag value — the flag is per CALL, so a single memo would freeze it. */
+  const openaiClients = new Map<string, ReturnType<typeof createOpenAICompatible>>();
   let openrouter: ReturnType<typeof createOpenRouter> | undefined;
   /** Built on the first `embedded/` resolve, so a router that never sees one never touches the peer. */
   let embedded: EmbeddedModelStore | undefined;
@@ -374,6 +384,34 @@ export function createModelRouter(options: ModelRouterOptions = {}): ModelRouter
         apiKey: options.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY,
       });
       return anthropic(providerId);
+    }
+    if (route === "openai") {
+      // Built on `@ai-sdk/openai-compatible` rather than a dedicated OpenAI package, because OpenAI
+      // IS the shape that package implements — it is the reference the "compatible" name refers to.
+      // A second SDK dependency would buy provider-specific extras this project does not use, and
+      // the local route already proves this client against a server speaking the same protocol.
+      //
+      // Keyed on the strict flag and cached per value, exactly as the local route is, because the
+      // flag is PER CALL: `supportsStructuredOutputs` makes the client send
+      // `response_format.json_schema.strict`, and a schema that could not be strictified reaches here
+      // on the ADVISORY tier. Pinning it on would 400 every one of those — which is the tier's whole
+      // purpose — and one memoized client would freeze whichever answer the first call happened to
+      // want. `openRouterStrictStructuredOutputs` documents the same hazard and defaults it off.
+      const strict = opts.strictStructuredOutput ?? false;
+      const key = `openai:${strict}`;
+      let client = openaiClients.get(key);
+      if (client === undefined) {
+        client = createOpenAICompatible({
+          name: "openai",
+          baseURL: options.openAiBaseURL ?? "https://api.openai.com/v1",
+          apiKey: options.openAiApiKey ?? process.env.OPENAI_API_KEY,
+          // OpenAI returns usage on the stream only when asked, and cost is computed from it.
+          includeUsage: true,
+          supportsStructuredOutputs: strict,
+        });
+        openaiClients.set(key, client);
+      }
+      return client(providerId);
     }
     if (route === "local") {
       const server = typeof options.local === "function" ? options.local(providerId) : options.local;

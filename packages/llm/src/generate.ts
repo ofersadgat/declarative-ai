@@ -293,6 +293,9 @@ export async function generateStructured<T = JsonValue>(
       toolResults: toolResults.length > 0 ? toolResults : undefined,
       files: producedFiles.length > 0 ? producedFiles : undefined,
       finishReason: args.finishReason,
+      // Which model answered, resolved — see `LlmOutput.model`. Recorded on every branch, including
+      // the failure one below: "which model refused" is exactly the question a failure raises.
+      model: modelId,
       // What the call APPENDED, verbatim, for a caller mirroring the conversation (DESIGN.md §1.6).
       ...(responseMessages.length > 0 ? { messages: responseMessages } : {}),
     };

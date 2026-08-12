@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   canonicalIdFor,
+  DEFAULT_MODELS,
   deriveIdentity,
   isReasoningModel,
   ModelInfo,
@@ -332,5 +333,47 @@ describe("model identity derivation (canonical id / display)", () => {
     // Fill-only: an explicit value is kept.
     const fed = deriveIdentity({ route: "openrouter", model: "x/y", inputPerMillion: 1, outputPerMillion: 1, supportedParameters: ["temperature"] });
     expect(fed.supportedParameters).toEqual(["temperature"]);
+  });
+});
+
+describe("DEFAULT_MODELS — the snapshot folded together with the seed rows it cannot see", () => {
+  const keyed = new Map(DEFAULT_MODELS.map((row) => [`${row.route}/${row.model}`, row] as const));
+
+  it("carries the native openai rows, which exist ONLY in the seed", () => {
+    // The generator refreshes from Anthropic's docs and OpenRouter's API; neither publishes OpenAI's
+    // own catalog, so a plain `= GENERATED_MODELS` empties this route on every regeneration.
+    expect(keyed.get("openai/gpt-5")).toBeDefined();
+    // And keeps it as its OWN row beside the same model relayed by OpenRouter. Two rows, not one:
+    // another endpoint, another key, another price row — even in a week when the two prices agree.
+    expect(keyed.get("openrouter/openai/gpt-5")).toBeDefined();
+    expect(keyed.get("openai/gpt-5")?.route).toBe("openai");
+    expect(keyed.get("openrouter/openai/gpt-5")?.route).toBe("openrouter");
+  });
+
+  it("gives a folded-in seed row the identity a generated row arrives with", () => {
+    // Without this a native openai row prices correctly and then shows up in a vendor-grouped picker
+    // as an unnamed row under no heading. It stayed invisible while every seed row had a generated twin.
+    const row = keyed.get("openai/gpt-5")!;
+    expect(row.provider).toBe("OpenAI");
+    expect(row.label).toBe("gpt-5");
+    expect(row.canonicalId).toBe("gpt-5");
+  });
+
+  it("prices OpenAI's cache the way OpenAI does, not the way Anthropic does", () => {
+    // The class defaults are Anthropic's ratios (read 0.1x, write 1.25x/2x). OpenAI's cached-read
+    // discount varies by family and its cache WRITE is free, so the inherited defaults would bill a
+    // write nobody was charged for and under-report a 4o cached read fivefold.
+    const rates = (id: string) => ModelInfo.instance.lookup(id)!;
+    expect(rates("openai/gpt-5").cacheReadPerMillion).toBeCloseTo(0.125, 10); // 0.1x
+    expect(rates("openai/gpt-4o").cacheReadPerMillion).toBeCloseTo(1.25, 10); // 0.5x — NOT 0.1x
+    expect(rates("openai/o4-mini").cacheReadPerMillion).toBeCloseTo(0.275, 10); // 0.25x
+    for (const id of ["openai/gpt-5", "openai/gpt-4o", "openai/o4-mini"]) {
+      expect(rates(id).cacheWritePerMillion, `${id} cache write`).toBe(0);
+      expect(rates(id).cacheWrite1hPerMillion, `${id} 1h cache write`).toBe(0);
+    }
+  });
+
+  it("lets the REFRESH win where a key is in both halves — the seed is a fallback, not an override", () => {
+    expect(keyed.get("anthropic/claude-opus-4-8")?.source).toBe("anthropic-docs");
   });
 });

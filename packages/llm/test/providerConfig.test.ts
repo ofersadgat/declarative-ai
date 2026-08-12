@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EMBEDDED_CONFIG_SCHEMA, LOCAL_CONFIG_SCHEMA, configSchemaFor } from "../src/providerConfig.js";
+import { adaptReasoning } from "../src/reasoning.js";
 import { MODEL_ROUTES } from "../src/router.js";
 
 /** The declared properties of a config schema document. */
@@ -34,10 +35,42 @@ describe("provider config schemas (§4)", () => {
   });
 
   it("neither local space declares `reasoning` — nothing adapts it for these routes yet", () => {
-    // `adaptReasoning` knows the Anthropic and OpenRouter shapes only. Declaring the neutral spec here
-    // would let an author request thinking that silently translates to nothing on the wire.
+    // `adaptReasoning` knows the Anthropic, native-OpenAI and OpenRouter shapes only. Declaring the
+    // neutral spec here would let an author request thinking that silently translates to nothing.
     expect(propsOf(LOCAL_CONFIG_SCHEMA)).not.toHaveProperty("reasoning");
     expect(propsOf(EMBEDDED_CONFIG_SCHEMA)).not.toHaveProperty("reasoning");
     expect(propsOf(configSchemaFor("anthropic"))).toHaveProperty("reasoning");
+  });
+
+  it("every space that DECLARES `reasoning` has an arm in the adapter that honours it", () => {
+    // The pairing is the invariant, and it is the one that broke: `openai` was aliased to OpenRouter's
+    // document, which declares `reasoning`, while the adapter had no openai arm — so the knob was
+    // offered, accepted, and dropped on the wire. A route may omit `reasoning`; it may not offer one
+    // nothing translates.
+    const adapts: Record<string, boolean> = {
+      anthropic: adaptReasoning({ effort: "high" }, { anthropic: true }) !== undefined,
+      openai: adaptReasoning({ effort: "high" }, { anthropic: false, openai: true })?.["openai"] !== undefined,
+      openrouter: adaptReasoning({ effort: "high" }, { anthropic: false })?.["openrouter"] !== undefined,
+      local: false,
+      embedded: false,
+    };
+    for (const route of MODEL_ROUTES) {
+      if ("reasoning" in propsOf(configSchemaFor(route))) {
+        expect(adapts[route], `route "${route}" declares reasoning but nothing adapts it`).toBe(true);
+      }
+    }
+  });
+
+  it("openai is its OWN document, not OpenRouter's under another name", () => {
+    const openai = configSchemaFor("openai");
+    const openrouter = configSchemaFor("openrouter");
+    // A shared object gives the openai family OpenRouter's title and OpenRouter's `model` description,
+    // and makes the two hash alike wherever a schema is content-addressed for identity.
+    expect(openai).not.toBe(openrouter);
+    expect((openai as { title?: string }).title).toBe("openai-config");
+    // `topK` is not a parameter OpenAI's API has: the compatible client drops it with a warning
+    // nobody reads. OpenRouter can offer it because OpenRouter translates it.
+    expect(propsOf(openai)).not.toHaveProperty("topK");
+    expect(propsOf(openrouter)).toHaveProperty("topK");
   });
 });

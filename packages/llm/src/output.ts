@@ -183,6 +183,16 @@ export interface LlmOutput<T = JsonValue> {
    *  deliberately no parallel `artifacts` channel on the execution result (DESIGN §3.7). */
   files?: GeneratedFile[];
   finishReason: string;
+  /**
+   * WHICH MODEL answered — the resolved id, after routing and after any default was applied.
+   *
+   * On the RESULT rather than on the metrics, for the reason `providerSessionId` gives just below:
+   * metrics MEASURE a call — tokens, money, duration — while this is something the call PRODUCED. It
+   * is also the only place a later reader can learn it. A state naming no model, or naming a route
+   * that picks its own, is answered by a decision made inside this call; without this field a
+   * consumer resuming that conversation has to guess which model it was talking to.
+   */
+  model?: string;
   /** Provider-assigned handle to resume from, when the provider is stateful. This is the ONLY honest
    *  session field: it is something the call PRODUCED. The execution envelope used to carry a
    *  `session.id` that was just the caller's own logical key echoed back, read by nobody. */

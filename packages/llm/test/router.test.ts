@@ -26,8 +26,17 @@ describe("provider router (§5)", () => {
 
   it("rejects a bare/unprefixed model id (routing is explicit, never guessed)", () => {
     expect(() => parseModelRoute("claude-opus-4-8")).toThrow(/must be route-prefixed/);
-    expect(() => parseModelRoute("openai/gpt-5")).toThrow(/must be route-prefixed/); // "openai" is not a route
     expect(() => familyForModel("claude-opus-4-8")).toThrow(/must be route-prefixed/);
+    // The set is CLOSED — a prefix is not a route just because it is followed by a slash.
+    expect(() => parseModelRoute("mistral/large")).toThrow(/must be route-prefixed/);
+  });
+
+  it("tells the NATIVE openai route from the same model relayed by openrouter", () => {
+    // `openai/gpt-5` used to be refused, because there was no native route and the only way to that
+    // model was through OpenRouter. Both are legal now and they are DIFFERENT calls: another
+    // endpoint, another key, another price row.
+    expect(parseModelRoute("openai/gpt-5")).toEqual({ route: "openai", providerId: "gpt-5" });
+    expect(parseModelRoute("openrouter/openai/gpt-5")).toEqual({ route: "openrouter", providerId: "openai/gpt-5" });
   });
 
   it("isAnthropicModel is a native-id predicate (route already stripped)", () => {

@@ -4,8 +4,13 @@
  * Runs the model refresh/update functions (`model-catalog-source.ts`) against the LIVE sources — the
  * Anthropic docs pricing page + the OpenRouter models API — on top of the hand-maintained core seed
  * ({@link CORE_SEED_MODELS}), then writes the resulting rows to `src/model-catalog-data.generated.ts` as a
- * strongly-typed `as const` tuple. That generated module is imported by `model-catalog.ts` as
- * `DEFAULT_MODELS`, so `new ModelInfo(DEFAULT_MODELS)` gets compile-time-checked `${route}/${model}` keys.
+ * strongly-typed `as const` tuple — `GENERATED_MODELS`, which `model-catalog.ts` folds together with any
+ * seed row the refresh could not see to make `DEFAULT_MODELS`. Both halves are tuples, so `KnownModelKey`
+ * is the exact union of the `${route}/${model}` keys the runtime ships with.
+ *
+ * A source the refresh does not cover is why that fold exists: nothing here publishes OpenAI's own
+ * catalog, so the native `openai/…` rows live in the seed and would be dropped by every regeneration if
+ * `DEFAULT_MODELS` were the generated tuple alone.
  *
  * This is a manual, lockfile-style refresh: the output is committed and reviewed. It hits the network,
  * so it's kept OUT of the normal build/test path. A source that fails to fetch/parse/validate is skipped

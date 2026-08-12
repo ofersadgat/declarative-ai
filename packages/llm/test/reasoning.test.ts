@@ -27,4 +27,40 @@ describe("adaptReasoning — provider-neutral ReasoningSpec → provider provide
   it("an explicit budget wins over effort on Anthropic", () => {
     expect(adaptReasoning({ effort: "low", budgetTokens: 12000 }, { anthropic: true })).toEqual({ anthropic: { thinking: { type: "enabled", budgetTokens: 12000 } } });
   });
+
+  describe("the native openai route", () => {
+    it("files the effort under the PROVIDER'S OWN key, spelled the way its client parses it", () => {
+      // The whole point. `@ai-sdk/openai-compatible` reads `providerOptions[name]` where the name is
+      // the one the client was built with (`openai`), and lowers `reasoningEffort` to
+      // `reasoning_effort`. Under `openrouter` this request reaches the provider and is dropped
+      // without a warning — the call runs at the model's default while everything else claims the
+      // level was honoured.
+      expect(adaptReasoning({ effort: "high" }, { anthropic: false, openai: true })).toEqual({
+        openai: { reasoningEffort: "high" },
+      });
+    });
+
+    it("clamps xhigh rather than refusing it, as every level-taking provider does", () => {
+      expect(adaptReasoning({ effort: "xhigh" }, { anthropic: false, openai: true })).toEqual({
+        openai: { reasoningEffort: "high" },
+      });
+    });
+
+    it("converts a budget-only spec to a level, because there is no budget field to send it to", () => {
+      expect(adaptReasoning({ budgetTokens: 1000 }, { anthropic: false, openai: true })).toEqual({ openai: { reasoningEffort: "low" } });
+      expect(adaptReasoning({ budgetTokens: 8192 }, { anthropic: false, openai: true })).toEqual({ openai: { reasoningEffort: "medium" } });
+      expect(adaptReasoning({ budgetTokens: 100_000 }, { anthropic: false, openai: true })).toEqual({ openai: { reasoningEffort: "high" } });
+    });
+
+    it("still emits nothing when nothing was requested", () => {
+      expect(adaptReasoning(undefined, { anthropic: false, openai: true })).toBeUndefined();
+      expect(adaptReasoning({}, { anthropic: false, openai: true })).toBeUndefined();
+    });
+
+    it("does not steal the openrouter arm — the same model relayed by OpenRouter keeps its shape", () => {
+      expect(adaptReasoning({ effort: "high" }, { anthropic: false, openai: false })).toEqual({
+        openrouter: { reasoning: { effort: "high" } },
+      });
+    });
+  });
 });

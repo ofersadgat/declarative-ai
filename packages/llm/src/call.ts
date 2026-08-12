@@ -23,7 +23,7 @@ import type { LlmCallResult } from "./output.js";
 import { ModelInfo } from "./model-catalog.js";
 import { promptAsMessages, promptText, type CallPromptInput } from "./prompt.js";
 import { adaptReasoning } from "./reasoning.js";
-import { providerNativeId, type ModelRouter } from "./router.js";
+import { familyForModel, providerNativeId, type ModelRouter } from "./router.js";
 import { adaptSchemaCached, profileForModelId, type ProviderSchemaProfile } from "./schema/index.js";
 
 /** A runtime tool implementation — the `execute` for a declared FUNCTION tool, looked up by tool name.
@@ -152,7 +152,15 @@ async function runCall<T>(def: LlmCallDefinition<T>, env: CallDeps, timeoutArg?:
   // to the provider's `providerOptions` shape, MERGED over the config's raw passthrough (adapted
   // reasoning wins per provider key, since it's the first-class neutral request).
   const reasoning = "reasoning" in def ? def.reasoning : undefined;
-  const adaptedReasoning = acceptsReasoning ? adaptReasoning(reasoning, { anthropic: env.modelRouter.isAnthropic(def.model) }) : undefined;
+  // `openai` comes from the ROUTE PREFIX because the router publishes no predicate for it — and it
+  // has to be told apart at all, because the AI SDK keys `providerOptions` by the provider's own
+  // name and a request filed under another one is discarded silently (see `adaptReasoning`).
+  const adaptedReasoning = acceptsReasoning
+    ? adaptReasoning(reasoning, {
+        anthropic: env.modelRouter.isAnthropic(def.model),
+        openai: familyForModel(def.model) === "openai",
+      })
+    : undefined;
   const providerOptions = mergeProviderOptions(def.providerOptions, adaptedReasoning);
 
   // Build the runtime tool set from the serializable declarations + injected `execute` impls, and bound
