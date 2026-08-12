@@ -194,6 +194,80 @@ export class PermissionLedger {
   }
 }
 
+/** Everything the one decision needs. Shared by {@link withPermission} and {@link createToolGate}. */
+export interface ToolDecisionOptions {
+  ledger: PermissionLedger;
+  sessionId: string;
+  approve: Approver;
+  /** The per-STATE authored mode for this tool, shadowing the workflow-wide baseline. */
+  authoredMode?: PermissionMode;
+  /** The `smart`-mode policy for this tool. When `smart` resolves and none is supplied, it escalates to `ask`. */
+  smart?: SmartApprover;
+  /** Custom profile predicates by name — consulted when the session's profile isn't a built-in. */
+  profiles?: Record<string, ProfilePredicate>;
+}
+
+/** Why a call was refused, or that it may proceed. */
+export type ToolDecision = { allow: true } | { allow: false; reason: string };
+
+/**
+ * Decide ONE tool call — profile, then mode, then `smart`, then the human.
+ *
+ * THE single implementation, and it is single on purpose. The two `policyEnforcement` styles reach it
+ * by different routes — a composed runtime through {@link withPermission} wrapping each tool, a
+ * delegated one through {@link createToolGate} answering its native permission callback — and before
+ * this existed only the first route had one. The delegated side called `approve` directly, which made
+ * `smart` unreachable (its policy was never consulted) and `allow` indistinguishable from `ask` (the
+ * human was asked either way). Both were silent: the modes were configured, displayed, and ignored.
+ *
+ * `readOnly` is optional because the delegated caller does not always know it — an agent's own
+ * built-in is not a tool we registered. See {@link ToolGate.modeOf} for what an unknown one resolves
+ * to and why that is `ask` rather than a guess in either direction.
+ */
+export async function decideToolCall(
+  tool: { name: string; readOnly?: boolean },
+  input: FunctionInputs,
+  opts: ToolDecisionOptions,
+): Promise<ToolDecision> {
+  const { ledger, sessionId, approve, authoredMode, smart, profiles } = opts;
+  // Profile gate first: an out-of-scope tool is refused regardless of mode (a mutating tool under
+  // `read-only`/`plan`, or one a custom profile's predicate excludes).
+  const profile = ledger.resolveProfile(sessionId);
+  const scoped = scopeOf(profile, tool, profiles);
+  if (scoped === "out") return { allow: false, reason: `tool '${tool.name}' is out of the '${profile}' profile` };
+
+  let mode = ledger.resolve(tool.name, sessionId, authoredMode);
+  // An UNCLASSIFIABLE tool under a narrowing profile is escalated rather than resolved either way —
+  // see {@link ToolGate.modeOf}. It must not slip through on an `allow` the profile would have refused.
+  if (scoped === "unknown" && mode !== "deny") mode = "ask";
+  if (mode === "smart") {
+    // The smart policy decides directly, or returns `ask` to escalate to the human gate below.
+    mode = smart ? await smart({ tool: tool.name, input, sessionId }) : "ask";
+  }
+  if (mode === "ask") {
+    const decision = await approve({ tool: tool.name, input, sessionId });
+    ledger.apply(tool.name, decision, sessionId);
+    mode = decision.decision === "allow" ? "allow" : "deny";
+  }
+  return mode === "deny" ? { allow: false, reason: `tool '${tool.name}' denied by permission policy` } : { allow: true };
+}
+
+/**
+ * Whether a profile admits a tool — `unknown` when the tool cannot be classified at all.
+ *
+ * The third answer exists for the delegated case only. `full` excludes nothing, so an unclassifiable
+ * tool is fine there; under any NARROWING profile the predicate needs a `readOnly` we may not have.
+ */
+function scopeOf(
+  profile: PermissionProfile,
+  tool: { name: string; readOnly?: boolean },
+  profiles?: Record<string, ProfilePredicate>,
+): "in" | "out" | "unknown" {
+  if (profile === "full") return "in";
+  if (tool.readOnly === undefined) return "unknown";
+  return inProfile(profile, { name: tool.name, readOnly: tool.readOnly }, profiles) ? "in" : "out";
+}
+
 /**
  * Wrap a {@link Tool} so every call is gated by the permission ledger for `(sessionId, toolName)`:
  * `allow` runs it, `deny` returns a {@link PermissionDenied} result, `ask` invokes the approver and applies
@@ -202,43 +276,133 @@ export class PermissionLedger {
  */
 export function withPermission(
   tool: Tool,
-  opts: {
-    ledger: PermissionLedger;
-    sessionId: string;
-    toolName: string;
-    approve: Approver;
-    authoredMode?: PermissionMode;
-    /** The `smart`-mode policy for this tool. When `smart` resolves and none is supplied, it escalates to `ask`. */
-    smart?: SmartApprover;
-    /** Custom profile predicates by name — consulted when the session's profile isn't a built-in. */
-    profiles?: Record<string, ProfilePredicate>;
-  },
+  opts: Omit<ToolDecisionOptions, "authoredMode"> & { toolName: string; authoredMode?: PermissionMode },
 ): Tool {
-  const { ledger, sessionId, toolName, approve, authoredMode, smart, profiles } = opts;
-  const deny = (reason: string): PermissionDenied => ({ denied: true, tool: toolName, reason });
+  const { toolName, ...decision } = opts;
   return {
     description: tool.description,
     inputSchema: tool.inputSchema,
     readOnly: tool.readOnly,
     async run(input: FunctionInputs, ctx: ExecServices): Promise<JsonValue> {
-      // Profile gate first: an out-of-scope tool is refused regardless of mode (a mutating tool under
-      // `read-only`/`plan`, or one a custom profile's predicate excludes).
-      const profile = ledger.resolveProfile(sessionId);
-      if (!inProfile(profile, { name: toolName, readOnly: tool.readOnly }, profiles)) {
-        return deny(`tool '${toolName}' is out of the '${profile}' profile`);
-      }
-      let mode = ledger.resolve(toolName, sessionId, authoredMode);
-      if (mode === "smart") {
-        // The smart policy decides directly, or returns `ask` to escalate to the human gate below.
-        mode = smart ? await smart({ tool: toolName, input, sessionId }) : "ask";
-      }
-      if (mode === "ask") {
-        const decision = await approve({ tool: toolName, input, sessionId });
-        ledger.apply(toolName, decision, sessionId);
-        mode = decision.decision === "allow" ? "allow" : "deny";
-      }
-      if (mode === "deny") return deny(`tool '${toolName}' denied by permission policy`);
+      const verdict = await decideToolCall({ name: toolName, readOnly: tool.readOnly }, input, decision);
+      if (!verdict.allow) return { denied: true, tool: toolName, reason: verdict.reason } satisfies PermissionDenied;
       return tool.run(input, ctx);
+    },
+  };
+}
+
+/**
+ * The permission gate a DELEGATED agent drives its own loop through.
+ *
+ * A delegated adapter cannot be given wrapped tools — it runs its own loop and calls its own
+ * built-ins, which we never registered and cannot wrap. What it has instead is a native permission
+ * callback and an up-front configuration step, and this is what both of those consult so that they
+ * consult the same thing {@link withPermission} does.
+ */
+export interface ToolGate {
+  /**
+   * The session's effective profile.
+   *
+   * Published because one transport can act on the profile and on nothing else: `codex exec` has no
+   * per-tool gate at all, so its whole enforcement is the up-front `--sandbox`, and a `plan` profile
+   * is the one thing that maps onto it exactly — a planning turn must not write. Without this the
+   * sandbox came from a statically-configured option and a state that authored `plan` ran with
+   * whatever the adapter had been constructed with.
+   */
+  readonly profile: PermissionProfile;
+  /** Decide one call, input in hand. Everything resolves here: profile, mode, `smart`, the human. */
+  check(tool: { name: string; readOnly?: boolean }, input: FunctionInputs): Promise<ToolDecision>;
+  /**
+   * The mode a tool resolves to WITHOUT its input — what up-front configuration is allowed to assume.
+   *
+   * Three callers care, and the distinctions are the whole reason this is separate from `check`:
+   *
+   *  - `deny` ⇒ never offer the tool at all. A floor needs no input to apply.
+   *  - `allow` ⇒ safe to PRE-APPROVE, so the agent is not interrupted for it. This is what
+   *    `allowedTools` should carry, and carrying every tool regardless of mode is what made an
+   *    authored `ask` never ask.
+   *  - anything else (`ask`, `smart`) ⇒ must go through {@link check}. `smart` in particular INSPECTS
+   *    the input, so pre-approving it would decide the call before the thing that decides it ran.
+   *
+   * A tool the gate cannot classify — an agent's own built-in, with no `readOnly` we know — resolves
+   * to `ask` under any narrowing profile rather than to `allow` or `deny`. Denying would refuse an
+   * agent its own `Read` under `read-only`, which is the one thing that profile plainly permits;
+   * allowing would let it write under a profile that forbids writing. Escalating puts the one
+   * question we cannot answer to somebody who can.
+   */
+  modeOf(tool: { name: string; readOnly?: boolean }): PermissionMode;
+}
+
+/** What a gate governs: the tools we registered, plus the authored block that shadows the baseline. */
+export interface ToolGateOptions {
+  ledger: PermissionLedger;
+  sessionId: string;
+  approve: Approver;
+  /** The tools we REGISTERED, by name — this is where a `readOnly` is known. */
+  tools?: Record<string, { readOnly: boolean }>;
+  /** The operation's own `environment.permissions`, which shadows the workflow-wide baseline. */
+  authored?: { default?: PermissionMode; tools?: Record<string, PermissionMode> };
+  smart?: Record<string, SmartApprover>;
+  profiles?: Record<string, ProfilePredicate>;
+  /**
+   * Tools ALREADY wrapped with {@link withPermission}, which this gate must therefore not gate again.
+   *
+   * For a host that cannot know, at wiring time, whether the executor it is handing tools to will
+   * enforce by callback or by wrapping. The safe move is to wrap — an unwrapped tool reaching a
+   * `policyEnforcement: "none"` executor is ungated — and the cost is that a delegated adapter then
+   * asks about the same call the wrapper is about to ask about again. One `ask`, two prompts.
+   *
+   * Naming them here resolves it at the right end: they report `allow` to CONFIGURATION, so the
+   * adapter pre-approves them and its callback never fires, and the wrapper underneath makes the real
+   * decision when the tool actually runs. Nothing is loosened — the gate that matters is the one
+   * closest to the call.
+   */
+  preGated?: readonly string[];
+}
+
+/** Build the {@link ToolGate} for one delegated call. */
+export function createToolGate(opts: ToolGateOptions): ToolGate {
+  // OWN entries only, throughout. These maps are keyed by TOOL NAME, so a tool called `constructor`
+  // would otherwise resolve its mode — and its smart rule — to a prototype member.
+  const own = <T>(map: Record<string, T> | undefined, name: string): T | undefined =>
+    map !== undefined && Object.hasOwn(map, name) ? map[name] : undefined;
+  const authoredMode = (name: string): PermissionMode | undefined => own(opts.authored?.tools, name) ?? opts.authored?.default;
+  /** The registered tool's `readOnly` when we have it; the caller's claim otherwise. */
+  const known = (tool: { name: string; readOnly?: boolean }): { name: string; readOnly?: boolean } => {
+    const registered = own(opts.tools, tool.name);
+    return registered !== undefined ? { name: tool.name, readOnly: registered.readOnly } : tool;
+  };
+  const decisionFor = (name: string): ToolDecisionOptions => ({
+    ledger: opts.ledger,
+    sessionId: opts.sessionId,
+    approve: opts.approve,
+    ...(authoredMode(name) !== undefined ? { authoredMode: authoredMode(name) } : {}),
+    ...(own(opts.smart, name) !== undefined ? { smart: own(opts.smart, name) } : {}),
+    ...(opts.profiles !== undefined ? { profiles: opts.profiles } : {}),
+  });
+  const preGated = new Set(opts.preGated ?? []);
+  return {
+    // A GETTER: a plan-mode exit rebinds the session's profile mid-run, and a snapshot taken when the
+    // gate was built would go on reporting `plan` after the door had been opened.
+    get profile(): PermissionProfile {
+      return opts.ledger.resolveProfile(opts.sessionId);
+    },
+    // NOT short-circuited for a pre-gated tool. `preGated` is a statement about where the decision is
+    // made, not that there is none — an adapter that asks anyway must still get the true answer.
+    check: (tool, input) => decideToolCall(known(tool), input, decisionFor(tool.name)),
+    modeOf: (tool) => {
+      const it = known(tool);
+      // Pre-approved AT CONFIGURATION so the adapter's callback does not fire — see `preGated`. The
+      // wrapper underneath decides the call for real when the tool runs.
+      if (preGated.has(it.name)) return "allow";
+      const profile = opts.ledger.resolveProfile(opts.sessionId);
+      const scoped = scopeOf(profile, it, opts.profiles);
+      if (scoped === "out") return "deny";
+      const mode = opts.ledger.resolve(it.name, opts.sessionId, authoredMode(it.name));
+      // Same escalation as `decideToolCall`, and it has to be here too: this is the answer that
+      // decides whether the tool is PRE-APPROVED, so resolving it to `allow` would skip the gate
+      // entirely for exactly the tool we could not classify.
+      return scoped === "unknown" && mode !== "deny" ? "ask" : mode;
     },
   };
 }

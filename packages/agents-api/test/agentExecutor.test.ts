@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import { isOk, sessionOutcomeOf, promptOp, resolveSessionRef, type ExecEvent, type ExecServices, type ResolvedSession, type Tool } from "@declarative-ai/exec";
 import type { LlmOutput, ModelMessage } from "@declarative-ai/llm";
 import { PromptExecutor } from "@declarative-ai/promptop";
+import { createToolGate, PermissionLedger, type Approver, type PermissionBaseline, type PermissionMode, type SmartApprover } from "@declarative-ai/permissions";
 import { AgentApiExecutor, AgentExecutor, DELEGATED_CAPS } from "../src/index.js";
 import type { AgentQuery, AgentQueryOptions } from "../src/index.js";
 
@@ -732,5 +733,183 @@ describe("the model reaches the transport", () => {
     const { query, seen } = capturing();
     await new AgentExecutor({ query }).start(op(), {}).result;
     expect(seen()?.model).toBeUndefined();
+  });
+});
+
+/**
+ * The permission MODES on the delegated path.
+ *
+ * A delegated adapter gets RAW tools — it runs its own loop and calls its own built-ins, so wrapping
+ * them here would double-gate what it never routes through us anyway. What it gets instead is
+ * `ctx.gate`, and these pin the three places the modes are actually consumed.
+ *
+ * Every one of them was silently broken before the gate existed. The adapter read
+ * `ctx.policy.baseline.tools` for its deny floor (missing anything authored on the STATE),
+ * pre-approved every declared tool regardless of mode, and answered its permission callback by
+ * calling the human approver directly — so `smart` never ran its policy and `allow` asked anyway.
+ */
+describe("permission modes reach a delegated agent", () => {
+  const tool = (name: string, readOnly = true): Tool => ({
+    description: name,
+    readOnly,
+    inputSchema: { type: "object" } as never,
+    run: () => name,
+  });
+
+  /** A ctx carrying the real gate over the real ledger — not a stub, so precedence is exercised. */
+  const gated = (opts: {
+    tools: Record<string, Tool>;
+    authored?: { default?: PermissionMode; tools?: Record<string, PermissionMode> };
+    baseline?: PermissionBaseline;
+    smart?: Record<string, SmartApprover>;
+    approve?: Approver;
+  }) => {
+    const asked: string[] = [];
+    const approve: Approver =
+      opts.approve ??
+      ((req) => {
+        asked.push(req.tool);
+        return { decision: "allow", scope: "once" };
+      });
+    const ledger = new PermissionLedger({ ...(opts.baseline !== undefined ? { baseline: opts.baseline } : {}) });
+    const gate = createToolGate({
+      ledger,
+      sessionId: "s1",
+      approve,
+      tools: Object.fromEntries(Object.entries(opts.tools).map(([n, t]) => [n, { readOnly: t.readOnly }])),
+      ...(opts.authored !== undefined ? { authored: opts.authored } : {}),
+      ...(opts.smart !== undefined ? { smart: opts.smart } : {}),
+    });
+    return { asked, ctx: { tools: opts.tools, gate, approve } as unknown as ExecServices };
+  };
+
+  it("pre-approves ONLY the tools whose mode is `allow`", async () => {
+    const { query, seen } = capturing();
+    const { ctx } = gated({
+      tools: { open: tool("open"), look: tool("look"), think: tool("think") },
+      authored: { tools: { open: "allow", look: "ask", think: "smart" } },
+    });
+    await new AgentExecutor({
+      query,
+      injectTools: false, // route them natively, so they are eligible for the allow-list at all
+    }).start(op(), ctx).result;
+    // `ask` must still be asked and `smart` must still run its policy — pre-approving either is what
+    // decides a call before the thing that decides it has run.
+    expect(seen()?.allowedTools).toEqual(["open"]);
+  });
+
+  it("applies a deny authored on the STATE, which the baseline never carried", async () => {
+    const { query, seen } = capturing();
+    const { ctx } = gated({ tools: { open: tool("open") }, authored: { tools: { open: "deny" } } });
+    await new AgentExecutor({ query }).start(op(), ctx).result;
+    // Never offered — not injected, not allowed. A floor needs no human.
+    expect(seen()?.mcpTools).toBeUndefined();
+    expect(seen()?.allowedTools).toEqual([]);
+  });
+
+  it("applies the PROFILE as a deny, without anybody naming the tool", async () => {
+    const { query, seen } = capturing();
+    const { ctx } = gated({
+      tools: { look: tool("look", true), write: tool("write", false) },
+      baseline: { profile: "read-only" },
+      authored: { default: "allow" },
+    });
+    await new AgentExecutor({ query }).start(op(), ctx).result;
+    expect(Object.keys(seen()?.mcpTools ?? {})).toEqual(["look"]);
+  });
+
+  it("answers the native callback through the gate, so `smart` runs instead of a human", async () => {
+    const { query, seen } = capturing();
+    const { ctx, asked } = gated({
+      tools: { open: tool("open") },
+      authored: { tools: { open: "smart" } },
+      smart: { open: ({ input }) => ((input as { ok?: boolean }).ok === true ? "allow" : "deny") },
+    });
+    await new AgentExecutor({ query }).start(op(), ctx).result;
+    const ask = (input: unknown) =>
+      seen()!.canUseTool!({ toolName: "mcp__dai__open", input: input as never }, { signal: new AbortController().signal });
+
+    expect(await ask({ ok: true })).toEqual({ allow: true });
+    expect(await ask({ ok: false })).toMatchObject({ allow: false });
+    // The human was never involved — that is what `smart` means.
+    expect(asked).toEqual([]);
+  });
+
+  it("resolves the callback's name back to the LOGICAL one the policy is written against", async () => {
+    // Three vocabularies meet at that callback: the agent addresses an injected tool as
+    // `mcp__dai__open` and an aliased one as `Read`, while a mode is authored against `open`.
+    const { query, seen } = capturing();
+    const { ctx, asked } = gated({ tools: { open: tool("open") }, authored: { tools: { open: "allow" } } });
+    await new AgentExecutor({ query }).start(op(), ctx).result;
+    const decision = await seen()!.canUseTool!(
+      { toolName: "mcp__dai__open", input: {} },
+      { signal: new AbortController().signal },
+    );
+    expect(decision).toEqual({ allow: true });
+    expect(asked).toEqual([]); // an `allow` does not interrupt
+  });
+
+  it("escalates a tool the gate cannot classify rather than guessing", async () => {
+    // The agent's own `Bash` is not a tool we registered, so there is no `readOnly` to judge it by.
+    const { query, seen } = capturing();
+    const { ctx, asked } = gated({ tools: {}, baseline: { profile: "read-only", default: "allow" } });
+    await new AgentExecutor({ query }).start(op(), ctx).result;
+    const decision = await seen()!.canUseTool!({ toolName: "Bash", input: {} }, { signal: new AbortController().signal });
+    expect(decision).toEqual({ allow: true });
+    expect(asked).toEqual(["Bash"]); // asked, not assumed — in either direction
+  });
+
+  it("falls back to the bare approver for a host that publishes no gate", async () => {
+    // The prior behaviour, kept: an un-gated host is not silently un-gated.
+    const { query, seen } = capturing();
+    const asked: string[] = [];
+    const approve: Approver = (req) => {
+      asked.push(req.tool);
+      return { decision: "deny", scope: "once" };
+    };
+    await new AgentExecutor({ query }).start(op(), { tools: { open: tool("open") }, approve } as unknown as ExecServices).result;
+    expect(await seen()!.canUseTool!({ toolName: "open", input: {} }, { signal: new AbortController().signal })).toEqual({
+      allow: false,
+      reason: "denied by permission policy",
+    });
+    expect(asked).toEqual(["open"]);
+  });
+});
+
+describe("the session profile reaches a transport that has no per-tool gate", () => {
+  /**
+   * `codex exec` enforces entirely up front: no permission callback, no allow-list, no deny-list —
+   * just `--sandbox`, chosen from the permission mode. So the profile is the only policy input it can
+   * act on, and until the gate carried it the sandbox came from a statically-configured adapter
+   * option: a state authoring `plan` ran under whatever that option happened to be.
+   */
+  const gateWithProfile = (profile: string): ExecServices =>
+    ({
+      approve: () => ({ decision: "allow", scope: "once" }),
+      gate: createToolGate({
+        ledger: new PermissionLedger({ baseline: { profile } }),
+        sessionId: "s1",
+        approve: () => ({ decision: "allow", scope: "once" }),
+      }),
+    }) as unknown as ExecServices;
+
+  it("derives `plan` from a plan profile — the one exact correspondence", async () => {
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query }).start(op(), gateWithProfile("plan")).result;
+    expect(seen()?.permissionMode).toBe("plan");
+  });
+
+  it("derives NOTHING from read-only, which has no counterpart in this vocabulary", async () => {
+    // Borrowing `plan` here would tell the agent to stop acting and start planning, which is a
+    // different instruction from "you may read". The per-tool gate enforces read-only instead.
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query }).start(op(), gateWithProfile("read-only")).result;
+    expect(seen()?.permissionMode).toBeUndefined();
+  });
+
+  it("lets an explicitly configured mode win — it is the more specific statement", async () => {
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query, permissionMode: "acceptEdits" }).start(op(), gateWithProfile("plan")).result;
+    expect(seen()?.permissionMode).toBe("acceptEdits");
   });
 });

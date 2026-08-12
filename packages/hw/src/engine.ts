@@ -64,12 +64,14 @@ import {
 } from "@declarative-ai/exec";
 import type { WorkflowMetrics } from "./ports.js";
 import {
+  createToolGate,
   PermissionLedger,
   planExitTool,
   withPermission,
   type Approver,
   type PermissionBaseline,
   type PermissionMode,
+  type ToolGate,
   type ProfilePredicate,
   type SmartApprover,
 } from "@declarative-ai/permissions";
@@ -1347,7 +1349,10 @@ export class WorkflowEngine {
     const rendered = op.kind === "prompt" ? { ...op, user: this.renderTemplate(op.user, instance, literal.values) } : op;
     let outcome;
     try {
-      outcome = await this.operations.start(rendered, (await this.servicesFor(resourceKey, instance, toolsOrFailure.tools))).result;
+      outcome = await this.operations.start(
+        rendered,
+        await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, undefined, toolsOrFailure.gate),
+      ).result;
     } catch (e) {
       return { error: `executor rejected: ${(e as Error).message}` };
     }
@@ -1416,7 +1421,7 @@ export class WorkflowEngine {
     const toolsOrFailure = this.resolveTools(env, resourceKey, delegates);
     if ("failure" in toolsOrFailure) return fail(toolsOrFailure.failure);
 
-    const services = await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, session);
+    const services = await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, session, toolsOrFailure.gate);
     // Errors are DATA (§4.2): the impl RESOLVES value-or-failure, so a 429 raised inside a registered
     // function keeps its classification instead of being reconstructed from `err.name` — which is what
     // made every non-`AbortError` permanently failed, retry machinery and all.
@@ -1583,28 +1588,64 @@ export class WorkflowEngine {
 
   /**
    * Resolve the environment's declared tool NAMES through `registry.tools` into executables, and
-   * apply the permission gate (DESIGN §5.1, "Enforcement"): with an approver configured, wrap
-   * every tool so a call is authorized by profile × mode; seed the authored profile once; inject the
-   * plan-exit gate while the session is in `plan`. A DELEGATED adapter (`policyEnforcement:
-   * "callback"`) authorizes its own loop's calls through `ctx.approve`, so it gets RAW tools —
-   * wrapping there too would double-gate.
+   * apply the permission gate (DESIGN §5.1, "Enforcement").
+   *
+   * Two shapes, per the executing entry's `policyEnforcement`:
+   *
+   *  - COMPOSED (`config`/`none`): every tool is WRAPPED, so a call is authorized by profile × mode
+   *    on its way through. The plan-exit gate is injected while the session is in `plan`.
+   *  - DELEGATED (`callback`): the tools stay RAW — the adapter runs its own loop and authorizes
+   *    through its native callback, and wrapping here as well would double-gate — and a {@link ToolGate}
+   *    is published instead. The gate is what carries the authored modes across that boundary. Without
+   *    it "raw" meant the state's own `permissions` block went NOWHERE: the adapter read the
+   *    workflow-wide baseline only, so a per-tool `deny` or `smart` written on the state was
+   *    configured, displayed, and ignored.
    */
   private resolveTools(
     env: ExecEnvironmentDecl,
     sessionId: string,
     delegatesPermissions: boolean,
-  ): { tools?: Record<string, Tool> } | { failure: Failure } {
-    if (env.tools === undefined || env.tools.length === 0) return {};
+  ): { tools?: Record<string, Tool>; gate?: ToolGate } | { failure: Failure } {
+    const approve = this.config.permissions?.approve;
+    // Seeded whichever way the policy is enforced. It used to happen on the wrapping path only, so a
+    // DELEGATED state authoring `profile: "read-only"` ran under `full` — the ledger's default —
+    // before any of the rest of this had a chance to matter.
+    if (env.permissions?.profile) this.permissions.seedProfile(sessionId, env.permissions.profile);
+
+    const named = env.tools ?? [];
     const tools: Record<string, Tool> = {};
-    for (const name of env.tools) {
+    for (const name of named) {
       const tool = this.config.registry.tools.get(name);
       if (!tool) return { failure: { classification: "permanent", reason: `tool '${name}' is not registered` } };
       tools[name] = tool;
     }
-    const approve = this.config.permissions?.approve;
-    if (!approve || delegatesPermissions) return { tools };
+    const some = Object.keys(tools).length > 0;
+    if (!approve) return some ? { tools } : {};
 
-    if (env.permissions?.profile) this.permissions.seedProfile(sessionId, env.permissions.profile);
+    /**
+     * The gate, built for EVERY enforcement style rather than only the delegated one.
+     *
+     * A composed runtime never calls it — its tools are wrapped below and the wrapping is the gate —
+     * so publishing it there is inert. What it is not is useless: `ToolGate.profile` is the only way
+     * the session's profile reaches an adapter at all, and `codex exec` acts on the profile and on
+     * nothing else. Withholding it from `config` adapters would keep the one transport that has no
+     * per-tool gate from honouring the one thing it CAN honour.
+     *
+     * Built even with NO declared tools, because a delegated agent's own built-ins are the calls that
+     * most need answering for — they are the ones we never registered and cannot wrap.
+     */
+    const gate = createToolGate({
+      ledger: this.permissions,
+      sessionId,
+      approve,
+      tools: Object.fromEntries(Object.entries(tools).map(([name, tool]) => [name, { readOnly: tool.readOnly }])),
+      ...(env.permissions !== undefined ? { authored: env.permissions } : {}),
+      ...(this.config.permissions?.smart !== undefined ? { smart: this.config.permissions.smart } : {}),
+      ...(this.config.permissions?.profiles !== undefined ? { profiles: this.config.permissions.profiles } : {}),
+    });
+
+    if (delegatesPermissions) return { ...(some ? { tools } : {}), gate };
+    if (!some) return { gate };
     // OWN entries only. These are authored/host-supplied maps keyed by TOOL NAME, so a tool called
     // `constructor` or `toString` used to resolve its permission mode — and its smart-approval rule
     // — to a prototype member, handing a FUNCTION to a permission decision. Far-fetched input, but
@@ -1629,7 +1670,7 @@ export class WorkflowEngine {
     if (this.permissions.resolveProfile(sessionId) === "plan") {
       guarded["exit_plan"] = planExitTool({ ledger: this.permissions, sessionId, approve });
     }
-    return { tools: guarded };
+    return { tools: guarded, gate };
   }
 
   /** The services one operation runs with: its resource bundle's workspace, its tools, its cancellation. */
@@ -1638,8 +1679,11 @@ export class WorkflowEngine {
     instance: Instance,
     tools?: Record<string, Tool>,
     session?: SessionBinding,
+    /** The delegated permission gate, when this call has one — see {@link resolveTools}. */
+    gate?: ToolGate,
   ): Promise<ExecServices> {
     const services = this.childServices();
+    if (gate !== undefined) services.gate = gate;
     // RESOLVED HERE, not stated as a request for a layer below to resolve.
     //
     // The engine used to publish `ctx.sessionRequest` — which conversation, and whether to branch —

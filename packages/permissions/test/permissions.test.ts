@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  createToolGate,
   PermissionLedger,
   planExitTool,
   isPermissionDenied,
@@ -234,5 +235,169 @@ describe("custom profiles", () => {
     const ledger = new PermissionLedger({ baseline: { default: "allow", profile: "mystery" } });
     const wrapped = withPermission(tool, { ledger, sessionId: "s1", toolName: "grep", approve: scriptedApprover({ decision: "allow", scope: "once" }) });
     expect(isPermissionDenied(await wrapped.run({}, CTX))).toBe(true); // no predicate for "mystery"
+  });
+});
+
+describe("the delegated gate — the same decision, reached by the other route", () => {
+  /**
+   * A delegated agent cannot be handed wrapped tools: it runs its own loop and calls its own
+   * built-ins, which nobody registered and nothing can wrap. So it answers its native permission
+   * callback through {@link createToolGate} instead — and the point of these is that the two routes
+   * reach ONE implementation.
+   *
+   * Before the gate existed the delegated side called the human approver directly, which collapsed
+   * three of the four modes without failing: `smart` never ran its policy, `allow` asked anyway, and
+   * the session profile was never consulted at all.
+   */
+  const gateFor = (opts: Partial<Parameters<typeof createToolGate>[0]> = {}) => {
+    const approve = scriptedApprover({ decision: "allow", scope: "once" });
+    const ledger = opts.ledger ?? new PermissionLedger({});
+    return {
+      approve,
+      ledger,
+      gate: createToolGate({ ledger, sessionId: "s1", approve, ...opts }),
+    };
+  };
+
+  it("runs the SMART policy instead of asking a human", async () => {
+    let inspected: FunctionInputs | undefined;
+    const smart: SmartApprover = ({ input }) => {
+      inspected = input;
+      return (input as { danger?: boolean }).danger === true ? "deny" : "allow";
+    };
+    const { gate, approve } = gateFor({
+      tools: { bash: { readOnly: false } },
+      authored: { tools: { bash: "smart" } },
+      smart: { bash: smart },
+    });
+
+    expect(await gate.check({ name: "bash" }, { danger: false })).toEqual({ allow: true });
+    expect(inspected).toEqual({ danger: false });
+    expect(await gate.check({ name: "bash" }, { danger: true })).toMatchObject({ allow: false });
+    // The whole point: a `smart` tool decided twice and the human was never involved.
+    expect(approve.asked).toBe(0);
+  });
+
+  it("does not ask about a tool the caller set to `allow`", async () => {
+    const { gate, approve } = gateFor({ tools: { bash: { readOnly: false } }, authored: { tools: { bash: "allow" } } });
+    expect(await gate.check({ name: "bash" }, {})).toEqual({ allow: true });
+    expect(approve.asked).toBe(0);
+  });
+
+  it("refuses a `deny` without asking, and asks about an `ask`", async () => {
+    const { gate, approve } = gateFor({
+      tools: { bash: { readOnly: false }, read_file: { readOnly: true } },
+      authored: { tools: { bash: "deny", read_file: "ask" } },
+    });
+    expect(await gate.check({ name: "bash" }, {})).toMatchObject({ allow: false });
+    expect(approve.asked).toBe(0);
+    expect(await gate.check({ name: "read_file" }, {})).toEqual({ allow: true });
+    expect(approve.asked).toBe(1);
+  });
+
+  it("applies the session PROFILE, which the direct-approver path skipped entirely", async () => {
+    // A `read-only` state could previously be talked into a write by one distracted click, because
+    // nothing between the agent and the human knew the profile existed.
+    const ledger = new PermissionLedger({ baseline: { profile: "read-only" } });
+    const { gate, approve } = gateFor({
+      ledger,
+      tools: { bash: { readOnly: false }, read_file: { readOnly: true } },
+      authored: { tools: { bash: "allow", read_file: "allow" } },
+    });
+    expect(await gate.check({ name: "bash" }, {})).toMatchObject({ allow: false, reason: expect.stringContaining("read-only") });
+    expect(approve.asked).toBe(0); // refused outright — a profile needs no human
+    expect(await gate.check({ name: "read_file" }, {})).toEqual({ allow: true });
+  });
+
+  it("honours the STATE's authored mode over the workflow-wide baseline", async () => {
+    // The reason the gate exists at all: raw tools used to mean the state's own `permissions` block
+    // reached the adapter through no channel whatsoever.
+    const ledger = new PermissionLedger({ baseline: { tools: { bash: "allow" } } });
+    const { gate, approve } = gateFor({ ledger, tools: { bash: { readOnly: false } }, authored: { tools: { bash: "deny" } } });
+    expect(await gate.check({ name: "bash" }, {})).toMatchObject({ allow: false });
+    expect(approve.asked).toBe(0);
+  });
+
+  describe("modeOf — what up-front configuration may assume", () => {
+    it("reports `allow` only for a tool that really is pre-approvable", () => {
+      const { gate } = gateFor({
+        tools: { a: { readOnly: false }, b: { readOnly: false }, c: { readOnly: false }, d: { readOnly: false } },
+        authored: { tools: { a: "allow", b: "ask", c: "smart", d: "deny" } },
+      });
+      // `allowedTools` carries exactly the first. Carrying all four is what made an authored `ask`
+      // never ask — and pre-approving `smart` would decide the call before its policy ran.
+      expect(gate.modeOf({ name: "a" })).toBe("allow");
+      expect(gate.modeOf({ name: "b" })).toBe("ask");
+      expect(gate.modeOf({ name: "c" })).toBe("smart");
+      expect(gate.modeOf({ name: "d" })).toBe("deny");
+    });
+
+    it("ESCALATES a tool it cannot classify under a narrowing profile", async () => {
+      // An agent's own `Bash` is not a tool we registered, so there is no `readOnly` to judge it by.
+      // Denying would refuse its `Read` under `read-only` — the one thing that profile plainly
+      // permits — and allowing would let it write under a profile that forbids writing.
+      const ledger = new PermissionLedger({ baseline: { profile: "read-only", default: "allow" } });
+      const { gate, approve } = gateFor({ ledger });
+      expect(gate.modeOf({ name: "Bash" })).toBe("ask");
+      expect(await gate.check({ name: "Bash" }, {})).toEqual({ allow: true });
+      expect(approve.asked).toBe(1);
+    });
+
+    it("leaves an unclassifiable tool alone under `full`, which excludes nothing", () => {
+      const ledger = new PermissionLedger({ baseline: { default: "allow" } });
+      const { gate } = gateFor({ ledger });
+      expect(gate.modeOf({ name: "Bash" })).toBe("allow");
+    });
+
+    it("still honours an explicit `deny` for a tool it cannot classify", () => {
+      const ledger = new PermissionLedger({ baseline: { profile: "read-only", tools: { Bash: "deny" } } });
+      const { gate } = gateFor({ ledger });
+      expect(gate.modeOf({ name: "Bash" })).toBe("deny");
+    });
+  });
+
+  it("reads OWN entries only, so a tool named `constructor` cannot resolve to a prototype member", () => {
+    const { gate } = gateFor({ authored: { tools: {} }, smart: {} });
+    expect(gate.modeOf({ name: "constructor" })).toBe("ask");
+    expect(gate.modeOf({ name: "toString" })).toBe("ask");
+  });
+});
+
+describe("preGated — a tool already wrapped, so the gate must not gate it twice", () => {
+  /**
+   * For a host that cannot know, when it wires the tools, which executor will answer. Wrapping is the
+   * safe default — an unwrapped tool reaching a `policyEnforcement: "none"` executor is ungated — but
+   * if the route turns out to be a delegated agent, that agent asks about the very call the wrapper is
+   * about to ask about again. One `ask`, two prompts.
+   */
+  it("reports `allow` to CONFIGURATION, so the adapter pre-approves and its callback never fires", () => {
+    const ledger = new PermissionLedger({});
+    const gate = createToolGate({
+      ledger,
+      sessionId: "s1",
+      approve: scriptedApprover({ decision: "allow", scope: "once" }),
+      tools: { bash: { readOnly: false } },
+      authored: { tools: { bash: "ask" } },
+      preGated: ["bash"],
+    });
+    expect(gate.modeOf({ name: "bash" })).toBe("allow");
+    // And only for the named one — everything else resolves normally.
+    expect(gate.modeOf({ name: "Write" })).toBe("ask");
+  });
+
+  it("still answers `check` truthfully — pre-gated says WHERE the decision is made, not that there is none", async () => {
+    // An adapter that asks anyway must not be told `allow` for a tool the policy denies.
+    const ledger = new PermissionLedger({});
+    const approve = scriptedApprover({ decision: "allow", scope: "once" });
+    const gate = createToolGate({
+      ledger,
+      sessionId: "s1",
+      approve,
+      tools: { bash: { readOnly: false } },
+      authored: { tools: { bash: "deny" } },
+      preGated: ["bash"],
+    });
+    expect(await gate.check({ name: "bash" }, {})).toMatchObject({ allow: false });
+    expect(approve.asked).toBe(0);
   });
 });

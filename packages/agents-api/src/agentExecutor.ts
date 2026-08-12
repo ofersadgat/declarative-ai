@@ -52,7 +52,8 @@ import type { BudgetMeter, BudgetMetrics, ExecMetrics } from "@declarative-ai/ex
 // and `policy` on `ExecServices`, and this executor reads both. Without the import they are absent
 // from the type in every package that compiles this one — which is how a whole approval path can
 // typecheck as missing while the tests, running on the merged runtime shape, still pass.
-import type { Approver } from "@declarative-ai/permissions";
+import type { Approver, PermissionMode } from "@declarative-ai/permissions";
+import { mcpToolName } from "./mcpTools.js";
 import { sdkAgentQuery } from "./sdkQuery.js";
 import { isRetriableAgentError } from "./streamMessages.js";
 import type { AgentPermissionMode, AgentQuery, AgentQueryOptions, AgentResult, AgentRun, AgentSessionReader, InjectedTool } from "./seam.js";
@@ -538,12 +539,27 @@ export class AgentExecutor extends PromptExecutor {
     // must not leave a listener attached to a possibly long-lived, shared `ctx.abortSignal`.
     const signal = ctx.abortSignal ?? new AbortController().signal;
 
-    // A per-tool `deny` in the authored baseline needs no human, so it must reach the agent as
-    // CONFIGURATION rather than waiting for an approval that will never be asked for. Native names are
-    // what the agent addresses, so an aliased tool is denied under its `native` name.
-    const denied = Object.entries(ctx.policy?.baseline?.tools ?? {})
-      .filter(([, mode]) => mode === "deny")
-      .map(([name]) => nativeMap[name]?.native ?? name);
+    /**
+     * The resolved mode for one tool, WITHOUT its input — what up-front configuration may assume.
+     *
+     * `ctx.gate` is the real answer: the session profile, THIS state's authored block, the run's
+     * ledger overlays and the workflow-wide baseline, resolved by the one implementation that knows
+     * their precedence. Reading `ctx.policy.baseline.tools` directly — as this used to — saw the last
+     * of those and nothing else, so a mode authored on the state was invisible here. That is most of
+     * what a caller actually sets.
+     *
+     * The fallback keeps a host that publishes no gate working exactly as before.
+     */
+    const modeOf = (name: string, readOnly?: boolean): PermissionMode | undefined =>
+      ctx.gate?.modeOf({ name, ...(readOnly !== undefined ? { readOnly } : {}) }) ??
+      (Object.hasOwn(ctx.policy?.baseline?.tools ?? {}, name) ? ctx.policy?.baseline?.tools?.[name] : undefined);
+
+    // A per-tool `deny` needs no human, so it must reach the agent as CONFIGURATION rather than
+    // waiting for an approval that will never be asked for. Native names are what the agent
+    // addresses, so an aliased tool is denied under its `native` name.
+    const denied = Object.keys(ctx.policy?.baseline?.tools ?? {})
+      .filter((name) => modeOf(name) === "deny")
+      .map((name) => nativeMap[name]?.native ?? name);
     const denySet = new Set(denied);
 
     // Resolve each logical tool to NATIVE (the agent's built-in, aliased) or MCP-INJECTED (our impl,
@@ -560,22 +576,38 @@ export class AgentExecutor extends PromptExecutor {
     let mcpTools: Record<string, InjectedTool> | undefined;
     const native: string[] = [];
     const injected: Record<string, InjectedTool> = {};
+    /** Tools resolving to `allow` — the only ones it is honest to pre-approve. See below. */
+    const preApproved: string[] = [];
     if (tools) {
       for (const [name, tool] of Object.entries(tools)) {
         const ref = nativeMap[name];
+        const mode = modeOf(name, tool.readOnly);
         // A `deny` is an unconditional floor: the tool is never OFFERED, native or injected. An injected
         // tool is addressed as `mcp__dai__<name>`, which no logical-name deny entry matches, so leaving
         // it injected would route around the floor entirely — drop it here.
-        if (denySet.has(ref ? ref.native : name)) continue;
+        //
+        // `modeOf` rather than the deny SET, because the set is built from the workflow-wide baseline
+        // and this tool's `deny` may have been authored on the state — which is where a caller writes
+        // one. It also covers a tool the PROFILE excludes: under `read-only`, a writer resolves to
+        // `deny` without anybody naming it.
+        if (denySet.has(ref ? ref.native : name) || mode === "deny") continue;
         if (!inject || ref) native.push(ref ? ref.native : name);
         else injected[name] = bind(tool);
+        // ONLY an explicit `allow`. This list is a PRE-APPROVAL — a tool named here is never put to
+        // the permission callback — so carrying every tool regardless of mode, as it used to, meant an
+        // authored `ask` never asked and a `smart` policy never ran. `smart` is the sharper of the two:
+        // it INSPECTS the input, so pre-approving it decides the call before the thing that decides it
+        // has run.
+        if (mode === "allow") preApproved.push(ref ? ref.native : name);
       }
-      // `allowedTools` PRE-APPROVES; denied tools are already excluded above, native and injected alike.
-      //
       // ✅ An EMPTY list means "pre-approve nothing", NOT "allow nothing" — checked on a live run, where
       // `--allowedTools ""` still let the agent use its native `Read`. So this and `cliArgv`'s
-      // omit-when-empty are the same request, and neither silently disarms the agent.
-      allowedTools = native;
+      // omit-when-empty are the same request, and neither silently disarms the agent. Which is what
+      // makes narrowing this safe: what is not pre-approved is ASKED about, not refused.
+      //
+      // With no gate there are no modes to read, so the prior behaviour stands: pre-approve what was
+      // declared. A host that publishes a gate gets the mode honoured.
+      allowedTools = ctx.gate !== undefined ? preApproved : native;
     }
     // EXTRA tools ride on top, whatever `injectTools` decided about `ctx.tools`. This is the "natives
     // plus extras" case: a host exposing its own capability to an otherwise stock agent, which the one
@@ -585,6 +617,27 @@ export class AgentExecutor extends PromptExecutor {
       injected[name] = bind(tool);
     }
     if (Object.keys(injected).length > 0) mcpTools = injected;
+
+    /**
+     * The tool a permission callback is asking about, named the way the POLICY is written.
+     *
+     * Three vocabularies meet at that callback and only one of them is the policy's. The agent
+     * addresses an injected tool as `mcp__dai__read_file` and an aliased one by its built-in name
+     * (`Read`), while an authored mode is written against the LOGICAL name (`read_file`) — so asking
+     * the gate about the string the agent used would miss the mode every time an alias or an
+     * injection was in play, and silently fall through to the default.
+     *
+     * A name that is neither — the agent's own `Bash`, which we never registered — passes through
+     * with no `readOnly`, which is exactly the unclassifiable case `ToolGate.modeOf` documents.
+     */
+    const mcpPrefix = mcpToolName("");
+    const logicalByNative = new Map(Object.entries(nativeMap).map(([logical, ref]) => [ref.native, logical]));
+    const gateSubject = (addressed: string): { name: string; readOnly?: boolean } => {
+      const bare = addressed.startsWith(mcpPrefix) ? addressed.slice(mcpPrefix.length) : addressed;
+      const logical = logicalByNative.get(bare) ?? bare;
+      const known = tools?.[logical];
+      return { name: logical, ...(known !== undefined ? { readOnly: known.readOnly } : {}) };
+    };
 
     // DISPLACE what an injected tool stands in for. Without this, injection adds a second set of tools
     // the model ignores: a live run with `read_file` injected and `Read` still available used `Read`
@@ -625,7 +678,7 @@ export class AgentExecutor extends PromptExecutor {
       // The injected-tool input gate is sync (`seam.ts`); the ctx seam is maybe-async — narrow
       // FAIL-CLOSED (json's `syncOnly`) rather than let an async validator read as a pass.
       ...(ctx.validator !== undefined ? { validator: syncOnly(ctx.validator) } : {}),
-      permissionMode: this.permissionMode(),
+      permissionMode: this.permissionMode(ctx),
       // THE NEUTRAL KNOBS a delegated transport can actually carry. This used to read three fields off
       // the lowered declaration and drop everything else — so a state authored with `reasoning: {effort:
       // "xhigh"}` and a step budget ran at the agent's own defaults, silently, and cost what the deeper
@@ -645,13 +698,33 @@ export class AgentExecutor extends PromptExecutor {
         : {}),
       ...(resume !== undefined ? { resume, ...(session?.mode === "fork" ? { forkSession: true } : {}) } : {}),
       ...(replayed !== undefined ? { messages: replayed as never } : {}),
-      // Route the agent's native tool-approval callback through our approver (DESIGN §5.1,
-      // "Delegated approval fidelity").
+      /**
+       * Route the agent's native tool-approval callback through our GATE (DESIGN §5.1, "Delegated
+       * approval fidelity").
+       *
+       * The gate, not the approver. `approve` is only the LAST of the four things a permission
+       * decision does — and calling it directly, as this used to, silently collapsed the other three:
+       *
+       *  - `smart` never ran its policy. Its whole point is to inspect the call and decide without a
+       *    human, and every `smart` tool was put to one instead.
+       *  - `allow` asked anyway, so a mode whose meaning is "do not interrupt me" interrupted.
+       *  - the session PROFILE was never consulted, so a `read-only` state could be talked into a
+       *    write by one distracted click.
+       *
+       * None of it failed loudly: the modes were configured, shown in the UI, and ignored.
+       *
+       * `approve` remains the fallback for a host that publishes no gate, and it is what the gate
+       * itself escalates to when a decision really does need a human.
+       */
       canUseTool:
-        approve && wantsApprovalCallback
+        (ctx.gate ?? approve) && wantsApprovalCallback
           ? async (req) => {
-              const decision = await approve({ tool: req.toolName, input: req.input, sessionId: scope });
-              return decision.decision === "allow" ? { allow: true } : { allow: false, reason: `denied by permission policy` };
+              if (ctx.gate) {
+                const verdict = await ctx.gate.check(gateSubject(req.toolName), req.input);
+                return verdict.allow ? { allow: true } : { allow: false, reason: verdict.reason };
+              }
+              const decision = await approve!({ tool: req.toolName, input: req.input, sessionId: scope });
+              return decision.decision === "allow" ? { allow: true } : { allow: false, reason: "denied by permission policy" };
             }
           : undefined,
       abortSignal: signal,
@@ -807,10 +880,27 @@ export class AgentExecutor extends PromptExecutor {
     return undefined;
   }
 
-  /** An author-supplied permission mode, ignoring an unknown value. */
-  protected permissionMode(): AgentPermissionMode | undefined {
+  /**
+   * The permission mode this run is configured with — the adapter's own, else the session PROFILE's.
+   *
+   * The fallback exists for the transport that has nothing else. `codex exec` has no per-tool gate:
+   * its whole enforcement is the up-front `--sandbox`, chosen from this. So without a profile arm a
+   * state authoring `plan` ran codex with whatever sandbox the adapter happened to be constructed
+   * with — the profile said "must not write" and nothing carried it to the one place that could act.
+   *
+   * ONLY `plan` maps, and deliberately. It is the one exact correspondence between the two
+   * vocabularies (a planning turn must not write, which is what `--sandbox read-only` and claude's
+   * `--permission-mode plan` both mean). `read-only` has no counterpart: claude has no read-only mode,
+   * and borrowing `plan` for it would tell the agent to stop acting and start planning, which is a
+   * different instruction from "you may read". That gap is enforced per-tool by the gate instead,
+   * everywhere a gate exists.
+   *
+   * An explicitly configured mode always wins: it is the more specific statement.
+   */
+  protected permissionMode(ctx?: ExecServices): AgentPermissionMode | undefined {
     const m = this.agent.permissionMode;
-    return m !== undefined && PERMISSION_MODES.includes(m) ? m : undefined;
+    if (m !== undefined && PERMISSION_MODES.includes(m)) return m;
+    return ctx?.gate?.profile === "plan" ? "plan" : undefined;
   }
 
   /**
