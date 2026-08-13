@@ -100,6 +100,17 @@ import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, 
  * Both are DATA (§5) and both are serializable, which is what lets a host back this with something
  * durable. `PENDING` is deliberately not here — it is a scheduling state, not an answer.
  */
+/** {@link hashOperation}, total: undefined for an op that has no stable content identity (a live
+ *  stream input) rather than the throw a memo wants. The events stamped from this simply omit the
+ *  id, matching the record layer's own fallback for the same op. */
+function tryHashOperation(op: Operation<InlineFamily>): string | undefined {
+  try {
+    return hashOperation(op);
+  } catch {
+    return undefined;
+  }
+}
+
 export type CallResult = { value: ResolvedValue } | { error: string; failure?: Failure };
 
 /**
@@ -1107,8 +1118,17 @@ export class WorkflowEngine {
   private async runOperation(instance: Instance, op: Operation<InlineFamily>): Promise<Failure | undefined> {
     const kind: OperationKind = op.kind === "prompt" ? "prompt" : "function";
     this.emit({ type: "operation.started", instanceId: instance.id, stateId: instance.stateId, op: kind });
-    const fail = (failure: Failure): Failure => {
-      this.emit({ type: "operation.failed", instanceId: instance.id, stateId: instance.stateId, op: kind, failure });
+    // `operationId` arrives from the dispatch paths once the DISPATCHED op exists — see the
+    // EngineEvent comment on why a pre-dispatch failure carries none.
+    const fail = (failure: Failure, operationId?: string): Failure => {
+      this.emit({
+        type: "operation.failed",
+        instanceId: instance.id,
+        stateId: instance.stateId,
+        op: kind,
+        ...(operationId !== undefined ? { operationId } : {}),
+        failure,
+      });
       return failure;
     };
 
@@ -1372,7 +1392,7 @@ export class WorkflowEngine {
     instance: Instance,
     op: FunctionOp<InlineFamily>,
     opInputs: FunctionInputs,
-    fail: (f: Failure) => Failure,
+    fail: (f: Failure, operationId?: string) => Failure,
   ): Promise<Failure | undefined> {
     const entry: RegisteredFunction<ExecServices, WorkflowMetrics> | undefined = this.config.registry.functions.get(op.functionRef);
     if (!entry) {
@@ -1428,7 +1448,13 @@ export class WorkflowEngine {
     //
     // `bindInputs` writes the resolved inputs onto the op first: the executor reads them off the op
     // and has no view of the instance they were resolved against.
-    const outcome = await this.operations.start(bindInputs(this.operationFor(instance, op), opInputs), services).result;
+    // Hashed HERE, over exactly the value the executor stack receives, because that is the id an
+    // unplaced record gets (`withRecord`: no position ⇒ `hashOperation(op)`) — the join the
+    // settled events carry. Undefined when the op cannot be hashed (a live stream input, which
+    // `hashOperation` refuses by design): such a call's record has no content id either.
+    const dispatched = bindInputs(this.operationFor(instance, op), opInputs);
+    const operationId = tryHashOperation(dispatched);
+    const outcome = await this.operations.start(dispatched, services).result;
     // An impl that reports what it cost (a delegated agent bills inside its own loop) rolls up here,
     // exactly as a prompt op's outcome does — otherwise the spend of the most expensive thing in the
     // graph is the one thing the run's metrics never see. `childLlmCalls` counts LLM calls: a prompt op
@@ -1463,18 +1489,19 @@ export class WorkflowEngine {
       isOk(outcome) ? outcome.value : undefined,
     );
     if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
-    if (!isOk(outcome)) return fail(outcome.error);
+    if (!isOk(outcome)) return fail(outcome.error, operationId);
     // The op's declared output KIND decides how its value is read — a `blob` output IS the value
     // (bytes), any other kind is a record of named outputs. Omitting it here left the blob branch
     // unreachable from the function path, so a function op producing a `Uint8Array` failed with "did
     // not produce required output" about the file it had just produced (§7.1).
     const failure = this.acceptOpOutputs(instance, "function", outcome.value, op.output.kind);
-    if (failure) return fail(failure);
+    if (failure) return fail(failure, operationId);
     this.emit({
       type: "operation.completed",
       instanceId: instance.id,
       stateId: instance.stateId,
       op: "function",
+      ...(operationId !== undefined ? { operationId } : {}),
       ...(metrics !== undefined ? { metrics } : {}),
     });
     return undefined;
@@ -1485,7 +1512,7 @@ export class WorkflowEngine {
     instance: Instance,
     op: PromptOp<InlineFamily>,
     opInputs: FunctionInputs,
-    fail: (f: Failure) => Failure,
+    fail: (f: Failure, operationId?: string) => Failure,
   ): Promise<Failure | undefined> {
     const promptExecutor = this.config.prompt;
     if (!promptExecutor) {
@@ -1546,13 +1573,15 @@ export class WorkflowEngine {
       const bound = AbortSignal.timeout(instance.def.limits.timeout * 1000);
       services.abortSignal = services.abortSignal ? AbortSignal.any([services.abortSignal, bound]) : bound;
     }
+    // Hashed over the op the executor stack receives — the settled events' join to its record.
+    const operationId = tryHashOperation(resolvedOp);
     let outcome;
     try {
       outcome = await promptExecutor.start(resolvedOp, services).result;
     } catch (e) {
       // An executor must not reject for unit failures; a rejection is a bug — normalized here so the
       // workflow still degrades per SPEC §3.3.
-      return fail({ classification: "permanent", reason: `prompt executor rejected: ${(e as Error).message}` });
+      return fail({ classification: "permanent", reason: `prompt executor rejected: ${(e as Error).message}` }, operationId);
     }
     this.childLlmCalls += 1 + (outcome.metrics.childLlmCalls ?? 0);
     this.childCost += outcome.metrics.costUsd;
@@ -1571,7 +1600,7 @@ export class WorkflowEngine {
     // A FAILED call contributes nothing to the transcript. It ran before this check and a failure
     // carries no `value`, so the assistant turn was the literal string "null" — and under the default
     // `full_history` mode every later state in the session then read that back in its preamble.
-    if (!isOk(outcome)) return fail(outcome.error);
+    if (!isOk(outcome)) return fail(outcome.error, operationId);
 
     // Conversation artifact (SPEC §4.7): the exchange is already in the session, because the session
     // layer RECORDED the call — one write, not two. The engine used to synthesize a user turn and a
@@ -1581,8 +1610,15 @@ export class WorkflowEngine {
     await this.refreshTranscript(session.id);
 
     const failure = this.acceptOpOutputs(instance, "prompt", (outcome.value ?? null) as ResolvedValue, op.output.kind);
-    if (failure) return fail(failure);
-    this.emit({ type: "operation.completed", instanceId: instance.id, stateId: instance.stateId, op: "prompt", metrics: outcome.metrics });
+    if (failure) return fail(failure, operationId);
+    this.emit({
+      type: "operation.completed",
+      instanceId: instance.id,
+      stateId: instance.stateId,
+      op: "prompt",
+      ...(operationId !== undefined ? { operationId } : {}),
+      metrics: outcome.metrics,
+    });
     return undefined;
   }
 

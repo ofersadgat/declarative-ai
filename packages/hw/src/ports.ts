@@ -70,8 +70,17 @@ export type EngineEvent =
   | { type: "instance.entered"; instanceId: number; stateId: string; childKey?: string; parentInstanceId?: number; inputs: Record<string, ResolvedValue> }
   | { type: "instance.blocked"; instanceId: number; stateId: string; reason: string }
   | { type: "operation.started"; instanceId: number; stateId: string; op: OperationKind }
-  | { type: "operation.completed"; instanceId: number; stateId: string; op: OperationKind; metrics?: WorkflowMetrics }
-  | { type: "operation.failed"; instanceId: number; stateId: string; op: OperationKind; failure: Failure }
+  /**
+   * `operationId` is the content hash of the op AS DISPATCHED (`hashOperation` over the value the
+   * executor stack received) — which is exactly the id `withRecord` gives an UNPLACED record, so a
+   * journal row and its operation record share a key at last. A PLACED call's record is keyed by
+   * its session position instead, and its join was always `metrics.sessionRef`; the hash is
+   * stamped regardless, so every settled operation event names the call it settled. Absent on
+   * `operation.started` deliberately (it fires before input resolution, so the dispatched op — the
+   * thing the hash is OF — does not exist yet), and on a `failed` that never reached dispatch.
+   */
+  | { type: "operation.completed"; instanceId: number; stateId: string; op: OperationKind; operationId?: string; metrics?: WorkflowMetrics }
+  | { type: "operation.failed"; instanceId: number; stateId: string; op: OperationKind; operationId?: string; failure: Failure }
   | { type: "transition.taken"; instanceId: number; stateId: string; to: string; iteration: number }
   | { type: "child.superseded"; instanceId: number; stateId: string; childKey: string }
   | { type: "instance.terminated"; instanceId: number; stateId: string; outcome: TerminationOutcome; failure?: Failure };

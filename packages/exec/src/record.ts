@@ -127,6 +127,24 @@ export interface RecordStore<R = ResolvedValue, M extends ExecMetrics = ExecMetr
   bySession?(session: string, upTo?: number): StoredRecord<R, M>[] | Promise<StoredRecord<R, M>[]>;
 }
 
+/**
+ * The content id an unplaced record is keyed by — {@link hashOperation}, made TOTAL.
+ *
+ * `hashOperation` deliberately throws on an op carrying a LIVE byte stream (a single-consumer blob
+ * kept un-materialized for piping, DESIGN §10.1): such an op has no stable content identity, and a
+ * memo must refuse it. A RECORD must not — recording is unconditional, and a throw here would fail
+ * the very call it was meant to witness. An unhashable op gets a unique process-local id instead:
+ * it names this record and claims nothing about content, which is exactly true of a stream.
+ */
+let unhashable = 0;
+function contentIdOf(op: Operation<InlineFamily>): string {
+  try {
+    return hashOperation(op);
+  } catch {
+    return `unhashable:${++unhashable}`;
+  }
+}
+
 /** The ctx seam {@link withRecord} consumes. */
 type RecordSeams = { records: RecordStore };
 
@@ -168,7 +186,7 @@ export function withRecord<R = ExecServices, M extends ExecMetrics = ExecMetrics
         // memoization — two identical calls are one answer — and wrong here: the same prompt asked
         // twice in one conversation is two turns, and keying them alike makes the second silently
         // overwrite the first.
-        const id = position !== undefined ? `${position.id}:${position.seq}` : hashOperation(op);
+        const id = position !== undefined ? `${position.id}:${position.seq}` : contentIdOf(op);
         const stub: RecordStub = {
           id,
           source: op,

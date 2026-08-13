@@ -789,6 +789,17 @@ describe("run records (SPEC §10.2)", () => {
     // Cost/call rollup for the whole run.
     expect(result.metrics.childLlmCalls).toBe(3);
     expect(result.metrics.childCost).toBeCloseTo(0.03);
+    // Every SETTLED operation event names the call it settled: `operationId` is the content hash of
+    // the dispatched op — the same id `withRecord` gives an unplaced record, so the journal and the
+    // record store share a key. `started` carries none (it fires before the dispatched op exists).
+    for (const e of persistence.events) {
+      if (e.event.type === "operation.completed" || e.event.type === "operation.failed") {
+        expect((e.event as { operationId?: string }).operationId).toMatch(/^[0-9a-f]{16,}$/);
+      }
+      if (e.event.type === "operation.started") {
+        expect((e.event as { operationId?: string }).operationId).toBeUndefined();
+      }
+    }
   });
 
   // A delegated agent is a FunctionOp, and it is the only thing that knows what it spent — it bills
