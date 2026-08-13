@@ -243,6 +243,19 @@ describe("runtime references", () => {
     expect(bundle(defs).states.w!.outputs!.doubled!.binding).toMatchObject({ op: { kind: "function", functionRef: "add" } });
   });
 
+  it("reads a bracket index as an expression, not as a path segment", () => {
+    // Brackets belong to the expression grammar (sugar for `at`), so `.inputs.xs[-1]` must reach
+    // the desugarer whole — split as a runtime PATH it would name the nonexistent input 'xs[-1]'.
+    const defs = {
+      "w.json": {
+        inputs: { xs: { schema: { type: "array", items: { type: "integer" } } } },
+        outputs: { last: { binding: ".inputs.xs[-1]" } },
+        operation: { kind: "prompt", prompt: "go", model: "m" },
+      },
+    };
+    expect(bundle(defs).states.w!.outputs!.last!.binding).toMatchObject({ op: { kind: "function", functionRef: "at" } });
+  });
+
   /**
    * A property path walks OWN properties. Transclusion splices what it finds into the document, so
    * an inherited hit put a FUNCTION where a node was expected instead of reporting that the file has

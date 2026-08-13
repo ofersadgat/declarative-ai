@@ -162,11 +162,14 @@ function isRelativeFilePath(body: string): boolean {
 /**
  * Characters the EXPRESSION grammar uses that a reference can never contain.
  *
- * Whitespace, the two quotes, parentheses, the comma, and every operator character. Deliberately a
- * blacklist rather than a whitelist of legal path characters: an unusual filename keeps working,
- * whereas a whitelist would silently reclassify one as an expression.
+ * Whitespace, the two quotes, parentheses, brackets, the comma, and every operator character.
+ * Deliberately a blacklist rather than a whitelist of legal path characters: an unusual filename
+ * keeps working, whereas a whitelist would silently reclassify one as an expression. Brackets
+ * joined the list when the grammar gained indexing (`xs[-1]`, sugar for `at`) — a bracket-bearing
+ * FILENAME therefore stopped being addressable, and fails loudly as an unparseable expression
+ * rather than silently resolving to nothing.
  */
-const EXPRESSION_ONLY = /[\s()'",!?<>=&|]/;
+const EXPRESSION_ONLY = /[\s()'",!?<>=&|[\]]/;
 
 /**
  * True when a string is spelled entirely within the REFERENCE grammar — a path and nothing else.

@@ -76,6 +76,19 @@ describe("dynamic access — member access takes a LITERAL name", () => {
     expect(ev("get(.inputs.o, 'constructor')")).toBeUndefined();
     expect(ev("get(.inputs.o, '__proto__')")).toBeUndefined();
   });
+
+  /** `xs[i]` is parser sugar for `at(xs, i)` — same AST, so identical behavior is by construction;
+   *  exercised through the full lower-and-resolve path anyway, per this file's philosophy. */
+  it("indexes with brackets, negative from the end", () => {
+    expect(ev(".inputs.xs[1]")).toBe(1);
+    expect(ev(".inputs.xs[-1]")).toBe(3);
+    expect(ev(".inputs.xs[99]")).toBeUndefined();
+    expect(ev(".inputs.pairs[-1][0]")).toBe("y");
+    expect(ev(".inputs.xs[sub(2, 1)]")).toBe(1);
+    expect(ev(".inputs.xs[-1] === 3")).toBe(true);
+    // TOTAL like everything else: nonsense answers undefined rather than throwing.
+    expect(ev(".inputs.nothing[0]")).toBeUndefined();
+  });
 });
 
 describe("negative literals", () => {

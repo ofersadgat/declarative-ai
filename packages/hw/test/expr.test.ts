@@ -132,6 +132,31 @@ describe("calls", () => {
   });
 
   /**
+   * Bracket indexing is SUGAR for `at`: the two spellings parse to the same AST, so there is one
+   * semantics — negative indices count from the end because `at`'s already do — and nothing
+   * downstream (lowering, inference, static analysis) can treat them differently.
+   */
+  it("parses `xs[i]` to exactly the AST `at(xs, i)` parses to", () => {
+    expect(parseExpression(".inputs.xs[-1]")).toEqual(parseExpression("at(.inputs.xs, -1)"));
+    expect(parseExpression(".inputs.xs[0]")).toEqual(parseExpression("at(.inputs.xs, 0)"));
+    // A computed index is an ordinary expression…
+    expect(parseExpression(".inputs.xs[.inputs.i]")).toEqual(parseExpression("at(.inputs.xs, .inputs.i)"));
+    // …indexing chains like any other postfix, on either side…
+    expect(parseExpression(".inputs.rows[-1].name")).toEqual(parseExpression("at(.inputs.rows, -1).name"));
+    expect(parseExpression("messages(.inputs.s)[-1]")).toEqual(parseExpression("at(messages(.inputs.s), -1)"));
+    expect(parseExpression(".inputs.grid[0][1]")).toEqual(parseExpression("at(at(.inputs.grid, 0), 1)"));
+    // …and composes with operators.
+    expect(parseExpression(".inputs.xs[-1] === 3")).toEqual(parseExpression("at(.inputs.xs, -1) === 3"));
+  });
+
+  it("refuses a dangling or misplaced bracket with a real message", () => {
+    expect(() => parseExpression(".inputs.xs[-1")).toThrow(ExprError);
+    expect(() => parseExpression(".inputs.xs[]")).toThrow(ExprError);
+    // An operation reference is only meaningful called (its own rule), never indexed.
+    expect(() => parseExpression("$JAIRA/prompts/review[-1]")).toThrow(/cannot be indexed/);
+  });
+
+  /**
    * A callee may be a full REFERENCE, not just a bare or dotted name — both spellings of the same
    * operation resolve, one through the search path and one explicitly rooted.
    */
@@ -199,7 +224,8 @@ describe("calls", () => {
 });
 
 describe("purity — rejected constructs", () => {
-  const bad = ["a[0]", "a = 1", "a + b", "a - b", "a * b", "new X", "a; b", "() => 1", "a?.b", "`t`"];
+  // `a[0]` left this list when bracket indexing became sugar for `at` — see the calls block above.
+  const bad = ["a = 1", "a + b", "a - b", "a * b", "new X", "a; b", "() => 1", "a?.b", "`t`"];
   for (const src of bad) {
     it(`rejects: ${src}`, () => {
       expect(() => parseExpression(src)).toThrow(ExprError);

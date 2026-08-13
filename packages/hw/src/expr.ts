@@ -153,7 +153,7 @@ const OPERATION_ALIASES: Readonly<Record<string, string>> = {
   messages: RESOLVER_REFS.conversation,
 };
 
-const PUNCT = ["===", "!==", "==", "!=", "<=", ">=", "&&", "||", "<", ">", "!", "?", ":", "(", ")", ".", ",", "/"];
+const PUNCT = ["===", "!==", "==", "!=", "<=", ">=", "&&", "||", "<", ">", "!", "?", ":", "(", ")", "[", "]", ".", ",", "/"];
 const IDENT_START = /[A-Za-z_$]/;
 const IDENT_PART = /[A-Za-z0-9_$]/;
 
@@ -361,6 +361,21 @@ class Parser {
         this.next();
         e = { type: "apply", op: OPERATION_ALIASES[callee] ?? callee, args: this.args() };
         reference = undefined;
+        continue;
+      }
+      if (this.atPunct("[")) {
+        // SUGAR for `at(value, index)` and deliberately nothing more: the bracket emits the exact
+        // AST the call form parses to, so lowering, inference, static analysis and the interpreter
+        // all treat `xs[-1]` and `at(xs, -1)` as one expression — there is no second semantics to
+        // keep in step. Negative indices count from the end, because `at` already does.
+        const at = this.peek().pos;
+        if (reference !== undefined) {
+          throw new ExprError("an operation reference cannot be indexed; call it first", at);
+        }
+        this.next();
+        const index = this.ternary();
+        this.expectPunct("]");
+        e = { type: "apply", op: "at", args: [e, index] };
         continue;
       }
       if (reference !== undefined) {
