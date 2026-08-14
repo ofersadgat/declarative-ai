@@ -210,15 +210,23 @@ describe("readAgentMessage — one message, normalized", () => {
     expect(msg.text).toBe("Hi!");
   });
 
-  it("turns a text delta into a `partial`, and streams NOTHING from a thinking delta", () => {
+  it("turns a text delta into a `partial`, and a thinking delta into a `thinking-partial`", () => {
     expect(readAgentMessage({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "ZEP" } } })).toEqual({
       type: "partial",
       delta: "ZEP",
     });
-    // Streaming reasoning into `output_partial` would put the thinking into the answer — the one thing
-    // §5.1 says must never happen. It stays an opaque provider event instead.
+    // Reasoning never rides the answer's stream — the one thing §5.1 says must never happen — but a
+    // consumer showing a minutes-long think as it happens needs the delta on its own channel.
     expect(
-      readAgentMessage({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "thinking_delta", thinking: "hmm" } } }).type,
+      readAgentMessage({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "thinking_delta", thinking: "hmm" } } }),
+    ).toEqual({ type: "thinking-partial", delta: "hmm" });
+  });
+
+  it("keeps a delta it cannot read as an opaque provider event", () => {
+    // `input_json_delta` (tool arguments assembling), signature deltas, block starts — bookkeeping,
+    // whose content arrives again on the finished turn.
+    expect(
+      readAgentMessage({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "input_json_delta", partial_json: "{\"pa" } } }).type,
     ).toBe("provider_event");
   });
 

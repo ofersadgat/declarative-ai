@@ -297,11 +297,15 @@ export interface AgentResult {
  *  - `assistant` / `user` — a turn the agent appended, with `message` VERBATIM and the projections
  *    (`thinking`, `toolCalls`, `toolResults`) read off it.
  *  - `partial` — a text delta while the answer is still being written. `delta` is the new text.
+ *  - `thinking-partial` — a reasoning delta while the model is still thinking. `delta` is the new
+ *    reasoning text. Its own variant rather than a `partial`, because the answer's stream must never
+ *    contain reasoning — and a consumer that wants to SHOW thinking as it happens (the point of
+ *    streaming a minutes-long turn) still needs the delta somewhere.
  *  - `provider_event` — everything with no neutral home, forwarded opaquely (see {@link event}).
  *  - `other` — a message this mapping recognises and has nothing to say about.
  */
 export interface AgentStreamMessage {
-  type: "result" | "assistant" | "user" | "partial" | "provider_event" | "other";
+  type: "result" | "assistant" | "user" | "partial" | "thinking-partial" | "provider_event" | "other";
   /** Present on the terminal `result` message. */
   result?: AgentResult;
   /** A run-fatal error the agent reported, as prose. */
@@ -336,7 +340,7 @@ export interface AgentStreamMessage {
   toolCalls?: AgentToolCall[];
   /** Tool results this turn carried back. */
   toolResults?: AgentToolResult[];
-  /** The new text on a `partial`. */
+  /** The new text on a `partial`, or the new reasoning text on a `thinking-partial`. */
   delta?: string;
   /**
    * A `provider_event`'s payload, forwarded opaquely.

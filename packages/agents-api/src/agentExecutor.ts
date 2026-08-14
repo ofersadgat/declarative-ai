@@ -844,10 +844,25 @@ export class AgentExecutor extends PromptExecutor {
             // The answer as it is written. This is what makes the declared `streaming` capability true.
             if (msg.delta !== undefined && msg.delta.length > 0) events?.push({ type: "output_partial", text: msg.delta });
             break;
+          case "thinking-partial":
+            // The reasoning as it happens, on its own channel — never folded into the answer.
+            if (msg.delta !== undefined && msg.delta.length > 0) events?.push({ type: "thinking_partial", text: msg.delta });
+            break;
           case "provider_event":
             // Forwarded OPAQUELY. `exec` must not learn this agent's vocabulary, and a host that wants
             // to render a compaction boundary must not be stopped because we had no neutral name for it.
             if (msg.event !== undefined) events?.push({ type: "provider_event", payload: msg.event });
+            break;
+          case "assistant":
+          case "user":
+            // The whole turn, live — the contract's declared `message` variant, which nothing emitted
+            // until now. Deltas carry only the answer's text; the tool calls, their results and the
+            // thinking blocks all ride on the finished turn objects, so a viewer that gets no
+            // `message` events learns about an agent's tools only when the record closes — for a
+            // run that takes an hour, that is indistinguishable from an agent doing nothing.
+            if (msg.message !== undefined) {
+              events?.push({ type: "message", role: msg.type, content: msg.message as JsonValue });
+            }
             break;
           default:
             break;

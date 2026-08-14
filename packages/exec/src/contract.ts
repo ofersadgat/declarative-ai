@@ -128,6 +128,14 @@ export type ExecEvent =
   | { type: "command_result"; decision: "allowed" | "blocked" | "approved" | "denied" }
   | { type: "output_partial"; text: string }
   /**
+   * A reasoning delta, while the model is still thinking.
+   *
+   * Separate from `output_partial` on purpose: the answer's stream must never contain reasoning, and
+   * a consumer that wants to show a minutes-long think as it happens needs the delta on its own
+   * channel rather than folded into the answer or withheld until the turn lands.
+   */
+  | { type: "thinking_partial"; text: string }
+  /**
    * A provider's own event, forwarded OPAQUELY.
    *
    * A delegated agent narrates a great deal that has no neutral home and should not be given one:

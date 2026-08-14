@@ -363,6 +363,36 @@ describe("lossless output — what the agent produced reaches the caller", () =>
     ]);
   });
 
+  it("delivers reasoning deltas as `thinking_partial`, never on the answer's channel", async () => {
+    const thinking: AgentQuery = async function* () {
+      yield { type: "thinking-partial", delta: "check " };
+      yield { type: "thinking-partial", delta: "the file" };
+      yield { type: "partial", delta: "The answer" };
+      yield { type: "result", result: { text: "The answer" } };
+    };
+    const handle = new AgentExecutor({ query: thinking }).start(op(), {});
+    const seen: ExecEvent[] = [];
+    for await (const event of handle.events) seen.push(event);
+    await handle.result;
+    expect(seen.filter((e) => e.type === "thinking_partial").map((e) => (e as { text: string }).text)).toEqual(["check ", "the file"]);
+    expect(seen.filter((e) => e.type === "output_partial").map((e) => (e as { text: string }).text)).toEqual(["The answer"]);
+  });
+
+  it("delivers each finished turn as a `message` event, tool calls and results included", async () => {
+    // The variant the contract declared and nothing emitted: without it a live viewer learns about
+    // an agent's tool calls only when the record closes — for an hour-long run, that reads as an
+    // agent doing nothing, and then as a transcript that appeared out of nowhere.
+    const handle = new AgentExecutor({ query: fullTurn }).start(op(), {});
+    const seen: ExecEvent[] = [];
+    for await (const event of handle.events) seen.push(event);
+    await handle.result;
+    const messages = seen.filter((e) => e.type === "message") as Array<{ role: string; content: unknown }>;
+    expect(messages.map((m) => m.role)).toEqual(["assistant", "assistant", "user", "assistant"]);
+    // Verbatim turn objects, in stream order — the tool_use and the tool_result that answers it.
+    expect(messages[1]?.content).toEqual({ role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "Read", input: { path: "a.txt" } }] });
+    expect(messages[2]?.content).toEqual({ role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ZEPHYR" }] });
+  });
+
   it("CLOSES the event stream when the run settles, so a consumer is never left parked", async () => {
     const handle = new AgentExecutor({ query: capturing().query }).start(op(), {});
     const drained: ExecEvent[] = [];

@@ -218,14 +218,26 @@ export function isRetriableAgentError(code: string | undefined): boolean {
   return code !== undefined && RETRIABLE_AGENT_ERROR_CODES.has(code);
 }
 
-/** The text a `stream_event` adds, or nothing when the event is about something else. */
-function readDelta(event: unknown): string | undefined {
+/**
+ * What a `stream_event` adds, or nothing when the event is about something else.
+ *
+ * Output text and reasoning are kept APART all the way down: a `thinking_delta` streamed into the
+ * answer would put reasoning into the output — the one thing §5.1 says must never happen — so it
+ * travels as its own kind, for consumers that want to show a minutes-long think as it happens.
+ */
+function readDelta(event: unknown): { kind: "text" | "thinking"; text: string } | undefined {
   const e = bag(event);
   if (e?.["type"] !== "content_block_delta") return undefined;
   const delta = bag(e["delta"]);
-  // Only the OUTPUT text. A `thinking_delta` is the agent reasoning aloud, and streaming it into
-  // `output_partial` would put the reasoning into the answer — the one thing §5.1 says must never happen.
-  return delta?.["type"] === "text_delta" ? str(delta["text"]) : undefined;
+  if (delta?.["type"] === "text_delta") {
+    const text = str(delta["text"]);
+    return text !== undefined ? { kind: "text", text } : undefined;
+  }
+  if (delta?.["type"] === "thinking_delta") {
+    const text = str(delta["thinking"]);
+    return text !== undefined ? { kind: "thinking", text } : undefined;
+  }
+  return undefined;
 }
 
 /**
@@ -294,7 +306,8 @@ export function readAgentMessage(msg: Record<string, unknown>): AgentStreamMessa
     }
     case "stream_event": {
       const delta = readDelta(msg["event"]);
-      return delta !== undefined ? { type: "partial", delta } : { type: "provider_event", event: msg as JsonValue };
+      if (delta === undefined) return { type: "provider_event", event: msg as JsonValue };
+      return { type: delta.kind === "thinking" ? "thinking-partial" : "partial", delta: delta.text };
     }
     default:
       // `system` in all its subtypes (init, compact_boundary, hook_started, task_progress, api_retry,
