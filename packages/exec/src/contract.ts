@@ -122,7 +122,9 @@ export type ExecResult<O, M extends ExecMetrics = ExecMetrics> = ResultWithMetri
 
 export type ExecEvent =
   | { type: "progress"; message: string }
-  | { type: "message"; role: string; content: JsonValue } // transcript stream
+  // The transcript stream: a whole finished turn, verbatim. `parentToolUseId` marks a SUBAGENT's
+  // turn with the tool call that spawned it; absent means the main thread.
+  | { type: "message"; role: string; content: JsonValue; parentToolUseId?: string }
   | { type: "child_result"; ref: { label?: string }; metrics: ExecMetrics }
   | { type: "command_request"; command: string; parsed?: JsonValue } // process units
   | { type: "command_result"; decision: "allowed" | "blocked" | "approved" | "denied" }

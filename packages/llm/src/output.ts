@@ -210,6 +210,42 @@ export interface LlmOutput<T = JsonValue> {
    * Absent when the call produced nothing, e.g. an error before the model responded.
    */
   messages?: ModelMessage[];
+  /**
+   * Conversations the call ran BESIDE this one — a subagent per spawning tool call, keyed by that
+   * call's id (the stream's `parent_tool_use_id`). Same contract as {@link messages}: the provider's
+   * own log, verbatim, in arrival order. Kept OUT of `messages` because they are not part of the
+   * main thread's wire history — folding them in is how a record comes to claim the main thread
+   * said things a subagent said.
+   */
+  sidechains?: Record<string, ModelMessage[]>;
+  /**
+   * Provider events with no neutral home — session init, compaction boundaries, rate-limit windows —
+   * in arrival order, each pinned to how many main-thread messages preceded it, so a reader can
+   * interleave them faithfully. Opaque by the same rule as the live stream's `provider_event`.
+   */
+  providerEvents?: Array<{ index: number; event: JsonValue }>;
+  /**
+   * Lines of the transport's own ON-DISK session record that never rode the stream — a delegated
+   * agent's context injections (`attachment` lines), its structured tool-execution records
+   * (`toolUseResult`), its bookkeeping (`queue-operation`, `ai-title`), and the per-line
+   * uuid/parentUuid threading and timestamps the wire strips.
+   *
+   * Folded in by a HOST's capture step at record close, not produced by the call itself: the file is
+   * the agent's, prunable on its schedule, so copying at close is the only honest capture. `index`
+   * pins each line to how many main-chain message lines preceded it IN THE FILE (a resumed session's
+   * file spans the whole conversation, so a sliced capture keeps file positions rather than
+   * renumbering). Opaque by the same rule as {@link providerEvents}.
+   */
+  nativeLines?: Array<{ index: number; line: JsonValue }>;
+  /**
+   * The same capture for the SUBAGENT conversations, which keep their own on-disk files — keyed by
+   * the spawning tool call's id, exactly as {@link sidechains} is, so the native lines and the
+   * streamed conversation they annotate join on the key they already share. A spawn whose meta file
+   * (the id's source) was missing is keyed `agent-<agentId>` rather than dropped. `meta` is the
+   * agent's own sidecar (agentType, description), kept because nothing else records why the
+   * subagent existed.
+   */
+  nativeSidechains?: Record<string, { agentId: string; meta?: JsonValue; lines: Array<{ index: number; line: JsonValue }> }>;
 }
 
 /**

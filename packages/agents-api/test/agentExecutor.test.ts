@@ -363,6 +363,65 @@ describe("lossless output — what the agent produced reaches the caller", () =>
     ]);
   });
 
+  /** A run that spawns a subagent: the sidechain's turns arrive on the same stream, tagged. */
+  const withSubagent: AgentQuery = async function* () {
+    yield {
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "tool_use", id: "toolu_task", name: "Task", input: { prompt: "explore" } }] },
+      toolCalls: [{ toolCallId: "toolu_task", toolName: "Task", input: { prompt: "explore" } }],
+    };
+    yield {
+      type: "assistant",
+      parentToolUseId: "toolu_task",
+      message: { role: "assistant", content: [{ type: "text", text: "I am the subagent" }] },
+      text: "I am the subagent",
+    };
+    yield {
+      type: "user",
+      parentToolUseId: "toolu_task",
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_sub", content: "sub data" }] },
+      toolResults: [{ toolCallId: "toolu_sub", output: "sub data" }],
+    };
+    yield {
+      type: "user",
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_task", content: "the report" }] },
+      toolResults: [{ toolCallId: "toolu_task", output: "the report" }],
+    };
+    yield { type: "provider_event", event: { type: "system", subtype: "compact_boundary" } };
+    yield { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Done." }] }, text: "Done." };
+    yield { type: "result", result: { text: "Done." } };
+  };
+
+  it("keeps a subagent's turns OUT of the main log and in a sidechain keyed by the spawning call", async () => {
+    const payload = await payloadOf(withSubagent);
+    // The main thread: Task call, its report, the final answer — and nothing the subagent said.
+    expect((payload.messages ?? []).map((m) => JSON.stringify(m))).not.toContain(expect.stringContaining("I am the subagent"));
+    expect(payload.messages).toHaveLength(3);
+    expect(payload.sidechains?.["toolu_task"]).toEqual([
+      { role: "assistant", content: [{ type: "text", text: "I am the subagent" }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_sub", content: "sub data" }] },
+    ]);
+    // The projections are the MAIN thread's: the subagent's tool results are not the agent's own.
+    expect(payload.toolResults).toEqual([{ toolCallId: "toolu_task", output: "the report" }]);
+    // The subagent's answer text never leaks into the main answer.
+    expect(payload.value).toBe("Done.");
+  });
+
+  it("records provider events pinned to their place among the turns", async () => {
+    const payload = await payloadOf(withSubagent);
+    // After the third main-thread message, before the fourth — where it happened.
+    expect(payload.providerEvents).toEqual([{ index: 2, event: { type: "system", subtype: "compact_boundary" } }]);
+  });
+
+  it("tags a subagent's live `message` events with the spawning call", async () => {
+    const handle = new AgentExecutor({ query: withSubagent }).start(op(), {});
+    const seen: ExecEvent[] = [];
+    for await (const event of handle.events) seen.push(event);
+    await handle.result;
+    const messages = seen.filter((e) => e.type === "message") as Array<{ parentToolUseId?: string }>;
+    expect(messages.map((m) => m.parentToolUseId)).toEqual([undefined, "toolu_task", "toolu_task", undefined, undefined]);
+  });
+
   it("delivers reasoning deltas as `thinking_partial`, never on the answer's channel", async () => {
     const thinking: AgentQuery = async function* () {
       yield { type: "thinking-partial", delta: "check " };

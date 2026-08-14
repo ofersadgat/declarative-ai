@@ -343,6 +343,15 @@ export interface AgentStreamMessage {
   /** The new text on a `partial`, or the new reasoning text on a `thinking-partial`. */
   delta?: string;
   /**
+   * The tool call this turn belongs to, when it is a SUBAGENT's — the spawning `Task` call's id,
+   * off the stream envelope's `parent_tool_use_id`.
+   *
+   * Absent means the main thread. Dropping this field is not lossy, it is WRONG: a subagent's turns
+   * arrive on the same stream, and untagged they interleave into the main conversation
+   * indistinguishably — a record that then claims the main thread said things a subagent said.
+   */
+  parentToolUseId?: string;
+  /**
    * A `provider_event`'s payload, forwarded opaquely.
    *
    * The agent emits a great deal that has no neutral home and should not be given one — session init,

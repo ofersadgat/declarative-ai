@@ -222,6 +222,17 @@ describe("readAgentMessage — one message, normalized", () => {
     ).toEqual({ type: "thinking-partial", delta: "hmm" });
   });
 
+  it("carries the envelope's sidechain tag, so a subagent's turn is attributable", () => {
+    const msg = readAgentMessage({
+      type: "assistant",
+      parent_tool_use_id: "toolu_task_1",
+      message: { role: "assistant", content: [{ type: "text", text: "subagent speaking" }] },
+    });
+    expect(msg.parentToolUseId).toBe("toolu_task_1");
+    // And its absence means the main thread — never an empty string.
+    expect(readAgentMessage({ type: "assistant", message: { role: "assistant", content: [] } }).parentToolUseId).toBeUndefined();
+  });
+
   it("keeps a delta it cannot read as an opaque provider event", () => {
     // `input_json_delta` (tool arguments assembling), signature deltas, block starts — bookkeeping,
     // whose content arrives again on the finished turn.

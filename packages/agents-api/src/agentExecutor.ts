@@ -112,6 +112,10 @@ interface AgentTurn {
   thinking: ReasoningSegment[];
   toolCalls: ToolCall[];
   toolResults: ToolResult[];
+  /** Subagent conversations, keyed by the spawning tool call — kept OUT of `messages` (see LlmOutput). */
+  sidechains: Map<string, ModelMessage[]>;
+  /** Opaque provider events, each pinned to how many main-thread messages preceded it. */
+  providerEvents: Array<{ index: number; event: JsonValue }>;
 }
 
 /** Delegated agents: they mutate the workspace, run their own non-deterministic loop (not memoizable),
@@ -509,6 +513,8 @@ export class AgentExecutor extends PromptExecutor {
         ...(turn.toolCalls.length > 0 ? { toolCalls: turn.toolCalls } : {}),
         ...(turn.toolResults.length > 0 ? { toolResults: turn.toolResults } : {}),
         ...(result.sessionId !== undefined ? { providerSessionId: result.sessionId } : {}),
+        ...(turn.sidechains.size > 0 ? { sidechains: Object.fromEntries(turn.sidechains) } : {}),
+        ...(turn.providerEvents.length > 0 ? { providerEvents: turn.providerEvents } : {}),
       };
       return { value: output, metrics: this.agentMetrics(startMs, result) };
     } catch (e) {
@@ -815,7 +821,7 @@ export class AgentExecutor extends PromptExecutor {
     // the conversation went. None of it was missing at the source.
     const channel = this.sink(ctx);
     const events = channel?.events;
-    const turn: AgentTurn = { result: { text: "" }, text: "", messages: [], thinking: [], toolCalls: [], toolResults: [] };
+    const turn: AgentTurn = { result: { text: "" }, text: "", messages: [], thinking: [], toolCalls: [], toolResults: [], sidechains: new Map(), providerEvents: [] };
     let result: AgentResult | undefined;
     // The last machine-readable failure code the agent gave. It arrives on the ASSISTANT turn that
     // carries the failure text, one message BEFORE the terminal result that repeats the prose — so it
@@ -851,7 +857,17 @@ export class AgentExecutor extends PromptExecutor {
           case "provider_event":
             // Forwarded OPAQUELY. `exec` must not learn this agent's vocabulary, and a host that wants
             // to render a compaction boundary must not be stopped because we had no neutral name for it.
-            if (msg.event !== undefined) events?.push({ type: "provider_event", payload: msg.event });
+            if (msg.event !== undefined) {
+              events?.push({ type: "provider_event", payload: msg.event });
+              // …and RECORDED, pinned to its place among the turns. The live view already showed it;
+              // a replay that shows less than the person watching saw is a record telling a smaller
+              // story than the run. Except delta bookkeeping: a `stream_event` is a fragment whose
+              // content arrives again on the finished turn, and hundreds of them per turn would
+              // swamp the record with what it already holds.
+              if ((msg.event as { type?: unknown }).type !== "stream_event") {
+                turn.providerEvents.push({ index: turn.messages.length, event: msg.event });
+              }
+            }
             break;
           case "assistant":
           case "user":
@@ -861,11 +877,28 @@ export class AgentExecutor extends PromptExecutor {
             // `message` events learns about an agent's tools only when the record closes — for a
             // run that takes an hour, that is indistinguishable from an agent doing nothing.
             if (msg.message !== undefined) {
-              events?.push({ type: "message", role: msg.type, content: msg.message as JsonValue });
+              events?.push({
+                type: "message",
+                role: msg.type,
+                content: msg.message as JsonValue,
+                ...(msg.parentToolUseId !== undefined ? { parentToolUseId: msg.parentToolUseId } : {}),
+              });
             }
             break;
           default:
             break;
+        }
+        // A SUBAGENT's turn goes to its own chain and nowhere else. Its text is not the answer, its
+        // thinking is not the main thread's reasoning, its tool calls are not the agent's own — and
+        // before the tag existed they were all folded in, which made the record claim the main
+        // thread said things a subagent said.
+        if (msg.parentToolUseId !== undefined) {
+          if (msg.message !== undefined) {
+            const chain = turn.sidechains.get(msg.parentToolUseId);
+            if (chain === undefined) turn.sidechains.set(msg.parentToolUseId, [msg.message as unknown as ModelMessage]);
+            else chain.push(msg.message as unknown as ModelMessage);
+          }
+          continue;
         }
         // The provider's own turn objects, kept whole. `LlmOutput.messages` is documented as the
         // provider's log rather than a reconstruction; an Anthropic message and a `ModelMessage` are

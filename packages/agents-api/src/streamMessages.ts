@@ -293,6 +293,9 @@ export function readAgentMessage(msg: Record<string, unknown>): AgentStreamMessa
       const inner = bag(msg["message"]);
       return {
         type: msg["type"] as "assistant" | "user",
+        // The envelope's sidechain tag. A subagent's turns ride the SAME stream; without this they
+        // would interleave into the main thread's log indistinguishably (see the seam's field doc).
+        ...(str(msg["parent_tool_use_id"]) !== undefined ? { parentToolUseId: str(msg["parent_tool_use_id"])! } : {}),
         // ✅ OBSERVED on a not-logged-in run: the turn that carries the failure text also carries
         // `error: "authentication_failed"` and `message.model: "<synthetic>"`. The prose reaches the
         // caller either way — the terminal result repeats it — but the CODE is the only part that can
