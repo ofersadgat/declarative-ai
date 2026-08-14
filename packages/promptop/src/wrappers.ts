@@ -306,17 +306,15 @@ export function withRateLimit<R = ExecServices, M extends ExecMetrics = ExecMetr
       // has nothing to say about.
       if (!governs(appliesTo, priced.model)) return innerExec.start(op, ctx);
       return wrapHandle(async (ctl) => {
-        let est = estimateCache.get(op);
-        if (!est) {
-          // Tokenizing the resolved text is the expensive half, so it happens on the cache MISS — the
-          // resolution itself is already shared with the `appliesTo` check above.
-          est = { ...estimateCallTokens(priced.text, undefined, priced.maxOutputTokens), modelId: priced.model };
-          estimateCache.set(op, est);
-        }
+        const cached = estimateCache.get(op);
+        // Tokenizing the resolved text is the expensive half, so it happens on the cache MISS — the
+        // resolution itself is already shared with the `appliesTo` check above.
+        const base = cached ?? { ...estimateCallTokens(priced.text, undefined, priced.maxOutputTokens), modelId: priced.model };
+        if (cached === undefined) estimateCache.set(op, base);
         // Added OUTSIDE the cache: the op is the same object across repair attempts and retries, but
         // the session it runs against has moved on, so a cached transcript size would be stale.
         const prior = estimateInputTokens(await sessionText(ctx));
-        if (prior > 0) est = { ...est, inputTokens: est.inputTokens + prior };
+        const est = prior > 0 ? { ...base, inputTokens: base.inputTokens + prior } : base;
         const modelId = est.modelId;
         let ran = false;
         const result = await limiter.schedule(est, () => {
