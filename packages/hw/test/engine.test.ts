@@ -997,6 +997,80 @@ describe("tool permissions (DESIGN §5.1, \"Permissions: two orthogonal axes\")"
     expect(await received!.run({}, {})).toEqual({ wrote: true });
   });
 
+  it("hands an agent-served PROMPT state raw tools and the gate — the answering executor decides, not the op kind", async () => {
+    // A prompt op dispatches on its model prefix, and a `claude-cli/…` route is a delegated agent
+    // exactly as a registered adapter is. This used to be hard-coded composed: the agent got
+    // permission-WRAPPED tools (a second gate under the callback that is the gate) and NO ToolGate at
+    // all, so the state's authored modes and its profile never reached the one channel that could
+    // enforce them.
+    let seen: FakeCall | undefined;
+    const script: Script = (call) => {
+      seen = call;
+      return ok({ r: "done" });
+    };
+    const inner = new FakePromptExecutor(script);
+    const delegatedPrompt: Executor<ExecServices, WorkflowMetrics> = {
+      metrics: inner.metrics,
+      capabilities: { ...inner.capabilities, policyEnforcement: "callback" },
+      start: (o, c) => inner.start(o, c),
+    };
+    const { engine } = makeEngine(invokeWriteFiles({ profile: "read-only" }), "s", script, {
+      tools: { write: writeTool },
+      prompt: delegatedPrompt,
+      extra: { permissions: { approve: allowSession } },
+    });
+    const result = await engine.run({ inputs: {} });
+    expect(result.outcome).toBe("success");
+    // RAW, exactly as the function path hands them — the gate below is the enforcement channel.
+    expect(await seen!.ctx.tools!["write"]!.run({}, {})).toEqual({ wrote: true });
+    expect(seen!.ctx.gate?.profile).toBe("read-only");
+  });
+
+  it("builds the gate off the SERVICES seam when the host wired no EngineConfig.permissions", async () => {
+    // The production path: `createWorkflowExecutor` forwards the caller's ctx as `config.services`
+    // and never sets `config.permissions`. Reading only the latter meant that path never built a
+    // gate at all — a delegated adapter's callback fell through to the bare approver and the
+    // authored profile was configured, displayed, and ignored.
+    let seen: FakeCall | undefined;
+    const script: Script = (call) => {
+      seen = call;
+      return ok({ r: "done" });
+    };
+    const inner = new FakePromptExecutor(script);
+    const delegatedPrompt: Executor<ExecServices, WorkflowMetrics> = {
+      metrics: inner.metrics,
+      capabilities: { ...inner.capabilities, policyEnforcement: "callback" },
+      start: (o, c) => inner.start(o, c),
+    };
+    const { engine } = makeEngine(invokeWriteFiles({ profile: "read-only" }), "s", script, {
+      tools: { write: writeTool },
+      prompt: delegatedPrompt,
+      extra: { services: { approve: allowSession } as unknown as ExecServices },
+    });
+    const result = await engine.run({ inputs: {} });
+    expect(result.outcome).toBe("success");
+    expect(seen!.ctx.gate?.profile).toBe("read-only");
+    // The composed rule is unchanged: with no ENGINE-level approver the declared tools stay raw.
+    expect(await seen!.ctx.tools!["write"]!.run({}, {})).toEqual({ wrote: true });
+  });
+
+  it("publishes the gate on a COMPOSED prompt call too — inert for the wrapper, but the only carrier of the profile", async () => {
+    let seen: FakeCall | undefined;
+    const script: Script = async (call) => {
+      seen = call;
+      return ok({ r: "done" });
+    };
+    const { engine } = makeEngine(invokeWriteFiles({ profile: "read-only" }), "s", script, {
+      tools: { write: writeTool },
+      extra: { permissions: { approve: allowSession } },
+    });
+    const result = await engine.run({ inputs: {} });
+    expect(result.outcome).toBe("success");
+    // Wrapped, as before: the read-only profile denies the mutating tool on its way through.
+    expect(isPermissionDenied(await seen!.ctx.tools!["write"]!.run({}, {}))).toBe(true);
+    expect(seen!.ctx.gate?.profile).toBe("read-only");
+  });
+
   it("routes a smart-mode tool through the engine-supplied smart policy (decides before the human)", async () => {
     let toolResult: JsonValue = null;
     const script: Script = async (call) => {

@@ -83,6 +83,14 @@ export class AgentCodexExecutor extends AgentExecutor {
   constructor(options: AgentCodexExecutorOptions = {}) {
     super({
       label: "codex",
+      // Codex answers a narrowing profile with its SANDBOX, not with a deny list — it has no such
+      // flag, and `codexRefusal` would refuse the run over the claude names the base's default list
+      // carries. The mapping is exact where it is not for claude: `sandboxFor("plan")` is nothing but
+      // `--sandbox read-only`, with no planning behaviour behind the word, so a `read-only` profile
+      // may borrow it. The base maps only `plan` on its own precisely because claude's `plan` IS a
+      // different instruction.
+      mutatingNativeTools: [],
+      readOnlyProfileMode: "plan",
       ...options,
       capabilities: options.capabilities ?? CODEX_CAPS,
       // `codex exec` cannot ask, so an approver must not be handed to it as though it could.

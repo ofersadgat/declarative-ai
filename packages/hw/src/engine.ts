@@ -439,7 +439,11 @@ export class WorkflowEngine {
     this.validator = config.validator ?? new SchemaValidator();
     this.clock = config.clock ?? { now: () => Date.now() };
     this.permissions = new PermissionLedger({
-      baseline: config.permissions?.baseline,
+      // Falling back to the services seam for the same reason `resolveTools` does for the approver:
+      // `createWorkflowExecutor` forwards the caller's compiled policy as `services.policy` and never
+      // sets `permissions`, so without the fallback the production ledger resolved every mode against
+      // an EMPTY baseline while the UI displayed the policy as in force.
+      baseline: config.permissions?.baseline ?? config.services?.policy?.baseline,
       process: config.permissions?.process,
     });
   }
@@ -1363,7 +1367,10 @@ export class WorkflowEngine {
     // and permissions are the ones the author expects.
     const entry = op.kind === "function" ? this.config.registry.functions.get(op.functionRef) : undefined;
     if (op.kind === "function" && !entry) return { error: `no function '${op.functionRef}' is registered` };
-    const delegates = entry?.kind === "runtime" && entry.capabilities.policyEnforcement === "callback";
+    const delegates =
+      op.kind === "prompt"
+        ? this.delegatesPolicy(this.operations, op)
+        : entry?.kind === "runtime" && entry.capabilities.policyEnforcement === "callback";
     const toolsOrFailure = this.resolveTools(env, resourceKey, delegates);
     if ("failure" in toolsOrFailure) return { error: toolsOrFailure.failure.reason };
     const rendered = op.kind === "prompt" ? { ...op, user: this.renderTemplate(op.user, instance, literal.values) } : op;
@@ -1544,7 +1551,15 @@ export class WorkflowEngine {
     const preamble = this.conversationPreamble(env.conversation?.mode ?? "full_history", transcript, env.conversation?.artifacts);
     const prompt = preamble ? `${preamble}\n\n${rendered}` : rendered;
 
-    const toolsOrFailure = this.resolveTools(env, session.resourceKey, false);
+    // Whether THIS call's tools stay raw is the answering executor's fact, not the op kind's. A prompt
+    // op dispatches on its model prefix, and a `claude-cli/…` route is a delegated agent exactly as a
+    // registered adapter is — it runs its own loop and authorizes through its native callback. This
+    // used to be hard-coded `false`, which had two silent consequences on an agent-served prompt state:
+    // the tools it was handed were permission-WRAPPED (a second gate under the callback that is the
+    // gate), and — worse — the {@link ToolGate} was never published at all, so the state's authored
+    // modes, its `permissions.profile` and the run's ledger were all invisible to the one enforcement
+    // channel a delegated transport has. The agent ran under nothing but its own defaults.
+    const toolsOrFailure = this.resolveTools(env, session.resourceKey, this.delegatesPolicy(promptExecutor, op));
     if ("failure" in toolsOrFailure) return fail(toolsOrFailure.failure);
     const tools = toolsOrFailure.tools;
 
@@ -1564,7 +1579,9 @@ export class WorkflowEngine {
 
     // The per-call ENVIRONMENT the old `PromptOpEnvironment` carried — tools, the time budget,
     // cancellation — are `ExecServices` fields now, which is why that type could be deleted outright.
-    const services = await this.servicesFor(session.resourceKey, instance, tools, session);
+    // The gate rides along exactly as it does on the function path: inert for a composed transport,
+    // and the ONLY carrier of authored modes and the session profile for a delegated one.
+    const services = await this.servicesFor(session.resourceKey, instance, tools, session, toolsOrFailure.gate);
     // An authored `limits.timeout` reaches the call as CANCELLATION. It used to be published as
     // `services.timeoutMs`, which only an executor that knew to read it honoured — and which the llm
     // layer turned straight back into `AbortSignal.timeout(...)` anyway. Folding it into the signal
@@ -1623,6 +1640,20 @@ export class WorkflowEngine {
   }
 
   /**
+   * Whether the executor that will answer this op enforces policy through its OWN callback — the
+   * per-op question `capabilitiesFor` exists to answer.
+   *
+   * A function op's answer is on its registry entry; a PROMPT op's is on whichever route its model
+   * prefix dispatches to, and only the executor tree knows that. One static record standing in for a
+   * router whose routes disagree (a provider enforces nothing; a `claude-cli` route enforces by
+   * callback) is exactly the degradation {@link Executor.capabilitiesFor} documents — so this reads
+   * the per-op answer and falls back to the static record only where no per-op answer exists.
+   */
+  private delegatesPolicy(executor: Executor<ExecServices, WorkflowMetrics>, op: Operation<InlineFamily>): boolean {
+    return (executor.capabilitiesFor?.(op) ?? executor.capabilities).policyEnforcement === "callback";
+  }
+
+  /**
    * Resolve the environment's declared tool NAMES through `registry.tools` into executables, and
    * apply the permission gate (DESIGN §5.1, "Enforcement").
    *
@@ -1643,6 +1674,21 @@ export class WorkflowEngine {
     delegatesPermissions: boolean,
   ): { tools?: Record<string, Tool>; gate?: ToolGate } | { failure: Failure } {
     const approve = this.config.permissions?.approve;
+    /**
+     * The GATE's escalation channel, falling back to the services seam.
+     *
+     * `createWorkflowExecutor` forwards the caller's ctx as `config.services` and never sets
+     * `config.permissions` — so reading only `permissions.approve`, as this used to, meant the
+     * PRODUCTION path never built a gate at all: a delegated adapter's callback fell through to the
+     * bare approver, and every authored mode, `smart` rule and `permissions.profile` on that path
+     * was configured, displayed, and ignored.
+     *
+     * The COMPOSED wrapping below still keys on `permissions.approve` alone, deliberately: a host
+     * that publishes an approver on services but no engine-level permissions gets exactly the tool
+     * behaviour it always had (raw, self-gating where the tool chooses to), while the gate — which
+     * only a delegated adapter consults — now exists to carry the profile and the modes across.
+     */
+    const escalate = approve ?? this.config.services?.approve;
     // Seeded whichever way the policy is enforced. It used to happen on the wrapping path only, so a
     // DELEGATED state authoring `profile: "read-only"` ran under `full` — the ledger's default —
     // before any of the rest of this had a chance to matter.
@@ -1656,7 +1702,7 @@ export class WorkflowEngine {
       tools[name] = tool;
     }
     const some = Object.keys(tools).length > 0;
-    if (!approve) return some ? { tools } : {};
+    if (!escalate) return some ? { tools } : {};
 
     /**
      * The gate, built for EVERY enforcement style rather than only the delegated one.
@@ -1670,17 +1716,23 @@ export class WorkflowEngine {
      * Built even with NO declared tools, because a delegated agent's own built-ins are the calls that
      * most need answering for — they are the ones we never registered and cannot wrap.
      */
+    const smart = this.config.permissions?.smart ?? this.config.services?.policy?.smart;
+    const customProfiles = this.config.permissions?.profiles ?? this.config.services?.policy?.profiles;
     const gate = createToolGate({
       ledger: this.permissions,
       sessionId,
-      approve,
+      approve: escalate,
       tools: Object.fromEntries(Object.entries(tools).map(([name, tool]) => [name, { readOnly: tool.readOnly }])),
       ...(env.permissions !== undefined ? { authored: env.permissions } : {}),
-      ...(this.config.permissions?.smart !== undefined ? { smart: this.config.permissions.smart } : {}),
-      ...(this.config.permissions?.profiles !== undefined ? { profiles: this.config.permissions.profiles } : {}),
+      ...(smart !== undefined ? { smart } : {}),
+      ...(customProfiles !== undefined ? { profiles: customProfiles } : {}),
     });
 
     if (delegatesPermissions) return { ...(some ? { tools } : {}), gate };
+    // Composed, but the host wired no engine-level approver: the tools stay RAW — the documented
+    // "without an approver, tools are handed over unguarded" rule, unchanged — and the gate still
+    // travels for anything that reads only it.
+    if (!approve) return { ...(some ? { tools } : {}), gate };
     if (!some) return { gate };
     // OWN entries only. These are authored/host-supplied maps keyed by TOOL NAME, so a tool called
     // `constructor` or `toString` used to resolve its permission mode — and its smart-approval rule
@@ -1689,8 +1741,6 @@ export class WorkflowEngine {
     const authoredTools = env.permissions?.tools;
     const authoredMode = (name: string): PermissionMode | undefined =>
       (authoredTools !== undefined && Object.hasOwn(authoredTools, name) ? authoredTools[name] : undefined) ?? env.permissions?.default;
-    const smartFor = this.config.permissions?.smart;
-    const profiles = this.config.permissions?.profiles;
     const guarded: Record<string, Tool> = {};
     for (const [name, tool] of Object.entries(tools)) {
       guarded[name] = withPermission(tool, {
@@ -1699,8 +1749,8 @@ export class WorkflowEngine {
         toolName: name,
         approve,
         authoredMode: authoredMode(name),
-        smart: smartFor !== undefined && Object.hasOwn(smartFor, name) ? smartFor[name] : undefined,
-        profiles,
+        smart: smart !== undefined && Object.hasOwn(smart, name) ? smart[name] : undefined,
+        profiles: customProfiles,
       });
     }
     if (this.permissions.resolveProfile(sessionId) === "plan") {

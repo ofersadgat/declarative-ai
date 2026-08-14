@@ -912,4 +912,70 @@ describe("the session profile reaches a transport that has no per-tool gate", ()
     await new AgentExecutor({ query, permissionMode: "acceptEdits" }).start(op(), gateWithProfile("plan")).result;
     expect(seen()?.permissionMode).toBe("acceptEdits");
   });
+
+  it("maps read-only through `readOnlyProfileMode` where a transport declared the mapping exact", async () => {
+    // Codex's arrangement: its `plan` carries no behaviour — it is nothing but `--sandbox read-only`.
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query, readOnlyProfileMode: "plan" }).start(op(), gateWithProfile("read-only")).result;
+    expect(seen()?.permissionMode).toBe("plan");
+  });
+});
+
+/**
+ * A `read-only` profile as CONFIGURATION, not only as a callback.
+ *
+ * The gate escalates what it cannot classify — but "may this agent run `Bash`?" under a profile that
+ * means "no writes" is not a human question, and before this the whole restriction hung on somebody
+ * answering it correctly every time. The write-capable built-ins are a known fact about the
+ * transport, so they are denied up front; the callback stays the floor for everything the list
+ * cannot name.
+ */
+describe("a narrowing profile reaches the agent up front", () => {
+  const gateWithProfile = (profile: string): ExecServices =>
+    ({
+      approve: () => ({ decision: "allow", scope: "once" }),
+      gate: createToolGate({
+        ledger: new PermissionLedger({ baseline: { profile } }),
+        sessionId: "s1",
+        approve: () => ({ decision: "allow", scope: "once" }),
+      }),
+    }) as unknown as ExecServices;
+
+  it("denies claude's write-capable built-ins under `read-only`", async () => {
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query }).start(op(), gateWithProfile("read-only")).result;
+    expect(seen()?.disallowedTools).toEqual(expect.arrayContaining(["Bash", "Edit", "Write", "Task"]));
+  });
+
+  it("denies NOTHING under `plan` — `--permission-mode plan` is the exact channel, and it still allows read-only use of these tools", async () => {
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query }).start(op(), gateWithProfile("plan")).result;
+    expect(seen()?.permissionMode).toBe("plan");
+    expect(seen()?.disallowedTools).toBeUndefined();
+  });
+
+  it("denies nothing under `full`, and nothing with no gate at all", async () => {
+    const full = capturing();
+    await new AgentExecutor({ query: full.query }).start(op(), gateWithProfile("full")).result;
+    expect(full.seen()?.disallowedTools).toBeUndefined();
+    const bare = capturing();
+    await new AgentExecutor({ query: bare.query }).start(op(), {}).result;
+    expect(bare.seen()?.disallowedTools).toBeUndefined();
+  });
+
+  it("lets a transport state its own list — codex passes [] and answers with its sandbox instead", async () => {
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query, mutatingNativeTools: [] }).start(op(), gateWithProfile("read-only")).result;
+    expect(seen()?.disallowedTools).toBeUndefined();
+  });
+
+  it("refuses a narrowing profile on a transport that enforces nothing, rather than running unheld", async () => {
+    const { query } = capturing();
+    const none = new AgentExecutor({ query, capabilities: { ...DELEGATED_CAPS, policyEnforcement: "none" } });
+    const result = await none.start(op(), gateWithProfile("read-only")).result;
+    expect(!isOk(result) && result.error.reason).toMatch(/read-only.*enforces no policy/s);
+    // `full` excludes nothing, so there is nothing to fail to enforce — the same transport runs.
+    const runs = await none.start(op(), gateWithProfile("full")).result;
+    expect(isOk(runs)).toBe(true);
+  });
 });

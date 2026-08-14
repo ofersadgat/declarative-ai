@@ -8,8 +8,8 @@
  * a CLI agent came out labelled `claude-code`. It surfaced only against a real binary.
  */
 import { describe, expect, it } from "vitest";
-import { isOk, promptOp } from "@declarative-ai/exec";
-import type { AgentQuery } from "@declarative-ai/agents-api";
+import { isOk, promptOp, type ExecServices } from "@declarative-ai/exec";
+import type { AgentQuery, AgentQueryOptions } from "@declarative-ai/agents-api";
 import { AgentCliExecutor, AgentCodexExecutor } from "../src/cliExecutor.js";
 import { CLI_CONFIG_ONLY_CAPS, CLI_DELEGATED_CAPS } from "../src/runtime.js";
 import { CODEX_CAPS } from "../src/codexRuntime.js";
@@ -49,5 +49,23 @@ describe("AgentCodexExecutor", () => {
     expect(caps).toEqual(CODEX_CAPS);
     expect(caps.policyEnforcement).toBe("config");
     expect(caps.sessionFork).toBe(false);
+  });
+
+  it("answers a read-only profile with its sandbox, not with claude's deny list", async () => {
+    // The sandbox is codex's ONLY enforcement channel, and its `plan` mode is nothing but
+    // `--sandbox read-only` — so the profile maps where it deliberately does not for claude. The
+    // base's default deny list must stay clear of the argv: `codexRefusal` would refuse the whole
+    // run over tool names codex has no flag for.
+    let seen: AgentQueryOptions | undefined;
+    const query: AgentQuery = async function* (opts) {
+      seen = opts;
+      yield { type: "result", result: { text: "ok" } };
+    };
+    // A stub gate is enough: the executor reads only `profile` off it on this path.
+    const gated = { gate: { profile: "read-only", check: async () => ({ allow: true }), modeOf: () => "ask" } } as unknown as ExecServices;
+    const result = await new AgentCodexExecutor({ query }).start(op(), gated).result;
+    expect(isOk(result)).toBe(true);
+    expect(seen?.permissionMode).toBe("plan");
+    expect(seen?.disallowedTools).toBeUndefined();
   });
 });

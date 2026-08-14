@@ -186,6 +186,26 @@ export class AgentError extends Error {
 const PERMISSION_MODES: readonly AgentPermissionMode[] = ["default", "plan", "acceptEdits", "bypassPermissions"];
 
 /**
+ * `claude`'s own built-ins that can mutate — what a `read-only` profile denies up-front.
+ *
+ * A blocklist, not an enumeration of the agent's whole tool set, and the distinction is what keeps it
+ * honest: an unlisted read-only built-in (`Read`, `Glob`, `Grep`) is exactly what the profile permits,
+ * and an unlisted WRITER a future release adds still hits the permission callback, where the gate
+ * escalates anything it cannot classify. `Task` and `Agent` are here because a sub-agent inherits
+ * tools this deny list never sees; `SlashCommand` because a command file can instruct anything.
+ */
+export const CLAUDE_MUTATING_BUILTINS: readonly string[] = [
+  "Bash",
+  "Edit",
+  "Write",
+  "MultiEdit",
+  "NotebookEdit",
+  "Task",
+  "Agent",
+  "SlashCommand",
+];
+
+/**
  * The model id used when a call names none — a PLACEHOLDER, never a routing decision.
  *
  * Route-prefixed like every other id so it cannot be mistaken for a provider-native one, and so
@@ -237,6 +257,22 @@ export interface AgentExecutorOptions extends PromptExecutorOptions {
    */
   replacesNative?: Record<string, string | readonly string[]>;
   /**
+   * The agent's OWN built-ins that can MUTATE — write files, run commands, spawn sub-agents — denied
+   * up-front when the session's profile is `read-only`.
+   *
+   * The gap this closes is the one `ToolGate.modeOf` documents from the other side: a `read-only`
+   * profile is enforced per-tool by the gate, but the gate cannot CLASSIFY an agent's own built-in
+   * (no `readOnly` we know), so every such call escalates to a human — including the ones the profile
+   * plainly forbids, which a distracted click then allows. The built-ins whose write-capability is a
+   * known fact about the transport need no escalation: they are denied as CONFIGURATION, before the
+   * model can reach for them. The callback stays the floor for everything this list cannot name.
+   *
+   * Defaults to {@link CLAUDE_MUTATING_BUILTINS}, because the base class drives `claude`. A transport
+   * with a different vocabulary states its own list — codex passes `[]` and answers the profile with
+   * its sandbox instead, which is the channel it actually has.
+   */
+  mutatingNativeTools?: readonly string[];
+  /**
    * Route the agent's tool approvals to `ctx.approve`. Default `true`.
    *
    * `false` states that this transport HAS no mid-run approval channel — codex is the case. Making it
@@ -266,6 +302,14 @@ export interface AgentExecutorOptions extends PromptExecutorOptions {
   env?: NodeJS.ProcessEnv;
   /** The agent's NATIVE permission profile, when the caller pins one. */
   permissionMode?: AgentPermissionMode;
+  /**
+   * The native permission mode a `read-only` session profile maps onto, for a transport where that
+   * mapping is EXACT. Absent ⇒ unmapped, which is claude's truth: it has no read-only mode, and
+   * borrowing `plan` would tell the agent to stop acting and start planning — a different
+   * instruction, not a narrower one. Codex sets `"plan"`, because for it the word carries no
+   * behaviour at all: `sandboxFor("plan")` is nothing but `--sandbox read-only`.
+   */
+  readOnlyProfileMode?: AgentPermissionMode;
   /** Approval scope key for `ctx.approve`. Defaults to `"delegated"`. */
   approvalScope?: string;
   /**
@@ -525,6 +569,24 @@ export class AgentExecutor extends PromptExecutor {
     const refusal = this.agentRefusal(definition);
     if (refusal !== undefined) throw new AgentError(`${this.label()}: ${refusal}`);
 
+    /**
+     * A NARROWING profile on a transport that enforces nothing is refused, not run.
+     *
+     * The profile is the one restriction an author states about a whole delegated run ("this state
+     * must not write"), and `policyEnforcement: "none"` is this executor's own declaration that no
+     * channel exists to hold the agent to it — no callback, no deny flag, no sandbox. Running anyway
+     * would be the exact failure the capability record exists to prevent: the workflow reads as
+     * restricted while the agent runs under nothing but its own defaults.
+     */
+    const profile = ctx.gate?.profile;
+    if (profile !== undefined && profile !== "full" && this.capabilities.policyEnforcement === "none") {
+      throw new AgentError(
+        `${this.label()}: this state runs under the '${profile}' permission profile, and this transport ` +
+          `enforces no policy (policyEnforcement: "none") — nothing could hold the agent to it. ` +
+          `Run the state on claude-code, claude-cli or codex-cli, or drop the profile`,
+      );
+    }
+
     const inject = this.agent.injectTools ?? true;
     const nativeMap = this.agent.nativeTools ?? {};
     const wantsApprovalCallback = this.agent.approvalCallback ?? true;
@@ -651,6 +713,24 @@ export class AgentExecutor extends PromptExecutor {
       const replaced = this.agent.replacesNative?.[name];
       for (const builtin of replaced === undefined ? [] : typeof replaced === "string" ? [replaced] : replaced) {
         if (!aliased.has(builtin) && !denySet.has(builtin)) {
+          denied.push(builtin);
+          denySet.add(builtin);
+        }
+      }
+    }
+
+    // A `read-only` profile reaches the agent as CONFIGURATION, not only as a callback. The gate
+    // already refuses what it can classify and escalates what it cannot — but escalation is a human
+    // question, and "may this agent run `Bash`?" under a profile that means "no writes" is not one:
+    // the write-capable built-ins are a known fact about the transport, so they are denied up-front
+    // (see {@link AgentExecutorOptions.mutatingNativeTools}). NOT applied under `plan`, which has an
+    // exact native counterpart (`--permission-mode plan`, set below) that still allows read-only use
+    // of these same tools; and not under a custom profile, whose predicate this executor cannot read
+    // — there the callback remains the whole answer. An alias is not exempt: the profile is the
+    // narrower statement, so a declared `bash` aliased to `Bash` is still denied under `read-only`.
+    if (profile === "read-only") {
+      for (const builtin of this.agent.mutatingNativeTools ?? CLAUDE_MUTATING_BUILTINS) {
+        if (!denySet.has(builtin)) {
           denied.push(builtin);
           denySet.add(builtin);
         }
@@ -888,19 +968,24 @@ export class AgentExecutor extends PromptExecutor {
    * state authoring `plan` ran codex with whatever sandbox the adapter happened to be constructed
    * with — the profile said "must not write" and nothing carried it to the one place that could act.
    *
-   * ONLY `plan` maps, and deliberately. It is the one exact correspondence between the two
-   * vocabularies (a planning turn must not write, which is what `--sandbox read-only` and claude's
-   * `--permission-mode plan` both mean). `read-only` has no counterpart: claude has no read-only mode,
-   * and borrowing `plan` for it would tell the agent to stop acting and start planning, which is a
-   * different instruction from "you may read". That gap is enforced per-tool by the gate instead,
-   * everywhere a gate exists.
+   * ONLY `plan` maps unconditionally, and deliberately. It is the one exact correspondence between
+   * the two vocabularies (a planning turn must not write, which is what `--sandbox read-only` and
+   * claude's `--permission-mode plan` both mean). `read-only` maps only where a transport DECLARED
+   * the mapping exact ({@link AgentExecutorOptions.readOnlyProfileMode} — codex, whose `plan` is
+   * nothing but its sandbox): claude has no read-only mode, and borrowing `plan` for it would tell
+   * the agent to stop acting and start planning, which is a different instruction from "you may
+   * read". For claude that profile is enforced by the up-front deny of its write-capable built-ins
+   * ({@link AgentExecutorOptions.mutatingNativeTools}) plus the gate's per-call answer.
    *
    * An explicitly configured mode always wins: it is the more specific statement.
    */
   protected permissionMode(ctx?: ExecServices): AgentPermissionMode | undefined {
     const m = this.agent.permissionMode;
     if (m !== undefined && PERMISSION_MODES.includes(m)) return m;
-    return ctx?.gate?.profile === "plan" ? "plan" : undefined;
+    if (ctx?.gate?.profile === "plan") return "plan";
+    // Only where a transport declared the mapping exact — see {@link AgentExecutorOptions.readOnlyProfileMode}.
+    if (ctx?.gate?.profile === "read-only") return this.agent.readOnlyProfileMode;
+    return undefined;
   }
 
   /**
