@@ -167,11 +167,13 @@ export function parseApprovalRequest(args: unknown): ApprovalRequest | undefined
  * The decision payload, as the JSON string the CLI expects inside `content[0].text`.
  *
  * `input` is echoed into `updatedInput` on an allow because the CLI's schema requires it — we never
- * MODIFY the agent's tool input, but we must restate it. Nothing here rewrites what the agent asked
- * for; an approver that wanted to would be a different feature with a different seam.
+ * MODIFY the agent's tool input, but we must restate it. The one exception is a decision that CARRIES
+ * a replacement: an answered `AskUserQuestion` returns the human's choices as `{...input, answers}`,
+ * which is the documented way the answer reaches the agent. Anything else rewriting arguments would
+ * be a different feature with a different seam.
  */
 export function approvalResponseText(decision: AgentPermissionDecision, input: Record<string, JsonValue>): string {
-  if (decision.allow) return JSON.stringify({ behavior: "allow", updatedInput: input });
+  if (decision.allow) return JSON.stringify({ behavior: "allow", updatedInput: decision.updatedInput ?? input });
   return JSON.stringify({ behavior: "deny", message: decision.reason ?? "denied by permission policy" });
 }
 

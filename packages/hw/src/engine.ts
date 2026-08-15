@@ -1122,9 +1122,11 @@ export class WorkflowEngine {
   private async runOperation(instance: Instance, op: Operation<InlineFamily>): Promise<Failure | undefined> {
     const kind: OperationKind = op.kind === "prompt" ? "prompt" : "function";
     this.emit({ type: "operation.started", instanceId: instance.id, stateId: instance.stateId, op: kind });
-    // `operationId` arrives from the dispatch paths once the DISPATCHED op exists — see the
-    // EngineEvent comment on why a pre-dispatch failure carries none.
-    const fail = (failure: Failure, operationId?: string): Failure => {
+    // `operationId` and `metrics` both arrive from the dispatch paths, and for the same reason: they
+    // exist only once the call was actually MADE. See the EngineEvent comment — a pre-dispatch
+    // failure has no dispatched op to hash and nothing to measure, and saying so by omission is more
+    // honest than reporting zeros for a call that never happened.
+    const fail = (failure: Failure, operationId?: string, metrics?: WorkflowMetrics): Failure => {
       this.emit({
         type: "operation.failed",
         instanceId: instance.id,
@@ -1132,6 +1134,7 @@ export class WorkflowEngine {
         op: kind,
         ...(operationId !== undefined ? { operationId } : {}),
         failure,
+        ...(metrics !== undefined ? { metrics } : {}),
       });
       return failure;
     };
@@ -1399,7 +1402,7 @@ export class WorkflowEngine {
     instance: Instance,
     op: FunctionOp<InlineFamily>,
     opInputs: FunctionInputs,
-    fail: (f: Failure, operationId?: string) => Failure,
+    fail: (f: Failure, operationId?: string, metrics?: WorkflowMetrics) => Failure,
   ): Promise<Failure | undefined> {
     const entry: RegisteredFunction<ExecServices, WorkflowMetrics> | undefined = this.config.registry.functions.get(op.functionRef);
     if (!entry) {
@@ -1496,13 +1499,13 @@ export class WorkflowEngine {
       isOk(outcome) ? outcome.value : undefined,
     );
     if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
-    if (!isOk(outcome)) return fail(outcome.error, operationId);
+    if (!isOk(outcome)) return fail(outcome.error, operationId, metrics);
     // The op's declared output KIND decides how its value is read — a `blob` output IS the value
     // (bytes), any other kind is a record of named outputs. Omitting it here left the blob branch
     // unreachable from the function path, so a function op producing a `Uint8Array` failed with "did
     // not produce required output" about the file it had just produced (§7.1).
     const failure = this.acceptOpOutputs(instance, "function", outcome.value, op.output.kind);
-    if (failure) return fail(failure, operationId);
+    if (failure) return fail(failure, operationId, metrics);
     this.emit({
       type: "operation.completed",
       instanceId: instance.id,
@@ -1519,7 +1522,7 @@ export class WorkflowEngine {
     instance: Instance,
     op: PromptOp<InlineFamily>,
     opInputs: FunctionInputs,
-    fail: (f: Failure, operationId?: string) => Failure,
+    fail: (f: Failure, operationId?: string, metrics?: WorkflowMetrics) => Failure,
   ): Promise<Failure | undefined> {
     const promptExecutor = this.config.prompt;
     if (!promptExecutor) {
@@ -1617,7 +1620,7 @@ export class WorkflowEngine {
     // A FAILED call contributes nothing to the transcript. It ran before this check and a failure
     // carries no `value`, so the assistant turn was the literal string "null" — and under the default
     // `full_history` mode every later state in the session then read that back in its preamble.
-    if (!isOk(outcome)) return fail(outcome.error, operationId);
+    if (!isOk(outcome)) return fail(outcome.error, operationId, outcome.metrics);
 
     // Conversation artifact (SPEC §4.7): the exchange is already in the session, because the session
     // layer RECORDED the call — one write, not two. The engine used to synthesize a user turn and a
@@ -1627,7 +1630,7 @@ export class WorkflowEngine {
     await this.refreshTranscript(session.id);
 
     const failure = this.acceptOpOutputs(instance, "prompt", (outcome.value ?? null) as ResolvedValue, op.output.kind);
-    if (failure) return fail(failure, operationId);
+    if (failure) return fail(failure, operationId, outcome.metrics);
     this.emit({
       type: "operation.completed",
       instanceId: instance.id,

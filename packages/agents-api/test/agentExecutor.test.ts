@@ -965,6 +965,93 @@ describe("permission modes reach a delegated agent", () => {
   });
 });
 
+/**
+ * `AskUserQuestion` is a QUESTION, not a permission — see {@link ASK_USER_TOOL}. Before the routing
+ * existed it hit the gate as an unclassifiable native tool, so the human was asked to APPROVE being
+ * asked a question, and an allow echoed the input unchanged — the agent's question resolved with no
+ * answers at all.
+ */
+describe("AskUserQuestion routes to ctx.askUser, never to the approval gate", () => {
+  const input = {
+    questions: [
+      {
+        question: "Which library?",
+        header: "Library",
+        options: [
+          { label: "date-fns", description: "small" },
+          { label: "luxon", description: "batteries" },
+        ],
+      },
+    ],
+  };
+  const signal = () => ({ signal: new AbortController().signal });
+
+  /** A ctx whose approver RECORDS — proof the gate and the human were never involved. */
+  const attended = (answers?: Record<string, string | readonly string[]>) => {
+    const asked: string[] = [];
+    const questioned: string[] = [];
+    const approve: Approver = (req) => {
+      asked.push(req.tool);
+      return { decision: "allow", scope: "once" };
+    };
+    const ctx = {
+      approve,
+      askUser: async (req: { questions: { question: string }[] }) => {
+        questioned.push(...req.questions.map((q) => q.question));
+        return answers;
+      },
+    } as unknown as ExecServices;
+    return { ctx, asked, questioned };
+  };
+
+  it("puts the questions to the user and carries the answers back on updatedInput", async () => {
+    const { query, seen } = capturing();
+    const { ctx, asked, questioned } = attended({ "Which library?": "luxon" });
+    await new AgentExecutor({ query }).start(op(), ctx).result;
+    const decision = await seen()!.canUseTool!({ toolName: "AskUserQuestion", input: input as never }, signal());
+    expect(decision).toEqual({
+      allow: true,
+      updatedInput: { ...input, answers: { "Which library?": "luxon" } },
+    });
+    expect(questioned).toEqual(["Which library?"]);
+    // The approval gate never saw it — that is the whole point of the routing.
+    expect(asked).toEqual([]);
+  });
+
+  it("tells the agent to use its own judgment when the question is dismissed", async () => {
+    const { query, seen } = capturing();
+    const { ctx, asked } = attended(undefined);
+    await new AgentExecutor({ query }).start(op(), ctx).result;
+    const decision = await seen()!.canUseTool!({ toolName: "AskUserQuestion", input: input as never }, signal());
+    expect(decision).toMatchObject({ allow: false, reason: expect.stringMatching(/own best judgment/) });
+    expect(asked).toEqual([]);
+  });
+
+  it("answers the same way on a run with no question surface at all", async () => {
+    // Unattended is not an error: the agent should proceed, not park — and the approval gate must
+    // still not be consulted, because "may you ask?" is not a question anyone should answer.
+    const { query, seen } = capturing();
+    const asked: string[] = [];
+    const approve: Approver = (req) => {
+      asked.push(req.tool);
+      return { decision: "allow", scope: "once" };
+    };
+    await new AgentExecutor({ query }).start(op(), { approve } as unknown as ExecServices).result;
+    const decision = await seen()!.canUseTool!({ toolName: "AskUserQuestion", input: input as never }, signal());
+    expect(decision).toMatchObject({ allow: false, reason: expect.stringMatching(/own best judgment/) });
+    expect(asked).toEqual([]);
+  });
+
+  it("treats a malformed question batch as unanswerable rather than throwing", async () => {
+    const { query, seen } = capturing();
+    const { ctx, questioned } = attended({ never: "asked" });
+    await new AgentExecutor({ query }).start(op(), ctx).result;
+    const decision = await seen()!.canUseTool!({ toolName: "AskUserQuestion", input: { questions: "?" } as never }, signal());
+    expect(decision).toMatchObject({ allow: false });
+    expect(questioned).toEqual([]); // nothing readable was ever put to the user
+  });
+});
+
 describe("the session profile reaches a transport that has no per-tool gate", () => {
   /**
    * `codex exec` enforces entirely up front: no permission callback, no allow-list, no deny-list —

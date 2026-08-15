@@ -5,7 +5,7 @@
  * package rather than 265 lines sitting in a core everything depends on. It DECLARES its own seams on
  * `ExecServices` (DESIGN §3.2) — `exec` therefore does not know that permissions exist.
  */
-import type { Approver, ExecPolicy, ToolGate } from "./permissions.js";
+import type { Approver, AskUser, ExecPolicy, ToolGate } from "./permissions.js";
 
 export * from "./permissions.js";
 
@@ -31,5 +31,15 @@ declare module "@declarative-ai/exec" {
      * ungated — which is a wiring mistake, not a mode.
      */
     gate?: ToolGate;
+    /**
+     * Where a running agent's mid-run QUESTIONS go — `AskUserQuestion` and its kin.
+     *
+     * Distinct from {@link approve} on purpose: an approval authorizes a call, where here the call IS
+     * the question and the human's answer is its payload. Routing questions through the approval gate
+     * gives the worst of both — the person is asked to approve being asked, and the question itself
+     * is never put to them. Absent ⇒ no one can answer; the adapter tells the agent to use its own
+     * judgment rather than parking forever.
+     */
+    askUser?: AskUser;
   }
 }

@@ -80,7 +80,26 @@ export type EngineEvent =
    * thing the hash is OF — does not exist yet), and on a `failed` that never reached dispatch.
    */
   | { type: "operation.completed"; instanceId: number; stateId: string; op: OperationKind; operationId?: string; metrics?: WorkflowMetrics }
-  | { type: "operation.failed"; instanceId: number; stateId: string; op: OperationKind; operationId?: string; failure: Failure }
+  /**
+   * `metrics` is present exactly when the operation actually RAN — a post-dispatch failure, where
+   * the call was made and the money was spent. A pre-dispatch failure (unresolvable inputs, no
+   * executor wired) carries none, because nothing ran to measure.
+   *
+   * It closes two gaps, both silent. A failed call's SPEND was invisible: an agent that burned a
+   * dollar and then failed its output schema reported nothing, so every roll-up under-counted. And
+   * `metrics.sessionRef` is the journal's join to the conversation a call ran in — carried on
+   * completion since the beginning and dropped here — so a failed call's transcript sat in the
+   * record store with nothing in the journal pointing at it.
+   */
+  | {
+      type: "operation.failed";
+      instanceId: number;
+      stateId: string;
+      op: OperationKind;
+      operationId?: string;
+      failure: Failure;
+      metrics?: WorkflowMetrics;
+    }
   | { type: "transition.taken"; instanceId: number; stateId: string; to: string; iteration: number }
   | { type: "child.superseded"; instanceId: number; stateId: string; childKey: string }
   | { type: "instance.terminated"; instanceId: number; stateId: string; outcome: TerminationOutcome; failure?: Failure };

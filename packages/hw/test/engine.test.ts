@@ -802,6 +802,39 @@ describe("run records (SPEC §10.2)", () => {
     }
   });
 
+  /**
+   * A FAILED call ran, and a call that ran cost money and sat in a conversation. Both facts were
+   * dropped: `operation.failed` carried no metrics, so a delegated agent that burned a dollar and
+   * then failed reported nothing to any roll-up, and `metrics.sessionRef` — the journal's only join
+   * to the transcript a call produced — was absent exactly when a reader most wants it.
+   */
+  it("reports what a FAILED operation spent, and the conversation it ran in", async () => {
+    const files = specPlanningFiles();
+    const HR = "feature/plan/critique/human_review";
+    // Ran, billed, then failed — the shape of an agent that hit its output schema at the end.
+    const expensive = async (): Promise<FunctionResult<ResolvedValue, WorkflowMetrics>> => ({
+      error: { classification: "permanent", reason: "the model refused" },
+      metrics: { durationMs: 9, costUsd: 0.4, costSource: "provider" as const, childLlmCalls: 1, childCostUsd: 0.4 },
+    });
+    const { engine, persistence } = makeEngine(files, HR, () => ok({}), { functions: { choose_option: expensive } });
+    const result = await engine.run({ inputs: { plan_doc: "p", critique_report: "r" } });
+    expect(result.outcome).toBe("error");
+
+    const failed = persistence.events.find((e) => e.event.type === "operation.failed")!;
+    expect((failed.event as { metrics?: { costUsd?: number } }).metrics?.costUsd).toBe(0.4);
+  });
+
+  it("carries NO metrics on a failure that never dispatched — nothing ran to measure", async () => {
+    // The honest distinction: reporting zeros here would claim a call was made and cost nothing.
+    const files = specPlanningFiles();
+    const HR = "feature/plan/critique/human_review";
+    const { engine, persistence } = makeEngine(files, HR, () => ok({}), { functions: {} });
+    await engine.run({ inputs: { plan_doc: "p", critique_report: "r" } });
+    const failed = persistence.events.find((e) => e.event.type === "operation.failed");
+    expect(failed).toBeDefined();
+    expect((failed!.event as { metrics?: unknown }).metrics).toBeUndefined();
+  });
+
   // A delegated agent is a FunctionOp, and it is the only thing that knows what it spent — it bills
   // inside its own loop. Without a metrics channel on `FunctionResult<ResolvedValue, WorkflowMetrics>` the function path emitted
   // `operation.completed` with no metrics at all, so the most expensive op in a graph was the one

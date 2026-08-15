@@ -145,6 +145,15 @@ describe("the decision payload", () => {
     expect(JSON.parse(approvalResponseText({ allow: true }, {}))).toEqual({ behavior: "allow", updatedInput: {} });
   });
 
+  it("prefers a decision's OWN updatedInput — how an answered AskUserQuestion travels", () => {
+    const input = { questions: [{ question: "Which one?" }] };
+    const updated = { ...input, answers: { "Which one?": "A" } };
+    expect(JSON.parse(approvalResponseText({ allow: true, updatedInput: updated as never }, input as never))).toEqual({
+      behavior: "allow",
+      updatedInput: updated,
+    });
+  });
+
   it("carries a required message on deny", () => {
     expect(JSON.parse(approvalResponseText({ allow: false, reason: "writes outside the workspace" }, {}))).toEqual({
       behavior: "deny",

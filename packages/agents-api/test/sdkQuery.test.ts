@@ -250,6 +250,19 @@ describe("sdkPermissionCallback — our approver in the SDK's calling convention
     expect(await cb("Bash", { command: "ls" }, {})).toEqual({ behavior: "allow", updatedInput: { command: "ls" } });
   });
 
+  it("carries a decision's OWN updatedInput on an allow — the answered-question channel", async () => {
+    // An answered AskUserQuestion travels as `{...input, answers}` on the allow. Every other decision
+    // leaves `updatedInput` unset and the original input is echoed (the test above).
+    const cb = sdkPermissionCallback(
+      async (req) => ({ allow: true, updatedInput: { ...req.input, answers: { "Which one?": "A" } } as never }),
+      signal,
+    );
+    expect(await cb("AskUserQuestion", { questions: [] }, {})).toEqual({
+      behavior: "allow",
+      updatedInput: { questions: [], answers: { "Which one?": "A" } },
+    });
+  });
+
   it("answers a deny with a MESSAGE, which the wire path also requires", async () => {
     const cb = sdkPermissionCallback(async () => ({ allow: false, reason: "denied by permission policy" }), signal);
     expect(await cb("Bash", {}, {})).toEqual({ behavior: "deny", message: "denied by permission policy" });

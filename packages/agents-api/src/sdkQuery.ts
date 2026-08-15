@@ -268,9 +268,11 @@ export const readSdkResult: (msg: Record<string, unknown>) => AgentStreamMessage
  * (`{allow}`) the SDK does not parse. Both halves fail silently — the agent proceeds under its own
  * defaults while the workflow believes its approver is in force.
  *
- * `updatedInput` echoes the agent's own input back on an allow. We never REWRITE what the agent asked
- * for; the field is how the SDK's wire path spells "and use these arguments", and the CLI it drives
- * requires it (see `agents-cli`'s `mcpProtocol.ts`, where a bare allow was observed failing the parse).
+ * `updatedInput` echoes the agent's own input back on an allow — unless the DECISION carries its own,
+ * which is how an answered `AskUserQuestion` travels: the human's chosen options ride back as
+ * `{...input, answers}`. For everything else we never REWRITE what the agent asked for; the field is
+ * how the SDK's wire path spells "and use these arguments", and the CLI it drives requires it (see
+ * `agents-cli`'s `mcpProtocol.ts`, where a bare allow was observed failing the parse).
  */
 export function sdkPermissionCallback(
   approve: AgentPermissionCallback,
@@ -278,7 +280,9 @@ export function sdkPermissionCallback(
 ): (toolName: string, input: Record<string, unknown>, options: { signal?: AbortSignal }) => Promise<Record<string, unknown>> {
   return async (toolName, input, options) => {
     const decision = await approve({ toolName, input: (input ?? {}) as FunctionInputs }, { signal: options?.signal ?? signal });
-    return decision.allow ? { behavior: "allow", updatedInput: input ?? {} } : { behavior: "deny", message: decision.reason ?? "denied" };
+    return decision.allow
+      ? { behavior: "allow", updatedInput: (decision.updatedInput as Record<string, unknown> | undefined) ?? input ?? {} }
+      : { behavior: "deny", message: decision.reason ?? "denied" };
   };
 }
 

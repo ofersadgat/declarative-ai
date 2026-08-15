@@ -25,6 +25,7 @@ import {
   type ExecControl,
   type ExecHandle,
   type ExecServices,
+  type FunctionInputs,
   type InlineFamily,
   type JsonSchema,
   type JsonValue,
@@ -52,7 +53,7 @@ import type { BudgetMeter, BudgetMetrics, ExecMetrics } from "@declarative-ai/ex
 // and `policy` on `ExecServices`, and this executor reads both. Without the import they are absent
 // from the type in every package that compiles this one — which is how a whole approval path can
 // typecheck as missing while the tests, running on the merged runtime shape, still pass.
-import type { Approver, PermissionMode } from "@declarative-ai/permissions";
+import type { Approver, PermissionMode, UserAnswers, UserQuestion } from "@declarative-ai/permissions";
 import { mcpToolName } from "./mcpTools.js";
 import { sdkAgentQuery } from "./sdkQuery.js";
 import { isRetriableAgentError } from "./streamMessages.js";
@@ -188,6 +189,51 @@ export class AgentError extends Error {
 }
 
 const PERMISSION_MODES: readonly AgentPermissionMode[] = ["default", "plan", "acceptEdits", "bypassPermissions"];
+
+/**
+ * The agent's own "put a question to the human" tool.
+ *
+ * It arrives on the SAME callback as every permission ask — the CLI routes it there even when an
+ * allow rule matches, because the call cannot be pre-approved: the call IS the question, and its
+ * answer travels back as input (`updatedInput.answers`, the documented contract). So it must be
+ * picked off BEFORE the gate. Left to the gate it is an unclassifiable native tool, which escalates
+ * to the approver — a human asked to APPROVE being asked a question they are then never shown, and
+ * an allow that resolves the question with no answers at all.
+ */
+export const ASK_USER_TOOL = "AskUserQuestion";
+
+/**
+ * The questions off an `AskUserQuestion` input, read defensively — the input crossed a process
+ * boundary as untyped JSON, and a malformed batch must become "nothing to ask" rather than a throw
+ * inside the permission callback (which the transports surface as a harness error the agent then
+ * works around).
+ */
+export function questionsOf(input: FunctionInputs): UserQuestion[] {
+  const raw = (input as { questions?: unknown }).questions;
+  if (!Array.isArray(raw)) return [];
+  const out: UserQuestion[] = [];
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const q = entry as Record<string, unknown>;
+    if (typeof q["question"] !== "string" || q["question"].length === 0) continue;
+    const options = Array.isArray(q["options"])
+      ? (q["options"] as unknown[])
+          .filter((o): o is Record<string, unknown> => o !== null && typeof o === "object" && !Array.isArray(o))
+          .filter((o) => typeof o["label"] === "string")
+          .map((o) => ({
+            label: o["label"] as string,
+            ...(typeof o["description"] === "string" ? { description: o["description"] } : {}),
+          }))
+      : [];
+    out.push({
+      question: q["question"],
+      ...(typeof q["header"] === "string" ? { header: q["header"] } : {}),
+      options,
+      ...(q["multiSelect"] === true ? { multiSelect: true } : {}),
+    });
+  }
+  return out;
+}
 
 /**
  * `claude`'s own built-ins that can mutate — what a `read-only` profile denies up-front.
@@ -805,6 +851,20 @@ export class AgentExecutor extends PromptExecutor {
       canUseTool:
         (ctx.gate ?? approve) && wantsApprovalCallback
           ? async (req) => {
+              // A QUESTION, not a permission — picked off before the gate (see {@link ASK_USER_TOOL}).
+              // The human's answers ride back on the allow; a dismissal or an unattended run answers
+              // "use your own judgment", which the agent handles by proceeding. Only a run with no
+              // question surface at all falls through to that deny.
+              if (req.toolName === ASK_USER_TOOL) {
+                const questions = questionsOf(req.input);
+                let answers: UserAnswers | undefined;
+                if (ctx.askUser !== undefined && questions.length > 0) {
+                  answers = await ctx.askUser({ questions, sessionId: scope });
+                }
+                return answers !== undefined
+                  ? { allow: true, updatedInput: { ...req.input, answers: answers as never } }
+                  : { allow: false, reason: "the user is not available to answer — use your own best judgment and continue" };
+              }
               if (ctx.gate) {
                 const verdict = await ctx.gate.check(gateSubject(req.toolName), req.input);
                 return verdict.allow ? { allow: true } : { allow: false, reason: verdict.reason };

@@ -77,6 +77,55 @@ export interface PermissionRequest {
  *  a plain callback in tests. */
 export type Approver = (req: PermissionRequest) => PermissionDecision | Promise<PermissionDecision>;
 
+// --- Mid-run user questions -----------------------------------------------------
+
+/** One choice a {@link UserQuestion} offers. */
+export interface UserQuestionOption {
+  label: string;
+  /** What choosing this means — trade-offs, implications. */
+  description?: string;
+}
+
+/**
+ * One question a running agent asks the person driving it.
+ *
+ * NOT a permission. An approval asks "may this call run?"; this asks "which way do you want it?" —
+ * the call itself IS the question, and putting it through the approval gate produces the absurdity
+ * of a human approving the act of being asked. Its own vocabulary keeps the two channels apart.
+ */
+export interface UserQuestion {
+  /** The complete question, e.g. "Which library should we use for date formatting?" */
+  question: string;
+  /** Short chip/tag label (e.g. "Library"). */
+  header?: string;
+  options: UserQuestionOption[];
+  /** True ⇒ several options may be chosen; the answer is then a list of labels. */
+  multiSelect?: boolean;
+}
+
+/** A batch of questions asked together, with the approval-scope key they arrived under. */
+export interface UserQuestionRequest {
+  questions: UserQuestion[];
+  sessionId: string;
+}
+
+/**
+ * The chosen answers, keyed by the QUESTION TEXT — a single label, a free-text answer, or (for a
+ * multi-select) a list of labels. The question text is the key because it is the one field both
+ * ends hold verbatim; an index would silently misalign the moment anything filtered the list.
+ */
+export type UserAnswers = Record<string, string | readonly string[]>;
+
+/**
+ * Put a running agent's questions to the person driving it.
+ *
+ * Resolves to the answers, or to `undefined` when nobody will answer — the question was dismissed,
+ * or the run has no interactive surface at all. `undefined` is a real answer ("decide yourself"),
+ * not an error: an agent that asks and hears nothing should proceed on its own judgment, which is
+ * exactly what the adapters tell it.
+ */
+export type AskUser = (req: UserQuestionRequest) => Promise<UserAnswers | undefined>;
+
 /**
  * The workflow-authored, durable baseline (the one non-ephemeral layer): a per-tool mode and a `default`
  * for unlisted tools. Authored as a workflow default merged with a per-state override; unset ⇒ `ask`.

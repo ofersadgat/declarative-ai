@@ -21,8 +21,15 @@ export interface AgentToolRequest {
   input: FunctionInputs;
 }
 
-/** The decision our approver returns for an agent tool-use (mapped to the SDK's allow/deny result). */
-export type AgentPermissionDecision = { allow: true } | { allow: false; reason?: string };
+/**
+ * The decision our approver returns for an agent tool-use (mapped to the SDK's allow/deny result).
+ *
+ * `updatedInput` is the wire's "run it with THESE arguments" channel. Ordinary approvals never set it
+ * (the transports echo the original input, which the CLI's parse requires); it exists for the one tool
+ * family whose ANSWER travels as input — `AskUserQuestion`, where the human's chosen options ride back
+ * on the allow (`{...input, answers}`), which is the documented contract for answering it.
+ */
+export type AgentPermissionDecision = { allow: true; updatedInput?: FunctionInputs } | { allow: false; reason?: string };
 
 /** The callback the agent calls before each gated tool-use — the adapter routes it to `ctx.approve`. */
 export type AgentPermissionCallback = (req: AgentToolRequest, opts: { signal: AbortSignal }) => Promise<AgentPermissionDecision>;
