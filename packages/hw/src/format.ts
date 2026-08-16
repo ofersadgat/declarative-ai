@@ -23,7 +23,7 @@ import type {
   Ref,
   RefKind,
 } from "@declarative-ai/exec";
-import type { PermissionMode, PermissionProfile } from "@declarative-ai/permissions";
+import type { PermissionMode, PermissionProfile, ScopeDecl } from "@declarative-ai/permissions";
 import { BUILTINS } from "./builtins.js";
 import { OPERATION_ENGINE_OUTPUT, OPERATION_METADATA_FIELDS } from "./operationNode.js";
 
@@ -263,6 +263,16 @@ export interface ExecEnvironmentDecl {
     profile?: PermissionProfile;
     default?: PermissionMode;
     tools?: Record<string, PermissionMode>;
+    /** What a tool the host does not register resolves to — see `ProfileTable.other`. */
+    other?: PermissionMode;
+    /**
+     * WHERE each tool may act, as authored on this operation.
+     *
+     * Carried, never resolved: the engine hands it to the host's `ExecPolicy.scopeOf`, which owns the
+     * glob grammar and decides what an unmatched path means. A state's table NARROWS whatever floor
+     * the host supplies — it cannot widen past it, for the same reason it cannot widen past a profile.
+     */
+    scopes?: ScopeDecl[];
   };
 }
 

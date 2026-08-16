@@ -69,6 +69,26 @@ export interface ProfileTable {
   other?: PermissionMode;
 }
 
+/**
+ * One authored scope: a PLACE, and what may happen there.
+ *
+ * The DATA shape lives here so a workflow can author it and the loader can carry it; the RESOLUTION
+ * — glob matching, specificity, inheritance, what an unmatched path means — deliberately does not.
+ * That belongs to the host, which is why the decision path takes a callback
+ * ({@link ToolDecisionOptions.scopeOf}) rather than this array: a glob grammar in this package would
+ * be a second place for "is this path inside the sandbox" to be answered differently.
+ */
+export interface ScopeDecl {
+  /** A path glob. Absolute, or relative to whatever the host resolves against. */
+  path?: string;
+  /** A URL glob, for tools that reach the network. */
+  url?: string;
+  /** Modes for the tools this scope names. */
+  tools?: Record<string, PermissionMode>;
+  /** What a tool this scope does not name resolves to here. */
+  default?: PermissionMode;
+}
+
 /** Either form. A predicate is the older, narrower statement; a table is the complete one. */
 export type ProfileRule = ProfilePredicate | ProfileTable;
 
@@ -222,7 +242,7 @@ export interface ExecPolicy {
    * would not have been allowed to open — a refusal at the call is not enough when the call's own
    * answer is the listing.
    */
-  scopeOf?: (tool: { name: string; readOnly?: boolean }, input: FunctionInputs) => PermissionMode | undefined;
+  scopeOf?: ScopeNarrowing;
   /** DELEGATED adapters only: the black-box agent's OWN tools this operation may use, by native name
    *  (a `Tool | NativeToolRef` rename binding's `native` side) — an allow-list, not an impl set. */
   nativeTools?: string[];
@@ -326,6 +346,8 @@ export interface ToolDecisionOptions {
   profiles?: Record<string, ProfileRule>;
   /** True when the HOST registered this tool — what tells `default` from `other` in a profile table. */
   registered?: boolean;
+  /** The operation's own permission block, passed through to {@link ToolDecisionOptions.scopeOf}. */
+  authored?: { scopes?: ScopeDecl[] } | undefined;
   /**
    * What a caller's own narrowing says about THIS call, given its input.
    *
@@ -339,8 +361,22 @@ export interface ToolDecisionOptions {
    * call the profile would have allowed and a caller's `allow` never rescues one the profile refused.
    * `undefined` ⇒ the caller has nothing to say about this call.
    */
-  scopeOf?: (tool: { name: string; readOnly?: boolean }, input: FunctionInputs) => PermissionMode | undefined;
+  scopeOf?: ScopeNarrowing;
 }
+
+/**
+ * A host's per-call narrowing.
+ *
+ * `authored` is the operation's own permission block, so a host that layers a project-wide FLOOR
+ * under a per-state table can see both at the moment of decision — the engine builds a gate per
+ * state and passes that state's block through. Without it a narrowing could only ever be global,
+ * and "this state may write under app/" would have nowhere to live.
+ */
+export type ScopeNarrowing = (
+  tool: { name: string; readOnly?: boolean },
+  input: FunctionInputs,
+  authored?: { scopes?: ScopeDecl[] } | undefined,
+) => PermissionMode | undefined;
 
 /** How restrictive each mode is — `deny` ▸ `ask` ▸ `smart` ▸ `allow`. */
 const MODE_RANK: Record<PermissionMode, number> = { allow: 0, smart: 1, ask: 2, deny: 3 };
@@ -408,7 +444,7 @@ export async function decideToolCall(
 
   // The caller's own narrowing — a path scope, a URL allow-list, whatever it models. Composed as a
   // narrowing rather than an override: it may refuse what the profile allowed, never the reverse.
-  const narrowed = opts.scopeOf?.(tool, input);
+  const narrowed = opts.scopeOf?.(tool, input, opts.authored);
   let mode = ledger.resolve(tool.name, sessionId, authoredMode);
   if (table !== undefined) mode = strictestMode(mode, table);
   if (narrowed !== undefined) mode = strictestMode(mode, narrowed);
@@ -533,7 +569,13 @@ export interface ToolGateOptions {
    * gives: with one field, "I have not decided about this tool" and "I have never heard of it" had
    * one answer, and only one of them deserves `deny`.
    */
-  authored?: { default?: PermissionMode; other?: PermissionMode; tools?: Record<string, PermissionMode> };
+  authored?: {
+    default?: PermissionMode;
+    other?: PermissionMode;
+    tools?: Record<string, PermissionMode>;
+    /** WHERE each tool may act — carried to {@link ToolDecisionOptions.scopeOf}, never resolved here. */
+    scopes?: ScopeDecl[];
+  };
   smart?: Record<string, SmartApprover>;
   profiles?: Record<string, ProfileRule>;
   /** Passed to every decision — see {@link ToolDecisionOptions.scopeOf}. */
@@ -578,6 +620,7 @@ export function createToolGate(opts: ToolGateOptions): ToolGate {
     ...(own(opts.smart, name) !== undefined ? { smart: own(opts.smart, name) } : {}),
     ...(opts.profiles !== undefined ? { profiles: opts.profiles } : {}),
     registered: own(opts.tools, name) !== undefined,
+    ...(opts.authored !== undefined ? { authored: opts.authored } : {}),
     ...(opts.scopeOf !== undefined ? { scopeOf: opts.scopeOf } : {}),
   });
   const preGated = new Set(opts.preGated ?? []);

@@ -1766,6 +1766,9 @@ export class WorkflowEngine {
         // The SAME narrowing the gate applies — a wrapped tool and a delegated one are two routes to
         // one decision, and binding only one would be a sandbox with a door in it.
         scopeOf,
+        // This state's own authored block, so a host layering a floor under a per-state table can
+        // see both at the moment of decision.
+        ...(env.permissions !== undefined ? { authored: env.permissions } : {}),
       });
     }
     if (this.permissions.resolveProfile(sessionId) === "plan") {
