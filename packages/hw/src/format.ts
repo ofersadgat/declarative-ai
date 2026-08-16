@@ -470,6 +470,37 @@ export interface ChildDecl {
    * operation. That machinery predates this field; per-child layers just reach it.
    */
   environment?: EnvironmentDecl;
+  /**
+   * Transitions considered ONLY when this child finishes, and BEFORE the state's own (SPEC §3.3).
+   *
+   * The DEFAULT place for a transition. The state's list ({@link StateDef.transitions}) is for the
+   * rules that hold whichever child just finished, or none did.
+   *
+   * The state-level list answers "what does this state do next", which is the right question when the
+   * answer depends on the state's whole situation and the wrong one when it depends on a single
+   * child's outcome. Written there, "if the review failed, escalate" has to say WHICH review failed
+   * and then stay true only while that is the freshest fact — so a list that grew a per-child branch
+   * for each of five children was five guards, each of which every other child's completion also had
+   * to be evaluated against.
+   *
+   * Here the "when" is structural: the child's completion is what makes the list eligible, and only
+   * for the round that completion triggered. A child that finished two rounds ago no longer diverts
+   * anything, so an unconditional `to` means "after this child, go here" rather than "from now on,
+   * always go here".
+   *
+   * ONCE PER COMPLETION, in the first round that STARTS after the child finished — see the snapshot
+   * the evaluation loop takes. Not once per child: a looped child is answered on every pass.
+   *
+   * Guards resolve in the ENCLOSING state's scope, exactly as the state-level ones do — this child is
+   * `.children.<key>` from here, and it is spelled out. A `self` alias would be one namespace whose
+   * meaning depended on where it was written, and the same guard would then mean two things depending
+   * on which list it had been moved into.
+   *
+   * `to` may name any sibling child or a `terminate.*` outcome, and entering a sibling resets the
+   * sequence exactly as a state-level transition does. Taking one HANDLES this child's failure: an
+   * error or timeout routed here is dealt with, not merely reacted to.
+   */
+  transitions?: TransitionDecl[];
 }
 
 export interface TransitionDecl {
@@ -527,6 +558,15 @@ export interface StateDef {
   children?: Record<string, ChildDecl>;
   /** Order the engine's cursor advances through `children`. Absent ⇒ declaration order (§6). */
   sequence?: string[];
+  /**
+   * Transitions that apply to the state AS A WHOLE — a decision made from its own operation's output,
+   * an entry into a child, an iteration limit.
+   *
+   * A rule about one child goes on that child instead ({@link ChildDecl.transitions}), which is the
+   * default. Written here it has to name the child in its guard, hold its position against every
+   * other rule in the list, and be re-evaluated after every unrelated child completion; written on
+   * the mount, the round it is eligible in is already the one it is about.
+   */
   transitions?: TransitionDecl[];
   limits?: LimitsDecl;
 }
@@ -615,6 +655,9 @@ export interface LoadedChild {
   /** The per-mount defaults this child was declared with, carried through so the closure walk can
    *  fold them into the chain (and so a lint surface can see why a state loaded as two variants). */
   environment?: EnvironmentDecl;
+  /** This mount's own transitions, guards lowered — considered when this child finishes, ahead of the
+   *  state's list (`ChildDecl.transitions`). */
+  transitions?: LoadedTransition[];
 }
 
 /** A loaded workflow: the root state ID plus every reachable state, keyed by state ID. */

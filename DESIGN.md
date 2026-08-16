@@ -139,6 +139,14 @@ one *at a position*. That single choice makes "continue from here" and "branch f
 primitive: an id commits to content, so holding one is holding a fact rather than a name that may since
 have moved. The ref is **opaque** — no executor parses it, and only the store reads its structure.
 
+A ref may also be **unpositioned** — a conversation id on its own — and that is how "add to the end"
+is said: it resolves at the head whenever it is used, so a chain of states appending in turn stays one
+thread. Both spellings are refs and neither is parseable from outside, so a caller obtains the
+unpositioned form from `ResolvedSession.at.id` and builds a positioned one with `SessionStore.refAt`,
+never by splitting a string. A workflow publishes both after a call — the position it ended at, and
+`.end` beside it (SPEC §6.1) — because which one a later state wires in *is* the choice between
+continuing a thread and branching off it.
+
 Resolution is a **reservation**, not an observation. `withSessionPosition` claims the next position before
 the call goes out, so two writers racing the same conversation collide instead of both reading one head;
 the loser FORKS. That is the whole of the repair-versus-retry rule, derived rather than configured: a

@@ -346,6 +346,43 @@ describe("a call inside a guard", () => {
     expect(bundle.states.plan!.transitions![0]!.whenRef).toBeUndefined();
     expect(validateBundle(bundle).errors.length).toBeGreaterThan(0);
   });
+
+  /**
+   * On a CHILD MOUNT, the call runs in that child's round and no other (SPEC §3.3).
+   *
+   * The engine runs a guard's calls before the (synchronous) evaluation reads them, so "which guards
+   * are evaluated" decides "which calls are paid for". Collecting every child's guards each round
+   * would dispatch this one in the round the state's own operation completed — against a child that
+   * had not run, whose output is `undefined` — and then again, for real, once `a` finished. Two calls
+   * for one guard, the first of them meaningless.
+   */
+  it("runs a call in a child mount's guard only in the round that child finished", async () => {
+    const leaf = {
+      outputs: { done: { schema: { type: "string" }, binding: { text: "ok" } } },
+      operation: { kind: "function", function: "noop" },
+    };
+    const parent = {
+      outputs: { done: { schema: { type: "string" }, binding: ".children.b.outputs.done" } },
+      operation: { kind: "function", function: "noop" },
+      children: {
+        // The argument is `a`'s OWN output, so a premature evaluation is visible as a second call
+        // under a different argument rather than being hidden by the content-addressed memo.
+        a: { state: "./a", transitions: [{ to: "b", when: "shout(.children.a.outputs.done) === 'OK'" }] },
+        b: { state: "./b" },
+      },
+      sequence: ["a", "b"],
+    };
+    const calls = { n: 0 };
+    const bundle = loadBundle({ "plan.json": parent, "plan/a.json": leaf, "plan/b.json": leaf }, "plan", {
+      defaultRoot: [WF, FUNCTIONS],
+      roots: { JAIRA: ROOT, PROJECT: "/p" },
+      vfs: vfsOf(files),
+    });
+    const engine = new WorkflowEngine({ bundle, registry: registryWithShout(calls), validator: new SchemaValidator() });
+    const result = await engine.run({ inputs: {} });
+    expect(result.outcome).toBe("success");
+    expect(calls.n).toBe(1);
+  });
 });
 
 /**

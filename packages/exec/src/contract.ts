@@ -432,6 +432,18 @@ export interface ExecServices {
  * executor — which is what lets the spelling change without touching a consumer. It is also the ONLY
  * enumerable property, so `JSON.stringify`, an events journal and any serialized inputs/outputs see
  * `{ id }` and nothing else.
+ *
+ * A ref may or may not carry a POSITION, and the difference is the difference between "continue from
+ * exactly here" and "continue from wherever this conversation has got to":
+ *
+ *  - **positioned** — what {@link SessionStore.resolve} returns and what {@link SessionStore.refAt}
+ *    builds. Continuing one appends at that position if it is still free and forks if it is not, so a
+ *    turn that arrived in between can never be silently skipped;
+ *  - **unpositioned** — a conversation id on its own, which every store must accept as a ref naming
+ *    that conversation AT ITS HEAD, resolved at the moment it is used.
+ *
+ * Both are ordinary refs and neither is parseable from outside: a caller obtains the unpositioned form
+ * as `ResolvedSession.at.id`, never by splitting a string.
  */
 export interface SessionRef {
   readonly id: string;
@@ -527,6 +539,17 @@ export interface SessionStore<Msg = JsonValue> {
    * at 15 instead of 14 would continue a conversation containing a turn this call never saw.
    */
   fork(ref: string, seed?: string): string | Promise<string>;
+  /**
+   * The ref naming one position in one conversation — the store's own spelling, built rather than
+   * concatenated.
+   *
+   * A caller that knows a position knows it as {@link ResolvedSession.at}, which is a conversation id
+   * and a number, and turning that pair back into a ref is the one thing it cannot do for itself: the
+   * ref's spelling belongs to the store. Without this, "the position AFTER the call I just made" — the
+   * value a workflow publishes so a later state can continue from it — is only reachable by string
+   * surgery on an opaque id, which is exactly what opacity is for.
+   */
+  refAt(at: { id: string; seq: number }): string;
   /** The conversation's contents at a position. */
   messages(ref: string): Msg[] | Promise<Msg[]>;
   /**
@@ -621,6 +644,10 @@ export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
     const [id, seq] = split(ref);
     const forked = this.branchFrom(id, seq ?? this.head(id), seed);
     return join(forked, this.head(forked));
+  }
+
+  refAt(at: { id: string; seq: number }): string {
+    return join(at.id, at.seq);
   }
 
   messages(ref: string): Msg[] {

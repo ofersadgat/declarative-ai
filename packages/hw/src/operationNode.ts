@@ -112,13 +112,29 @@ const STRING: JsonValue = { type: "string" };
 const NUMBER: JsonValue = { type: "number" };
 
 /**
- * A session ref as a schema: one enumerable `id`, matching {@link SessionRef}.
+ * A session ref as a schema: one enumerable `id`, matching `SessionRef`.
  *
  * `additionalProperties: false` is load-bearing. It is what makes `operation.output.session.position`
  * — a plausible thing to reach for, given how the notation reads — a lint error rather than a
  * runtime `undefined`. A ref is opaque, and the schema says so.
  */
-const SESSION_REF: JsonValue = { type: "object", properties: { id: STRING }, required: ["id"], additionalProperties: false };
+const SESSION_POSITION: JsonValue = { type: "object", properties: { id: STRING }, required: ["id"], additionalProperties: false };
+
+/**
+ * What a prompt call publishes as its `session`: the position it ended at, plus `end` — the same
+ * conversation with no position, which continues from wherever it has got to (`PublishedSession`).
+ *
+ * The one property the opaque ref gains, and it is declared rather than derived so the two spellings
+ * differ in the type as well as at run time: `.session` is a lint-checked position, `.session.end` a
+ * lint-checked conversation, and `.session.end.end` — like `.session.position` — is an error, because
+ * `end` is already the unpositioned form and there is nothing further to ask for.
+ */
+const SESSION_REF: JsonValue = {
+  type: "object",
+  properties: { id: STRING, end: SESSION_POSITION },
+  required: ["id"],
+  additionalProperties: false,
+};
 
 /**
  * The schema for `operation.*` on a state, discriminated by what the state's operation IS.

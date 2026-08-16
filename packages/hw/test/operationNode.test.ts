@@ -43,15 +43,20 @@ describe("the schema is a union over the operation's kind", () => {
     expect(schema.additionalProperties).toBe(false);
   });
 
-  it("treats a session ref as opaque — no reachable structure beyond `id`", () => {
+  it("treats a session ref as opaque — `id` and `end`, and no other structure", () => {
     // `operation.output.session.position` is a plausible thing to reach for given how the notation
-    // reads. It must not resolve: only the session store knows a ref has structure.
-    const schema = operationNodeSchema("prompt") as {
-      properties: { output: { properties: { session: { additionalProperties: boolean; properties: Record<string, unknown> } } } };
-    };
+    // reads. It must not resolve: only the session store knows a ref has structure. `end` is the one
+    // exception, and it is DECLARED — the same conversation with no position, which is the difference
+    // between continuing a thread and branching off it.
+    type Ref = { additionalProperties: boolean; properties: Record<string, unknown> };
+    const schema = operationNodeSchema("prompt") as { properties: { output: { properties: { session: Ref } } } };
     const session = schema.properties.output.properties.session;
-    expect(Object.keys(session.properties)).toEqual(["id"]);
+    expect(Object.keys(session.properties)).toEqual(["id", "end"]);
     expect(session.additionalProperties).toBe(false);
+    // ...and `end` is already unpositioned, so there is nothing further to ask it for.
+    const end = session.properties["end"] as Ref;
+    expect(Object.keys(end.properties)).toEqual(["id"]);
+    expect(end.additionalProperties).toBe(false);
   });
 });
 
@@ -74,6 +79,24 @@ describe("the load-time lint", () => {
     files["root"]!.children!["review"]!.inputs = { s: { expr: ".children.plan.operation.output.session" } };
     files["consumer"] = { ...promptLeaf(), inputs: { s: { schema: {} } } };
     expect(errorsFor(files, "root")).toEqual([]);
+  });
+
+  it("accepts `.session.end`, and refuses a second hop off it", () => {
+    // `.end` is the conversation with no position — the "append to the end" spelling. It is a ref
+    // like any other, so asking IT for an end is the same reach-too-far as `.session.position`.
+    const files = (expr: string): Record<string, StateDef> => ({
+      root: {
+        children: { plan: { state: "leaf" }, review: { state: "consumer", inputs: { s: { expr } } } },
+        sequence: ["plan", "review"],
+        outputs: { r: { binding: ".children.review.outputs.answer" } },
+      },
+      leaf: promptLeaf(),
+      consumer: { ...promptLeaf(), inputs: { s: { schema: {} } } },
+    });
+    expect(errorsFor(files(".children.plan.operation.output.session.end"), "root")).toEqual([]);
+    for (const overreach of [".children.plan.operation.output.session.end.end", ".children.plan.operation.output.session.position"]) {
+      expect(errorsFor(files(overreach), "root").some((e) => /resolves to no declared value/.test(e))).toBe(true);
+    }
   });
 
   it("REFUSES it when the child is a function op", () => {

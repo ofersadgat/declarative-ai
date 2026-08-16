@@ -49,6 +49,37 @@ export interface SessionRef {
 }
 
 /**
+ * What `operation.output.session` publishes: where the call ENDED, and the conversation it ended in.
+ *
+ * Both are ordinary {@link SessionRef}s, and the difference between them is the whole of what an
+ * author is choosing between when they wire one into a later state's `session`:
+ *
+ *  - the ref ITSELF is POSITIONED — the point immediately after this call's turn. Continuing from it
+ *    appends when nothing else has spoken since, and BRANCHES when something has, so a later state
+ *    picking up a conversation can never silently inherit turns it was never shown;
+ *  - `end` is the same conversation with NO position, so it continues from wherever that conversation
+ *    has got to by the time it is used. This is the "add to the end" case: three states appending in
+ *    turn are one thread, not a fork per state.
+ *
+ * `end` is a real property, materialized when the node is published, rather than something the
+ * consuming site interprets. That keeps it a plain ref everywhere downstream — it survives a spread,
+ * a `JSON.parse(JSON.stringify(…))` and the events journal, and `resolveSession` needs no case for it.
+ * A marker the store interpreted later would have to survive all three to stay correct, and losing it
+ * would silently turn "continue" back into "branch".
+ *
+ * There is no `end.end`: `end` is already unpositioned, so {@link operationNodeSchema} types it as a
+ * bare ref and a second hop is a lint error rather than a value that happens to be missing.
+ */
+export interface PublishedSession extends SessionRef {
+  readonly end: SessionRef;
+}
+
+/** Publish a finished call's position: the point after it, and its conversation's moving end. */
+export function publishedSession(position: string, conversation: string): PublishedSession {
+  return { id: position, end: { id: conversation } };
+}
+
+/**
  * What an author (or an expression) may put in the `session` slot.
  *
  * `null` is the ONLY explicit "start fresh" marker, and it is deliberately not the

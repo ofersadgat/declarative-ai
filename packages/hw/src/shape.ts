@@ -90,6 +90,9 @@ const operationFields: Record<string, Shape> = {
 
 const operation: Shape = { t: "object", fields: operationFields };
 
+/** A transition list, in the one shape both the state level and a child mount write it. */
+const transitions: Shape = { t: "array", of: { t: "object", fields: { to: scalar, when: scalar } } };
+
 const child: Shape = {
   t: "object",
   fields: {
@@ -99,6 +102,10 @@ const child: Shape = {
     // Per-mount defaults, written in the same shape as any other environment — so a `$ref` inside one
     // transcludes exactly as it does at state level.
     environment: operation,
+    // Considered when this child finishes, before the state's own. `to` is a plain scalar here for
+    // the same reason it is there: a transition target is a CHILD KEY, not a state path, so it is
+    // never resolved as a reference.
+    transitions,
   },
 };
 
@@ -115,7 +122,7 @@ export const STATE_SHAPE: Shape = {
     environment: operation,
     children: { t: "object", rest: child },
     sequence: { t: "array", of: scalar },
-    transitions: { t: "array", of: { t: "object", fields: { to: scalar, when: scalar } } },
+    transitions,
     limits: { t: "object", fields: { max_iterations: scalar, timeout: scalar } },
   },
 };

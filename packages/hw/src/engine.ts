@@ -84,13 +84,23 @@ import type {
   ExecEnvironmentDecl,
   LoadedChild,
   LoadedState,
+  LoadedTransition,
   SlotMeta,
   TerminationOutcome,
   WorkflowBundle,
 } from "./format.js";
 import { bindElement, bindInputs, embeddedOpsOf, higherOrderEdgesOf, higherOrderOf, isResolvedValue, isResolveError, resolveEmbedded, resolveInputs, resolveRef, type ResolutionScope, type Resolved } from "./resolve.js";
 import { isByteStream, materialize, MaterializeError } from "./materialize.js";
-import { RUN_RESOURCE_KEY, isSessionExpr, resolveSession, sessionFromExpr, type SessionBinding, type SessionDecl } from "./session.js";
+import {
+  RUN_RESOURCE_KEY,
+  isSessionExpr,
+  publishedSession,
+  resolveSession,
+  sessionFromExpr,
+  type PublishedSession,
+  type SessionBinding,
+  type SessionDecl,
+} from "./session.js";
 import type { OperationNode } from "./operationNode.js";
 import { isFannedOut } from "./fanout.js";
 import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, type Persistence } from "./ports.js";
@@ -280,6 +290,16 @@ interface Instance {
   heldFor?: string;
   /** The child most recently ENTERED — what `run.cursor` reports to a guard. */
   entered?: string;
+  /**
+   * Children that finished since the last evaluation round — whose own `transitions` are eligible
+   * THIS round and no other (`ChildDecl.transitions`).
+   *
+   * A list rather than a flag on the record, because eligibility is about the round and not about the
+   * child: a record stays `done` forever, so reading the status instead would make an unconditional
+   * child transition fire again on every later round, and a state with two such children could never
+   * reach its second one.
+   */
+  justFinished: string[];
   /** Child keys whose error/timeout termination has not yet been handled by a transition. */
   unhandledFailures: Set<string>;
   abort: AbortController;
@@ -342,7 +362,7 @@ function operationNodeOf(
   outcome: TerminationOutcome,
   metrics: WorkflowMetrics | undefined,
   model: string | undefined,
-  session?: SessionBinding,
+  session?: PublishedSession,
   /** What the call RETURNED — see {@link operationOutputOf}. */
   returned?: ResolvedValue,
 ): OperationNode {
@@ -371,8 +391,8 @@ function operationNodeOf(
  *
  * Written UNDER a returned value of the same name, for the same reason.
  */
-function operationOutputOf(value: ResolvedValue | undefined, session?: SessionBinding): JsonValue | undefined {
-  const position = session === undefined ? undefined : { id: session.id };
+function operationOutputOf(value: ResolvedValue | undefined, session?: PublishedSession): JsonValue | undefined {
+  const position = session === undefined ? undefined : ({ id: session.id, end: { id: session.end.id } } as JsonValue);
   if (value === undefined) return position === undefined ? undefined : ({ session: position } as JsonValue);
   if (position === undefined) return value as JsonValue;
   // Not a container — a string, a number, bytes, a live stream. Nothing to hang a property on.
@@ -513,6 +533,7 @@ export class WorkflowEngine {
       opRun: false,
       children: new Map(),
       cursor: 0,
+      justFinished: [],
       unhandledFailures: new Set(),
       abort,
       timedOut: false,
@@ -574,11 +595,23 @@ export class WorkflowEngine {
       if (instance.timedOut) return this.finish(instance, "timeout");
       if (instance.abort.signal.aborted) return this.finish(instance, "canceled");
 
+      // WHICH children this round answers for, fixed BEFORE anything is awaited.
+      //
+      // A round runs its guards' calls and only then evaluates, so it spans an await — and a child
+      // can finish inside that gap. Reading the set again at evaluation time would sweep that child
+      // in without its guards ever having been prepared: its calls would be missing, its guard would
+      // read PENDING, and the round would then mark it answered. Its completion would be silently
+      // lost. So the round takes a SNAPSHOT, answers exactly that, and leaves a late arrival to the
+      // next round, which is the guarantee: every completion is evaluated in the first round that
+      // starts after it.
+      let eligible: readonly string[] = [];
+
       // A guard may CALL an operation, and evaluation is synchronous — so its calls run here, exactly
       // as an operation's input calls run before `resolveInputs`. The memo means a guard re-evaluated
       // over many rounds pays for its call once.
       if (evaluationDue) {
-        const guardFailure = await this.runEmbeddedOps(instance, WorkflowEngine.guardParamsOf(def));
+        eligible = this.finishedInRunOrder(instance);
+        const guardFailure = await this.runEmbeddedOps(instance, this.guardParamsOf(instance, eligible));
         if (guardFailure !== undefined) return this.finish(instance, "error", guardFailure);
       }
 
@@ -588,7 +621,7 @@ export class WorkflowEngine {
         // Whatever the cursor was waiting on has resolved by the time an evaluation round runs; if
         // no transition handles it, the cursor is free to walk on from where it stopped.
         instance.heldFor = undefined;
-        const step = this.takeTransition(instance);
+        const step = this.takeTransition(instance, eligible);
         if (step === "terminated-success") return await this.finishSuccess(instance);
         if (step === "terminated-error") return this.finish(instance, "error", errorOf(instance, "terminate.error"));
         if (step === "terminated-canceled") return this.finish(instance, "canceled");
@@ -662,7 +695,14 @@ export class WorkflowEngine {
         evaluationDue = true;
         continue;
       }
-      const final = this.takeTransition(instance);
+      // A child that finished while an earlier round was in flight is still owed one. It gets a REAL
+      // round — guard calls and all — rather than the bare check below, which resolves guards without
+      // running anything and would park on a call this child's rule has not made yet.
+      if (instance.justFinished.length > 0) {
+        evaluationDue = true;
+        continue;
+      }
+      const final = this.takeTransition(instance, this.finishedInRunOrder(instance));
       if (final === "terminated-success") return await this.finishSuccess(instance);
       if (final === "terminated-error") return this.finish(instance, "error", errorOf(instance, "terminate.error"));
       if (final === "terminated-canceled") return this.finish(instance, "canceled");
@@ -692,9 +732,22 @@ export class WorkflowEngine {
   /** Evaluate transitions once; take the first match (SPEC §3.3 step 3–4). */
   private takeTransition(
     instance: Instance,
+    /** The children this round answers for — snapshotted before the round awaited anything. */
+    eligible: readonly string[],
   ): "none" | "entered" | "parked" | "terminated-success" | "terminated-error" | "terminated-canceled" | "terminated-timeout" {
-    const taken = this.firstMatchingTransition(instance);
-    if (!taken) return "none";
+    const taken = this.firstMatchingTransition(instance, eligible);
+    // A child's list is eligible for the round its completion triggered and no other, so the round
+    // consumes it — whether or not anything matched. Only the SNAPSHOT is consumed: a child that
+    // finished while this round was awaiting its guard calls has not been answered by it, and wiping
+    // the whole list would lose that completion entirely.
+    const consumeEligibility = (): void => {
+      const answered = new Set(eligible);
+      instance.justFinished = instance.justFinished.filter((key) => !answered.has(key));
+    };
+    if (!taken) {
+      consumeEligibility();
+      return "none";
+    }
     instance.iteration++;
     this.emit({
       type: "transition.taken",
@@ -705,34 +758,69 @@ export class WorkflowEngine {
     });
     instance.unhandledFailures.clear(); // a taken transition handles preceding child failures
     if (taken.to.startsWith("terminate.")) {
+      consumeEligibility();
       return `terminated-${taken.to.slice("terminate.".length) as TerminationOutcome}` as const;
     }
     const entered = this.enterChild(instance, taken.to);
     if (entered === "parked") {
       instance.iteration--; // the entry did not actually happen
+      // A park is not an answer, so the eligibility survives — but only while something is still
+      // running that could resolve what the target waits on. With nothing running it can never
+      // resolve, and holding the eligibility open would spin the loop re-parking forever instead of
+      // reporting the dataflow deadlock.
+      if (!this.hasRunningChildren(instance)) consumeEligibility();
       return "parked";
     }
+    consumeEligibility();
     return "entered";
   }
 
-  private firstMatchingTransition(instance: Instance): { to: string } | undefined {
-    const transitions = instance.def.transitions ?? [];
-    if (transitions.length === 0) return undefined;
+  /**
+   * The first transition that fires: each just-finished child's own list, then the state's (§3.3).
+   *
+   * Child lists come FIRST because they are the more specific statement — "when THIS child ends, go
+   * there" against "when anything happens, consider this" — and a specific rule that a general one
+   * could pre-empt is a rule the author cannot rely on.
+   *
+   * Two children finishing before the same round are walked in the order the state RUNS them: the
+   * sequence, then any child the sequence omits, in declaration order. Nothing about async completion
+   * order is stable enough to branch on, so the tie is broken by something an author wrote down.
+   */
+  private firstMatchingTransition(instance: Instance, eligible: readonly string[]): { to: string } | undefined {
     const scope = this.scopeFor(instance);
-    for (const t of transitions) {
-      // A guard that failed to lower never fires: validation blocks the run, and reading it as
-      // unconditional would be the worst possible interpretation of a typo.
-      if (t.whenError !== undefined) continue;
-      if (t.whenRef === undefined) return { to: t.to };
-      const r = resolveRef(t.whenRef, scope);
-      if (isPending(r)) continue; // skipped this round (SPEC §6/§10.4)
-      // A lowered expression cannot yield an ERROR on data: every operator's failure case is
-      // "producer is missing X", a malformed tree the loader cannot emit, and reading a missing
-      // namespace or property yields `undefined` rather than refusing. So there is no fourth
-      // outcome to give a bespoke path to — a non-value simply does not take the transition.
-      if (isResolvedValue(r) && r.value) return { to: t.to };
+    const firstOf = (transitions: readonly LoadedTransition[] | undefined): { to: string } | undefined => {
+      for (const t of transitions ?? []) {
+        // A guard that failed to lower never fires: validation blocks the run, and reading it as
+        // unconditional would be the worst possible interpretation of a typo.
+        if (t.whenError !== undefined) continue;
+        if (t.whenRef === undefined) return { to: t.to };
+        const r = resolveRef(t.whenRef, scope);
+        if (isPending(r)) continue; // skipped this round (SPEC §6/§10.4)
+        // A lowered expression cannot yield an ERROR on data: every operator's failure case is
+        // "producer is missing X", a malformed tree the loader cannot emit, and reading a missing
+        // namespace or property yields `undefined` rather than refusing. So there is no fourth
+        // outcome to give a bespoke path to — a non-value simply does not take the transition.
+        if (isResolvedValue(r) && r.value) return { to: t.to };
+      }
+      return undefined;
+    };
+    for (const key of eligible) {
+      const taken = firstOf(instance.def.children?.[key]?.transitions);
+      if (taken) return taken;
     }
-    return undefined;
+    return firstOf(instance.def.transitions);
+  }
+
+  /** The children eligible this round, in the order the state runs them — see the caller. */
+  private finishedInRunOrder(instance: Instance): string[] {
+    if (instance.justFinished.length === 0) return [];
+    const eligible = new Set(instance.justFinished);
+    const order = [
+      ...(instance.def.sequence ?? []),
+      // An authored `sequence` may omit children; they still run (by transition) and still finish.
+      ...Object.keys(instance.def.children ?? {}).filter((k) => !(instance.def.sequence ?? []).includes(k)),
+    ];
+    return order.filter((key) => eligible.has(key));
   }
 
   /**
@@ -808,8 +896,12 @@ export class WorkflowEngine {
       // The child's operation node, so `children.<key>.operation.*` reads what its call reported —
       // including, for a prompt op, the conversation position it ended at (SPEC.md §6.1).
       record.operation = term.operation;
-      if ((term.outcome === "error" || term.outcome === "timeout") && instance.children.get(key) === record) {
-        instance.unhandledFailures.add(key);
+      // Only while this record is still the live one: a superseded child's completion is not an event
+      // its own transitions get to answer, for the same reason its failure is not one the state has to
+      // handle — the run has already moved past it.
+      if (instance.children.get(key) === record) {
+        if (!instance.justFinished.includes(key)) instance.justFinished.push(key);
+        if (term.outcome === "error" || term.outcome === "timeout") instance.unhandledFailures.add(key);
       }
       instance.notify.signal();
     };
@@ -1167,12 +1259,25 @@ export class WorkflowEngine {
       : this.runFunctionOp(instance, op, opInputs, fail);
   }
 
-  /** A state's guards as parameter-shaped bindings, so one walker serves guards and slots alike. */
-  private static guardParamsOf(def: LoadedState): Record<string, Parameter<InlineFamily>> {
+  /**
+   * The guards this round will evaluate, as parameter-shaped bindings, so one walker serves guards
+   * and slots alike.
+   *
+   * A CHILD's guards are included only when that child is eligible this round, which is the same rule
+   * that decides whether they are evaluated. A guard may embed a call, and this is what runs it — so
+   * including every child's list unconditionally would dispatch the call behind "if the review found
+   * nothing, summarize" before the review had run, and pay for an answer about data that did not exist
+   * yet.
+   */
+  private guardParamsOf(instance: Instance, eligible: readonly string[]): Record<string, Parameter<InlineFamily>> {
     const out: Record<string, Parameter<InlineFamily>> = {};
-    (def.transitions ?? []).forEach((t, i) => {
-      if (t.whenRef !== undefined) out[`when${i}`] = { kind: "json", binding: t.whenRef };
-    });
+    const collect = (transitions: readonly LoadedTransition[] | undefined, prefix: string): void => {
+      (transitions ?? []).forEach((t, i) => {
+        if (t.whenRef !== undefined) out[`${prefix}${i}`] = { kind: "json", binding: t.whenRef };
+      });
+    };
+    for (const key of eligible) collect(instance.def.children?.[key]?.transitions, `${key}.when`);
+    collect(instance.def.transitions, "when");
     return out;
   }
 
@@ -1612,11 +1717,12 @@ export class WorkflowEngine {
     // Recorded whether the call SUCCEEDED or not, and before the checks below can return: a failed
     // call is exactly when a guard most wants to read what it cost and where the conversation ended
     // up, and a node written only on the happy path would be missing then.
+    const published = this.publish(services.session, session);
     instance.operation = operationNodeOf(
       isOk(outcome) ? "success" : "error",
       outcome.metrics,
       modelOfOp(resolvedOp),
-      session,
+      published,
       isOk(outcome) ? outcome.value : undefined,
     );
     if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
@@ -1631,7 +1737,7 @@ export class WorkflowEngine {
     // stringified assistant turn here, which threw away every tool call and reasoning part in between
     // and is exactly what the append-only model replaced. All that remains is re-reading, so a
     // `{ conversation }` binding in this state's outputs sees what the call just added.
-    await this.refreshTranscript(session.id);
+    await this.refreshTranscript(published.id, session.id, published.end.id);
 
     const failure = this.acceptOpOutputs(instance, "prompt", (outcome.value ?? null) as ResolvedValue, op.output.kind);
     if (failure) return fail(failure, operationId, outcome.metrics);
@@ -1866,6 +1972,27 @@ export class WorkflowEngine {
     });
   }
 
+  /**
+   * What a finished call publishes as `operation.output.session` — see {@link PublishedSession}.
+   *
+   * Built from what the STORE resolved, never from the declaration: the declaration says which
+   * conversation to join, and only the resolution knows where that landed — including when a taken
+   * position turned the call into a fork, where the branch is the conversation a later state must
+   * continue and the declared name would send it back to the trunk.
+   *
+   * The position published is the one AFTER this call's own, because a reader wanting "carry on from
+   * here" must not land on the slot this turn occupies — continuing there would see it taken and fork,
+   * turning every hand-off into a branch. Derived from `at` rather than by asking for the head, so it
+   * is exact whether or not a session layer is composed to write the record.
+   *
+   * With no resolved session — a run whose store minted nothing for this call — both halves fall back
+   * to the declared id, which is what this published before positions existed at all.
+   */
+  private publish(resolved: ExecServices["session"], declared: SessionBinding): PublishedSession {
+    if (resolved === undefined) return publishedSession(declared.id, declared.id);
+    return publishedSession(this.sessions().refAt({ id: resolved.at.id, seq: resolved.at.seq + 1 }), resolved.at.id);
+  }
+
   /** The `ExecServices` operations run with: caller services + engine validator + the run's session
    *  store — the SAME store the built-in transcript uses, so `withSession` and the preamble share one
    *  source (states sharing a logical `sessionId` continue one conversation; an app store wins). */
@@ -2072,9 +2199,17 @@ export class WorkflowEngine {
    *
    * A run with no session layer composed records nothing, and the transcript stays empty. That is
    * correct rather than a gap: without one there is no conversation.
+   *
+   * Mirrored under every ref that NAMES this conversation as it now stands — the position the call
+   * ended at, the conversation unpositioned, and the ref the call was declared with. They are three
+   * spellings of one content the moment a call returns, and an author holding any of them (a wired
+   * `.operation.output.session`, its `.end`, or the name they wrote) reads the same transcript.
+   * Mirroring only the declared one is what made `messages(.children.plan.operation.output.session)`
+   * report the conversation as unavailable: the ref that flowed as data was never a key.
    */
-  private async refreshTranscript(sessionRef: string): Promise<void> {
-    await this.readTranscript(sessionRef);
+  private async refreshTranscript(at: string, ...aliases: string[]): Promise<void> {
+    const turns = await this.readTranscript(at);
+    for (const alias of aliases) this.transcripts.set(alias, turns);
   }
 
   private conversationPreamble(mode: ConversationMode, transcript: Turn[], artifactNames?: string[]): string {

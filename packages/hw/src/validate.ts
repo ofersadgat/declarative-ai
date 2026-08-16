@@ -34,6 +34,7 @@ import {
   RESOLVER_REFS,
   TERMINATE_TARGETS,
   type LoadedState,
+  type LoadedTransition,
   type SlotMeta,
   type WorkflowBundle,
 } from "./format.js";
@@ -223,42 +224,50 @@ function validateState(
   });
 
   // --- transitions ------------------------------------------------------------
-  (def.transitions ?? []).forEach((t, i) => {
-    if (!TERMINATES.has(t.to) && !childKeys.has(t.to)) {
-      err(`transitions[${i}].to`, `'${t.to}' is neither a declared child nor a terminate.* outcome`);
-    }
-    let ast: Expr | undefined;
-    if (t.when !== undefined) {
-      const path = `transitions[${i}].when`;
-      ast = checkExpression(t.when, path, def, childKeys, err);
-      if (ast) {
-        // A guard must INFER to boolean — strict, no truthiness coercion (§7.2): a `when` that
-        // infers to `number` is a validation error, not a falsy surprise at run time.
-        const { schema, unresolved } = inferExpression(ast, scope);
-        // Quoted with the leading dot the author had to write: `unresolved` carries the path with
-        // its self root already dropped, and a message spelling an internal path sends the reader
-        // looking for a name that appears nowhere in their file.
-        for (const ref of unresolved) err(path, `references '.${ref.join(".")}', which resolves to no declared value`);
-        if (!isBooleanSchema(schema) && !isUniversalSchema(schema)) {
-          err(path, `guard must infer to boolean, but infers to ${describeSchema(schema)} — compare explicitly`);
+  //
+  // One check for both lists: a child's transitions are the state's, narrowed to the round that child
+  // finishes in (SPEC §3.3), so every rule about a target, a guard's type and a cycle holds identically
+  // — only the path in the message says which list the author wrote it in.
+  const checkTransitions = (list: readonly LoadedTransition[] | undefined, where: string): void =>
+    (list ?? []).forEach((t, i) => {
+      if (!TERMINATES.has(t.to) && !childKeys.has(t.to)) {
+        err(`${where}[${i}].to`, `'${t.to}' is neither a declared child nor a terminate.* outcome`);
+      }
+      let ast: Expr | undefined;
+      if (t.when !== undefined) {
+        const path = `${where}[${i}].when`;
+        ast = checkExpression(t.when, path, def, childKeys, err);
+        if (ast) {
+          // A guard must INFER to boolean — strict, no truthiness coercion (§7.2): a `when` that
+          // infers to `number` is a validation error, not a falsy surprise at run time.
+          const { schema, unresolved } = inferExpression(ast, scope);
+          // Quoted with the leading dot the author had to write: `unresolved` carries the path with
+          // its self root already dropped, and a message spelling an internal path sends the reader
+          // looking for a name that appears nowhere in their file.
+          for (const ref of unresolved) err(path, `references '.${ref.join(".")}', which resolves to no declared value`);
+          if (!isBooleanSchema(schema) && !isUniversalSchema(schema)) {
+            err(path, `guard must infer to boolean, but infers to ${describeSchema(schema)} — compare explicitly`);
+          }
         }
       }
-    }
-    // Unguarded-cycle warning: a transition that re-enters a sequence member resets the cursor
-    // (SPEC §3.3) and can loop forever without an iteration guard.
-    //
-    // Only an AUTHORED sequence counts. Every state with children has a sequence now (§6), so
-    // testing the effective one would warn about every either/or state in existence — a transition
-    // into one of two mutually exclusive children is ordinary control flow, not a declared order
-    // being contradicted. Writing the sequence out is what turns "these run in this order" into a
-    // claim a transition can violate, and that is the case worth flagging.
-    if (childKeys.has(t.to) && def.sequenceAuthored === true && sequence.includes(t.to) && def.limits?.max_iterations === undefined) {
-      const guarded = ast !== undefined && referencesOf(ast).some((p) => p[0] === "run" && p[1] === "iteration");
-      if (!guarded) {
-        warn(`transitions[${i}]`, `transition to sequence member '${t.to}' can cycle; add limits.max_iterations or a run.iteration guard`);
+      // Unguarded-cycle warning: a transition that re-enters a sequence member resets the cursor
+      // (SPEC §3.3) and can loop forever without an iteration guard.
+      //
+      // Only an AUTHORED sequence counts. Every state with children has a sequence now (§6), so
+      // testing the effective one would warn about every either/or state in existence — a transition
+      // into one of two mutually exclusive children is ordinary control flow, not a declared order
+      // being contradicted. Writing the sequence out is what turns "these run in this order" into a
+      // claim a transition can violate, and that is the case worth flagging.
+      if (childKeys.has(t.to) && def.sequenceAuthored === true && sequence.includes(t.to) && def.limits?.max_iterations === undefined) {
+        const guarded = ast !== undefined && referencesOf(ast).some((p) => p[0] === "run" && p[1] === "iteration");
+        if (!guarded) {
+          warn(`${where}[${i}]`, `transition to sequence member '${t.to}' can cycle; add limits.max_iterations or a run.iteration guard`);
+        }
       }
-    }
-  });
+    });
+
+  checkTransitions(def.transitions, "transitions");
+  for (const [key, child] of Object.entries(children)) checkTransitions(child.transitions, `children.${key}.transitions`);
 
   // --- declared slots ---------------------------------------------------------
   for (const [section, slots] of [
@@ -584,6 +593,9 @@ function* bindingsOf(def: LoadedState): Iterable<[string, Ref<InlineFamily>]> {
   for (const [name, slot] of Object.entries(def.inputs ?? {})) if (slot.binding) yield [`inputs.${name}`, slot.binding];
   for (const [key, child] of Object.entries(def.children ?? {})) {
     for (const [name, wire] of Object.entries(child.inputs ?? {})) yield [`children.${key}.inputs.${name}`, wire];
+    for (const [i, t] of (child.transitions ?? []).entries()) {
+      if (t.whenRef !== undefined) yield [`children.${key}.transitions[${i}].when`, t.whenRef];
+    }
   }
   for (const [i, t] of (def.transitions ?? []).entries()) {
     if (t.whenRef !== undefined) yield [`transitions[${i}].when`, t.whenRef];
@@ -833,25 +845,38 @@ function reachabilityOf(def: LoadedState): Reachability {
 
   // The earliest point each transition could be taken, as a sequence index: -1 = "as soon as the
   // operation completes", n = "not before member n has". A guard naming no child is unblocked.
+  //
+  // A CHILD's transition is blocked until that child finishes whatever its guard reads — that is what
+  // makes it a child transition — so its mount is a floor on when it can pre-empt anything. An
+  // unguarded one written on the first sequence member still pre-empts every member after it, which is
+  // exactly the diversion this analysis exists to notice.
+  const lists: Array<[readonly LoadedTransition[] | undefined, number]> = [
+    [def.transitions, -1],
+    ...Object.entries(def.children ?? {}).map(
+      ([key, child]) => [child.transitions, indexOf.get(key) ?? -1] as [readonly LoadedTransition[] | undefined, number],
+    ),
+  ];
   let earliest = Number.POSITIVE_INFINITY;
-  for (const t of def.transitions ?? []) {
-    let blockedUntil = -1;
-    if (t.when !== undefined) {
-      let ast: Expr | undefined;
-      try {
-        ast = parseExpression(t.when);
-      } catch {
-        ast = undefined; // a guard that does not parse is reported elsewhere; assume the worst
-      }
-      if (ast) {
-        for (const path of referencesOf(ast)) {
-          if (path[0] !== "children" || path[1] === undefined) continue;
-          const at = indexOf.get(path[1]);
-          if (at !== undefined) blockedUntil = Math.max(blockedUntil, at);
+  for (const [list, floor] of lists) {
+    for (const t of list ?? []) {
+      let blockedUntil = floor;
+      if (t.when !== undefined) {
+        let ast: Expr | undefined;
+        try {
+          ast = parseExpression(t.when);
+        } catch {
+          ast = undefined; // a guard that does not parse is reported elsewhere; assume the worst
+        }
+        if (ast) {
+          for (const path of referencesOf(ast)) {
+            if (path[0] !== "children" || path[1] === undefined) continue;
+            const at = indexOf.get(path[1]);
+            if (at !== undefined) blockedUntil = Math.max(blockedUntil, at);
+          }
         }
       }
+      earliest = Math.min(earliest, blockedUntil);
     }
-    earliest = Math.min(earliest, blockedUntil);
   }
 
   const always = new Set<string>();

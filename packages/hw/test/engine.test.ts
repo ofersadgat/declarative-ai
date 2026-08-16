@@ -107,7 +107,11 @@ function makeEngine(files: Record<string, StateDef>, rootId: string, script: Scr
   const engine = new WorkflowEngine({
     bundle: loadBundle(files, rootId),
     registry,
-    prompt: withSessionPosition(withRecord({ records: sessions as never }, (opts.prompt ?? fake) as never)) as never,
+    // WITH the store, as a production host composes it (`withSession({ sessions })` in promptop):
+    // that is what lets this layer answer a taken position by forking. Composed without it, a call
+    // continuing a position something else had claimed simply failed — which is the one behaviour
+    // the append-only model exists to avoid, and a harness that cannot reach it cannot test it.
+    prompt: withSessionPosition({ sessions }, withRecord({ records: sessions as never }, (opts.prompt ?? fake) as never)) as never,
     persistence,
     ...(operations !== undefined ? { operations } : {}),
     ...extra,
@@ -1294,12 +1298,121 @@ describe("operation.* resolves during a run", () => {
     expect(model.outputs?.read).toBe("reviewer");
   });
 
-  it("exposes the conversation position the call ENDED at, as a bare `{ id }`", async () => {
+  it("exposes the conversation position the call ENDED at, and the conversation as `.end`", async () => {
     const { engine } = makeEngine(reading(".children.call.operation.output.session"), "root", () => ok({ r: "done" }));
     const result = await engine.run({ inputs: {} });
-    // ONLY an id: the enumerable shape the events journal and `inputs_json` see. Everything else a
-    // resolved session carries is non-enumerable by construction.
-    expect(result.outputs?.read).toEqual({ id: "planning" });
+    // The position AFTER the call's own turn, so continuing from it appends rather than colliding
+    // with the slot this call occupies — and `end` beside it, the same conversation with no position.
+    // Two ids and nothing else: everything a RESOLVED session carries is non-enumerable by
+    // construction, and neither of these is parsed by anything outside the store.
+    expect(result.outputs?.read).toEqual({ id: "planning@1", end: { id: "planning" } });
+  });
+
+  /**
+   * A conversation reaches a later state as DATA — the parent wires the producer's ref into the
+   * consumer's input, and the consumer names that input as its session. Which of the two refs is
+   * wired is the whole of the author's choice between continuing and branching.
+   */
+  const continuing = (wired: string, between = false): Record<string, StateDef> => ({
+    root: {
+      children: {
+        first: { state: "first" },
+        ...(between ? { interloper: { state: "interloper" } } : {}),
+        second: { state: "second", inputs: { thread: wired } },
+      },
+      sequence: ["first", ...(between ? ["interloper"] : []), "second"],
+    },
+    first: {
+      environment: { session: "thread" },
+      outputs: { r: { schema: { type: "string" } } },
+      operation: { kind: "prompt", prompt: "one", model: "m" },
+    },
+    interloper: {
+      environment: { session: "thread" },
+      outputs: { r: { schema: { type: "string" } } },
+      operation: { kind: "prompt", prompt: "two", model: "m" },
+    },
+    second: {
+      inputs: { thread: { kind: "json" } },
+      environment: { session: { expr: ".inputs.thread" } as never },
+      outputs: { r: { schema: { type: "string" } } },
+      operation: { kind: "prompt", prompt: "three", model: "m" },
+    },
+  });
+
+  it("`.end` is the conversation, so a later state appends to it instead of branching", async () => {
+    const { engine, fake } = makeEngine(continuing(".children.first.operation.output.session.end"), "root", () => ok({ r: "done" }));
+    await engine.run({ inputs: {} });
+    const [one, two] = [fake.calls[0]!.ctx.session, fake.calls[1]!.ctx.session];
+    expect(two?.mode).toBe("append");
+    // One conversation, one position further on — not a branch beside it.
+    expect(two?.at.id).toBe(one?.at.id);
+    expect(two?.at.seq).toBe(one!.at.seq + 1);
+  });
+
+  it("works on a conversation nobody NAMED — `.end` is published for a minted session too", async () => {
+    // `first` declares no session, so the engine mints one for that instance. There is no name to
+    // write in a later state, which is exactly the case the published ref exists for: `.end` carries
+    // the minted conversation, and the consumer joins it.
+    const files = continuing(".children.first.operation.output.session.end");
+    delete files["first"]!.environment;
+    const { engine, fake } = makeEngine(files, "root", () => ok({ r: "done" }));
+    await engine.run({ inputs: {} });
+    const [one, two] = [fake.calls[0]!.ctx.session, fake.calls[1]!.ctx.session];
+    expect(two?.at.id).toBe(one?.at.id);
+    expect(two?.at.seq).toBe(one!.at.seq + 1);
+  });
+
+  it("`fork` still means fork on `.end` — branch from the current end", async () => {
+    // The two are orthogonal: `.end` says WHERE (the moving end), `fork` says what to do there. A
+    // deliberate divergence from the head cannot be inferred from stream state, which is why the flag
+    // survives at the consumption site.
+    const files = continuing(".children.first.operation.output.session.end");
+    files["second"]!.environment = { ...files["second"]!.environment, fork: true } as never;
+    const { engine, fake } = makeEngine(files, "root", () => ok({ r: "done" }));
+    await engine.run({ inputs: {} });
+    expect(fake.calls[1]!.ctx.session?.mode).toBe("fork");
+    expect(fake.calls[1]!.ctx.session?.at.id).not.toBe(fake.calls[0]!.ctx.session?.at.id);
+  });
+
+  it("reads a transcript through `.end`, the ref an author actually holds", async () => {
+    // `messages()` resolves against the engine's synchronous mirror. The mirror is keyed by every ref
+    // naming the conversation, so the unpositioned form works — before this it was keyed by the
+    // DECLARED ref alone, and a `messages(… .session.end)` reported the conversation as unavailable.
+    const files = continuing(".children.first.operation.output.session.end");
+    files["second"]!.operation = {
+      kind: "prompt",
+      prompt: "Recap: {{.inputs.history}}",
+      model: "m",
+      input: { history: { kind: "json", binding: "messages(.inputs.thread)" } },
+    } as never;
+    files["second"]!.environment = { conversation: { mode: "fresh" }, session: { expr: ".inputs.thread" } } as never;
+    const { engine, fake } = makeEngine(files, "root", () => ok({ r: "done" }));
+    await engine.run({ inputs: {} });
+    expect(promptOf(fake.calls[1]!)).toContain("one"); // `first`'s user turn, read back as data
+  });
+
+  it("the POSITION forks when someone else has spoken since, rather than silently inheriting the turns", async () => {
+    // The same wiring, with a third state appending to the conversation in between. Continuing from a
+    // position that is no longer free is what a fork is FOR: the reader asked to carry on from a
+    // point, and the turns added after it were never shown to them.
+    const positioned = makeEngine(continuing(".children.first.operation.output.session", true), "root", () => ok({ r: "done" }));
+    await positioned.engine.run({ inputs: {} });
+    const [trunk, branch] = [positioned.fake.calls[0]!.ctx.session, positioned.fake.calls[2]!.ctx.session];
+    // A DIFFERENT conversation: the position after `first` was claimed by the interloper, so the call
+    // branched from it rather than continuing a transcript it was never shown.
+    expect(branch?.at.id).not.toBe(trunk?.at.id);
+    // ...and the branch's prefix is what the point it forked from actually held: `first`'s exchange
+    // and nothing after it. This is SPEC §6.1's worked example — two explorers branching off one plan
+    // see the plan and not each other.
+    const seen = (await branch!.messages()) as Array<{ content: string }>;
+    expect(seen.map((m) => m.content)).toEqual(["one", JSON.stringify({ r: "done" })]);
+    // ...where `.end` appends onto the interloper's turn instead, in the one conversation. That is the
+    // whole distinction between the two spellings.
+    const atEnd = makeEngine(continuing(".children.first.operation.output.session.end", true), "root", () => ok({ r: "done" }));
+    await atEnd.engine.run({ inputs: {} });
+    expect(atEnd.fake.calls[2]!.ctx.session?.at.id).toBe(atEnd.fake.calls[0]!.ctx.session?.at.id);
+    expect(atEnd.fake.calls[2]!.ctx.session?.at.seq).toBe(2);
   });
 
   it("records a FAILED call too, which is when its cost is most worth reading", async () => {

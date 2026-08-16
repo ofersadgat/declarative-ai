@@ -133,7 +133,8 @@ describe("validateBundle failure modes", () => {
     const plan = files[PLAN_ID]!;
     plan.children!["ghost"] = { state: "feature/plan/ghost" };
     plan.sequence = [...plan.sequence!, "ghost", "goals"];
-    plan.transitions = [...plan.transitions!, { to: "nowhere" }, { to: "terminate.sideways" }];
+    // The fixture's own rules live on the `critique` mount (§3.3), so these are the state's whole list.
+    plan.transitions = [{ to: "nowhere" }, { to: "terminate.sideways" }];
     const report = validateBundle(loadBundle(files, PLAN_ID));
     const messages = report.errors.map((e) => e.message).join("\n");
     expect(messages).toMatch(/unknown state 'feature\/plan\/ghost'/);
@@ -144,8 +145,11 @@ describe("validateBundle failure modes", () => {
 
   it("flags unparseable and undeclared-reference expressions", () => {
     const files = specPlanningFiles();
-    files[PLAN_ID]!.transitions![0]!.when = ".children.critique.outputs.outcome ===";
-    files[PLAN_ID]!.transitions![2]!.when = ".children.nonchild.outcome === 'success'";
+    // Written where the fixture writes them — on the mount — so the lowering and the reference check
+    // are exercised through the child list, not only the state's own.
+    const guards = files[PLAN_ID]!.children!["critique"]!.transitions!;
+    guards[0]!.when = ".children.critique.outputs.outcome ===";
+    guards[2]!.when = ".children.nonchild.outcome === 'success'";
     files[PLAN_ID]!.outputs!["outcome"]!.binding = { expr: ".bogusroot.x" };
     const report = validateBundle(loadBundle(files, PLAN_ID));
     const messages = report.errors.map((e) => e.message).join("\n");
@@ -213,7 +217,7 @@ describe("validateBundle failure modes", () => {
 
   it("requires a guard to infer to boolean (§7.2, no truthiness coercion)", () => {
     const files = specPlanningFiles();
-    files[PLAN_ID]!.transitions![0]!.when = ".run.iteration";
+    files[PLAN_ID]!.children!["critique"]!.transitions![0]!.when = ".run.iteration";
     const report = validateBundle(loadBundle(files, PLAN_ID));
     expect(report.errors.map((e) => e.message).join("\n")).toMatch(/guard must infer to boolean/);
   });

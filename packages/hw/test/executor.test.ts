@@ -91,7 +91,7 @@ describe("hierarchical-workflow executor", () => {
 
   it("rejects an invalid bundle with the validation report", async () => {
     const definition = planningDefinition();
-    (definition.states as ReturnType<typeof specPlanningFiles>)[PLAN_ID]!.transitions!.push({ to: "nowhere" });
+    (definition.states as ReturnType<typeof specPlanningFiles>)[PLAN_ID]!.transitions = [{ to: "nowhere" }];
     const { registry, fake } = makeRegistry(happyScript);
     const executor = createWorkflowExecutor({ definition, registry, prompt: fake });
     const outcome = await executor.start(opFor({ issue: "i" }), CTX).result;

@@ -25,6 +25,7 @@ import {
   type ExecEnvironmentDecl,
   type LoadedChild,
   type LoadedState,
+  type LoadedTransition,
   type NamedParameterDecl,
   OPERATION_OWN_FIELDS,
   type OperationFields,
@@ -32,6 +33,7 @@ import {
   type ParameterDecl,
   type SlotMeta,
   type StateDef,
+  type TransitionDecl,
   type WorkflowBundle,
 } from "./format.js";
 import { parseExpression } from "./expr.js";
@@ -453,6 +455,23 @@ export function desugarState(
     }
   }
 
+  // Guards, lowered HERE rather than by the engine: a guard may CALL an operation, and resolving a
+  // callee needs the search path, the referring state and a filesystem — load-time knowledge. Engine-
+  // side lowering worked while expressions were operators only, and threw the moment one held a call.
+  //
+  // One function for both lists: a child's transitions are the state's, narrowed to when that child
+  // finishes (§3.3), and lowering them differently would make the same guard mean two things.
+  const lowerTransitions = (list: TransitionDecl[] | undefined): LoadedTransition[] | undefined =>
+    list?.map((t) => {
+      if (t.when === undefined) return { ...t };
+      try {
+        return { ...t, whenRef: lowerExpression(parseExpression(t.when), lower) };
+      } catch (e) {
+        // Carried, not thrown — see `LoadedTransition.whenError`.
+        return { ...t, whenError: (e as Error).message };
+      }
+    });
+
   let children: Record<string, LoadedChild> | undefined;
   if (def.children) {
     children = {};
@@ -471,23 +490,12 @@ export function desugarState(
         // Carried, never merged here: this layer belongs to the CHILD's chain, and folding it into
         // the parent's own environment would apply it to the parent's operation too (§5).
         ...(child.environment !== undefined ? { environment: child.environment } : {}),
+        ...(child.transitions !== undefined ? { transitions: lowerTransitions(child.transitions) } : {}),
       };
     }
   }
 
-  // Guards, lowered HERE rather than by the engine: a guard may CALL an operation, and resolving a
-  // callee needs the search path, the referring state and a filesystem — load-time knowledge. Engine-
-  // side lowering worked while expressions were operators only, and threw the moment one held a call.
-  const transitions = def.transitions?.map((t, i) => {
-    if (t.when === undefined) return { ...t };
-    void i;
-    try {
-      return { ...t, whenRef: lowerExpression(parseExpression(t.when), lower) };
-    } catch (e) {
-      // Carried, not thrown — see `LoadedTransition.whenError`.
-      return { ...t, whenError: (e as Error).message };
-    }
-  });
+  const transitions = lowerTransitions(def.transitions);
 
   // The effective operation (§5): the resolution environment above, then the op itself. Only a
   // state that DECLARES an operation gets one — otherwise every pure composite under an

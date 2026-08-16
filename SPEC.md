@@ -177,9 +177,11 @@ every descendant.
    and validated; validation failure blocks the state.
 2. The engine runs the highest-priority operation that has not yet run in this
    instance.
-3. When an operation completes, its outputs are validated and the state's
-   transitions are evaluated in declared order. The first transition whose
-   `when` expression is true is taken.
+3. When an operation completes, its outputs are validated and transitions are
+   evaluated. A child that finished since the last evaluation contributes its
+   OWN `transitions` first — in the order the state runs its children — and the
+   state's list is considered after them. Within each list, declared order; the
+   first transition whose `when` expression is true is taken.
 4. A taken transition either enters a child state or terminates the state.
 5. If no transition matches, the engine runs the next operation in priority
    order.
@@ -195,6 +197,60 @@ If an operation fails unrecoverably, or a child terminates with `error` or
 Transition order matters: child-completion conditions should be declared before
 child-entry conditions, so that the evaluation that runs after a child
 completes does not immediately re-enter it.
+
+A transition written on a child mount (`children.<key>.transitions`) says the
+same thing structurally, and is the better place for a rule that is about one
+child: it is eligible ONLY in the round that child's completion triggered, so a
+child that finished earlier no longer diverts anything and an unconditional `to`
+means "after this child, go here" rather than "from now on, always go here".
+
+The guarantee is **once per completion**: every child that finishes has its list
+evaluated exactly once, in the first evaluation round that STARTS after it
+finished. A round fixes the set of children it answers for before it runs any
+guard's call, so a child that finishes while a round is already in flight is
+answered by the next one rather than being swept into a round whose guards were
+prepared before it existed. Two async children may therefore share a round or take
+one each — nothing an author writes should depend on which — and a looped child is
+evaluated once per pass, because the eligibility is granted per completion and not
+per child. Its
+guards resolve in the enclosing state's scope like any other — this child is
+`.children.<key>` from there, spelled out. Taking one HANDLES that child's
+`error`/`timeout` termination, which is what makes per-child recovery expressible
+without a state-level guard for each child:
+
+```json
+{
+  "children": {
+    "implement": {
+      "state": "feature/implement",
+      "transitions": [
+        { "to": "repair", "when": ".children.implement.outcome === 'error'" }
+      ]
+    },
+    "repair": {
+      "state": "feature/repair",
+      "inputs": { "failed_change": ".inputs.change" }
+    },
+    "review": { "state": "feature/review" }
+  },
+  "sequence": ["implement", "review"]
+}
+```
+
+`implement` fails, its own rule routes to `repair`, and because a taken transition
+handles the failure the state does not terminate with `error`. `repair` is not a
+sequence member, so entering it does not move the cursor: when it finishes, the
+spine resumes at `review`. When `implement` succeeds the guard is false, nothing
+else matches, and the cursor reaches `review` the same way.
+
+**Write a transition on the mount by default.** The state's own `transitions` are
+for the rules that hold *whichever* child just finished, or none did — a decision
+made from the state's own operation output, an entry into a child, an iteration
+limit. A rule that is about one child belongs on that child, and the difference is
+not stylistic: written at state level it has to name the child in its guard, stay
+correctly ordered against every other rule in the list, and be re-evaluated after
+every unrelated child completion. Written on the mount, the round it is eligible
+in is already the one it is about.
 
 Taking a transition to a child that appears in the `sequence` resets the
 sequence cursor to that child and clears the recorded results of that child and
@@ -596,14 +652,18 @@ limits
   one.
 
 `children`
-: Declared child states, their input wiring, and async flags.
+: Declared child states, their input wiring, async flags, per-mount `environment`
+  defaults, and per-mount `transitions` — considered when that child finishes,
+  ahead of the state's own list (§3.3).
 
 `sequence`
 : Order the cursor advances through children. Optional — absent means the order the children were
   declared in; `[]` means no spine, so a child runs only when a transition enters it.
 
 `transitions`
-: Local transition rules.
+: Transition rules that apply to the state as a whole — a decision from its own
+  operation output, an entry into a child, an iteration limit. A rule about one
+  child belongs on that child's mount instead (§3.3), which is the default.
 
 `limits`
 : Iteration and timeout limits.
@@ -699,7 +759,7 @@ ambiguous. Its shape is a **typed union** — a common core on every kind plus l
 | `usage` | all | the measurement record, passed through rather than re-shaped |
 | `cost` | all | USD — lifted out of `usage` because it is the field asked for by name, and a *failed* call still spends money and still reports it |
 | `model` | all | the model the call was actually made with, post-resolution |
-| `outputs.session` | prompt only | a `SessionRef`, i.e. `{ id }` and nothing else |
+| `outputs.session` | prompt only | a `SessionRef` — `{ id }`, plus `end`, which is another `SessionRef` |
 
 `provider` and `attempts` are **absent on purpose**. Neither reaches the engine's seam today — they
 are things an executor knows and does not report — so declaring them would hand the lint a field it
@@ -714,6 +774,53 @@ its end until the provider resolves, so the end marker is the only value that ca
 engine reads it — and it is what a consumer actually wants ("append after me", "fork after me").
 There is deliberately no start marker: recovery after an error does not need one, since instance-scoped
 resolution (§4.7) forks from the right place on its own.
+
+**`operation.output.session.end` is the same conversation with no position.** The two are what an
+author chooses between when they wire a conversation into a later state's `session`:
+
+| Written | Means | When the conversation moved on in between |
+| --- | --- | --- |
+| `.operation.output.session` | continue from exactly the point this call ended at | branches, so the later state never silently inherits turns it was not shown |
+| `.operation.output.session.end` | continue from wherever the conversation has got to | appends after them — three states in a row are one thread, not a fork each |
+
+A conversation reaches a later state as DATA — the parent wires the ref into the consumer's input, and
+the consumer names that input as its session — so the choice is made at the point of wiring:
+
+```json
+{
+  "children": {
+    "plan": { "state": "feature/plan" },
+    "refine": {
+      "state": "feature/refine",
+      "inputs": { "thread": ".children.plan.operation.output.session.end" }
+    },
+    "explore_risks": {
+      "state": "feature/explore",
+      "inputs": { "thread": ".children.plan.operation.output.session" }
+    },
+    "explore_cost": {
+      "state": "feature/explore",
+      "inputs": { "thread": ".children.plan.operation.output.session" }
+    }
+  },
+  "sequence": ["plan", "refine", "explore_risks", "explore_cost"]
+}
+```
+
+Each consumer declares `"session": { "expr": ".inputs.thread" }`. `refine` CONTINUES the planning
+thread — `.end` resolves at the head, so it appends after `plan` and would append after anything else
+that had spoken since. The two `explore_*` children wire the POSITION instead, and `refine` has since
+claimed it: each branches from the point immediately after `plan`, so each sees `plan`'s turn and
+neither sees `refine`'s or the other's. One primitive does both jobs, and the ref that was wired is
+what decides which.
+
+`end` is the ONE property a ref carries beyond `id`, and it is a real value, materialized when the
+node is published — not a marker interpreted at the consuming site. So it survives a spread, a
+round-trip through JSON, and the events journal, and it is an ordinary `SessionRef` everywhere
+downstream. There is no `.end.end`: `end` is already unpositioned, so a second hop is a lint error.
+
+A plain session **name** already behaves as `end` does — a name is unpositioned by construction — so
+this distinction only arises where a conversation reaches a state as data.
 
 Note the granularity. **Authored forking is per-operation**: one agentic call that appends forty
 entries cannot be branched at entry twenty from a workflow. A store may address finer positions so a
@@ -848,10 +955,12 @@ alongside the rest, because each of these is a per-CALL decision:
 ```text
 session       The conversation this call joins (DESIGN.md §1.6). A NAME shares an
               append-only stream by declaration; {"expr": …} names an exact position
-              computed at run time, normally from `operation.output.session`; `null`
-              starts a fresh one, and absent means this state gets its own. The DECLARED
-              name separately keys the state's workspace and permissions, which are
-              inherited when nothing is declared.
+              computed at run time, normally from `operation.output.session` — or its
+              `.end`, the same conversation with no position, which continues the thread
+              rather than branching from a point (§6.1); `null` starts a fresh one, and
+              absent means this state gets its own. The DECLARED name separately keys the
+              state's workspace and permissions, which are inherited when nothing is
+              declared.
 tools         Logical names of tools the operation may call mid-loop, resolved through
               registry.tools. A composed prompt operation runs them in a bounded loop; a
               delegated agent is handed the allow-list.
@@ -972,25 +1081,29 @@ An agent operation may not:
         "plan_doc": ".inputs.plan_doc",
         "weaknesses": { "expr": ".outputs.weaknesses" },
         "critique_report": { "expr": ".outputs.critique_report" }
-      }
+      },
+      "transitions": [
+        {
+          "to": "terminate.success",
+          "when": ".children.address_weaknesses.outcome === 'success'"
+        }
+      ]
     },
     "human_review": {
       "state": "feature/plan/critique/human_review",
       "inputs": {
         "plan_doc": ".inputs.plan_doc",
         "critique_report": { "expr": ".outputs.critique_report" }
-      }
+      },
+      "transitions": [
+        {
+          "to": "terminate.success",
+          "when": ".children.human_review.outcome === 'success'"
+        }
+      ]
     }
   },
   "transitions": [
-    {
-      "to": "terminate.success",
-      "when": ".children.human_review.outcome === 'success'"
-    },
-    {
-      "to": "terminate.success",
-      "when": ".children.address_weaknesses.outcome === 'success'"
-    },
     {
       "to": "terminate.success",
       "when": ".outputs.outcome === 'clean'"
@@ -1012,11 +1125,14 @@ immediately, before any child runs. `needs_changes` runs one fix pass and then
 terminates so the parent can decide whether to re-plan. `blocked` collects a
 human decision, surfaced through the `human_decision` output — an output derived
 from a binding rather than produced by the operation, and `optional` because the
-child that produces it runs only on the conditional path (§6.2). The
-child-completion transitions are declared first so the evaluation that runs
-after a child completes does not re-enter it. The retry loop lives in the
-parent (Section 9), which re-runs the whole planning pass and gets a fresh
-critique instance each time.
+child that produces it runs only on the conditional path (§6.2). The two
+child-completion rules live on the mounts they are about, so nothing depends on
+their position in a list: each is eligible only in the round its own child ended.
+What stays in the state's own `transitions` is the decision the state's OPERATION
+makes — terminate on `clean`, enter one child or the other on `blocked` /
+`needs_changes` — which is about no child in particular and would be wrong
+anywhere else. The retry loop lives in the parent (Section 9),
+which re-runs the whole planning pass and gets a fresh critique instance each time.
 
 Handing the same state to a delegated agent instead of the prompt runner changes only the
 operation block — the slots, wiring, children, and transitions are untouched:
@@ -1176,36 +1292,39 @@ validated outputs. The parent branches on `outputs.decision`.
       "inputs": {
         "plan_doc": ".children.context.outputs.plan_doc",
         "severity_threshold": { "text": "significant" }
-      }
+      },
+      "transitions": [
+        {
+          "to": "terminate.success",
+          "when": ".children.critique.outputs.outcome === 'clean'"
+        },
+        {
+          "to": "goals",
+          "when": ".children.critique.outputs.outcome === 'needs_changes' && .run.iteration < .limits.max_iterations"
+        },
+        {
+          "to": "terminate.success",
+          "when": ".children.critique.outcome === 'success'"
+        }
+      ]
     }
   },
   "sequence": ["goals", "context", "critique"],
-  "transitions": [
-    {
-      "to": "terminate.success",
-      "when": ".children.critique.outputs.outcome === 'clean'"
-    },
-    {
-      "to": "goals",
-      "when": ".children.critique.outputs.outcome === 'needs_changes' && .run.iteration < .limits.max_iterations"
-    },
-    {
-      "to": "terminate.success",
-      "when": ".children.critique.outcome === 'success'"
-    }
-  ],
   "limits": {
     "max_iterations": 3
   }
 }
 ```
 
-The re-plan loop lives here: `needs_changes` transitions back to `goals`,
-which resets the sequence and clears the recorded results of `goals`,
-`context`, and `critique`, so the next pass runs fresh instances (and the
-first two transitions evaluate to false until `critique` runs again). When the
-iteration limit is reached, or critique reports `blocked`, the final
-transition fires and the `outcome` output resolves to `blocked`.
+Every rule here is about `critique` — what the critique said, and whether to go
+round again — so all three live on its mount and the state declares no
+`transitions` of its own. The re-plan loop still lives here: `needs_changes`
+transitions back to `goals`, which resets the sequence and clears the recorded
+results of `goals`, `context`, and `critique`, so the next pass runs fresh
+instances. On the mount they are not merely false until `critique` runs again;
+they are not evaluated at all until it finishes. When the iteration limit is
+reached, or critique reports `blocked`, the third rule fires and the `outcome`
+output resolves to `blocked`.
 
 The whole file type-checks statically (§6.2): the `outcome` expression is a conditional over two
 string literals, so it infers as the enum `["complete", "blocked"]` and satisfies the slot's

@@ -1262,6 +1262,7 @@ interface ResolvedSession<Msg = JsonValue> extends SessionRef {  // everything b
 interface SessionStore<Msg = JsonValue> {
   resolve(request: SessionRequest): ResolvedSession<Msg> | Promise<ResolvedSession<Msg>>;
   fork(ref: string, seed?: string): string | Promise<string>;
+  refAt(at: { id: string; seq: number }): string;                 // the store's own spelling for a position
   messages(ref: string): Msg[] | Promise<Msg[]>;
   compact?(ref: string, messages: readonly Msg[]): string | Promise<string>;
   resync?(ref: string, messages: readonly Msg[]): string | Promise<string>;
@@ -1270,7 +1271,10 @@ class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {}   // in-m
 ```
 
 **Append-only.** A ref names a conversation AT a position, which is what makes "continue from here" and
-"branch from here" one primitive. **A session is not a separate store** — it IS the `OperationRecord`s
+"branch from here" one primitive. A ref may equally be **unpositioned** — a conversation id alone, which
+every store resolves at the head whenever it is used, and which is how "append to the end" is said. A
+caller gets the unpositioned form from `ResolvedSession.at.id` and builds a positioned one with `refAt`;
+neither is ever produced by parsing a ref, which is what opacity buys. **A session is not a separate store** — it IS the `OperationRecord`s
 sharing a session id, so appending a turn and recording a call are ONE write, and `PRIMARY KEY
 (session_id, seq)` is the position reservation. There is deliberately no `get`/`put`: an
 observe-then-write pair leaves a TOCTOU window the length of the whole model call.
@@ -2518,7 +2522,8 @@ interface StateDef {
   environment?: EnvironmentDecl;                 // session / tools / conversation / permissions
   children?: Record<string, ChildDecl>;
   sequence?: string[];
-  transitions?: TransitionDecl[];
+  transitions?: TransitionDecl[];         // rules about the STATE (its own output, an entry, a limit).
+                                          // A rule about one child goes on that child's mount — the default
   limits?: LimitsDecl;
 }
 ```
@@ -2581,6 +2586,10 @@ interface ChildDecl {
   // One state mounted twice under two of these loads as two variants — which is how one review state
   // runs under two different agents.
   environment?: EnvironmentDecl;
+  // The DEFAULT place for a transition: considered when THIS child finishes and only in that round,
+  // ahead of the state's own list (SPEC §3.3). Guards resolve in the enclosing state's scope; taking
+  // one HANDLES this child's error/timeout termination.
+  transitions?: TransitionDecl[];
 }
 interface TransitionDecl { to: string; when?: string; }        // `when` must INFER to boolean
 interface LimitsDecl { max_iterations?: number; timeout?: number; }

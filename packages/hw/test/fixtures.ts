@@ -52,17 +52,20 @@ export function specPlanningFiles(): Record<string, StateDef> {
             plan_doc: ".children.context.outputs.plan_doc",
             severity_threshold: { text: "significant" },
           },
+          // Every rule here is about `critique`, so all three live on its mount (SPEC §3.3) and this
+          // state declares no `transitions` of its own. On the mount they are not merely false until
+          // `critique` runs again after a re-plan — they are not evaluated until it finishes.
+          transitions: [
+            { to: "terminate.success", when: ".children.critique.outputs.outcome === 'clean'" },
+            {
+              to: "goals",
+              when: ".children.critique.outputs.outcome === 'needs_changes' && .run.iteration < .limits.max_iterations",
+            },
+            { to: "terminate.success", when: ".children.critique.outcome === 'success'" },
+          ],
         },
       },
       sequence: ["goals", "context", "critique"],
-      transitions: [
-        { to: "terminate.success", when: ".children.critique.outputs.outcome === 'clean'" },
-        {
-          to: "goals",
-          when: ".children.critique.outputs.outcome === 'needs_changes' && .run.iteration < .limits.max_iterations",
-        },
-        { to: "terminate.success", when: ".children.critique.outcome === 'success'" },
-      ],
       limits: { max_iterations: 3 },
     },
     "feature/plan/goals": {
@@ -128,15 +131,18 @@ export function specPlanningFiles(): Record<string, StateDef> {
             weaknesses: { expr: ".operation.output.weaknesses" },
             critique_report: { expr: ".operation.output.critique_report" },
           },
+          transitions: [{ to: "terminate.success", when: ".children.address_weaknesses.outcome === 'success'" }],
         },
         human_review: {
           state: "feature/plan/critique/human_review",
           inputs: { plan_doc: ".inputs.plan_doc", critique_report: { expr: ".operation.output.critique_report" } },
+          transitions: [{ to: "terminate.success", when: ".children.human_review.outcome === 'success'" }],
         },
       },
+      // What is left is what the state's OWN operation decides — terminate on `clean`, enter one child
+      // or the other otherwise. The two child-completion rules moved to the mounts they are about, so
+      // nothing depends any more on their being declared ahead of the entry rules (SPEC §3.3).
       transitions: [
-        { to: "terminate.success", when: ".children.human_review.outcome === 'success'" },
-        { to: "terminate.success", when: ".children.address_weaknesses.outcome === 'success'" },
         { to: "terminate.success", when: ".operation.output.outcome === 'clean'" },
         { to: "human_review", when: ".operation.output.outcome === 'blocked'" },
         { to: "address_weaknesses", when: ".operation.output.outcome === 'needs_changes'" },
