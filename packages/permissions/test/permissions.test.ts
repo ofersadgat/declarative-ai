@@ -401,3 +401,199 @@ describe("preGated — a tool already wrapped, so the gate must not gate it twic
     expect(approve.asked).toBe(0);
   });
 });
+
+/**
+ * A profile as a TABLE, and the gap it closes.
+ *
+ * The predicate form answers for tools the host registered and says nothing about the rest, which is
+ * not a small omission: a delegated agent turns up with a dozen built-ins nobody modelled, every one
+ * of them is `unknown`, and `unknown` escalates. A `read-only` run then either interrupts a human per
+ * read or — where nothing routes the call to us at all — lets them past ungoverned.
+ */
+describe("profiles as tables", () => {
+  const ledger = () => {
+    const l = new PermissionLedger({});
+    l.setProfile("s1", "bounded");
+    return l;
+  };
+  const allow = () => scriptedApprover({ decision: "allow", scope: "once" });
+
+  it("answers for a tool the host never registered — what `other` is for", async () => {
+    const approve = allow();
+    const gate = createToolGate({
+      ledger: ledger(),
+      sessionId: "s1",
+      approve,
+      tools: { read_file: { readOnly: true } },
+      profiles: { bounded: { tools: { read_file: "allow" }, default: "deny", other: "deny" } },
+    });
+    // `Glob` is the agent's own — no `readOnly` we know, so the predicate form could only escalate.
+    expect(await gate.check({ name: "Glob" }, {})).toMatchObject({ allow: false });
+    expect(approve.asked).toBe(0);
+  });
+
+  it("distinguishes `other` from `default`", async () => {
+    // Two questions that had one answer: "not decided about a tool I have" vs "never heard of it".
+    const gate = createToolGate({
+      ledger: ledger(),
+      sessionId: "s1",
+      approve: allow(),
+      tools: { read_file: { readOnly: true }, write_file: { readOnly: false } },
+      profiles: { bounded: { tools: { read_file: "allow" }, default: "ask", other: "deny" } },
+    });
+    // Registered, unnamed by the table → `default`.
+    expect(gate.modeOf({ name: "write_file" })).toBe("ask");
+    // Not registered at all → `other`.
+    expect(gate.modeOf({ name: "mcp__elsewhere__thing" })).toBe("deny");
+  });
+
+  it("stops FORCING an unclassifiable tool to `ask`, which the predicate form cannot", async () => {
+    // The gap, isolated. Both gates resolve `Glob` to `allow` by mode; the predicate one escalates it
+    // anyway because it cannot classify the name, and that escalation is what interrupted a human
+    // once per read. A table has an opinion, so there is nothing to escalate for want of one.
+    const asked = allow();
+    const tabled = createToolGate({
+      ledger: ledger(),
+      sessionId: "s1",
+      approve: asked,
+      tools: {},
+      authored: { other: "allow" },
+      profiles: { bounded: { default: "allow", other: "allow" } },
+    });
+    expect(await tabled.check({ name: "Glob" }, {})).toMatchObject({ allow: true });
+    expect(asked.asked).toBe(0);
+
+    const escalated = allow();
+    const predicated = createToolGate({
+      ledger: ledger(),
+      sessionId: "s1",
+      approve: escalated,
+      tools: {},
+      authored: { other: "allow" },
+      profiles: { bounded: (tool) => tool.readOnly },
+    });
+    expect(await predicated.check({ name: "Glob" }, {})).toMatchObject({ allow: true });
+    expect(escalated.asked).toBe(1);
+  });
+
+  it("still narrows: a table saying `allow` does not widen the base posture", async () => {
+    // A profile is a narrowing in both forms. With nothing authored the ledger's own last resort is
+    // `ask`, and a permissive table must not talk it down to `allow`.
+    const asked = allow();
+    const gate = createToolGate({
+      ledger: ledger(),
+      sessionId: "s1",
+      approve: asked,
+      tools: {},
+      profiles: { bounded: { default: "allow", other: "allow" } },
+    });
+    expect(await gate.check({ name: "Glob" }, {})).toMatchObject({ allow: true });
+    expect(asked.asked).toBe(1);
+  });
+
+  it("narrows rather than overrides — a table cannot rescue what the mode denies", async () => {
+    const gate = createToolGate({
+      ledger: ledger(),
+      sessionId: "s1",
+      approve: allow(),
+      tools: { bash: { readOnly: false } },
+      authored: { tools: { bash: "deny" } },
+      profiles: { bounded: { tools: { bash: "allow" } } },
+    });
+    expect(await gate.check({ name: "bash" }, {})).toMatchObject({ allow: false });
+  });
+
+  it("leaves the predicate form working exactly as it did", async () => {
+    const pred: ProfilePredicate = (tool) => tool.readOnly;
+    const approve = allow();
+    const gate = createToolGate({
+      ledger: ledger(),
+      sessionId: "s1",
+      approve,
+      tools: { read_file: { readOnly: true }, bash: { readOnly: false } },
+      profiles: { bounded: pred },
+    });
+    expect(await gate.check({ name: "bash" }, {})).toMatchObject({ allow: false });
+    expect(await gate.check({ name: "read_file" }, {})).toMatchObject({ allow: true });
+    // …including the escalation, which a predicate genuinely cannot avoid.
+    expect(gate.modeOf({ name: "Glob" })).toBe("ask");
+  });
+});
+
+/**
+ * `scopeOf` — a caller's own narrowing, folded in without this package learning what a path is.
+ *
+ * A callback rather than a table: which argument of `bash` is a path, and whether it falls inside
+ * somebody's sandbox, is a question only the host can answer. A glob grammar in here would be a
+ * second place for it to be answered differently.
+ */
+describe("a caller's own narrowing", () => {
+  const allow = () => scriptedApprover({ decision: "allow", scope: "once" });
+
+  it("refuses a call the profile and mode would have allowed", async () => {
+    const approve = allow();
+    const gate = createToolGate({
+      ledger: new PermissionLedger({}),
+      sessionId: "s1",
+      approve,
+      tools: { read_file: { readOnly: true } },
+      authored: { tools: { read_file: "allow" } },
+      scopeOf: (_tool, input) => ((input as { path?: string }).path === "/etc/passwd" ? "deny" : undefined),
+    });
+    expect(await gate.check({ name: "read_file" }, { path: "/work/a.ts" })).toMatchObject({ allow: true });
+    expect(await gate.check({ name: "read_file" }, { path: "/etc/passwd" })).toMatchObject({ allow: false });
+    expect(approve.asked).toBe(0);
+  });
+
+  it("can escalate an `allow` to `ask`, but never rescue a `deny`", async () => {
+    // Narrowing composes one way only. A caller saying `allow` about a call the mode denies must not
+    // widen it — otherwise the hook is an override wearing a narrowing's name.
+    const asks = allow();
+    const escalating = createToolGate({
+      ledger: new PermissionLedger({}),
+      sessionId: "s1",
+      approve: asks,
+      tools: { read_file: { readOnly: true } },
+      authored: { tools: { read_file: "allow" } },
+      scopeOf: () => "ask",
+    });
+    expect(await escalating.check({ name: "read_file" }, {})).toMatchObject({ allow: true });
+    expect(asks.asked).toBe(1);
+
+    const rescuing = createToolGate({
+      ledger: new PermissionLedger({}),
+      sessionId: "s1",
+      approve: allow(),
+      tools: { write_file: { readOnly: false } },
+      authored: { tools: { write_file: "deny" } },
+      scopeOf: () => "allow",
+    });
+    expect(await rescuing.check({ name: "write_file" }, {})).toMatchObject({ allow: false });
+  });
+
+  it("says nothing when it has nothing to say", async () => {
+    const gate = createToolGate({
+      ledger: new PermissionLedger({}),
+      sessionId: "s1",
+      approve: allow(),
+      tools: { read_file: { readOnly: true } },
+      authored: { tools: { read_file: "allow" } },
+      scopeOf: () => undefined,
+    });
+    expect(await gate.check({ name: "read_file" }, {})).toMatchObject({ allow: true });
+  });
+});
+
+describe("authored `other`", () => {
+  it("governs a tool the host never registered, without touching `default`", async () => {
+    const gate = createToolGate({
+      ledger: new PermissionLedger({}),
+      sessionId: "s1",
+      approve: scriptedApprover({ decision: "allow", scope: "once" }),
+      tools: { read_file: { readOnly: true } },
+      authored: { default: "allow", other: "deny" },
+    });
+    expect(gate.modeOf({ name: "read_file" })).toBe("allow");
+    expect(gate.modeOf({ name: "Glob" })).toBe("deny");
+  });
+});

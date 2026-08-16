@@ -38,18 +38,73 @@ export type PermissionProfile = "read-only" | "plan" | "full" | (string & {});
 export type ProfilePredicate = (tool: { name: string; readOnly: boolean }) => boolean;
 
 /**
+ * A profile as a MAP over named tools, rather than a predicate over `readOnly`.
+ *
+ * The predicate form answers for the tools the host registered and has nothing to say about the ones
+ * it did not — which is the whole of a real failure: a delegated agent arrives with a dozen built-ins
+ * nobody modelled, the scope check can only report `unknown`, and every such call is escalated to a
+ * human, including the ones the profile plainly permits. Twenty ungoverned reads under `read-only`,
+ * with no fault anywhere in the mechanism.
+ *
+ * A table says something about every tool it names, and {@link ProfileTable.other} says something
+ * about every tool it does not. Between them nothing is left unclassifiable, so nothing has to be
+ * escalated for want of an opinion.
+ *
+ * Modes rather than booleans, deliberately: "out of scope" was always a `deny` in disguise, and
+ * expressing it as one lets a profile say `ask` — "this profile permits reading, but tell me" —
+ * which the boolean form could not.
+ */
+export interface ProfileTable {
+  /** Per-tool, by name. */
+  tools?: Record<string, PermissionMode>;
+  /** What a tool this table does not name resolves to. */
+  default?: PermissionMode;
+  /**
+   * What a tool the HOST does not register resolves to — see {@link ToolGateOptions.tools}.
+   *
+   * Distinct from {@link ProfileTable.default}, and the distinction is the point: "I have not decided
+   * about `write_file`" and "I have never heard of this tool" are different questions, and only one
+   * of them deserves `deny`. With one field they had one answer.
+   */
+  other?: PermissionMode;
+}
+
+/** Either form. A predicate is the older, narrower statement; a table is the complete one. */
+export type ProfileRule = ProfilePredicate | ProfileTable;
+
+const isTable = (rule: ProfileRule | undefined): rule is ProfileTable => typeof rule === "object" && rule !== null;
+
+/**
+ * The mode a table gives one tool — its own entry, then `default`, then `other` for a name the host
+ * does not register. `undefined` when the table declines to say anything at all.
+ */
+export function profileTableMode(
+  table: ProfileTable,
+  tool: string,
+  registered: boolean,
+): PermissionMode | undefined {
+  const own = table.tools !== undefined && Object.hasOwn(table.tools, tool) ? table.tools[tool] : undefined;
+  if (own !== undefined) return own;
+  return registered ? table.default : (table.other ?? table.default);
+}
+
+/**
  * Whether a tool is in scope under a profile: `full` admits all; `read-only`/`plan` admit only read-only
  * tools; any other name resolves through `custom` (an unknown custom profile admits nothing — safe default).
+ *
+ * A table-form profile is in scope for anything it does not resolve to `deny`, which is what makes the
+ * two forms interchangeable to a caller that only asks this question.
  */
 export function inProfile(
   profile: PermissionProfile,
   tool: { name: string; readOnly: boolean },
-  custom?: Record<string, ProfilePredicate>,
+  custom?: Record<string, ProfileRule>,
 ): boolean {
   if (profile === "full") return true;
   if (profile === "read-only" || profile === "plan") return tool.readOnly;
-  const pred = custom?.[profile];
-  return pred ? pred(tool) : false;
+  const rule = custom?.[profile];
+  if (isTable(rule)) return profileTableMode(rule, tool.name, true) !== "deny";
+  return rule ? rule(tool) : false;
 }
 
 /**
@@ -149,8 +204,13 @@ export interface PermissionBaseline {
 export interface ExecPolicy {
   /** The authored, durable baseline: per-tool modes, the `default` for unlisted tools, starting profile. */
   baseline?: PermissionBaseline;
-  /** Custom profile predicates by name — consulted when the session's profile isn't a built-in. */
-  profiles?: Record<string, ProfilePredicate>;
+  /**
+   * Profiles by name — a predicate, or a {@link ProfileTable}.
+   *
+   * A name here SHADOWS the built-in of the same name, which is how a host replaces `read-only` with
+   * a table that has an opinion about the agent's own built-ins rather than escalating them.
+   */
+  profiles?: Record<string, ProfileRule>;
   /** Per-tool `smart`-mode policies: inspect the call and decide, or escalate to the human gate. */
   smart?: Record<string, SmartApprover>;
   /** DELEGATED adapters only: the black-box agent's OWN tools this operation may use, by native name
@@ -252,8 +312,37 @@ export interface ToolDecisionOptions {
   authoredMode?: PermissionMode;
   /** The `smart`-mode policy for this tool. When `smart` resolves and none is supplied, it escalates to `ask`. */
   smart?: SmartApprover;
-  /** Custom profile predicates by name — consulted when the session's profile isn't a built-in. */
-  profiles?: Record<string, ProfilePredicate>;
+  /** Custom profiles by name — a predicate, or a {@link ProfileTable}. See {@link ProfileRule}. */
+  profiles?: Record<string, ProfileRule>;
+  /** True when the HOST registered this tool — what tells `default` from `other` in a profile table. */
+  registered?: boolean;
+  /**
+   * What a caller's own narrowing says about THIS call, given its input.
+   *
+   * The seam for a permission that depends on more than the tool's name — a path, a URL, whatever the
+   * caller models. It is a callback rather than a table because this package should not learn what a
+   * tool's arguments mean: which argument of `bash` is a path, and whether it falls inside somebody's
+   * sandbox, is a question only the host can answer, and a glob grammar in here would be a second
+   * place for it to be answered differently.
+   *
+   * The verdict NARROWS. It is folded in with {@link strictestMode}, so a caller's `deny` refuses a
+   * call the profile would have allowed and a caller's `allow` never rescues one the profile refused.
+   * `undefined` ⇒ the caller has nothing to say about this call.
+   */
+  scopeOf?: (tool: { name: string; readOnly?: boolean }, input: FunctionInputs) => PermissionMode | undefined;
+}
+
+/** How restrictive each mode is — `deny` ▸ `ask` ▸ `smart` ▸ `allow`. */
+const MODE_RANK: Record<PermissionMode, number> = { allow: 0, smart: 1, ask: 2, deny: 3 };
+
+/**
+ * The more restrictive of two modes — how two independent narrowings compose.
+ *
+ * `smart` sits under `ask` because it MAY decide without a human and is not guaranteed to, so it
+ * cannot dominate an explicit `ask`.
+ */
+export function strictestMode(a: PermissionMode, b: PermissionMode): PermissionMode {
+  return MODE_RANK[a] >= MODE_RANK[b] ? a : b;
 }
 
 /** Why a call was refused, or that it may proceed. */
@@ -278,17 +367,54 @@ export async function decideToolCall(
   input: FunctionInputs,
   opts: ToolDecisionOptions,
 ): Promise<ToolDecision> {
-  const { ledger, sessionId, approve, authoredMode, smart, profiles } = opts;
-  // Profile gate first: an out-of-scope tool is refused regardless of mode (a mutating tool under
-  // `read-only`/`plan`, or one a custom profile's predicate excludes).
+  const { ledger, sessionId, approve, authoredMode, smart, profiles, registered } = opts;
   const profile = ledger.resolveProfile(sessionId);
-  const scoped = scopeOf(profile, tool, profiles);
-  if (scoped === "out") return { allow: false, reason: `tool '${tool.name}' is out of the '${profile}' profile` };
 
+  /**
+   * What the profile says, as a MODE.
+   *
+   * A table answers for every tool including the ones the host never registered, which is what
+   * retires the `unknown ⇒ ask` escalation below for callers that supply one. A predicate — or a
+   * built-in profile — still answers in/out, and `unknown` still escalates, because a predicate
+   * genuinely cannot classify a tool whose `readOnly` nobody knows.
+   */
+  const rule = profiles?.[profile];
+  const table = isTable(rule) ? profileTableMode(rule, tool.name, registered ?? tool.readOnly !== undefined) : undefined;
+  if (table === undefined) {
+    // Profile gate first: an out-of-scope tool is refused regardless of mode (a mutating tool under
+    // `read-only`/`plan`, or one a custom profile's predicate excludes).
+    const scoped = profileScopeOf(profile, tool, profiles);
+    if (scoped === "out") return { allow: false, reason: `tool '${tool.name}' is out of the '${profile}' profile` };
+    if (scoped === "unknown") {
+      // An UNCLASSIFIABLE tool under a narrowing profile is escalated rather than resolved either
+      // way. It must not slip through on an `allow` the profile would have refused — and a profile
+      // TABLE is how a caller stops having to pay this, by having an opinion about the name.
+      const resolved = ledger.resolve(tool.name, sessionId, authoredMode);
+      if (resolved !== "deny") return finish("ask", tool, input, opts);
+    }
+  } else if (table === "deny") {
+    return { allow: false, reason: `tool '${tool.name}' is denied by the '${profile}' profile` };
+  }
+
+  // The caller's own narrowing — a path scope, a URL allow-list, whatever it models. Composed as a
+  // narrowing rather than an override: it may refuse what the profile allowed, never the reverse.
+  const narrowed = opts.scopeOf?.(tool, input);
   let mode = ledger.resolve(tool.name, sessionId, authoredMode);
-  // An UNCLASSIFIABLE tool under a narrowing profile is escalated rather than resolved either way —
-  // see {@link ToolGate.modeOf}. It must not slip through on an `allow` the profile would have refused.
-  if (scoped === "unknown" && mode !== "deny") mode = "ask";
+  if (table !== undefined) mode = strictestMode(mode, table);
+  if (narrowed !== undefined) mode = strictestMode(mode, narrowed);
+  if (mode === "deny") return { allow: false, reason: `tool '${tool.name}' denied by permission policy` };
+  return finish(mode, tool, input, opts);
+}
+
+/** The tail of {@link decideToolCall}: `smart`, then the human, then the verdict. */
+async function finish(
+  start: PermissionMode,
+  tool: { name: string; readOnly?: boolean },
+  input: FunctionInputs,
+  opts: ToolDecisionOptions,
+): Promise<ToolDecision> {
+  const { ledger, sessionId, approve, smart } = opts;
+  let mode = start;
   if (mode === "smart") {
     // The smart policy decides directly, or returns `ask` to escalate to the human gate below.
     mode = smart ? await smart({ tool: tool.name, input, sessionId }) : "ask";
@@ -307,10 +433,10 @@ export async function decideToolCall(
  * The third answer exists for the delegated case only. `full` excludes nothing, so an unclassifiable
  * tool is fine there; under any NARROWING profile the predicate needs a `readOnly` we may not have.
  */
-function scopeOf(
+function profileScopeOf(
   profile: PermissionProfile,
   tool: { name: string; readOnly?: boolean },
-  profiles?: Record<string, ProfilePredicate>,
+  profiles?: Record<string, ProfileRule>,
 ): "in" | "out" | "unknown" {
   if (profile === "full") return "in";
   if (tool.readOnly === undefined) return "unknown";
@@ -389,10 +515,19 @@ export interface ToolGateOptions {
   approve: Approver;
   /** The tools we REGISTERED, by name — this is where a `readOnly` is known. */
   tools?: Record<string, { readOnly: boolean }>;
-  /** The operation's own `environment.permissions`, which shadows the workflow-wide baseline. */
-  authored?: { default?: PermissionMode; tools?: Record<string, PermissionMode> };
+  /**
+   * The operation's own `environment.permissions`, which shadows the workflow-wide baseline.
+   *
+   * `other` is what a tool the host does NOT register resolves to — an agent's own built-in, a tool
+   * from somebody else's MCP server. Separate from `default` for the reason {@link ProfileTable.other}
+   * gives: with one field, "I have not decided about this tool" and "I have never heard of it" had
+   * one answer, and only one of them deserves `deny`.
+   */
+  authored?: { default?: PermissionMode; other?: PermissionMode; tools?: Record<string, PermissionMode> };
   smart?: Record<string, SmartApprover>;
-  profiles?: Record<string, ProfilePredicate>;
+  profiles?: Record<string, ProfileRule>;
+  /** Passed to every decision — see {@link ToolDecisionOptions.scopeOf}. */
+  scopeOf?: ToolDecisionOptions["scopeOf"];
   /**
    * Tools ALREADY wrapped with {@link withPermission}, which this gate must therefore not gate again.
    *
@@ -415,7 +550,11 @@ export function createToolGate(opts: ToolGateOptions): ToolGate {
   // would otherwise resolve its mode — and its smart rule — to a prototype member.
   const own = <T>(map: Record<string, T> | undefined, name: string): T | undefined =>
     map !== undefined && Object.hasOwn(map, name) ? map[name] : undefined;
-  const authoredMode = (name: string): PermissionMode | undefined => own(opts.authored?.tools, name) ?? opts.authored?.default;
+  // `other` for a name the host never registered; `default` for one it did. Two questions, and the
+  // gap between them is where an agent's built-ins used to fall.
+  const authoredMode = (name: string): PermissionMode | undefined =>
+    own(opts.authored?.tools, name) ??
+    (own(opts.tools, name) !== undefined ? opts.authored?.default : (opts.authored?.other ?? opts.authored?.default));
   /** The registered tool's `readOnly` when we have it; the caller's claim otherwise. */
   const known = (tool: { name: string; readOnly?: boolean }): { name: string; readOnly?: boolean } => {
     const registered = own(opts.tools, tool.name);
@@ -428,6 +567,8 @@ export function createToolGate(opts: ToolGateOptions): ToolGate {
     ...(authoredMode(name) !== undefined ? { authoredMode: authoredMode(name) } : {}),
     ...(own(opts.smart, name) !== undefined ? { smart: own(opts.smart, name) } : {}),
     ...(opts.profiles !== undefined ? { profiles: opts.profiles } : {}),
+    registered: own(opts.tools, name) !== undefined,
+    ...(opts.scopeOf !== undefined ? { scopeOf: opts.scopeOf } : {}),
   });
   const preGated = new Set(opts.preGated ?? []);
   return {
@@ -445,12 +586,19 @@ export function createToolGate(opts: ToolGateOptions): ToolGate {
       // wrapper underneath decides the call for real when the tool runs.
       if (preGated.has(it.name)) return "allow";
       const profile = opts.ledger.resolveProfile(opts.sessionId);
-      const scoped = scopeOf(profile, it, opts.profiles);
-      if (scoped === "out") return "deny";
       const mode = opts.ledger.resolve(it.name, opts.sessionId, authoredMode(it.name));
+      const rule = opts.profiles?.[profile];
+      if (isTable(rule)) {
+        // A table has an opinion about every name, so there is nothing to escalate for want of one.
+        const said = profileTableMode(rule, it.name, own(opts.tools, it.name) !== undefined);
+        return said === undefined ? mode : strictestMode(mode, said);
+      }
+      const scoped = profileScopeOf(profile, it, opts.profiles);
+      if (scoped === "out") return "deny";
       // Same escalation as `decideToolCall`, and it has to be here too: this is the answer that
       // decides whether the tool is PRE-APPROVED, so resolving it to `allow` would skip the gate
-      // entirely for exactly the tool we could not classify.
+      // entirely for exactly the tool we could not classify. A profile TABLE is how a caller stops
+      // paying this — see above.
       return scoped === "unknown" && mode !== "deny" ? "ask" : mode;
     },
   };
