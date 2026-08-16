@@ -213,6 +213,16 @@ export interface ExecPolicy {
   profiles?: Record<string, ProfileRule>;
   /** Per-tool `smart`-mode policies: inspect the call and decide, or escalate to the human gate. */
   smart?: Record<string, SmartApprover>;
+  /**
+   * The host's own per-CALL narrowing — see {@link ToolDecisionOptions.scopeOf}.
+   *
+   * On the policy rather than passed at each gate because it is a property of the project's posture,
+   * not of one operation: a sandbox bounds everything running under it. A host tool may read it off
+   * `ctx.policy` too, which is what lets a tool that ENUMERATES (a glob, a grep) drop results it
+   * would not have been allowed to open — a refusal at the call is not enough when the call's own
+   * answer is the listing.
+   */
+  scopeOf?: (tool: { name: string; readOnly?: boolean }, input: FunctionInputs) => PermissionMode | undefined;
   /** DELEGATED adapters only: the black-box agent's OWN tools this operation may use, by native name
    *  (a `Tool | NativeToolRef` rename binding's `native` side) — an allow-list, not an impl set. */
   nativeTools?: string[];

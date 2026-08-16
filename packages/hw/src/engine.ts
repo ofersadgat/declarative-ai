@@ -72,7 +72,8 @@ import {
   type PermissionBaseline,
   type PermissionMode,
   type ToolGate,
-  type ProfilePredicate,
+  type ExecPolicy,
+  type ProfileRule,
   type SmartApprover,
 } from "@declarative-ai/permissions";
 import { SchemaValidator } from "@declarative-ai/validate";
@@ -183,9 +184,12 @@ export interface EngineConfig {
     baseline?: PermissionBaseline;
     process?: Map<string, PermissionMode>;
     smart?: Record<string, SmartApprover>;
-    /** Custom profile predicates by name (DESIGN §5.1, "Permissions: two orthogonal axes") — a `runtime.permissions.profile`
-     *  naming one of these gates tools by its predicate instead of the built-in read-only/plan/full. */
-    profiles?: Record<string, ProfilePredicate>;
+    /** Custom profiles by name (DESIGN §5.1, "Permissions: two orthogonal axes") — a `runtime.permissions.profile`
+     *  naming one of these gates tools by it instead of the built-in read-only/plan/full. A
+     *  {@link ProfileTable} answers for tools the host never registered; a predicate cannot. */
+    profiles?: Record<string, ProfileRule>;
+    /** The host's own per-call narrowing — see `ExecPolicy.scopeOf`. */
+    scopeOf?: ExecPolicy["scopeOf"];
   };
   /** Per-session workspace resolver (DESIGN §5.1, "Sessions: the run-scoped resource bundle"): maps a `runtime.session` id to the
    *  workspace that session's tools act within, so fan-out branches can isolate (e.g. per-worktree). Returns
@@ -1721,6 +1725,10 @@ export class WorkflowEngine {
      */
     const smart = this.config.permissions?.smart ?? this.config.services?.policy?.smart;
     const customProfiles = this.config.permissions?.profiles ?? this.config.services?.policy?.profiles;
+    // The host's own per-call narrowing (a path sandbox, a URL allow-list), read off the policy the
+    // same way `smart` and `profiles` are. It composes as a narrowing inside `decideToolCall`, so a
+    // policy that supplies none changes nothing.
+    const scopeOf = this.config.permissions?.scopeOf ?? this.config.services?.policy?.scopeOf;
     const gate = createToolGate({
       ledger: this.permissions,
       sessionId,
@@ -1729,6 +1737,7 @@ export class WorkflowEngine {
       ...(env.permissions !== undefined ? { authored: env.permissions } : {}),
       ...(smart !== undefined ? { smart } : {}),
       ...(customProfiles !== undefined ? { profiles: customProfiles } : {}),
+      ...(scopeOf !== undefined ? { scopeOf } : {}),
     });
 
     if (delegatesPermissions) return { ...(some ? { tools } : {}), gate };
@@ -1754,6 +1763,9 @@ export class WorkflowEngine {
         authoredMode: authoredMode(name),
         smart: smart !== undefined && Object.hasOwn(smart, name) ? smart[name] : undefined,
         profiles: customProfiles,
+        // The SAME narrowing the gate applies — a wrapped tool and a delegated one are two routes to
+        // one decision, and binding only one would be a sandbox with a door in it.
+        scopeOf,
       });
     }
     if (this.permissions.resolveProfile(sessionId) === "plan") {
