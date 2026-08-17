@@ -100,6 +100,55 @@ export const BUILTINS: Readonly<Record<string, Builtin>> = {
   }),
   join: define(["value", "separator"], (v, sep) => arr(v).map(str).join(sep === undefined ? "" : str(sep))),
 
+  // --- aggregates -------------------------------------------------------------
+  //
+  // The arithmetic above computes over two numbers; these compute over a LIST, which is where the
+  // arithmetic a real workflow needs actually lives — a weighted score, a winning candidate, a margin
+  // between two of them.
+  //
+  // Every one that needs to look inside an element takes a KEY NAME rather than an operation, which
+  // is what keeps them in here — pure and synchronous — instead of in the engine's embedded-op
+  // machinery beside `map` and `reduce` (§3.5, which is built).
+  //
+  // So these are not a workaround for a missing feature. What differs is what has to exist on disk:
+  // the op position of `reduce` takes a REFERENCE, so folding a column means authoring a document for
+  // the fold, while `sum(pluck(xs, 'total'))` needs no file at all. For the cases these serve — a
+  // weighted score, a winning row, a margin between two — that is the entire cost, which is why both
+  // spellings earn their place.
+  sum: define(["value"], (v) => arr(v).reduce<number>((t, x) => t + num(x), 0)),
+  /**
+   * Empty averages to 0 rather than to NaN.
+   *
+   * Both are defensible for a mean of nothing; only one is safe here. Every comparison against NaN is
+   * false, so a NaN score would make `score < ask_below` false and a gate would silently resolve on a
+   * measurement that does not exist — the exact failure a confidence score is there to prevent.
+   */
+  avg: define(["value"], (v) => (arr(v).length === 0 ? 0 : arr(v).reduce<number>((t, x) => t + num(x), 0) / arr(v).length)),
+  /** Weighted sum — `dot(weights, signals)`. Pairs past the shorter list are dropped, not zero-filled:
+   *  a weight with no signal is a mistake, and inventing a 0 for it would hide the mistake in a number. */
+  dot: define(["a", "b"], (a, b) => {
+    const xs = arr(a);
+    const ys = arr(b);
+    let total = 0;
+    for (let i = 0; i < Math.min(xs.length, ys.length); i++) total += num(xs[i]) * num(ys[i]);
+    return total;
+  }),
+  /** One property across every element — `map(xs, x => x[key])` without needing a function value. */
+  pluck: define(["value", "key"], (v, k) => arr(v).map((x) => obj(x)[str(k)])),
+  any: define(["value"], (v) => arr(v).some(Boolean)),
+  all: define(["value"], (v) => arr(v).every(Boolean)),
+  /** `undefined` for an empty list, exactly as `first` does — there is no maximum of nothing. */
+  maxBy: define(["value", "key"], (v, k) =>
+    arr(v).reduce<unknown>((best, x) => (best === undefined || num(obj(x)[str(k)]) > num(obj(best)[str(k)]) ? x : best), undefined),
+  ),
+  minBy: define(["value", "key"], (v, k) =>
+    arr(v).reduce<unknown>((best, x) => (best === undefined || num(obj(x)[str(k)]) < num(obj(best)[str(k)]) ? x : best), undefined),
+  ),
+  /** Ascending, by the same stable `compare` `sort` uses — so `at(sortBy(xs, 'total'), -1)` is `maxBy`. */
+  sortBy: define(["value", "key"], (v, k) => [...arr(v)].sort((a, b) => compare(obj(a)[str(k)], obj(b)[str(k)]))),
+  /** The first element whose `key` equals `value`, by the same deep comparison `contains` uses. */
+  find: define(["value", "key", "match"], (v, k, m) => arr(v).find((x) => same(obj(x)[str(k)], m))),
+
   // --- strings ----------------------------------------------------------------
   concat: define(["a", "b"], (a, b) => (Array.isArray(a) || Array.isArray(b) ? [...arr(a), ...arr(b)] : str(a) + str(b))),
   split: define(["value", "separator"], (v, sep) => str(v).split(sep === undefined ? "" : str(sep))),

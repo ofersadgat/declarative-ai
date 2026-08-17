@@ -15,6 +15,7 @@
  * type, not the only source of typing.
  */
 import type { InlineFamily, JsonSchema, JsonValue, Ref } from "@declarative-ai/exec";
+import { BUILTIN_PARAMS } from "./builtins.js";
 import { pathOf, selfPathOf, type Expr } from "./expr.js";
 import { RESOLVER_REFS } from "./format.js";
 import { pathOfRef } from "./lowerExpr.js";
@@ -153,8 +154,15 @@ function inferOne(ref: Ref<InlineFamily>, scope: ExprScope, unresolved: string[]
     case RESOLVER_REFS.cond:
       operand("test");
       return joinSchemas(operand("then"), operand("else"));
-    default:
-      return ANY_SCHEMA;
+    default: {
+      // A BUILT-IN, reached by its own name — `add`, `pluck`, `maxBy`. Its arguments are bound to the
+      // ordered parameter names §3.3 gives it, so reading them back is the same positional mapping the
+      // lowering used, in reverse. Anything else is an operation document whose declared output is not
+      // in this scope: unknown rather than wrong.
+      const params = BUILTIN_PARAMS[producer.functionRef];
+      if (params === undefined) return ANY_SCHEMA;
+      return builtinResult(producer.functionRef, params.map(operand)) ?? ANY_SCHEMA;
+    }
   }
 }
 
@@ -217,9 +225,93 @@ function infer(expr: Expr, scope: ExprScope, unresolved: string[][]): JsonSchema
         case RESOLVER_REFS.ge:
           return BOOLEAN; // every built-in comparison is one
         default:
-          return ANY_SCHEMA;
+          // A built-in by name, typed from the same table the lowered walk reads — one table, so the
+          // two paths cannot drift. Anything else is a document reference, unknown until the loader
+          // has resolved it.
+          return builtinResult(expr.op, args) ?? ANY_SCHEMA;
       }
     }
+  }
+}
+
+/** An array schema's element type, or the universal schema when it declares none. */
+function itemsOf(s: JsonSchema): JsonSchema {
+  const items = s.items;
+  return items !== null && typeof items === "object" && !Array.isArray(items) ? (items as JsonSchema) : ANY_SCHEMA;
+}
+
+const arrayOf = (items: JsonSchema): JsonSchema => ({ type: "array", items: items as JsonValue });
+
+/** The literal string a schema pins down, for the built-ins that take a KEY NAME as an argument. */
+function constStringOf(s: JsonSchema): string | undefined {
+  const v = "const" in s ? s.const : undefined;
+  return typeof v === "string" ? v : undefined;
+}
+
+/**
+ * The result type of a built-in (§3), given its ARGUMENT types. `undefined` = not a built-in.
+ *
+ * One table, read by both inference paths — the AST walk and the lowered-tree walk. They used to
+ * agree by having nothing to disagree about: every built-in fell through to the universal schema, so
+ * `append(xs, 'a')` bound into an `array of string` slot failed as "producer declares none" and the
+ * only way to author it was to drop the consumer's schema. Typing them here is what lets an
+ * expression-valued output keep a declared type, which is most of what the lint is for.
+ *
+ * Precision where it is free and honest: `slice` preserves whichever of string-or-array it was given,
+ * `first`/`maxBy`/`find` return the ELEMENT type of their argument, and `pluck` projects the named key
+ * off that element when the key is a literal — which is what makes `sum(pluck(scores, 'total'))` check
+ * end to end instead of degrading to any at the first hop.
+ */
+export function builtinResult(name: string, args: readonly JsonSchema[]): JsonSchema | undefined {
+  const a = args[0] ?? ANY_SCHEMA;
+  const b = args[1] ?? ANY_SCHEMA;
+  switch (name) {
+    case "add": case "sub": case "mul": case "div": case "mod":
+    case "min": case "max": case "abs":
+    case "sum": case "avg": case "dot":
+      return NUMBER;
+    case "round": case "floor": case "ceil": case "len":
+      return INTEGER;
+    case "isEmpty": case "startsWith": case "endsWith": case "contains":
+    case "isArray": case "isNull": case "any": case "all":
+      return BOOLEAN;
+    case "trim": case "lower": case "upper": case "replace":
+    case "join": case "to_json": case "typeof":
+      return STRING;
+    case "split": case "keys":
+      return arrayOf(STRING);
+    case "range":
+      return arrayOf(INTEGER);
+    case "values":
+      return arrayOf(ANY_SCHEMA);
+    case "entries":
+      return arrayOf(arrayOf(ANY_SCHEMA));
+    case "merge": case "pick": case "omit": case "fromEntries":
+      return { type: "object" };
+    case "reverse": case "sort": case "unique": case "sortBy":
+      return a.type === "array" ? a : arrayOf(ANY_SCHEMA);
+    case "slice":
+      return a.type === "string" ? STRING : a.type === "array" ? a : ANY_SCHEMA;
+    case "append":
+      return arrayOf(joinSchemas(itemsOf(a), b));
+    case "concat":
+      // Array when either side is one, string otherwise — the implementation's own rule, restated.
+      return a.type === "array" || b.type === "array" ? arrayOf(joinSchemas(itemsOf(a), itemsOf(b))) : STRING;
+    case "first": case "last": case "at": case "find": case "maxBy": case "minBy":
+      return itemsOf(a);
+    case "pluck": {
+      const key = constStringOf(b);
+      const projected = key === undefined ? undefined : projectProperty(itemsOf(a), key);
+      return arrayOf(projected ?? ANY_SCHEMA);
+    }
+    case "coalesce":
+      return joinSchemas(a, b);
+    // Honestly unknown rather than absent: a dynamic key and a parsed document have no static type,
+    // and saying so is different from not having an opinion.
+    case "get": case "parse_json":
+      return ANY_SCHEMA;
+    default:
+      return undefined;
   }
 }
 

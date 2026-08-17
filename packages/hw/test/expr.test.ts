@@ -171,10 +171,12 @@ describe("calls", () => {
     expect(callOf("$/lib/ops.review(a)").op).toBe("$/lib/ops.review");
   });
 
-  it("refuses a rooted path that is not called, and a stray separator", () => {
+  it("refuses a rooted path that is not called", () => {
     // Reading DATA uses the leading-dot runtime form; a file path is only ever an operation.
     expect(() => parseExpression("$JAIRA/prompts/customPrompt")).toThrow(/only meaningful called/);
-    expect(() => parseExpression("1 / 2")).toThrow(/only meaningful inside an operation reference/);
+    // `1 / 2` used to be a stray separator, because `/` could only be one. It is division now — see
+    // the arithmetic block. What decides is whether a NAME sits to the left of the slash.
+    expect(parseExpression("1 / 2")).toMatchObject({ type: "apply", op: "div" });
   });
 
   it("refuses to call something that is not a name", () => {
@@ -223,9 +225,76 @@ describe("calls", () => {
   });
 });
 
+describe("arithmetic", () => {
+  it("is sugar for the built-ins, not a node of its own", () => {
+    expect(parseExpression("a + b")).toMatchObject({ type: "apply", op: "add" });
+    expect(parseExpression("a - b")).toMatchObject({ type: "apply", op: "sub" });
+    expect(parseExpression("a * b")).toMatchObject({ type: "apply", op: "mul" });
+    expect(parseExpression(".a / .b")).toMatchObject({ type: "apply", op: "div" });
+  });
+
+  it("binds tighter than comparison and looser than member access", () => {
+    expect(ev("1 + 2 * 3", {})).toBe(7);
+    expect(ev("(1 + 2) * 3", {})).toBe(9);
+    expect(ev("1 + 2 < 4", {})).toBe(true);
+    expect(ev(".n.v * 2", { n: { v: 4 } })).toBe(8);
+  });
+
+  it("keeps a leading minus a SIGN where no value precedes it", () => {
+    // The case the sign rule exists for: indexing from the end.
+    expect(ev("at(.xs, -1)", { xs: [1, 2, 3] })).toBe(3);
+    expect(ev(".xs[-1]", { xs: [1, 2, 3] })).toBe(3);
+    expect(ev("-2 + 5", {})).toBe(3);
+    // …and a subtraction where one does.
+    expect(ev(".n - 1", { n: 10 })).toBe(9);
+    expect(ev(".n -1", { n: 10 })).toBe(9);
+    expect(ev("(4) - 1", {})).toBe(3);
+  });
+
+  it("negates in prefix position", () => {
+    expect(ev("-.n", { n: 4 })).toBe(-4);
+  });
+
+  /**
+   * `/` is both the reference separator and division, and what decides is whether a NAME sits to its
+   * left. A bare dotted path is a document; everything else is a value.
+   */
+  it("divides where the left side cannot be a reference", () => {
+    expect(ev(".total / 2", { total: 9 })).toBe(4.5);
+    expect(ev("len(.xs) / 2", { xs: [1, 2, 3, 4] })).toBe(2);
+    expect(ev("6 / 3", {})).toBe(2);
+    // …and stays a reference where it can be.
+    expect(parseExpression("$/functions/classify(.x)")).toMatchObject({ type: "apply", op: "$/functions/classify" });
+    expect(parseExpression("lib/review(.x)")).toMatchObject({ type: "apply", op: "lib/review" });
+  });
+
+  it("aggregates over a list", () => {
+    const ctx = { scores: [{ total: 3 }, { total: 9 }, { total: 5 }], w: [0.5, 0.5], s: [4, 8] };
+    expect(ev("sum(pluck(.scores, 'total'))", ctx)).toBe(17);
+    expect(ev("avg(pluck(.scores, 'total'))", ctx)).toBeCloseTo(17 / 3);
+    expect(ev("maxBy(.scores, 'total').total", ctx)).toBe(9);
+    expect(ev("minBy(.scores, 'total').total", ctx)).toBe(3);
+    expect(ev("at(sortBy(.scores, 'total'), -1).total", ctx)).toBe(9);
+    expect(ev("find(.scores, 'total', 5).total", ctx)).toBe(5);
+    expect(ev("dot(.w, .s)", ctx)).toBe(6);
+    expect(ev("all(.flags)", { flags: [true, true] })).toBe(true);
+    expect(ev("any(.flags)", { flags: [false, false] })).toBe(false);
+    // Empty averages to 0 rather than NaN: every comparison against NaN is false, which would make a
+    // score guard silently pass.
+    expect(ev("avg(.none)", { none: [] })).toBe(0);
+  });
+
+  it("reads a key an identifier cannot spell", () => {
+    expect(ev('.cfg."claude-cli"', { cfg: { "claude-cli": 7 } })).toBe(7);
+    expect(ev(".cfg.'a.b'", { cfg: { "a.b": 1 } })).toBe(1);
+    expect(parseExpression('.cfg."claude-cli"')).toMatchObject({ type: "member", prop: "claude-cli" });
+  });
+});
+
 describe("purity — rejected constructs", () => {
-  // `a[0]` left this list when bracket indexing became sugar for `at` — see the calls block above.
-  const bad = ["a = 1", "a + b", "a - b", "a * b", "new X", "a; b", "() => 1", "a?.b", "`t`"];
+  // `a[0]` left this list when bracket indexing became sugar for `at`, and `a + b` / `a - b` /
+  // `a * b` left it when arithmetic became sugar for `add` / `sub` / `mul` — see the block above.
+  const bad = ["a = 1", "new X", "a; b", "() => 1", "a?.b", "`t`"];
   for (const src of bad) {
     it(`rejects: ${src}`, () => {
       expect(() => parseExpression(src)).toThrow(ExprError);

@@ -17,7 +17,7 @@
  *    wiring that evaluates to PENDING waits.
  */
 
-import { BUILTIN_PARAMS } from "./builtins.js";
+import { BUILTIN_PARAMS, BUILTINS } from "./builtins.js";
 import { RESOLVER_REFS } from "./format.js";
 
 /** The pending sentinel — placed in the evaluation context at unresolved async-child
@@ -153,9 +153,27 @@ const OPERATION_ALIASES: Readonly<Record<string, string>> = {
   messages: RESOLVER_REFS.conversation,
 };
 
-const PUNCT = ["===", "!==", "==", "!=", "<=", ">=", "&&", "||", "<", ">", "!", "?", ":", "(", ")", "[", "]", ".", ",", "/"];
+const PUNCT = ["===", "!==", "==", "!=", "<=", ">=", "&&", "||", "<", ">", "!", "?", ":", "(", ")", "[", "]", ".", ",", "/", "*", "+", "-"];
 const IDENT_START = /[A-Za-z_$]/;
 const IDENT_PART = /[A-Za-z0-9_$]/;
+
+/**
+ * Arithmetic syntax → the BUILT-IN it is sugar for.
+ *
+ * Deliberately not `BINARY_OPS`: those map onto resolver operators, and these map onto ordinary
+ * entries of the built-in library (§3). That is the whole reason arithmetic syntax costs so little —
+ * `a + b` parses to exactly the AST `add(a, b)` parses to, so lowering, inference, fan-out planning,
+ * the static analysis and the interpreter each need no case of their own. Syntax is sugar; the
+ * operation is the meaning.
+ */
+const ARITHMETIC_OPS: Readonly<Record<string, string>> = { "+": "add", "-": "sub", "*": "mul", "/": "div" };
+
+/** Token kinds that END a value, so a following `-` is a subtraction rather than a sign. */
+function endsValue(t: Token | undefined): boolean {
+  if (t === undefined) return false;
+  if (t.kind === "num" || t.kind === "str" || t.kind === "ident") return true;
+  return t.kind === "punct" && (t.value === ")" || t.value === "]");
+}
 
 function lex(src: string): Token[] {
   const out: Token[] = [];
@@ -187,10 +205,12 @@ function lex(src: string): Token[] {
       out.push({ kind: "str", value: s, pos });
       continue;
     }
-    // A leading `-` is part of the NUMBER, not an operator: this language has no arithmetic syntax,
-    // so `-` can only ever be a sign. Without it a negative literal had no spelling at all — `at(xs,
-    // -1)`, the natural way to index from the end, was a lex error.
-    const negative = c === "-" && src[i + 1] !== undefined && src[i + 1]! >= "0" && src[i + 1]! <= "9";
+    // `-` is a SIGN or a SUBTRACTION, and only the token before it can tell you which. After a value
+    // — a number, a name, a closing bracket — it is arithmetic; anywhere else it belongs to the
+    // number that follows. That is JavaScript's own rule, and it is what keeps `at(xs, -1)` reading
+    // as an index from the end while `.inputs.n - 1` reads as subtraction.
+    const negative =
+      c === "-" && !endsValue(out[out.length - 1]) && src[i + 1] !== undefined && src[i + 1]! >= "0" && src[i + 1]! <= "9";
     if (negative || (c >= "0" && c <= "9")) {
       const pos = i;
       let j = negative ? i + 1 : i;
@@ -302,12 +322,34 @@ class Parser {
   }
 
   private relational(): Expr {
-    let left = this.unary();
+    let left = this.additive();
     for (;;) {
       const t = this.peek();
       if (t.kind === "punct" && (t.value === "<" || t.value === "<=" || t.value === ">" || t.value === ">=")) {
         this.next();
-        left = { type: "apply", op: BINARY_OPS[t.value]!, args: [left, this.unary()] };
+        left = { type: "apply", op: BINARY_OPS[t.value]!, args: [left, this.additive()] };
+      } else return left;
+    }
+  }
+
+  private additive(): Expr {
+    let left = this.multiplicative();
+    for (;;) {
+      const t = this.peek();
+      if (t.kind === "punct" && (t.value === "+" || t.value === "-")) {
+        this.next();
+        left = { type: "apply", op: ARITHMETIC_OPS[t.value]!, args: [left, this.multiplicative()] };
+      } else return left;
+    }
+  }
+
+  private multiplicative(): Expr {
+    let left = this.unary();
+    for (;;) {
+      const t = this.peek();
+      if (t.kind === "punct" && (t.value === "*" || t.value === "/")) {
+        this.next();
+        left = { type: "apply", op: ARITHMETIC_OPS[t.value]!, args: [left, this.unary()] };
       } else return left;
     }
   }
@@ -317,6 +359,12 @@ class Parser {
       const t = this.next();
       void t;
       return { type: "apply", op: RESOLVER_REFS.not, args: [this.unary()] };
+    }
+    // Prefix minus, as `0 - x`. Only reachable in prefix position — after a value the lexer has
+    // already handed `-` to `additive` — so this is negation and never a stray subtraction.
+    if (this.atPunct("-")) {
+      this.next();
+      return { type: "apply", op: "sub", args: [{ type: "lit", value: 0 }, this.unary()] };
     }
     return this.member();
   }
@@ -332,22 +380,32 @@ class Parser {
   private member(): Expr {
     let e = this.primary();
     // A callee may be a full REFERENCE — `$JAIRA/prompts/review(…)`, `$/functions/classify(…)` — so
-    // once a `/` appears the accumulated name is built as reference TEXT rather than as member
-    // access. `/` is unambiguous here because the language has no arithmetic: it cannot be division.
+    // once a `/` appears the accumulated name is built as reference TEXT rather than as member access.
+    //
+    // `/` is now BOTH that separator and division, and what decides is whether there is a NAME to its
+    // left. A bare dotted path is a document, and dividing documents means nothing; anything else —
+    // a leading-dot data read, a call's result, a literal, a parenthesised expression — cannot be part
+    // of a reference, so a `/` after one is arithmetic and this loop hands it back to
+    // `multiplicative`. The cost is that two bare names cannot be divided: `foo / bar` is the
+    // reference `foo/bar`. That is the right way round, since a bare name is never a number.
     let reference: string | undefined;
     for (;;) {
       if (this.atPunct(".")) {
         this.next();
         const t = this.next();
-        if (t.kind !== "ident") throw new ExprError("expected property name after '.'", t.pos);
-        if (reference !== undefined) reference += `.${t.value}`;
-        else e = { type: "member", obj: e, prop: t.value };
+        // A QUOTED segment carries any key a JSON document can hold — `claude-cli`, `a.b`, one with a
+        // space. Identifiers cannot: `-` is subtraction now, and `.` is this very operator. Without
+        // the quoted form those keys were reachable only through `get(o, 'k')`, which is the same
+        // read written so it cannot be chained.
+        if (t.kind !== "ident" && t.kind !== "str") throw new ExprError("expected property name after '.'", t.pos);
+        const name = String(t.value);
+        if (reference !== undefined) reference += `.${name}`;
+        else e = { type: "member", obj: e, prop: name };
         continue;
       }
       if (this.atPunct("/")) {
-        const at = this.peek().pos;
         const base = reference ?? pathOf(e)?.join(".");
-        if (base === undefined) throw new ExprError("'/' is only meaningful inside an operation reference", at);
+        if (base === undefined) return e; // division — see the note above
         this.next();
         const t = this.next();
         if (t.kind !== "ident") throw new ExprError("expected a path segment after '/'", t.pos);
@@ -579,6 +637,31 @@ function applyOperator(expr: Expr & { type: "apply" }, context: Record<string, u
       return t ? arg(1) : arg(2);
     }
     default: {
+      // A BUILT-IN is pure, total and non-mutating by contract (§3), which is exactly what this
+      // interpreter needs: no callee to resolve, no filesystem, no scope beyond its arguments. The
+      // refusal below is for a DOCUMENT reference — `classify(x)` — which has all three and genuinely
+      // cannot run from here.
+      //
+      // Without this the reference semantics did not cover the language it is the reference for:
+      // `xs[-1]` is sugar for `at(xs, -1)`, so bracket indexing could be parsed and lowered but not
+      // interpreted, and arithmetic would have arrived with the same hole.
+      const builtin = BUILTINS[expr.op];
+      if (builtin !== undefined) {
+        // Strict in every argument, unlike the three lazy forms above: PENDING anywhere makes the
+        // whole application PENDING rather than reaching an implementation that would read it as a
+        // value.
+        const values: unknown[] = [];
+        for (let i = 0; i < expr.args.length; i++) {
+          const v = arg(i);
+          if (isPending(v)) return PENDING;
+          values.push(v);
+        }
+        const named: Record<string, unknown> = {};
+        builtin.params.forEach((p, i) => {
+          named[p] = values[i];
+        });
+        return builtin.fn(named) as ExprValue;
+      }
       const op = BINARY_FOR_NAME[expr.op];
       if (op === undefined) {
         throw new ExprError(`'${expr.op}' is an operation, which only the lowered form can run`, 0);

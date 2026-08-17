@@ -2761,8 +2761,16 @@ The grammar **does** have calls: `classify(x)` applies an operation resolved as 
 may be a function op or a prompt op, and the built-in operation library (arithmetic, arrays, strings,
 objects, `map`/`filter`/`flatMap`/`reduce`) are ordinary entries in the same resolver set. There is
 still no assignment, no loops, no imports and no I/O; a call's effect is dispatched by the engine and
-memoized by the resolved operation's content hash. What the language cannot do is arithmetic by
-SYNTAX — there is no `+`/`-`/`*`/`/`, which is what makes `/` unambiguous in a callee path.
+memoized by the resolved operation's content hash.
+
+Arithmetic has SYNTAX too now — `+` `-` `*` `/`, standard precedence — and it is pure sugar: `a + b`
+parses to the same node `add(a, b)` does, so the lowering, the inference, the fan-out planner and the
+static analysis each need no case for it. Two disambiguations carry it. A `-` is a SIGN where no
+value precedes it and a subtraction where one does, which keeps `at(xs, -1)` reading as an index from
+the end. And `/` is the callee-path separator where a NAME sits to its left, division everywhere
+else — so `$/lib/classify(x)` is a reference and `.total / 2` is arithmetic, at the cost that two
+bare names cannot be divided. A bare name is a document and never a number, so that is the right way
+round.
 
 `referencesOf` (AST) and `referencePathsOf` (tree) power the dataflow join — waiting on the inputs an
 expression reads, a call's arguments included.
