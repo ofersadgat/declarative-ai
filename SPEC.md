@@ -871,6 +871,18 @@ subtyping (object width honoring `additionalProperties: false`, `required` cover
 `number`, `enum`/`const` ⊆) and **conservative** otherwise: an unmodeled keyword or a union
 rejects with a precise reason rather than passing silently.
 
+**An output's schema is optional, and an undeclared one is INFERRED from its binding.** A declared
+schema constrains twice — the binding filling the slot is checked against it, and so is every
+consumer reading it. Declaring none must not therefore mean "the top type": a schema every value
+satisfies is one no typed consumer accepts, so an undeclared output would be unwirable into
+anything typed, and the error would be reported against the parent, about a slot the parent did not
+write — making the declaration mandatory wherever the value was actually used. So an output with a
+binding and no schema takes the producer type of that binding, computed by the same rule as above,
+in the declaring state's own scope. An output with NO binding is filled by the operation, whose
+result is not statically typed, and stays unconstrained — genuinely unknown rather than merely
+undeclared. Inference is cut off at a state already being inferred, so a child that mounts an
+ancestor terminates rather than looping.
+
 **Expression typing.** Every `when` guard and every `{ "expr": … }` leaf is type-inferred against
 the namespaces of §6.1: member access projects property schemas, comparison and `!` yield boolean,
 `&&`/`||` and `?:` yield the join of their branches, and a literal infers to its exact value — so

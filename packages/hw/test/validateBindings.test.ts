@@ -131,3 +131,96 @@ describe("what a producer edge may name (§7.4)", () => {
     expect(messages(withBinding({ expr: ".inputs.seed" }), "root")).toBe("");
   });
 });
+
+/**
+ * An output's `schema` is a CONSTRAINT, and declaring one is optional (SPEC §6.2).
+ *
+ * The half that was missing: an undeclared one used to mean the top type, which no typed consumer
+ * accepts — so leaving it off made the state unwirable into anything typed, and the complaint
+ * landed on the PARENT, about a slot the parent did not write. Optional in name only.
+ */
+describe("an untyped output adopts the type of what fills it (§6.2)", () => {
+  const wiring = (helperOutput: unknown, seed: JsonSchema = { type: "string" }): Record<string, StateDef> => ({
+    root: {
+      label: "Root",
+      inputs: { seed: { schema: seed } },
+      outputs: { answer: { schema: { type: "string" }, binding: ".children.helper.outputs.result" } },
+      children: { helper: { state: "root/helper", inputs: { seed: ".inputs.seed" } } },
+      sequence: ["helper"],
+    } as StateDef,
+    "root/helper": {
+      label: "Helper",
+      inputs: { seed: { schema: seed } },
+      outputs: { result: helperOutput as never },
+    } as StateDef,
+  });
+
+  it("takes the binding's type, so a typed consumer accepts it", () => {
+    expect(messages(wiring({ binding: ".inputs.seed" }), "root")).toBe("");
+  });
+
+  it("takes it precisely enough to be REJECTED when it does not fit", () => {
+    // The point of inferring rather than shrugging: undeclared is not unchecked. The consumer wants
+    // a string and the child hands out whatever its own `seed` is.
+    expect(messages(wiring({ binding: ".inputs.seed" }, { type: "number" }), "root")).toMatch(
+      /producer type 'number' not allowed by consumer string/,
+    );
+  });
+
+  it("still honours a DECLARED schema over the binding's own type", () => {
+    expect(messages(wiring({ schema: { type: "number" }, binding: ".inputs.seed" }), "root")).toMatch(
+      /producer type 'number' not allowed by consumer string/,
+    );
+  });
+
+  it("leaves an output with no binding unconstrained — the operation fills it, and untyped", () => {
+    // Nothing is connected, so there is nothing to adopt. Unknown, rather than merely undeclared.
+    expect(messages(wiring({}), "root")).toMatch(/consumer requires type string but producer declares none/);
+  });
+
+  it("terminates when a child mounts its own ancestor", () => {
+    // Inference needs the declaring state's scope, and a scope names its children's outputs. A cycle
+    // in the mount graph would otherwise recurse forever; the state already being inferred
+    // contributes nothing instead.
+    const cyclic: Record<string, StateDef> = {
+      root: {
+        label: "Root",
+        inputs: { seed: { schema: { type: "string" } } },
+        outputs: { answer: { binding: ".children.loop.outputs.back" } },
+        children: { loop: { state: "root/loop", inputs: { seed: ".inputs.seed" } } },
+        sequence: ["loop"],
+      } as StateDef,
+      "root/loop": {
+        label: "Loop",
+        inputs: { seed: { schema: { type: "string" } } },
+        outputs: { back: { binding: ".children.again.outputs.answer" } },
+        children: { again: { state: "root", inputs: { seed: ".inputs.seed" } } },
+        sequence: ["again"],
+      } as StateDef,
+    };
+    expect(() => messages(cyclic, "root")).not.toThrow();
+  });
+});
+
+describe("an untyped output is adopted by its OWN state's readers too (§6.2)", () => {
+  /** A second output deriving from a first — the documented pattern, and a consumer like any other. */
+  const files = (first: unknown): Record<string, StateDef> => ({
+    root: {
+      label: "Root",
+      inputs: { seed: { schema: { type: "string" } } },
+      outputs: {
+        first: first as never,
+        second: { schema: { type: "string" }, binding: ".outputs.first" },
+      },
+      operation: { kind: "prompt", model: "m", prompt: "go" },
+    } as StateDef,
+  });
+
+  it("types `.outputs.<name>` from what the first output is bound to", () => {
+    expect(messages(files({ binding: ".inputs.seed" }), "root")).toBe("");
+  });
+
+  it("and rejects it when the adopted type does not fit", () => {
+    expect(messages(files({ binding: { json: 3 } }), "root")).toMatch(/not allowed by consumer string/);
+  });
+});

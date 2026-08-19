@@ -20,7 +20,7 @@
  *     to its evaluation point is an error; a declared `default` is the explicit opt-out. So
  *     `T | undefined` never propagates silently.
  */
-import type { FunctionCapabilities, InlineFamily, JsonSchema, JsonValue, Operation, Parameter, Ref, RefKind, RefTree } from "@declarative-ai/exec";
+import type { FunctionCapabilities, InlineFamily, JsonSchema, JsonValue, NamedParameter, Operation, Parameter, Ref, RefKind, RefTree } from "@declarative-ai/exec";
 import { checkBinding as checkBindingGeneric, isSubschema, producerSchemaOf, type CheckerHooks, type CheckIssue, type Schema } from "@declarative-ai/validate";
 import { parseExpression, referencesOf, type Expr } from "./expr.js";
 import { EXPRESSION_REFS, pathOfRef, referencePathsOf } from "./lowerExpr.js";
@@ -504,6 +504,8 @@ function hooksFor(
   reachable: Reachability,
   errors: ValidationIssue[],
   optOut: boolean,
+  /** States whose outputs are already being inferred — see {@link outputsObjectSchema}. */
+  seen?: ReadonlySet<string>,
 ): CheckerHooks<InlineFamily> {
   const hooks: CheckerHooks<InlineFamily> = {
     /** A producer named by a LOCAL KEY is a declared child — the inline family's analog of an op id.
@@ -514,7 +516,7 @@ function hooksFor(
       const child = def.children?.[ref];
       if (!child) return undefined;
       const childState = bundle.states[child.state];
-      const schema = childState ? outputsObjectSchema(childState) : undefined;
+      const schema = childState ? outputsObjectSchema(childState, bundle, seen ?? EMPTY_STATE_SET) : undefined;
       return {
         kind: "function",
         functionRef: ref,
@@ -523,7 +525,8 @@ function hooksFor(
       };
     },
     reachable: (ref) => (typeof ref === "string" ? reachable.always.has(ref) : true),
-    producerSchema: (op, path, report) => resolverSchema(op, path, stateId, def, bundle, scope, reachable, errors, optOut, report),
+    producerSchema: (op, path, report) =>
+      resolverSchema(op, path, stateId, def, bundle, scope, reachable, errors, optOut, report, seen),
   };
   return hooks;
 }
@@ -664,6 +667,8 @@ function resolverSchema(
   errors: ValidationIssue[],
   optOut: boolean,
   err: (message: string) => void,
+  /** States whose outputs are already being inferred — see {@link outputsObjectSchema}. */
+  seen?: ReadonlySet<string>,
 ): JsonSchema | undefined {
   if (op.kind !== "function") return undefined;
 
@@ -707,7 +712,17 @@ function resolverSchema(
       // unproven reachability edge) are THIS binding's issues, so they are forwarded, never swallowed.
       const inner: CheckIssue[] = [];
       const base = value?.binding
-        ? producerSchemaOf(value.binding, hooksFor(stateId, def, bundle, scope, reachable, errors, optOut), path, inner, optOut, value.kind)
+        ? producerSchemaOf(
+            value.binding,
+            // `seen` rides along: this recursion is how a `{ child, output }` selection reaches the
+            // child's outputs, and dropping it here restarted the inference stack from empty — which
+            // is an unbounded loop the moment a child mounts one of its own ancestors.
+            hooksFor(stateId, def, bundle, scope, reachable, errors, optOut, seen),
+            path,
+            inner,
+            optOut,
+            value.kind,
+          )
         : undefined;
       for (const issue of inner) err(issue.message);
       if (base === undefined || key === undefined) return undefined;
@@ -780,19 +795,70 @@ function schemaOfValue(v: JsonValue): JsonSchema {
   }
 }
 
-/** A state's declared outputs as one object schema — what a producer edge on it emits. */
-function outputsObjectSchema(state: LoadedState): JsonSchema | undefined {
+/**
+ * A state's declared outputs as one object schema — what a producer edge on it emits.
+ *
+ * ## An output's type is OPTIONAL, and an untyped one takes the type of what fills it
+ *
+ * A declared `schema` is a CONSTRAINT: the binding filling the slot is checked against it, and a
+ * consumer of the slot is checked against it in turn. Declaring none is a legitimate thing to do
+ * — most outputs are a value passed straight out of a child, and restating its type is a second
+ * place to keep in step with the first.
+ *
+ * What an undeclared one must NOT mean is "the top type". `{}` is a schema every value satisfies
+ * and no typed consumer accepts, so a state that left one output undeclared could not be wired
+ * into anything typed: "consumer requires type string but producer declares none", reported
+ * against the parent, about a slot the parent did not write. That is the opposite of optional —
+ * it made the declaration mandatory wherever the value was actually used.
+ *
+ * So an untyped output is INFERRED from its binding, in the state's own scope: `.inputs.seed` on a
+ * state whose `seed` is a string makes the output a string, and the parent's typed slot accepts it.
+ * A slot with no binding at all is filled by the operation, whose result is not statically typed,
+ * and stays `{}` — genuinely unknown rather than merely undeclared.
+ *
+ * `seen` guards the recursion. Inferring needs the state's scope, the scope names its children's
+ * outputs, and a child may mount an ancestor; a state already on the stack contributes `{}` rather
+ * than looping.
+ */
+function outputsObjectSchema(
+  state: LoadedState,
+  bundle: WorkflowBundle,
+  seen: ReadonlySet<string> = EMPTY_STATE_SET,
+): JsonSchema | undefined {
   const outputs = state.outputs;
   if (!outputs || Object.keys(outputs).length === 0) return undefined;
   const properties: Record<string, JsonValue> = {};
   const required: string[] = [];
+  // Built once, and only when something actually needs it: typing a binding costs a whole scope and
+  // a hook set, and most states declare every output they have.
+  let typing: { hooks: CheckerHooks<InlineFamily> } | undefined;
+  const inferred = (slot: NamedParameter<InlineFamily>): JsonValue => {
+    // No binding ⇒ the OPERATION fills this slot, and its result is not statically typed. `{}` there
+    // is honest: unknown, not merely undeclared.
+    if (slot.binding === undefined || seen.has(state.id)) return {} as JsonValue;
+    if (typing === undefined) {
+      const inner = new Set([...seen, state.id]);
+      // A throwaway error sink and `optOut`: this is a TYPE query, not a validation pass. Whatever is
+      // wrong with the binding is reported where the binding itself is checked, against the state
+      // that wrote it — surfacing it a second time here would name it against every consumer.
+      const discarded: ValidationIssue[] = [];
+      const scope = exprScopeOf(state, bundle, inner);
+      typing = { hooks: hooksFor(state.id, state, bundle, scope, reachabilityOf(state), discarded, true, inner) };
+    }
+    // The same function the binding CHECK computes its producer type with, so an inferred output and
+    // a declared one are decided by one rule rather than two that can drift.
+    return (producerSchemaOf(slot.binding, typing.hooks, "", [], true, slot.kind) ?? {}) as JsonValue;
+  };
   for (const [name, slot] of Object.entries(outputs)) {
-    properties[name] = (slot.schema ?? {}) as JsonValue;
+    properties[name] = slot.schema === undefined ? inferred(slot) : (slot.schema as JsonValue);
     const meta = state.slotMeta?.[`outputs.${name}`];
     if (meta?.optional !== true && meta?.default === undefined) required.push(name);
   }
   return { type: "object", properties, ...(required.length > 0 ? { required } : {}) };
 }
+
+/** The empty stack {@link outputsObjectSchema} starts from — a constant, so it is not reallocated. */
+const EMPTY_STATE_SET: ReadonlySet<string> = new Set<string>();
 
 // --- Reachability analysis (§7.2) ---------------------------------------------
 
@@ -906,8 +972,14 @@ function outputDeclOf(def: LoadedState): { name: string; kind?: string; schema?:
   };
 }
 
-/** Build the typed namespace map an expression is inferred against (§7.2/§7.5). */
-function exprScopeOf(def: LoadedState, bundle: WorkflowBundle): ExprScope {
+/**
+ * Build the typed namespace map an expression is inferred against (§7.2/§7.5).
+ *
+ * `seen` is the chain of states whose outputs are already being inferred — see
+ * {@link outputsObjectSchema}. It is threaded rather than reset because the recursion runs through
+ * here: a child's untyped output is inferred in the CHILD's scope, which names its own children.
+ */
+function exprScopeOf(def: LoadedState, bundle: WorkflowBundle, seen: ReadonlySet<string> = EMPTY_STATE_SET): ExprScope {
   const objectOf = (slots: Record<string, { schema?: JsonSchema }> | undefined): JsonSchema => {
     const properties: Record<string, JsonValue> = {};
     for (const [name, slot] of Object.entries(slots ?? {})) properties[name] = (slot.schema ?? {}) as JsonValue;
@@ -920,7 +992,7 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle): ExprScope {
   const outcomeSchema: JsonValue = { type: "string", enum: [...TERMINATE_OUTCOMES] };
   for (const [key, child] of Object.entries(def.children ?? {})) {
     const childState = bundle.states[child.state];
-    const outputs = childState ? (outputsObjectSchema(childState) ?? ANY_SCHEMA) : ANY_SCHEMA;
+    const outputs = childState ? (outputsObjectSchema(childState, bundle, seen) ?? ANY_SCHEMA) : ANY_SCHEMA;
     // A child's own operation node, typed by ITS operation's kind — so
     // `children.plan.operation.output.session` is checked against what `plan` actually runs, and
     // pointing it at a `ui` gate is a load-time error rather than a runtime undefined.
@@ -945,7 +1017,10 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle): ExprScope {
 
   return {
     inputs: objectOf(def.inputs),
-    outputs: objectOf(def.outputs),
+    // The state's OWN outputs, through the same reader a CHILD's go through — so an output that
+    // adopts its binding's type adopts it for `.outputs.<name>` here as well. A second output
+    // deriving from a first is the documented pattern, and it is a consumer like any other.
+    outputs: outputsObjectSchema(def, bundle, seen) ?? { type: "object", properties: {} },
     ...(operation !== undefined ? { operation } : {}),
     children: { type: "object", properties: childrenProps },
     // Session-owned resources: addressable, contents known only at run time.
