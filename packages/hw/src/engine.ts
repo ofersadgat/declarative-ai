@@ -1987,10 +1987,22 @@ export class WorkflowEngine {
    *
    * With no resolved session — a run whose store minted nothing for this call — both halves fall back
    * to the declared id, which is what this published before positions existed at all.
+   *
+   * And a store that cannot spell the position falls back to the conversation id, because THIS IS
+   * BOOKKEEPING ABOUT A CALL THAT ALREADY RAN. A host supplies its own store, built against whatever
+   * version of the contract it last compiled against, so `refAt` is a method that may simply not be
+   * there — as it was not the day it was added, where the throw failed the run permanently at the end
+   * of its first completed call and discarded the answer with it. An unpositioned id is a legitimate
+   * ref rather than a fudge: every store must accept one as naming that conversation AT ITS HEAD,
+   * which for a call that just settled is the slot after it — the same place, resolved later.
    */
   private publish(resolved: ExecServices["session"], declared: SessionBinding): PublishedSession {
     if (resolved === undefined) return publishedSession(declared.id, declared.id);
-    return publishedSession(this.sessions().refAt({ id: resolved.at.id, seq: resolved.at.seq + 1 }), resolved.at.id);
+    try {
+      return publishedSession(this.sessions().refAt({ id: resolved.at.id, seq: resolved.at.seq + 1 }), resolved.at.id);
+    } catch {
+      return publishedSession(resolved.at.id, resolved.at.id);
+    }
   }
 
   /** The `ExecServices` operations run with: caller services + engine validator + the run's session

@@ -667,6 +667,39 @@ describe("conversation modes (SPEC §4.7)", () => {
     expect(messages!.some((m) => m.role === "assistant")).toBe(true);
     expect(messages!.some((m) => m.role === "user" && m.content.includes("Extract goals"))).toBe(true);
   });
+
+  /**
+   * A host builds its store against whatever version of the contract it last compiled against, so a
+   * method the contract has GAINED since is simply absent at run time — which is what `refAt` was on
+   * the day it arrived. The TypeError landed AFTER the call had run and settled, so a finished answer
+   * and the conversation holding it were thrown away by the bookkeeping that came after them.
+   *
+   * The published ref degrades to the unpositioned conversation id, which is a ref in its own right:
+   * a consumer wiring it in reads the same transcript, resolved one step later.
+   */
+  it("publishes from a store that cannot spell a position, rather than failing a call that already succeeded", async () => {
+    const store = new MapSessionStore();
+    // That store as an older host's — everything intact except the one method, shadowed away.
+    const older = Object.assign(Object.create(store), { refAt: undefined }) as unknown as MapSessionStore;
+    const files = specPlanningFiles();
+    files[PLAN_ID]!.children!.critique!.inputs!.planners = ".children.goals.operation.output.session";
+    const critique = files["feature/plan/critique"]!;
+    critique.inputs = { ...critique.inputs, planners: { kind: "json" } };
+    critique.environment = { conversation: { mode: "fresh" } };
+    critique.operation = {
+      kind: "prompt",
+      model: "critic",
+      prompt: "Summarize this transcript: {{.inputs.history}}",
+      input: { history: { kind: "json", binding: "messages(.inputs.planners)" } },
+    };
+    const { engine, fake } = makeEngine(files, PLAN_ID, planningScript(), { extra: { sessions: older } });
+
+    const result = await engine.run({ inputs: { issue: "the issue" } });
+
+    expect(result.outcome).toBe("success");
+    // …and the ref it published still named the conversation, so the consumer read the transcript.
+    expect(promptOf(fake.calls[2]!)).toContain("Extract goals");
+  });
 });
 
 describe("template rendering: `{{.inputs.*}}` is the operation's resolved inputs", () => {
