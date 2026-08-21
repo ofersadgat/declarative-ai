@@ -991,7 +991,13 @@ Warnings, which do not block execution, cover the cases that are suspicious rath
 child state that is not a descendant path of its parent (legal, so shared library states stay
 expressible), a transition back into a `sequence` member with neither `limits.max_iterations` nor a
 `run.iteration` guard, a prompt operation with neither a template nor a skill, and a state that
-declares no operation and no children.
+declares no operation, no children **and no bound output**.
+
+That last one takes all three. An output with a binding is resolved when the state terminates
+(§3.7), so a state whose outputs bind is a pure computation — it has no operation and no children
+*because* it needs neither, and terminating immediately is precisely what it is for. Warning on that
+shape made the message unreadable in the workflows that lean on it: a scoring state over signals
+already in the run, or an arithmetic verdict over its inputs.
 
 Static validation cannot settle values, only types. Run-time validation of actual values against
 declared schemas (a nondeterministic producer can emit anything) remains at every boundary.

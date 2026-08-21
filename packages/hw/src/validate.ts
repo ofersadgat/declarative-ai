@@ -290,9 +290,20 @@ function validateState(
     checkOperation(def.operation, "operation", id, def, bundle, scope, reachable, errors, warn, env);
   }
 
-  const hasOperation = def.operation !== undefined || Object.keys(children).length > 0;
-  if (!hasOperation) {
-    warn("", "state declares no operation and no children; it will terminate immediately");
+  // A state with nothing to run and nothing to compute. Both halves matter: an output with a BINDING
+  // is resolved when the state terminates (§3.7), so a state whose outputs all bind is a pure
+  // computation — no model, no host code, no children — and terminating immediately is the whole
+  // point of it rather than a symptom. Warning on those made the message unreadable where the shape
+  // is deliberate: a scoring state over signals already in the run, or an arithmetic verdict.
+  //
+  // A PRODUCED output is the opposite case and the one worth keeping: nothing fills it, because
+  // filling it is the operation's job and there is no operation, so the state fails at run time with
+  // "required output was not produced". That is left to the unbound-output check, which reports it
+  // against the slot; here we only decline to claim the state does nothing.
+  const runsSomething = def.operation !== undefined || Object.keys(children).length > 0;
+  const computesSomething = Object.values(def.outputs ?? {}).some((slot) => slot.binding !== undefined);
+  if (!runsSomething && !computesSomething) {
+    warn("", "state declares no operation, no children and no bound output; it will terminate immediately having done nothing");
   }
 }
 
