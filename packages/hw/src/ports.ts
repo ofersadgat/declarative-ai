@@ -100,6 +100,25 @@ export type EngineEvent =
       failure: Failure;
       metrics?: WorkflowMetrics;
     }
+  /**
+   * A DEFERRED call was started and the round moved on without it — the state is now waiting on
+   * something outside the run (`HostCapabilities.deferred`).
+   *
+   * Recorded because a wait is otherwise invisible in the journal: the last thing written is the
+   * operation that completed, and a run parked on a person reads exactly like one that hung. The
+   * pair also gives a reader the DURATION of the wait, which is the number anybody asking "why did
+   * this take a day" wants.
+   */
+  | { type: "call.waiting"; instanceId: number; stateId: string; call: string; operationId: string }
+  | {
+      type: "call.settled";
+      instanceId: number;
+      stateId: string;
+      call: string;
+      operationId: string;
+      /** `error` covers a cancelled wait too — a failure is data, and this says which kind arrived. */
+      outcome: "value" | "error";
+    }
   | { type: "transition.taken"; instanceId: number; stateId: string; to: string; iteration: number }
   | { type: "child.superseded"; instanceId: number; stateId: string; childKey: string }
   | { type: "instance.terminated"; instanceId: number; stateId: string; outcome: TerminationOutcome; failure?: Failure };

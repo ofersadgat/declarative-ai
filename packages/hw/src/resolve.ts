@@ -378,6 +378,22 @@ function runResolver(op: Operation<InlineFamily> & { kind: "function" }, scope: 
       const r = operand("right");
       return r === undefined ? { error: "or producer is missing right" } : r;
     }
+    case RESOLVER_REFS.record: {
+      // An OBJECT LITERAL: every input slot is a key the author wrote, so this reads them all rather
+      // than asking for a signature's worth of names. Strict in every value — `PENDING` or an error
+      // in one entry is the whole object's answer, because an object holding a sentinel is not one
+      // a consumer can read.
+      const out: Record<string, JsonValue> = {};
+      for (const name of Object.keys(op.input)) {
+        const v = operand(name);
+        if (v === undefined) continue; // a key bound to nothing is absent, not `null`
+        if (!isResolvedValue(v)) return v;
+        // `defineProperty`, exactly as `fromEntries` does: `{ __proto__: x }` must store a key, not
+        // re-parent the object through an inherited setter.
+        Object.defineProperty(out, name, { value: v.value, writable: true, enumerable: true, configurable: true });
+      }
+      return { value: out };
+    }
     case RESOLVER_REFS.cond: {
       const t = operand("test");
       if (t === undefined) return { error: "cond producer is missing test" };

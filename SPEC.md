@@ -265,6 +265,68 @@ outputs of a child that has started but not yet finished is skipped for that
 evaluation round and becomes eligible again when the child resolves
 (Section 10.4).
 
+#### A guard that WAITS stops the list
+
+Skipping is right for a guard that reads a child still running: the guard is a
+question about data, the next transition is a different question, and the round
+can answer that one meanwhile.
+
+A guard may instead CALL an operation that waits on something outside the run —
+a person, an event, a deadline. A registered function declares this with the
+`deferred` capability, and it changes who waits: the engine STARTS such a call
+and reads its answer in a later round, rather than awaiting it inside the round
+that needed it. A call that may never finish must not hold a round open, because
+a round holding open is a state that can neither report what it is waiting for
+nor be woken by anything else that happens to it.
+
+While that answer is outstanding the guard is `PENDING`, and this `PENDING`
+**stops the evaluation and does not skip**:
+
+- no later transition in the same list is considered, and neither is the state's
+  own list if the waiting rule was on a child mount;
+- the round consumes no eligibility — the children it was answering for are still
+  owed an answer, and they get it from the round that runs when the call settles;
+- the state does not terminate. A state with nothing left to run WAITS instead of
+  succeeding, which is what makes it *paused on a decision* rather than one that
+  quietly finished while somebody was still looking at it;
+- the sequence does not advance. Nothing new starts in a state that is waiting to
+  be told where to go.
+
+The reason is that such a guard is not a question about data. It is a DECISION
+that has been asked for and not yet made, and every transition after it is a rule
+about what to do given that decision. Letting a later rule fire while the answer
+is outstanding would take a branch the author wrote to be considered only if the
+wait came back false.
+
+**A wait is only STARTED for a rule the round can reach.** Guards are prepared in
+the same order they are evaluated, and the preparation stops where the evaluation
+will: at the first rule that fires (unconditional, or a guard already true) and at
+the first rule that waits. A rule behind either of those is a rule about a decision
+this round will not reach, so its call is not made — which for an ordinary call
+saves the work, and for a deferred one is the difference between one outstanding
+question and several. Two offers on a screen for one decision, only one of which
+does anything, is not a cosmetic problem: it is a person told they may do something
+the engine would ignore.
+
+**A taken transition CANCELS the waits it did not answer.** A rule earlier in the
+list can become true in a later round while a rule behind it is still waiting — the
+list is walked from the top each time. When that earlier rule fires, every deferred
+call the instance still has outstanding is cancelled, because the decision they were
+asking about has been made by something else. The same happens when the instance
+ends for any reason: a terminated, timed-out or superseded state leaves no
+registration standing.
+
+**A taken transition CONSUMES the answer.** The result of a deferred call is
+forgotten when the instance takes a transition, and a call still in flight when
+one is taken is cancelled. An event is not a memo: a guard that kept reading the
+same `true` would re-take the same transition on every following round, and an
+offer nobody withdrew would stand for a state that had already moved on. The next
+round asks again, which registers a fresh wait — so a rule that says "let them do
+it again" means that, rather than firing on the memory of the last time.
+
+A wait is recorded in the run journal as a `call.waiting`/`call.settled` pair, so
+a run parked on a person does not read as one that hung.
+
 ### 3.4 State Instances
 
 Entering a state — including re-entering it via a transition — creates a fresh
@@ -699,6 +761,11 @@ The expression language should support:
 - Numeric comparisons.
 - String comparisons.
 - `.length` for arrays and strings.
+- Object literals — `{ to_state: 'deploy', urgent: .inputs.severity > 2 }`. Keys are bare
+  identifiers or quoted strings, never computed (`get(o, k)` is the spelling for a computed read);
+  values are full expressions. The aggregate literal, standing beside the scalar ones — its use is
+  an OPTIONS BAG at a call site, where naming what an argument means beats counting positions, and
+  where a call whose options grow renumbers nobody.
 
 Supported operators:
 
@@ -717,16 +784,27 @@ Supported operators:
 ?:
 ```
 
-The expression language must be pure. It must not support:
+The expression language is CLOSED — it has no way to reach anything the host did not put in front
+of it. It must not support:
 
 - Arbitrary JavaScript execution.
-- Function calls.
 - Imports.
 - Mutation.
 - Loops.
 - Filesystem access.
 - Network access.
-- Async execution.
+
+⚠️ **"No function calls" and "no async execution" no longer hold, and were the wrong line to draw.**
+An expression may CALL an operation resolved along the search path (EXPRESSIONS.md §3) — which is
+not an escape from the sandbox but the opposite: the callee is a document or a registered function
+the host chose to make available, resolved by name, exactly like the built-in operators it is
+indistinguishable from. What purity buys — no ambient authority, no mutation, no way to name
+something that was not offered — is preserved by that resolution rule and not by the absence of
+parentheses.
+
+A call may also WAIT (§3.3, "A guard that WAITS stops the list"). The expression itself stays
+synchronous: it resolves to `PENDING` and is re-resolved in a later round, which is the same
+protocol a reference to a running child already follows. Nothing in the language awaits anything.
 
 ### 6.1 Expression Context
 

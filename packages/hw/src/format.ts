@@ -96,6 +96,16 @@ export const RESOLVER_REFS = {
   and: "op.and",
   or: "op.or",
   cond: "op.cond",
+  /**
+   * An OBJECT LITERAL — `{ to_state: 'deploy' }`.
+   *
+   * The one resolver whose parameter names are the author's rather than the language's: an object
+   * literal's keys ARE the input slots, so there is no positional signature to write down and
+   * `OPERATOR_PARAMS` has no entry for it. That is what makes it the natural target — a producer
+   * edge's `input` is already a record of named parameters, so a record literal lowers onto the
+   * shape it already has instead of needing a variadic call convention the model does not have.
+   */
+  record: "op.record",
 } as const;
 
 /** Every well-known resolver ref, for registry seeding and validator checks. */

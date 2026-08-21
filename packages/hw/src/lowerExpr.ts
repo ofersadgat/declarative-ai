@@ -39,7 +39,7 @@ function edge(functionRef: string, args: Record<string, Ref<InlineFamily>>): Ref
 /**
  * Lower one parsed expression to the producer edge that computes it.
  *
- * Four cases, because the AST has four nodes. Every APPLICATION lowers the same way whatever it
+ * One case per AST node. Every APPLICATION lowers the same way whatever it
  * applies — its name goes in `functionRef`, its arguments bind to that operation's parameters in
  * order — which is why an operator and a call need no separate treatment here: `a === b` and
  * `classify(x)` differ only in the name and in where that name resolves.
@@ -76,6 +76,15 @@ export function lowerExpression(expr: Expr, options: LowerOptions = {}): Ref<Inl
       if (path !== undefined) return resolveName(path.join("."), options);
       return edge(RESOLVER_REFS.member, { value: down(expr.obj), prop: { text: expr.prop } });
     }
+    case "object":
+      // An object literal's KEYS ARE THE PARAMETER NAMES. Every other node maps ordered arguments
+      // onto a signature the language or the callee wrote down; this one has no signature, because
+      // the author names the slots as they fill them — which is exactly the shape a producer edge's
+      // `input` already is, so the literal lowers onto it with nothing in between.
+      return edge(
+        RESOLVER_REFS.record,
+        Object.fromEntries(expr.entries.map((entry) => [entry.key, down(entry.value)])),
+      );
     case "apply": {
       const builtin = OPERATOR_PARAMS[expr.op];
       if (builtin !== undefined) {
@@ -212,7 +221,61 @@ export const EXPRESSION_REFS: ReadonlySet<string> = new Set<string>([
   RESOLVER_REFS.and,
   RESOLVER_REFS.or,
   RESOLVER_REFS.cond,
+  RESOLVER_REFS.record,
 ]);
+
+/**
+ * The input a call may declare to be told WHICH RULE it is part of.
+ *
+ * A call in a transition guard is written inside a rule that already says where the run goes if it
+ * comes back true. Nothing could read that: a call's arguments are the ones the author typed, and the
+ * `to` beside them was not one of them — so a function whose whole job is to offer somebody the move
+ * this rule describes had to be told the destination a second time, in its own options, where it
+ * could silently disagree with the rule it sat in.
+ *
+ * Declaring an input by this name is a call's way of asking. The loader binds `{ to }` — the
+ * transition's target, exactly as authored — and only when the author has not bound it themselves, so
+ * an explicit argument still wins.
+ *
+ * It is bound as an ARGUMENT rather than folded into the callee's definition, which is what keeps it
+ * part of the call's identity: two rules offering the same event to two different places are two
+ * calls, hash differently, and get one registration each.
+ */
+export const TRANSITION_INPUT = "transition";
+
+/**
+ * Fill {@link TRANSITION_INPUT} on every call in a lowered guard that declares it and left it unbound.
+ *
+ * A rebuild rather than a mutation: a callee's operation comes from a resolved document, and writing
+ * into it would put one rule's destination on every other rule that names the same document.
+ */
+export function bindTransitionContext(ref: Ref<InlineFamily>, to: string): Ref<InlineFamily> {
+  if (!("op" in ref)) return ref;
+  const producer = ref.op;
+  if (typeof producer === "string") return ref;
+
+  const walked = (params: Record<string, Parameter<InlineFamily>> | undefined): Record<string, Parameter<InlineFamily>> | undefined => {
+    if (params === undefined) return undefined;
+    const out: Record<string, Parameter<InlineFamily>> = {};
+    for (const [name, p] of Object.entries(params)) {
+      out[name] = p.binding ? { ...p, binding: bindTransitionContext(p.binding, to) } : p;
+    }
+    return out;
+  };
+
+  const input = walked(producer.input) ?? producer.input;
+  const parameters = walked(ref.parameters);
+  const declared = Object.hasOwn(producer.input, TRANSITION_INPUT);
+  const bound = parameters?.[TRANSITION_INPUT]?.binding !== undefined || producer.input[TRANSITION_INPUT]?.binding !== undefined;
+  const filled: Record<string, Parameter<InlineFamily>> | undefined =
+    declared && !bound ? { ...parameters, [TRANSITION_INPUT]: { kind: "json", binding: { json: { to } } } } : parameters;
+
+  return {
+    ...ref,
+    op: { ...producer, input } as Operation<InlineFamily>,
+    ...(filled !== undefined ? { parameters: filled } : {}),
+  };
+}
 
 /**
  * Every root-anchored reference path in a lowered tree — the structural counterpart of

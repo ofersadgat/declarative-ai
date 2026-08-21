@@ -106,6 +106,14 @@ import { isFannedOut } from "./fanout.js";
 import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, type Persistence } from "./ports.js";
 
 /**
+ * A round that cannot finish yet: a transition guard is waiting on a deferred call.
+ *
+ * A sentinel rather than a string outcome so it cannot be confused with a state id or an outcome
+ * name at any of the three places a transition result is read.
+ */
+const WAITING: unique symbol = Symbol("ai-exec/hw transition waiting");
+
+/**
  * What a call's memo remembers: the value it produced, or the failure it produced.
  *
  * Both are DATA (§5) and both are serializable, which is what lets a host back this with something
@@ -305,6 +313,44 @@ interface Instance {
   abort: AbortController;
   timedOut: boolean;
   notify: Notifier;
+  /**
+   * The deferred calls this instance has demanded, by cache key — what a taken transition CONSUMES.
+   *
+   * See {@link WorkflowEngine.consumeDeferred}: an event is not a value, so the answer to "did the
+   * user drag it" cannot outlive the round that acted on it.
+   */
+  deferredKeys: Set<string>;
+}
+
+/**
+ * A DEFERRED call in flight — one whose registered function declared `deferred` and has not settled.
+ *
+ * The engine STARTS it and reads it later, rather than awaiting it inside the round that needed it.
+ * That is the whole difference between the two kinds of embedded call, and it exists because a call
+ * that waits on the world may never finish: awaiting one inside a round would hold the round open,
+ * and a round holding open is a state that can neither report what it is waiting for nor be woken by
+ * anything else that happens to it.
+ *
+ * Keyed by the same content hash its result will be cached under, so the second round to demand the
+ * same call finds it in flight instead of starting a second one.
+ */
+/**
+ * What resolution reports back when it asks for a call's result and there is none.
+ *
+ * `inFlight` distinguishes the two reasons a call has no result: it has not been started, or it has
+ * been started and is waiting. The first is work to do; the second is what the round is waiting FOR.
+ */
+type CallDemand = (op: Operation<InlineFamily>, key: string, inFlight: boolean) => void;
+
+interface DeferredCall {
+  /** The instance whose binding demanded it — what gets woken when it settles, and what cancels it. */
+  instance: Instance;
+  /** The op as dispatched (arguments bound), for diagnostics and for {@link WorkflowEngine.waitingOn}. */
+  op: Operation<InlineFamily>;
+  /** Stop it. Settles the call with a `canceled` failure if it had not settled already. */
+  cancel: () => Promise<void>;
+  /** Resolves when the call has settled and its result is in the cache. Never rejects. */
+  settled: Promise<void>;
 }
 
 class Notifier {
@@ -538,6 +584,7 @@ export class WorkflowEngine {
       abort,
       timedOut: false,
       notify: new Notifier(),
+      deferredKeys: new Set(),
     };
     this.emit({
       type: "instance.entered",
@@ -582,6 +629,10 @@ export class WorkflowEngine {
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       await this.cancelRunningChildren(instance);
+      // A wait outlives nothing. An instance that has terminated — succeeded, failed, been superseded
+      // by a sequence reset — must not leave a registration standing, or a person is left looking at
+      // a request for a run that no longer exists.
+      await this.cancelDeferredCalls(instance);
     }
   }
 
@@ -611,7 +662,7 @@ export class WorkflowEngine {
       // over many rounds pays for its call once.
       if (evaluationDue) {
         eligible = this.finishedInRunOrder(instance);
-        const guardFailure = await this.runEmbeddedOps(instance, this.guardParamsOf(instance, eligible));
+        const guardFailure = await this.runGuardCalls(instance, eligible);
         if (guardFailure !== undefined) return this.finish(instance, "error", guardFailure);
       }
 
@@ -626,6 +677,19 @@ export class WorkflowEngine {
         if (step === "terminated-error") return this.finish(instance, "error", errorOf(instance, "terminate.error"));
         if (step === "terminated-canceled") return this.finish(instance, "canceled");
         if (step === "terminated-timeout") return this.finish(instance, "timeout");
+        if (step === "waiting") {
+          // A guard asked for something and has not been answered. Nothing later in the list may run
+          // ahead of that answer, so the round ends here and resumes — from the top of the same list,
+          // with the same children still eligible — when the call settles or a child completes.
+          if (!(await this.waitForProgress(instance))) {
+            return this.finish(instance, "error", {
+              classification: "permanent",
+              reason: "a transition is waiting on a call that is no longer running",
+            });
+          }
+          evaluationDue = true;
+          continue;
+        }
         if (step === "entered" || step === "parked") continue;
         // "none": fall through — but a child failure no transition handled is fatal (SPEC §3.3).
         if (instance.unhandledFailures.size > 0) {
@@ -703,6 +767,20 @@ export class WorkflowEngine {
         continue;
       }
       const final = this.takeTransition(instance, this.finishedInRunOrder(instance));
+      if (final === "waiting") {
+        // The state has nothing left to run and would terminate — except that a guard is waiting on
+        // an answer, and a state that terminates while a person is being asked where it should go has
+        // answered the question itself. So it waits here instead, which is what makes this a state
+        // PAUSED on a decision rather than one that quietly succeeded.
+        if (await this.waitForProgress(instance)) {
+          evaluationDue = true;
+          continue;
+        }
+        return this.finish(instance, "error", {
+          classification: "permanent",
+          reason: "a transition is waiting on a call that is no longer running",
+        });
+      }
       if (final === "terminated-success") return await this.finishSuccess(instance);
       if (final === "terminated-error") return this.finish(instance, "error", errorOf(instance, "terminate.error"));
       if (final === "terminated-canceled") return this.finish(instance, "canceled");
@@ -734,8 +812,12 @@ export class WorkflowEngine {
     instance: Instance,
     /** The children this round answers for — snapshotted before the round awaited anything. */
     eligible: readonly string[],
-  ): "none" | "entered" | "parked" | "terminated-success" | "terminated-error" | "terminated-canceled" | "terminated-timeout" {
+  ): "none" | "entered" | "parked" | "waiting" | "terminated-success" | "terminated-error" | "terminated-canceled" | "terminated-timeout" {
     const taken = this.firstMatchingTransition(instance, eligible);
+    // WAITING is not an answer, so the round consumes nothing: the children this round was to answer
+    // for are still owed an answer, and they get it from the round that runs when the call settles.
+    // Consuming here would lose their completions entirely, exactly as a park would.
+    if (taken === WAITING) return "waiting";
     // A child's list is eligible for the round its completion triggered and no other, so the round
     // consumes it — whether or not anything matched. Only the SNAPSHOT is consumed: a child that
     // finished while this round was awaiting its guard calls has not been answered by it, and wiping
@@ -749,6 +831,7 @@ export class WorkflowEngine {
       return "none";
     }
     instance.iteration++;
+    this.consumeDeferred(instance);
     this.emit({
       type: "transition.taken",
       instanceId: instance.id,
@@ -786,16 +869,43 @@ export class WorkflowEngine {
    * sequence, then any child the sequence omits, in declaration order. Nothing about async completion
    * order is stable enough to branch on, so the tie is broken by something an author wrote down.
    */
-  private firstMatchingTransition(instance: Instance, eligible: readonly string[]): { to: string } | undefined {
-    const scope = this.scopeFor(instance);
-    const firstOf = (transitions: readonly LoadedTransition[] | undefined): { to: string } | undefined => {
+  private firstMatchingTransition(instance: Instance, eligible: readonly string[]): { to: string } | typeof WAITING | undefined {
+    // One flag, reset before each guard: whether resolving THIS guard reached a deferred call that is
+    // still waiting. That is the difference between the two kinds of PENDING a guard can produce —
+    // see the WAITING branch below.
+    let deferred = false;
+    const scope = this.scopeFor(instance, (_op, _key, inFlight) => {
+      if (inFlight) deferred = true;
+    });
+    const firstOf = (transitions: readonly LoadedTransition[] | undefined): { to: string } | typeof WAITING | undefined => {
       for (const t of transitions ?? []) {
         // A guard that failed to lower never fires: validation blocks the run, and reading it as
         // unconditional would be the worst possible interpretation of a typo.
         if (t.whenError !== undefined) continue;
         if (t.whenRef === undefined) return { to: t.to };
+        deferred = false;
         const r = resolveRef(t.whenRef, scope);
-        if (isPending(r)) continue; // skipped this round (SPEC §6/§10.4)
+        if (isPending(r)) {
+          /**
+           * PENDING ON A DEFERRED CALL STOPS THE LIST — it does not skip.
+           *
+           * Every other PENDING means "not yet, ask again next round", and skipping is right for it:
+           * a guard reading a running child is a question about data, the next transition is a
+           * different question, and the round can answer that one meanwhile.
+           *
+           * A guard waiting on a deferred call is not a question about data. It is a DECISION that
+           * has been asked for and not yet made — a person has been shown a drop target, an event has
+           * been subscribed to — and every transition after it is a rule about what to do given that
+           * decision. Letting a later rule fire while the answer is outstanding would take a branch
+           * the author wrote to be considered only if the wait came back false, and would leave a
+           * request standing for a state that has already moved on.
+           *
+           * So the round returns here, the eligibility is NOT consumed (`takeTransition`), and the
+           * same list is walked again from the top when the call settles.
+           */
+          if (deferred) return WAITING;
+          continue; // skipped this round (SPEC §6/§10.4)
+        }
         // A lowered expression cannot yield an ERROR on data: every operator's failure case is
         // "producer is missing X", a malformed tree the loader cannot emit, and reading a missing
         // namespace or property yields `undefined` rather than refusing. So there is no fourth
@@ -909,6 +1019,22 @@ export class WorkflowEngine {
     instance.children.set(key, record);
     record.promise = run();
     return "started";
+  }
+
+  /**
+   * Wait for anything this instance is waiting ON — a child completing, or a deferred call settling.
+   *
+   * The two are one wait because they wake the same way (`notify`) and mean the same thing to the
+   * loop: something has happened, run another evaluation round. Returns false when there is nothing
+   * to wait for, which the caller must treat as a fault rather than as a wait of zero length —
+   * looping on it would spin.
+   */
+  private async waitForProgress(instance: Instance): Promise<boolean> {
+    // Both checks are synchronous and nothing is awaited between them and `wait()`, so a call that
+    // settles "just now" cannot signal into the gap and be missed.
+    if (!this.hasRunningChildren(instance) && this.deferredFor(instance).length === 0) return false;
+    await instance.notify.wait();
+    return true;
   }
 
   /** Wait for any child completion signal. Returns false immediately when nothing is running. */
@@ -1043,12 +1169,24 @@ export class WorkflowEngine {
   }
 
   /** The run-scoped view binding resolution needs (§7.4) — this instance's data addresses. */
-  private scopeFor(instance: Instance): ResolutionScope {
+  private scopeFor(instance: Instance, demand?: CallDemand): ResolutionScope {
     return {
       exprContext: this.exprContext(instance),
       // A lowered CALL reads its result here, exactly as a child read reads `childOutputs`:
       // resolution never runs anything, and `undefined` (not yet run) parks the consumer.
-      operationResult: (op) => this.callCache.get(hashOperation(op)),
+      operationResult: (op) => {
+        const key = hashOperation(op);
+        // The deferred half FIRST, and it is a different half on purpose — see `deferredResults`.
+        const hit = this.deferredResults.get(key) ?? this.callCache.get(key);
+        // A MISS IS THE DEMAND. Resolution asked for a call's result and there is none, so this is
+        // where the engine learns which calls the expression it is resolving actually needs — and
+        // learning it HERE rather than by walking the tree up front is what makes the demand
+        // short-circuit correct: `.inputs.severity > 2 && waits()` never asks the resolver for the
+        // right-hand side when the left is false, so the right-hand side never runs. A static walk
+        // could not tell the difference, and paid for both.
+        if (hit === undefined) demand?.(op, key, this.deferredCalls.has(key));
+        return hit;
+      },
       childOutputs: (key) => {
         const rec = instance.children.get(key);
         if (!rec) return undefined;
@@ -1260,24 +1398,23 @@ export class WorkflowEngine {
   }
 
   /**
-   * The guards this round will evaluate, as parameter-shaped bindings, so one walker serves guards
-   * and slots alike.
+   * The transitions this round may evaluate, IN THE ORDER it will evaluate them — each eligible
+   * child's own list, in the order the state runs its children, then the state's own.
    *
-   * A CHILD's guards are included only when that child is eligible this round, which is the same rule
-   * that decides whether they are evaluated. A guard may embed a call, and this is what runs it — so
+   * The same order `firstMatchingTransition` walks, and shared with it deliberately: the round PREPARES
+   * guards in one pass and EVALUATES them in another, and two passes that disagreed about the order
+   * would prepare a rule the evaluation never reaches.
+   *
+   * A CHILD's list is included only when that child is eligible this round, which is the same rule that
+   * decides whether it is evaluated. A guard may embed a call, and preparing it runs that call — so
    * including every child's list unconditionally would dispatch the call behind "if the review found
    * nothing, summarize" before the review had run, and pay for an answer about data that did not exist
    * yet.
    */
-  private guardParamsOf(instance: Instance, eligible: readonly string[]): Record<string, Parameter<InlineFamily>> {
-    const out: Record<string, Parameter<InlineFamily>> = {};
-    const collect = (transitions: readonly LoadedTransition[] | undefined, prefix: string): void => {
-      (transitions ?? []).forEach((t, i) => {
-        if (t.whenRef !== undefined) out[`${prefix}${i}`] = { kind: "json", binding: t.whenRef };
-      });
-    };
-    for (const key of eligible) collect(instance.def.children?.[key]?.transitions, `${key}.when`);
-    collect(instance.def.transitions, "when");
+  private orderedTransitions(instance: Instance, eligible: readonly string[]): LoadedTransition[] {
+    const out: LoadedTransition[] = [];
+    for (const key of eligible) out.push(...(instance.def.children?.[key]?.transitions ?? []));
+    out.push(...(instance.def.transitions ?? []));
     return out;
   }
 
@@ -1330,6 +1467,27 @@ export class WorkflowEngine {
     this.resolvedOps.set(instance.stateId, resolved);
     return resolved;
   }
+
+  /**
+   * Deferred calls in flight, by the cache key their result will land under.
+   *
+   * Run-wide rather than per-instance because the memo is: two states waiting on the same event with
+   * the same arguments are waiting on the same call, and starting it twice would register two
+   * interests where the author wrote one.
+   */
+  private readonly deferredCalls = new Map<string, DeferredCall>();
+
+  /**
+   * What deferred calls RETURNED, held apart from the call memo — and dropped when a transition acts
+   * on them.
+   *
+   * An event is not a memo. `callCache` answers "what does this callee compute for these arguments",
+   * which is stable for the life of a run and may be backed by something durable; "did the user drag
+   * this card" is stable for exactly as long as nobody has acted on the answer. Putting one in the
+   * other made a state that moved on a drag re-enter its target on every following round — the guard
+   * kept reading the same `true` — and would have replayed a person's decision into a resumed run.
+   */
+  private readonly deferredResults = new Map<string, CallResult>();
 
   /** The cache backing {@link EngineConfig.callCache} when the host supplies none. */
   private readonly ownCallCache = new Map<string, CallResult>();
@@ -1385,6 +1543,179 @@ export class WorkflowEngine {
     return undefined;
   }
 
+
+  /**
+   * Run the calls this round's guards actually NEED — demanded by resolution, in evaluation order,
+   * and no further than the rule that decides the round.
+   *
+   * Two things this is not. It is not a WALK over every guard's binding tree: that ran both sides of
+   * every operator, so `.inputs.severity > 2 && confirm()` asked for a confirmation at severity 1 —
+   * for a computation a wasted call, and for a call that WAITS a request shown to somebody who should
+   * never have seen it. Resolution drives it instead: resolving a guard reports each call whose result
+   * is missing, those run, and the guard is resolved again, because a call's value can unlock the next
+   * demand as `a() && b()` does.
+   *
+   * And it is not a pass over ALL the guards. Evaluation stops at the first rule that fires and at the
+   * first rule that waits (`firstMatchingTransition`), so every rule behind those two is a rule about a
+   * decision this round will not reach. Preparing one would start a wait for a move the engine could
+   * not act on if somebody made it — two offers on a board for one decision, one of which does nothing.
+   * So this walk stops exactly where the evaluation will:
+   *
+   *  - an UNCONDITIONAL rule fires ⇒ nothing behind it is prepared;
+   *  - a rule whose guard is TRUE fires ⇒ likewise;
+   *  - a rule waiting on a deferred call holds the round ⇒ likewise;
+   *  - anything else (false, or pending on a running child) ⇒ carry on to the next rule.
+   *
+   * The cost is that two guards' calls no longer overlap, which is the honest arithmetic: the second
+   * one's call is needed only if the first is false. Calls demanded by ONE guard still run together.
+   */
+  private async runGuardCalls(instance: Instance, eligible: readonly string[]): Promise<Failure | undefined> {
+    /**
+     * What this round has already run, so a call that answers `PENDING` for a reason of its own — a
+     * document-level binding that has not resolved — is not demanded a second time.
+     *
+     * Termination normally comes from the result landing in the cache or the call registering as in
+     * flight. A call that does neither would otherwise be re-demanded on every pass, and because
+     * nothing in that loop awaits anything real it would starve the event loop rather than merely
+     * spin: no timer would fire, and the run would hang with the process pinned.
+     */
+    const started = new Set<string>();
+    for (const transition of this.orderedTransitions(instance, eligible)) {
+      // A guard that failed to lower never fires, so the evaluation skips it and so does this.
+      if (transition.whenError !== undefined) continue;
+      // Unconditional: it fires, and nothing behind it will be asked anything.
+      if (transition.whenRef === undefined) return undefined;
+      const binding = transition.whenRef;
+
+      for (;;) {
+        const fresh = new Map<string, Operation<InlineFamily>>();
+        let waiting = false;
+        // HIGHER-ORDER stays eager (§3.5): its applications are demanded one element at a time —
+        // `resolveRef` returns PENDING at the first element with no result — so a demand-driven pass
+        // would run a `map` over twenty elements in twenty rounds instead of one.
+        const higherFailure = await this.runHigherOrder(instance, binding);
+        if (higherFailure !== undefined) return higherFailure;
+        const resolved = resolveRef(binding, this.scopeFor(instance, (op, key, inFlight) => {
+          if (inFlight) waiting = true;
+          else if (!started.has(key)) fresh.set(key, op);
+        }));
+
+        if (fresh.size === 0) {
+          // Nothing left to run for this rule, so its answer is the round's answer about it — and the
+          // two kinds of PENDING part company here exactly as they do in the evaluation. Pending on a
+          // deferred call HOLDS the round; pending on a running child is skipped, and the next rule
+          // gets its turn.
+          if (isPending(resolved)) {
+            if (waiting) return undefined;
+            break;
+          }
+          if (isResolvedValue(resolved) && resolved.value) return undefined; // it fires
+          break; // false, or an error — the next rule gets its turn
+        }
+        for (const key of fresh.keys()) started.add(key);
+        const results = await Promise.all([...fresh].map(async ([key, op]) => [key, await this.startCall(instance, op)] as const));
+        // A DEFERRED call answers PENDING here — it has been started, not finished — and there is
+        // nothing to remember about a scheduling state.
+        for (const [key, outcome] of results) if (outcome !== PENDING) this.callCache.set(key, outcome);
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Run one demanded call: awaited here if it computes, started and left running if it waits.
+   *
+   * The fork is the registered function's own declaration (`HostCapabilities.deferred`) and not a
+   * property of where the call appears, so one function behaves the same way in a guard, in an
+   * input binding and as a state's whole operation.
+   */
+  private async startCall(instance: Instance, op: Operation<InlineFamily>): Promise<Resolved> {
+    if (!this.isDeferred(op)) return this.runEmbeddedOp(instance, op);
+    const key = hashOperation(op);
+    const already = this.deferredCalls.get(key);
+    if (already !== undefined) return PENDING;
+
+    const callName = op.kind === "function" ? op.functionRef : "prompt";
+    let cancel: () => Promise<void> = async () => {};
+    const settled = (async () => {
+      const outcome = await this.runEmbeddedOp(instance, op, (handle) => {
+        cancel = () => handle.cancel();
+      });
+      this.deferredCalls.delete(key);
+      if (outcome !== PENDING) this.deferredResults.set(key, outcome);
+      this.emit({
+        type: "call.settled",
+        instanceId: instance.id,
+        stateId: instance.stateId,
+        call: callName,
+        operationId: key,
+        outcome: outcome !== PENDING && "error" in outcome ? "error" : "value",
+      });
+      // WAKE THE WAITER, exactly as a child completion does. Without this the loop would sit in
+      // `waitForProgress` holding a result nobody had been told about.
+      instance.notify.signal();
+    })();
+    this.deferredCalls.set(key, { instance, op, cancel: () => cancel(), settled });
+    instance.deferredKeys.add(key);
+    this.emit({ type: "call.waiting", instanceId: instance.id, stateId: instance.stateId, call: callName, operationId: key });
+    return PENDING;
+  }
+
+  /** Whether a call WAITS rather than computes — its registry entry's own statement (§2). */
+  private isDeferred(op: Operation<InlineFamily>): boolean {
+    if (op.kind !== "function") return false;
+    const entry = this.config.registry.functions.get(op.functionRef);
+    // A `pure` entry is deterministic glue over its arguments (§2) and has nothing to wait on, which
+    // is why the capability is not on its record to read.
+    if (entry === undefined || entry.kind === "pure") return false;
+    return entry.capabilities.deferred === true;
+  }
+
+  /** The deferred calls this instance is waiting on, oldest first. */
+  private deferredFor(instance: Instance): DeferredCall[] {
+    return [...this.deferredCalls.values()].filter((c) => c.instance === instance);
+  }
+
+  /**
+   * A taken transition CONSUMES the waits this instance was holding.
+   *
+   * Two things go, and both for the same reason — the state has acted, so the question it asked is
+   * answered or moot:
+   *
+   *  - a settled result is FORGOTTEN, or the guard that read it would read the same `true` on every
+   *    following round and re-take the same transition forever. The run loop is fast and the guard
+   *    would never change its mind, so this is not a slow leak but a spin.
+   *  - a call still IN FLIGHT is cancelled. It can only be one the round never reached — an earlier
+   *    rule fired first — and an offer nobody withdrew would sit on a person's screen belonging to a
+   *    state that has moved on.
+   *
+   * The next round re-demands whatever is still written down, which registers a FRESH wait. That is
+   * what makes a rule like "let them drag it again" mean what it says rather than firing on the memory
+   * of the last drag.
+   */
+  private consumeDeferred(instance: Instance): void {
+    for (const key of instance.deferredKeys) {
+      this.deferredResults.delete(key);
+      const inFlight = this.deferredCalls.get(key);
+      // Not awaited: cancellation settles the call, and its settle handler tidies up after itself.
+      // Blocking a transition on the teardown of a question nobody is answering would be the wait all
+      // over again.
+      if (inFlight?.instance === instance) void inFlight.cancel();
+    }
+    instance.deferredKeys.clear();
+  }
+
+  /**
+   * Stop every deferred call this instance started, and wait for them to settle.
+   *
+   * A state that has terminated is not waiting for anything any more, and a registration left behind
+   * would keep a request on somebody's screen for a run that has ended.
+   */
+  private async cancelDeferredCalls(instance: Instance): Promise<void> {
+    const waiting = this.deferredFor(instance);
+    await Promise.allSettled(waiting.map(async (c) => c.cancel()));
+    await Promise.allSettled(waiting.map((c) => c.settled));
+  }
 
   /**
    * Run the per-element applications a higher-order edge needs (§3.5).
@@ -1448,8 +1779,18 @@ export class WorkflowEngine {
     return undefined;
   }
 
-  /** Run ONE embedded operation and return what the binding should see. */
-  private async runEmbeddedOp(instance: Instance, op: Operation<InlineFamily>): Promise<Resolved> {
+  /**
+   * Run ONE embedded operation and return what the binding should see.
+   *
+   * `onHandle` hands the live handle back before the call is awaited — the one thing a DEFERRED call
+   * needs that an ordinary one does not, since the only way to stop a wait is to cancel the call that
+   * is doing the waiting.
+   */
+  private async runEmbeddedOp(
+    instance: Instance,
+    op: Operation<InlineFamily>,
+    onHandle?: (handle: { cancel: () => Promise<void> }) => void,
+  ): Promise<Resolved> {
     const env = instance.def.environment ?? {};
     const resourceKey = instance.resourceKey;
     // Its arguments are already bound into `op.input` as literals (`resolveEmbedded`), so this reads
@@ -1488,10 +1829,12 @@ export class WorkflowEngine {
     const rendered = op.kind === "prompt" ? { ...op, user: this.renderTemplate(op.user, instance, literal.values) } : op;
     let outcome;
     try {
-      outcome = await this.operations.start(
+      const handle = this.operations.start(
         rendered,
         await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, undefined, toolsOrFailure.gate),
-      ).result;
+      );
+      onHandle?.(handle);
+      outcome = await handle.result;
     } catch (e) {
       return { error: `executor rejected: ${(e as Error).message}` };
     }

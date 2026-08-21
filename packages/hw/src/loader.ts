@@ -37,7 +37,7 @@ import {
   type WorkflowBundle,
 } from "./format.js";
 import { parseExpression } from "./expr.js";
-import { lowerExpression, type LowerOptions } from "./lowerExpr.js";
+import { bindTransitionContext, lowerExpression, type LowerOptions } from "./lowerExpr.js";
 import { environmentIdentity, mergeOperationFields, resolutionEnvironment } from "./merge.js";
 import { resolveStateRef, StateRefError, type StateRefOptions } from "./ref.js";
 import { expandReferences } from "./expand.js";
@@ -465,7 +465,7 @@ export function desugarState(
     list?.map((t) => {
       if (t.when === undefined) return { ...t };
       try {
-        return { ...t, whenRef: lowerExpression(parseExpression(t.when), lower) };
+        return { ...t, whenRef: bindTransitionContext(lowerExpression(parseExpression(t.when), lower), t.to) };
       } catch (e) {
         // Carried, not thrown — see `LoadedTransition.whenError`.
         return { ...t, whenError: (e as Error).message };
@@ -629,6 +629,19 @@ export interface LoadBundleOptions extends Omit<StateRefOptions, "defaultRoot"> 
    * skipped, which is what an in-memory bundle with no references wants.
    */
   vfs?: Vfs;
+  /**
+   * Operation documents the HOST ships, by bare name — searched only where the path finds nothing.
+   *
+   * A call in an expression names a document (§3), and its `input` declarations ARE the signature its
+   * positional arguments bind against (§3.3). That is exactly right for an operation somebody wrote
+   * in a file, and it leaves a host-provided function with nowhere to declare itself: registering the
+   * IMPLEMENTATION says what it does and nothing about how it is called.
+   *
+   * So a host may ship the document too. Consulted LAST, so a project file of the same name shadows
+   * it — the same precedence a base-layer document has, and for the same reason: what the host ships
+   * is a default, not a reservation.
+   */
+  documents?: Readonly<Record<string, unknown>>;
   /** Non-fatal ambiguities from reference resolution (§9). */
   onWarn?: (message: string) => void;
   /** Every file expansion read, for the snapshot closure (§8.1). */
@@ -814,17 +827,35 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
     stateId: string,
     path: readonly string[] | undefined,
   ): { document: unknown; file: string } | undefined => {
-    if (options.vfs === undefined) return undefined;
+    // A HOST-SHIPPED document has no file, so it is reached without one — which is also why it is
+    // tried after the path rather than before: a name that resolves to something on disk is a
+    // document somebody can open, and that always wins.
+    const shipped = (): { document: unknown; file: string } | undefined => {
+      const document = options.documents?.[name];
+      return document === undefined ? undefined : { document, file: `<built-in>/${name}` };
+    };
+    if (options.vfs === undefined) return shipped();
     const defaultRoot = path !== undefined && path.length > 0 ? path : options.defaultRoot;
-    const located = resolveReference(name, {
-      vfs: options.vfs,
-      from: stateId,
-      ...(defaultRoot !== undefined ? { defaultRoot } : {}),
-      ...(options.roots !== undefined ? { roots: options.roots } : {}),
-    });
-    if (located.file === undefined) return undefined;
+    let located;
+    try {
+      located = resolveReference(name, {
+        vfs: options.vfs,
+        from: stateId,
+        ...(defaultRoot !== undefined ? { defaultRoot } : {}),
+        ...(options.roots !== undefined ? { roots: options.roots } : {}),
+      });
+    } catch (e) {
+      // A name that matches nothing on the path THROWS rather than returning empty-handed, so the
+      // fallback has to be reached from here as well. Only when there is something to fall back to:
+      // with no shipped document of that name the original error is the right one, and it names every
+      // directory that was looked in.
+      const document = shipped();
+      if (document === undefined) throw e;
+      return document;
+    }
+    if (located.file === undefined) return shipped();
     const text = options.vfs.read(located.file);
-    if (text === undefined) return undefined;
+    if (text === undefined) return shipped();
     return { document: selectProperty(parseReferencedFile(located.file, text), located.property, name), file: located.file };
   };
 

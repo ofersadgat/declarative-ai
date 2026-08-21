@@ -154,6 +154,11 @@ function inferOne(ref: Ref<InlineFamily>, scope: ExprScope, unresolved: string[]
     case RESOLVER_REFS.cond:
       operand("test");
       return joinSchemas(operand("then"), operand("else"));
+    case RESOLVER_REFS.record:
+      // An object literal types as the object it is: one property per input slot, closed, and
+      // required — every key it declares is a key it has, which is what lets a call's options bag be
+      // checked against the parameter it fills instead of widening to the universal schema.
+      return recordSchema(Object.keys(producer.input).map((name) => [name, operand(name)]));
     default: {
       // A BUILT-IN, reached by its own name — `add`, `pluck`, `maxBy`. Its arguments are bound to the
       // ordered parameter names §3.3 gives it, so reading them back is the same positional mapping the
@@ -231,7 +236,24 @@ function infer(expr: Expr, scope: ExprScope, unresolved: string[][]): JsonSchema
           return builtinResult(expr.op, args) ?? ANY_SCHEMA;
       }
     }
+    case "object":
+      // The same schema the lowered walk builds, from the same helper — the two paths type an object
+      // literal identically because there is one place that says what its type is.
+      return recordSchema(expr.entries.map((entry) => [entry.key, infer(entry.value, scope, unresolved)]));
   }
+}
+
+/**
+ * An object literal's type: one property per entry, closed and required.
+ *
+ * CLOSED because the literal is the whole object — there is no later step that could add a key, so
+ * `additionalProperties: false` is a fact about it rather than a restriction placed on it. REQUIRED
+ * for the same reason: a key written down is a key present.
+ */
+function recordSchema(entries: readonly (readonly [string, JsonSchema])[]): JsonSchema {
+  const properties: Record<string, JsonValue> = {};
+  for (const [name, schema] of entries) properties[name] = schema as JsonValue;
+  return { type: "object", properties, required: entries.map(([name]) => name), additionalProperties: false };
 }
 
 /** An array schema's element type, or the universal schema when it declares none. */

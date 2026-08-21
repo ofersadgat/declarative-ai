@@ -74,7 +74,21 @@ export type Expr =
    * nothing to name; and the name must stay out of the data scope, or `classify(x)` would read as a
    * reference to an undeclared namespace called `classify`.
    */
-  | { type: "apply"; op: string; args: Expr[] };
+  | { type: "apply"; op: string; args: Expr[] }
+  /**
+   * An OBJECT LITERAL — `{ to_state: 'deploy', urgent: .inputs.severity > 2 }`.
+   *
+   * The aggregate literal, standing beside `lit` the way an object stands beside a scalar in JSON.
+   * Deliberately NOT an `apply`: every application is an operation name plus ORDERED arguments, and
+   * an object's arguments are named by the author, in no order. Squeezing it into `apply` would have
+   * meant a parallel array of keys riding alongside `args` — the same node with a second, silent
+   * shape.
+   *
+   * What it exists for is an options bag: `on_user_event('task_drag', { to_state: 'deploy' })` names
+   * what the second argument means at the call site, and a call whose options grow do not renumber
+   * anybody's positions.
+   */
+  | { type: "object"; entries: { key: string; value: Expr }[] };
 
 export class ExprError extends Error {
   constructor(
@@ -153,7 +167,7 @@ const OPERATION_ALIASES: Readonly<Record<string, string>> = {
   messages: RESOLVER_REFS.conversation,
 };
 
-const PUNCT = ["===", "!==", "==", "!=", "<=", ">=", "&&", "||", "<", ">", "!", "?", ":", "(", ")", "[", "]", ".", ",", "/", "*", "+", "-"];
+const PUNCT = ["===", "!==", "==", "!=", "<=", ">=", "&&", "||", "<", ">", "!", "?", ":", "(", ")", "[", "]", "{", "}", ".", ",", "/", "*", "+", "-"];
 const IDENT_START = /[A-Za-z_$]/;
 const IDENT_PART = /[A-Za-z0-9_$]/;
 
@@ -172,7 +186,7 @@ const ARITHMETIC_OPS: Readonly<Record<string, string>> = { "+": "add", "-": "sub
 function endsValue(t: Token | undefined): boolean {
   if (t === undefined) return false;
   if (t.kind === "num" || t.kind === "str" || t.kind === "ident") return true;
-  return t.kind === "punct" && (t.value === ")" || t.value === "]");
+  return t.kind === "punct" && (t.value === ")" || t.value === "]" || t.value === "}");
 }
 
 function lex(src: string): Token[] {
@@ -483,7 +497,50 @@ class Parser {
       this.expectPunct(")");
       return e;
     }
+    if (t.kind === "punct" && t.value === "{") return this.objectLiteral();
     throw new ExprError("unexpected token", t.pos);
+  }
+
+  /**
+   * An object literal's entries, already past the `{`.
+   *
+   * A KEY is a bare identifier or a quoted string, never an expression: the grammar has no computed
+   * keys, for the same reason `.a.b` takes a literal property name — `get(o, k)` is the spelling for
+   * a computed read, and having two ways to write one would make the static analysis guess which.
+   *
+   * A VALUE is a full expression, so an options bag can carry a computed one. `:` is unambiguous
+   * here even though the ternary owns it elsewhere: `ternary()` only ever consumes a `:` it has
+   * already seen a `?` for.
+   */
+  private objectLiteral(): Expr {
+    const entries: { key: string; value: Expr }[] = [];
+    if (this.atPunct("}")) {
+      this.next();
+      return { type: "object", entries };
+    }
+    for (;;) {
+      const key = this.next();
+      if (key.kind !== "ident" && key.kind !== "str") throw new ExprError("expected a property name", key.pos);
+      const name = String(key.value);
+      // A duplicate key is refused rather than last-one-wins: both spellings are silent at run time,
+      // and the one that reads as an author's intent — "I wrote this twice by mistake" — is the one
+      // worth saying out loud.
+      if (entries.some((e) => e.key === name)) throw new ExprError(`duplicate property '${name}'`, key.pos);
+      this.expectPunct(":");
+      entries.push({ key: name, value: this.ternary() });
+      if (this.atPunct(",")) {
+        this.next();
+        // A trailing comma is allowed, so a multi-line options bag can gain an entry in a one-line
+        // diff — the same courtesy JSON5 and every language written by people extends.
+        if (this.atPunct("}")) {
+          this.next();
+          return { type: "object", entries };
+        }
+        continue;
+      }
+      this.expectPunct("}");
+      return { type: "object", entries };
+    }
   }
 }
 
@@ -602,6 +659,21 @@ export function evaluate(expr: Expr, context: Record<string, unknown>): ExprValu
     }
     case "apply":
       return applyOperator(expr, context);
+    case "object": {
+      // STRICT in every value, like a built-in application and unlike the three lazy forms: an object
+      // holding PENDING is not an object anyone can read, and handing one on would put the sentinel
+      // inside a value that then travels as data.
+      const out: Record<string, unknown> = {};
+      for (const entry of expr.entries) {
+        const v = evaluate(entry.value, context);
+        if (isPending(v)) return PENDING;
+        // `defineProperty`, not assignment: `{ __proto__: x }` would otherwise invoke the inherited
+        // setter and re-parent the object instead of storing a key (`fromEntries` guards the same
+        // way).
+        Object.defineProperty(out, entry.key, { value: v, writable: true, enumerable: true, configurable: true });
+      }
+      return out;
+    }
   }
 }
 
@@ -718,6 +790,10 @@ export function referencesOf(expr: Expr): string[][] {
         // against this instance. Reporting it here would make `classify(x)` look like a read of an
         // undeclared namespace called `classify`.
         for (const arg of e.args) collect(arg);
+        return undefined;
+      case "object":
+        // The VALUES read data; the KEYS are names the author wrote, not paths into anything.
+        for (const entry of e.entries) collect(entry.value);
         return undefined;
     }
   };

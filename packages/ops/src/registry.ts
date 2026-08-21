@@ -123,6 +123,24 @@ export interface HostCapabilities {
   readOnly: boolean;
   /** Sound to memoize under the standard memo key. */
   memoizable: boolean;
+  /**
+   * The call does not RUN so much as WAIT: it registers interest in something outside the run and
+   * settles when that thing happens — a person answering, an event arriving, a deadline passing.
+   *
+   * Optional, and absent means `false`, which is what every function written before this field
+   * meant. Declaring it changes only WHO WAITS. An ordinary embedded call is awaited by the
+   * scheduling round that needed it, which is right for a computation that will finish on its own
+   * and wrong for one that may never finish: a guard calling it would hold the round open for as
+   * long as nobody acts, and a round holding open is a state that cannot report what it is waiting
+   * for. A deferred call is instead STARTED by the round and read by a later one — the same
+   * `PENDING`-then-value protocol a running child already resolves through — so the engine stays
+   * live, the wait is visible, and cancelling the run cancels the wait.
+   *
+   * It says nothing about purity or side effects; `readOnly` and `memoizable` still answer those. A
+   * deferred function is very often `memoizable: false`, because what it returns is an event and not
+   * a computation over its arguments.
+   */
+  deferred?: boolean;
 }
 
 /**
