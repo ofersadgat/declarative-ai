@@ -824,8 +824,10 @@ output type doesn't match the consumed slot, is a **compile error**; unbound dec
 entirely and relies on the runtime checkers. Both tiers check the *same* schemas, so they cannot drift.
 
 `runtimeOp` is authoring sugar for a delegated-runtime invocation and emits **exactly a plain `FunctionOp`**
-— `functionRef` names the adapter, the runtime surface is a bound `config` input, the prompt an ordinary
-`text` input named `prompt`. No extra field, no refinement in the hashed form. Builders assign a slot's
+— `functionRef` names the adapter, the prompt is an ordinary `text` input named `prompt`, and each authored
+argument is its own named input. `args` was `config`, bound as ONE json input under that name, which is
+what an operation could carry while a registered function had no way to declare named parameters; it emits
+the same flat map a workflow's `args` lowers to now. No extra field, no refinement in the hashed form. Builders assign a slot's
 `kind` with [`kindFor`](#the-operation-model), so a builder-made slot and a hand-written one agree.
 
 ---
@@ -2563,7 +2565,7 @@ interface PromptOpDecl {
 interface FunctionOpDecl {
   kind: "function";
   function: string;                                 // registry name — host function OR runtime adapter
-  config?: Record<string, JsonValue>;               // the authored surface, bound as the op's `config` input
+  args?: Record<string, JsonValue>;                 // the authored surface, bound to input slots BY NAME
   input?: Record<string, ParameterDecl>;
   output?: NamedParameterDecl;
 }
@@ -2704,8 +2706,9 @@ const RESOLVER_REF_VALUES: readonly string[];     // all of them, for registry s
 
 A `PromptOpDecl`'s render variables are authored directly as **bound input slots** (the operation's
 resolved inputs ARE the template's `{{.inputs.*}}` scope — there is no separate `params`), and a
-`FunctionOpDecl`'s `config` lowers into a bound `config` input — the "authored surface rides bound inputs"
-move that keeps the op shape exactly findmyprompt's. A `skill` prompt is marked in the same `user` slot
+`FunctionOpDecl`'s `args` lower into one bound input each, by name — the "authored surface rides bound
+inputs" move that keeps the op shape exactly findmyprompt's, with the callee's declared slots deciding what
+those names may be. A `skill` prompt is marked in the same `user` slot
 with a prefix rather than an extra op field:
 
 ```ts
@@ -2837,7 +2840,7 @@ const DELEGATED_CAPS: RuntimeCapabilities = {
   streaming: true, runtime: "node",
 };
 
-interface ClaudeCodeConfig {                     // the authored surface, bound as the op's `config` input
+interface ClaudeCodeConfig {                     // the authored surface, bound as named inputs
   permissionMode?: AgentPermissionMode;
   sessionId?: string;                            // approval scope key for ctx.approve (default "delegated")
 }
@@ -2849,14 +2852,15 @@ Register and author it:
 
 ```ts
 const agent = createClaudeCodeFunction();
-registry.functions.set("claude-code", runtimeFunction(agent.run, agent.capabilities));
-const op = runtimeOp({ runtime: "claude-code", prompt: "…", config: { permissionMode: "plan" } });
-// => exactly { kind: "function", functionRef: "claude-code", input: { prompt, config }, output }
+registry.functions.set("claude-code", runtimeFunction(agent.run, agent.capabilities, { signature: agent.signature }));
+const op = runtimeOp({ runtime: "claude-code", prompt: "…", args: { permissionMode: "plan" } });
+// => exactly { kind: "function", functionRef: "claude-code", input: { prompt, permissionMode }, output }
 ```
 
 The op shape carries **no runtime marker at all** — permission gating and search refusal read the resolved
-registry entry's `DELEGATED_CAPS`. The function reads its `prompt` input as the agent instruction and its
-`config` input as the authored surface; `ctx.workspace.root` is the cwd, `ctx.tools` the resolved tool set,
+registry entry's `DELEGATED_CAPS`. The function reads its `prompt` input as the agent instruction and `permissionMode` / `sessionId` as its
+own inputs — `AGENT_SIGNATURE` declares all four, so a state passing `permissionMod` is an authoring error
+rather than a silently ignored key; `ctx.workspace.root` is the cwd, `ctx.tools` the resolved tool set,
 `ctx.approve` the human gate, `ctx.abortSignal` cancellation, and `ctx.meter` the wallet. Its output value
 is the agent's answer **text**.
 

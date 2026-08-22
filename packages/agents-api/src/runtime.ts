@@ -31,8 +31,10 @@ import {
   type FunctionResult,
   type ExecServices,
   type FunctionInputs,
+  type InlineFamily,
   type JsonValue,
   type NativeToolRef,
+  type Signature,
   type RuntimeCapabilities,
   type Tool,
 } from "@declarative-ai/exec";
@@ -112,19 +114,30 @@ export class ClaudeCodeError extends Error {
   }
 }
 
-/** Read an author-supplied permission mode from the bound `config` input, ignoring an unknown value. */
-function permissionModeOf(config: Record<string, JsonValue>): AgentPermissionMode | undefined {
-  const m = config["permissionMode"];
+/** Read an author-supplied permission mode from its own input, ignoring an unknown value. */
+function permissionModeOf(inputs: FunctionInputs): AgentPermissionMode | undefined {
+  const m = inputs.permissionMode;
   return typeof m === "string" && (PERMISSION_MODES as readonly string[]).includes(m) ? (m as AgentPermissionMode) : undefined;
 }
 
-/** Read the op's bound `config` input as a plain record (absent/non-object/bytes ⇒ empty). */
-function configOf(inputs: FunctionInputs): Record<string, JsonValue> {
-  const c = inputs.config;
-  return c !== null && typeof c === "object" && !Array.isArray(c) && !(c instanceof Uint8Array) && !("getReader" in c)
-    ? (c as Record<string, JsonValue>)
-    : {};
-}
+/**
+ * What this adapter is CALLED WITH — the named slots a workflow's `args` and `input` bind against.
+ *
+ * Declared rather than discovered, and the declaration is what makes the call checkable: `prompt`
+ * required, the rest optional, so a state passing `permissionMod` is an authoring error instead of a
+ * silently ignored key. These used to arrive inside one `config` object, because a registered
+ * function had no way to say it takes named parameters and a workflow had nowhere to bind them.
+ */
+export const AGENT_SIGNATURE: Signature<InlineFamily> = {
+  input: {
+    prompt: { kind: "text", schema: { type: "string" }, index: 0 },
+    permissionMode: { kind: "text", schema: { type: "string", enum: [...PERMISSION_MODES] }, index: 1, optional: true },
+    /** The approval SCOPE key, not a provider session id — see `approvalScope` below. */
+    sessionId: { kind: "text", schema: { type: "string" }, index: 2, optional: true },
+    system: { kind: "text", schema: { type: "string" }, index: 3, optional: true },
+  },
+  output: { name: "output", kind: "text", schema: { type: "string" } },
+};
 
 /**
  * Present the agent executor as a `runtime` registry entry.
@@ -137,6 +150,8 @@ export function agentRuntimeEntry(
   options: ClaudeCodeFunctionOptions = {},
 ): {
   capabilities: RuntimeCapabilities;
+  /** What this adapter is called with, for `runtimeFunction(run, capabilities, { signature })`. */
+  signature: Signature<InlineFamily>;
   run: (inputs: FunctionInputs, ctx: ExecServices) => Promise<FunctionResult<string, AgentMetrics>>;
   /** The provider read seam a host wires into `ctx.sessionReader`, when this transport has one. */
   sessionReader?: { read(providerSessionId: string): Promise<readonly unknown[]> };
@@ -147,15 +162,18 @@ export function agentRuntimeEntry(
   const capabilities = options.capabilities ?? build({}).capabilities;
   return {
     capabilities: capabilities as RuntimeCapabilities,
+    // Offered beside the capabilities, and for the same reason: both are statements about the entry
+    // that a checker has to be able to read without invoking it. A registration that carries only
+    // the impl says what the adapter does and nothing about how it is called.
+    signature: AGENT_SIGNATURE,
     // Present only when this transport can actually read a conversation back. The distinction is
     // load-bearing: an absent reader means a resync starts EMPTY, and §11 requires that to be visible
     // rather than mistaken for a conversation that happened to have nothing in it.
     ...(readSession !== undefined ? { sessionReader: { read: (id: string) => readSession(id) } } : {}),
     run: async (inputs: FunctionInputs, ctx: ExecServices): Promise<FunctionResult<string, AgentMetrics>> => {
-      const config = configOf(inputs);
       const prompt = typeof inputs.prompt === "string" ? inputs.prompt : String(inputs.prompt ?? "");
       // A fresh executor per call, because `permissionMode` and the approval scope are per-CALL facts
-      // that arrive on the op's `config` input while the executor takes them at construction. It is an
+      // that arrive as the op's own inputs while the executor takes them at construction. It is an
       // options bag and a closure — no I/O, no connection, nothing worth pooling.
       const executor = build({
         ...(options.query !== undefined ? { query: options.query } : {}),
@@ -169,8 +187,8 @@ export function agentRuntimeEntry(
         ...(options.binaryPath !== undefined ? { binaryPath: options.binaryPath } : {}),
         ...(options.env !== undefined ? { env: options.env } : {}),
         ...(options.label !== undefined ? { label: options.label } : {}),
-        ...(permissionModeOf(config) !== undefined ? { permissionMode: permissionModeOf(config) } : {}),
-        ...(typeof config["sessionId"] === "string" ? { approvalScope: config["sessionId"] } : {}),
+        ...(permissionModeOf(inputs) !== undefined ? { permissionMode: permissionModeOf(inputs) } : {}),
+        ...(typeof inputs.sessionId === "string" ? { approvalScope: inputs.sessionId } : {}),
       });
       const op = promptOp({ user: prompt, output: { name: "result", schema: { type: "string" } } });
       const result = await executor.start(op, ctx).result;

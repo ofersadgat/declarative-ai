@@ -333,8 +333,14 @@ export function functionOp<I extends Record<string, JsonValue>, O, Ctx>(
 
 /**
  * Authoring sugar for a RUNTIME INVOCATION (§3.1): emits a PLAIN `FunctionOp` — no extra
- * field, no refinement — whose `functionRef` names the registered adapter, with the authored
- * runtime surface bound as the `config` input and the prompt as an ordinary `text` input.
+ * field, no refinement — whose `functionRef` names the registered adapter, with the prompt and each
+ * authored argument bound as ordinary named inputs.
+ *
+ * `args` was `config`, and it was bound as ONE json input under that name, so an adapter read
+ * `inputs.config.permissionMode`. That was what an operation could carry while a registered function
+ * had no way to declare named parameters; an entry declares them now, so an argument has a name to
+ * arrive under and this builder emits the same flat `input` map a workflow's `args` lowers to. One
+ * spelling of "the authored surface", whether it was written in JSON or built here.
  */
 export function runtimeOp<const SO extends JSONSchema = { readonly type: "string" }>(spec: {
   /** The registered runtime adapter's function ref (e.g. "claude-code"). */
@@ -342,15 +348,22 @@ export function runtimeOp<const SO extends JSONSchema = { readonly type: "string
   prompt: TypedBinding<string>;
   system?: string;
   /** The authored runtime surface: permission baseline, tool allow-list, permission mode, … */
-  config?: { [key: string]: JsonValue };
-  /** Additional wired inputs beyond `prompt`/`config`. */
+  args?: { [key: string]: JsonValue };
+  /** Additional wired inputs beyond `prompt` and the authored arguments. */
   input?: { [name: string]: Parameter<InlineFamily> };
   output?: { name?: string; schema?: SO };
 }): TypedOperation<Record<string, JsonValue>, InferSchema<SO>> & FunctionOp<InlineFamily> {
   const outSchema = (spec.output?.schema ?? { type: "string" }) as SchemaDoc as JsonSchema;
   const input: { [name: string]: Parameter<InlineFamily> } = {
     prompt: { kind: "text", binding: toRef(spec.prompt, "text"), schema: { type: "string" } },
-    config: { kind: "json", binding: { json: (spec.config ?? {}) as JsonValue } },
+    // The same rule hw's `bindIntoSlots` applies to an authored `args` block: a string is `text` and
+    // everything else is `json`, so a literal reaches a slot one way however it was written.
+    ...Object.fromEntries(
+      Object.entries(spec.args ?? {}).map(([name, value]) => [
+        name,
+        typeof value === "string" ? { kind: "text" as const, binding: { text: value } } : { kind: "json" as const, binding: { json: value } },
+      ]),
+    ),
     ...(spec.system !== undefined ? { system: { kind: "text", binding: { text: spec.system }, schema: { type: "string" } } } : {}),
     ...spec.input,
   };

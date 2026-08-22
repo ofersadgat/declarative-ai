@@ -6,10 +6,7 @@ import { createClaudeCodeFunction, DELEGATED_CAPS } from "../src/index.js";
 import type { AgentPermissionDecision, AgentQuery, AgentQueryOptions, AgentToolRequest } from "../src/index.js";
 
 /** The op's bound inputs, as the engine hands them to the registered async function (§3.1). */
-const inputs = (over: { prompt?: string; config?: JsonValue } = {}): FunctionInputs => ({
-  prompt: over.prompt ?? "do it",
-  config: over.config ?? {},
-});
+const inputs = (over: Record<string, JsonValue> = {}): FunctionInputs => ({ prompt: "do it", ...over });
 const tool = (): Tool => ({ inputSchema: { type: "object" }, readOnly: true, run: () => ({}) });
 /** Run the adapter and split its `Result`. Errors are DATA now (§4.2): the adapter RESOLVES a
  *  classified failure instead of throwing, so there is nothing for the caller to guess at. */
@@ -32,12 +29,12 @@ describe("createClaudeCodeFunction — delegated agent as a registered async fun
   });
 
   it("the authoring builder lowers to a PLAIN FunctionOp — no extra field, no runtime marker", () => {
-    const op = runtimeOp({ runtime: "claude-code", prompt: "fix the test", config: { permissionMode: "plan" } });
+    const op = runtimeOp({ runtime: "claude-code", prompt: "fix the test", args: { permissionMode: "plan" } });
     expect(op.kind).toBe("function");
     expect(op.functionRef).toBe("claude-code");
     expect(Object.keys(op).sort()).toEqual(["functionRef", "input", "kind", "output"]);
     expect(op.input.prompt?.binding).toEqual({ text: "fix the test" });
-    expect(op.input.config?.binding).toEqual({ json: { permissionMode: "plan" } });
+    expect(op.input.permissionMode?.binding).toEqual({ text: "plan" });
   });
 
   it("maps inputs + ctx onto the query and returns the agent's text", async () => {
@@ -47,7 +44,7 @@ describe("createClaudeCodeFunction — delegated agent as a registered async fun
       yield { type: "assistant" };
       yield { type: "result", result: { text: "done", costUsd: 0.02 } };
     };
-    const result = await createClaudeCodeFunction({ query }).run(inputs({ config: { permissionMode: "plan" } }), {
+    const result = await createClaudeCodeFunction({ query }).run(inputs({ permissionMode: "plan" }), {
       workspace: { root: "/repo" },
       tools: { read_file: tool(), write_file: tool() },
     });
@@ -94,7 +91,7 @@ describe("createClaudeCodeFunction — delegated agent as a registered async fun
       captured = opts;
       yield { type: "result", result: { text: "x" } };
     };
-    await createClaudeCodeFunction({ query }).run(inputs({ config: { permissionMode: "bogus" } }), {});
+    await createClaudeCodeFunction({ query }).run(inputs({ permissionMode: "bogus" }), {});
     expect(captured?.permissionMode).toBeUndefined();
     expect(captured?.allowedTools).toBeUndefined();
     expect(captured?.cwd).toBeUndefined();
@@ -119,7 +116,7 @@ describe("createClaudeCodeFunction — delegated agent as a registered async fun
     expect(decisions[1]).toEqual({ allow: true });
   });
 
-  it("uses the config's sessionId as the approval scope key", async () => {
+  it("uses the `sessionId` input as the approval scope key", async () => {
     const seen: string[] = [];
     const query: AgentQuery = async function* (opts) {
       await opts.canUseTool!({ toolName: "bash", input: {} }, { signal: new AbortController().signal });
@@ -129,7 +126,7 @@ describe("createClaudeCodeFunction — delegated agent as a registered async fun
       seen.push(r.sessionId);
       return { decision: "allow", scope: "once" };
     };
-    await createClaudeCodeFunction({ query }).run(inputs({ config: { sessionId: "review-1" } }), { approve });
+    await createClaudeCodeFunction({ query }).run(inputs({ sessionId: "review-1" }), { approve });
     expect(seen).toEqual(["review-1"]);
   });
 

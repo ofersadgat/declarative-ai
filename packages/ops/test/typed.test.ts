@@ -183,11 +183,11 @@ describe("typed op builders", () => {
     });
   });
 
-  it("runtimeOp emits a PLAIN FunctionOp — adapter name + bound config/prompt inputs (§3.1)", () => {
+  it("runtimeOp emits a PLAIN FunctionOp — adapter name + one bound input per argument (§3.1)", () => {
     const op = runtimeOp({
       runtime: "claude-code",
       prompt: "Fix the failing test.",
-      config: { permissionMode: "plan", tools: ["Read", "Grep"] },
+      args: { permissionMode: "plan", tools: ["Read", "Grep"] },
       output: { name: "report", schema: { type: "string" } },
     });
     // The op SHAPE does not change at all: it is exactly a FunctionOp.
@@ -195,7 +195,11 @@ describe("typed op builders", () => {
     expect(plain.kind).toBe("function");
     expect(plain.functionRef).toBe("claude-code");
     expect(plain.input.prompt).toEqual({ kind: "text", binding: { text: "Fix the failing test." }, schema: { type: "string" } });
-    expect(plain.input.config).toEqual({ kind: "json", binding: { json: { permissionMode: "plan", tools: ["Read", "Grep"] } } });
+    // Each argument gets its own NAMED slot, so an adapter reads `inputs.permissionMode`. They used
+    // to arrive as one json blob under `config`, which is what an operation could carry while a
+    // registered function had no way to declare named parameters.
+    expect(plain.input.permissionMode).toEqual({ kind: "text", binding: { text: "plan" } });
+    expect(plain.input.tools).toEqual({ kind: "json", binding: { json: ["Read", "Grep"] } });
     expect(Object.keys(plain).sort()).toEqual(["functionRef", "input", "kind", "output"]); // no extra fields
     expectTypeOf<OperationOutput<typeof op>>().toEqualTypeOf<string>();
   });
