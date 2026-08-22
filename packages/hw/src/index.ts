@@ -28,6 +28,9 @@ export * from "./moduleExports.js";
 export * from "./moduleIndex.js";
 // An embedded js/ts body compiled to module source (SPEC.md §7.5.1).
 export * from "./functionBody.js";
+// Transpiling and running a user module — the require path, the closure, and the CJS scope
+// (SPEC.md §7.5.4, §7.5.6).
+export * from "./moduleLoader.js";
 export * from "./shape.js";
 export * from "./expand.js";
 export * from "./loader.js";
