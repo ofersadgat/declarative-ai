@@ -95,6 +95,12 @@ describe("a registered function is a callee", () => {
     expect(opOf("shout('hi')")).toMatchObject({ functionRef: "shout" });
   });
 
+  it("is reachable in HIGHER-ORDER position, where a callee must be named rather than computed", () => {
+    // `map` takes an operation to apply, so its second argument is a reference. Nothing special was
+    // needed for the registry to be nameable there: it resolves through the same `resolveOperation`.
+    expect(opOf("map(.inputs.xs, shout)").input).toMatchObject({ op: { binding: { op: { functionRef: "shout" } } } });
+  });
+
   it("still resolves an entry that declares NO signature, with no slots to bind", () => {
     // Every host function written before signatures existed is this case, so refusing it would make
     // putting the registry on the path a breaking change for all of them. What it costs is exactly

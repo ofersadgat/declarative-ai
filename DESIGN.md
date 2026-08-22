@@ -1402,9 +1402,49 @@ approved" and "changed since approval" — a person about to be asked for approv
 exempt" would leave open exactly the hole approval closes, since the require path lets a bare
 specifier reach a plain file in a search entry.
 
+**`operation.function` resolves along the path, and the last separate namespace goes with it.** ✅
+*Implemented — `loader.ts`, `registryPath.test.ts`.*
+
+It meant "a name in `registry.functions`" and did not search, which had two consequences worth
+stating together because only one of them is obvious. A state's own call was the one call in the
+system that could not reach a document or a module. And the registry was a namespace only that field
+could address — so there was no way to override a host function, and a host wanting one callable from
+an expression had to ship a document restating the parameters its implementation already had.
+
+`desugarOperation` resolves it through `resolveOperation`, the same seam an expression's callee goes
+through, and binds the state's `input` and `args` into the callee's declared slots. One rule at the
+call site: the callee's slot carries the TYPE, the caller's carries the VALUE. A state that restates
+a slot overrides only what it restated, so a caller cannot quietly re-type a parameter it does not
+own; the state's `outputs` win where it wrote any and the callee's stand where it did not, so a
+module's return type reaches a state that declared nothing.
+
+A name resolving NOWHERE keeps its older meaning — a bare ref the engine looks up at dispatch. Not a
+compatibility shim: an unregistered `functionRef` is a validator WARNING by design, because a state
+the run never enters never needs its function and leaving one unregistered is how a search context
+refuses a human gate. Turning it into a load failure would take that away.
+
+`resolving` is the one piece of state this adds, and it exists for a shape that reads as a cycle and
+is not one. `functions/shout.json` declaring `{"function": "shout"}` is the ordinary way a document
+types a registered implementation — but `function` searches the path now, so desugaring it asks for
+`shout` again and finds the same file. Suppressing the inner resolution is what makes the document
+mean what it reads as: THESE slots, dispatched to the registered `shout`.
+
+**Checking a call needed the required-slot check rescued, not extended.** It asked "does the
+operation declare a slot of this name", which stopped meaning anything the moment the callee's slots
+were copied onto the operation: every declared parameter is present whether or not anybody supplied
+it, and the check could never have fired again. It asks what it always meant — will anything FILL
+this slot — and that is two predicates rather than one approximation, because the answer genuinely
+differs. A state's operation is dispatched with `{ …instance.inputs, …resolved.values }`, so a state
+whose declared input shares the slot's name fills it with nothing wired; an embedded call has no
+enclosing instance to spread in, since `resolveEmbedded` binds the producer edge's `parameters` and
+nothing else. The other direction — an argument past the last slot — was a silent DROP in
+`bindPositionally`, tolerable while slots came from a hand-written document beside the call and not
+once a signature can change under a call site that still type-checks.
+
 **Validation becomes a function of *(document, registry, approvals)*.** It was already a function of
 document and registry (§3.3) so that "a `functionRef` naming nothing registered" is an authoring
-error rather than a runtime one. Approval status is the same kind of fact, known at the same moment,
+error rather than a runtime one. LOADING is one too now, for the same kind of reason: a callee's
+declared slots are what a call binds against, and for a host function those slots live on the entry. Approval status is the same kind of fact, known at the same moment,
 and it produces the same kind of error — with one difference in severity: an unapproved module is a
 *blocking* condition at freeze time, never a warning, because a run is not the moment to decide what
 code to trust.
