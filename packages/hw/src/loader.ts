@@ -41,7 +41,9 @@ import { bindTransitionContext, lowerExpression, type LowerOptions } from "./low
 import { environmentIdentity, mergeOperationFields, resolutionEnvironment } from "./merge.js";
 import { resolveStateRef, StateRefError, type StateRefOptions } from "./ref.js";
 import { expandReferences } from "./expand.js";
-import { isDataFile, isRuntimeReference, parseReferencedFile, resolveReference, selectProperty, type Vfs } from "./reference.js";
+import { isDataFile, isRuntimeReference, MODULE_EXTENSIONS, parseReferencedFile, resolveReference, selectProperty, type Vfs } from "./reference.js";
+import type { SymbolIndex } from "./reference.js";
+import type { UserFunctions } from "./userFunctions.js";
 
 export class WorkflowLoadError extends Error {
   constructor(
@@ -60,6 +62,12 @@ export class WorkflowLoadError extends Error {
  * value tree, and `snapshotHash` hashes that value rather than the bytes, so one workflow has one
  * identity whichever it was written in.
  */
+/** True for a js/ts module — a file whose value is its export rather than its text. */
+function isModuleFile(file: string): boolean {
+  const ext = file.split("/").pop()?.split(".").pop()?.toLowerCase();
+  return ext !== undefined && (MODULE_EXTENSIONS as readonly string[]).includes(ext);
+}
+
 export function stateIdFromPath(relPath: string): string {
   return relPath.replace(/\\/g, "/").replace(/\.state\.json$|\.(json|yaml|yml)$/i, "");
 }
@@ -308,7 +316,30 @@ export function splitExecEnvironment(fields: OperationFields): { op: OperationFi
  * `environment` rather than from the state file — which is why the "did the author say enough to
  * build an operation?" checks live here rather than in the type.
  */
-export function desugarOperation(decl: OperationFields, stateId: string, outputs?: Record<string, NamedParameterDecl>): Operation<InlineFamily> {
+export function desugarOperation(
+  decl: OperationFields,
+  stateId: string,
+  outputs?: Record<string, NamedParameterDecl>,
+  userFunctions?: UserFunctions,
+): Operation<InlineFamily> {
+  // An EMBEDDED BODY (SPEC §7.5.1, form 2). The document declares its slots the way a state does and
+  // supplies js/ts; the wrapper's parameters are those slots in `positionalOrder`, so a call binds
+  // against exactly what the author declared. From here down it is a module like any other.
+  if (decl.body !== undefined) {
+    if (userFunctions === undefined) {
+      throw new WorkflowLoadError(
+        "operation declares a 'body', but this loader was given no way to compile js/ts",
+        stateId,
+      );
+    }
+    if (decl.function !== undefined) {
+      throw new WorkflowLoadError(
+        "operation declares both a 'body' and a 'function' — exactly one says what it runs",
+        stateId,
+      );
+    }
+    return userFunctions.operationForBody(stateId, decl.body, decl.input ?? {}).operation;
+  }
   if (decl.kind === undefined) {
     throw new WorkflowLoadError(
       "operation declares no 'kind', and no ancestor's environment supplies one — expected 'prompt' or 'function'",
@@ -512,7 +543,7 @@ export function desugarState(
   // and reported by the validator alongside every other one. Throwing here instead aborted the load
   // at the first such state, and the author saw a downstream consequence — "this leaf has no kind" —
   // in place of the mistake they actually made two files away.
-  const operationOrError = describeOperation(split, id, def.outputs);
+  const operationOrError = describeOperation(split, id, def.outputs, lower.userFunctions);
 
   const { operation, environment: _e, inputs: _i, outputs: _o, children: _c, sequence: _s, transitions: _t, ...rest } = def;
   return {
@@ -578,10 +609,11 @@ function describeOperation(
   split: { op: OperationFields } | undefined,
   id: string,
   outputs: Record<string, NamedParameterDecl> | undefined,
+  userFunctions?: UserFunctions,
 ): { operation?: Operation<InlineFamily>; error?: string } {
   if (split === undefined) return {};
   try {
-    return { operation: desugarOperation(split.op, id, outputs) };
+    return { operation: desugarOperation(split.op, id, outputs, userFunctions) };
   } catch (e) {
     if (e instanceof WorkflowLoadError) return { error: e.message.replace(`${id}: `, "") };
     throw e;
@@ -642,6 +674,29 @@ export interface LoadBundleOptions extends Omit<StateRefOptions, "defaultRoot"> 
    * is a default, not a reservation.
    */
   documents?: Readonly<Record<string, unknown>>;
+  /**
+   * How a dotted symbol resolves to the MODULE contributing it (SPEC §7.5.2).
+   *
+   * Built by `createSymbolIndex`, which is asynchronous once and synchronous thereafter — which is
+   * what lets a sync loader consult it. Absent ⇒ no module contributes anything, which is the
+   * behavior that predates the feature.
+   */
+  symbols?: SymbolIndex;
+  /**
+   * Parsed documents, shared across every reference this load resolves.
+   *
+   * Named apart from {@link LoadBundleOptions.documents}, which is the host's SHIPPED operation
+   * documents — two different things that would otherwise collide on one word.
+   */
+  documentCache?: Map<string, unknown>;
+  /**
+   * The bridge from a resolved js/ts symbol to an operation (SPEC §7.5).
+   *
+   * Absent ⇒ a module callee is an authoring error rather than silently unresolvable, because a
+   * loader that can FIND a symbol and cannot type it would report "not an operation document" about
+   * a file that is perfectly good.
+   */
+  userFunctions?: UserFunctions;
   /** Non-fatal ambiguities from reference resolution (§9). */
   onWarn?: (message: string) => void;
   /** Every file expansion read, for the snapshot closure (§8.1). */
@@ -826,7 +881,7 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
     name: string,
     stateId: string,
     path: readonly string[] | undefined,
-  ): { document: unknown; file: string } | undefined => {
+  ): { document: unknown; file: string; symbol?: readonly string[] } | undefined => {
     // A HOST-SHIPPED document has no file, so it is reached without one — which is also why it is
     // tried after the path rather than before: a name that resolves to something on disk is a
     // document somebody can open, and that always wins.
@@ -843,6 +898,9 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
         from: stateId,
         ...(defaultRoot !== undefined ? { defaultRoot } : {}),
         ...(options.roots !== undefined ? { roots: options.roots } : {}),
+        ...(options.symbols !== undefined ? { symbols: options.symbols } : {}),
+        ...(options.documentCache !== undefined ? { documents: options.documentCache } : {}),
+        ...(options.onWarn !== undefined ? { onWarn: options.onWarn } : {}),
       });
     } catch (e) {
       // A name that matches nothing on the path THROWS rather than returning empty-handed, so the
@@ -854,6 +912,13 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
       return document;
     }
     if (located.file === undefined) return shipped();
+    // A MODULE is not read as a document. `parseReferencedFile` returns a `.ts` file's TEXT (which is
+    // right for a `.md` prompt and wrong here), and `selectProperty` on text reports "text has no
+    // properties" — an error about the wrong thing entirely. A module's value is its EXPORT, reached
+    // by loading it, so it is handed on as a symbol for `resolveOperationName` to type.
+    if (isModuleFile(located.file)) {
+      return { document: undefined, file: located.file, symbol: located.property };
+    }
     const text = options.vfs.read(located.file);
     if (text === undefined) return shipped();
     return { document: selectProperty(parseReferencedFile(located.file, text), located.property, name), file: located.file };
@@ -866,11 +931,22 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
   ): Operation<InlineFamily> | undefined => {
     const found = resolveDocument(name, stateId, path);
     if (found === undefined) return undefined;
+    // A js/ts SYMBOL: its signature IS its declaration (SPEC §7.5.2), so the operation is read out of
+    // the TypeScript rather than out of a JSON block somebody also had to write.
+    if (found.symbol !== undefined) {
+      if (options.userFunctions === undefined) {
+        throw new WorkflowLoadError(
+          `'${name}' resolves to '${found.file}', but this loader was given no way to read a js/ts signature`,
+          stateId,
+        );
+      }
+      return options.userFunctions.operationFor(found.file, found.symbol).operation;
+    }
     const { document } = found;
     if (document === null || typeof document !== "object" || Array.isArray(document)) {
       throw new WorkflowLoadError(`operation '${name}' resolved to ${typeof document}, not an operation document`, stateId);
     }
-    return desugarOperation(document as OperationFields, stateId);
+    return desugarOperation(document as OperationFields, stateId, undefined, options.userFunctions);
   };
 
   /**
@@ -895,6 +971,7 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
     const lower: LowerOptions = {
       resolveOperation: (name) => resolveOperationName(name, id, searchPath),
       resolveName: (name) => resolveValueName(name, id, searchPath, lower),
+      ...(options.userFunctions !== undefined ? { userFunctions: options.userFunctions } : {}),
     };
     const loaded = desugarState(id, expanded, inherited, refs, childrenByParent.get(id), lower);
     loaded.id = variant;

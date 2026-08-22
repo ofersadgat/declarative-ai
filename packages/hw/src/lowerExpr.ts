@@ -142,6 +142,14 @@ export interface LowerOptions {
    * The loader owns that dispatch because `desugarBinding` is already exactly it.
    */
   resolveName?: (name: string) => Ref<InlineFamily> | undefined;
+  /**
+   * How a js/ts body or symbol becomes an operation (SPEC §7.5).
+   *
+   * Carried here because `desugarState` already receives these options, and an embedded body is
+   * lowered in exactly the place an expression is — a second channel for one state's compilation
+   * context would be a second thing to keep in step.
+   */
+  userFunctions?: import("./userFunctions.js").UserFunctions;
 }
 
 /** The runtime namespaces, for the one diagnostic that has to survive the dot becoming required. */

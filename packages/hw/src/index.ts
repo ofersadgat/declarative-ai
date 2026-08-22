@@ -40,6 +40,9 @@ export * from "./signature.js";
 // Hashing, approval and the freeze (SPEC.md §7.5.5) — what makes running a user module
 // acceptable, and what makes a frozen run actually frozen.
 export * from "./integrity.js";
+// Where every piece meets the rest of the system: a resolved js/ts symbol or an embedded body
+// becomes an ordinary registry-dispatched operation (SPEC.md §7.5).
+export * from "./userFunctions.js";
 export * from "./shape.js";
 export * from "./expand.js";
 export * from "./loader.js";
