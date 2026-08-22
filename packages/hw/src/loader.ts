@@ -403,7 +403,7 @@ export function desugarOperation(
   // not a load failure (a state the run never enters never needs its function).
   const callee = lower.resolveOperation?.(decl.function!);
   if (callee === undefined) {
-    return { kind: "function", functionRef: decl.function!, input: withArgs(input, decl.args), output };
+    return { kind: "function", functionRef: decl.function!, input: bindIntoSlots({}, input, decl.args, decl.function!, stateId), output };
   }
   if (callee.kind !== "function") {
     throw new WorkflowLoadError(
@@ -433,7 +433,20 @@ export function desugarOperation(
  * A name the callee has no slot for is an ERROR, and only where the callee declared slots at all. An
  * argument nothing reads is the failure this whole change exists to make visible; a callee that
  * declared nothing has said nothing to disagree with, which is every host function written before
- * signatures existed.
+ * signatures existed. `declared = {}` is therefore not a special case but the low end of that rule —
+ * it is what a `function` naming something the path does not resolve gets, and it does exactly what
+ * binding `args` by name has to do on its own.
+ *
+ * **`args` is the shorthand for `input`**: `{"args": {"mode": "plan"}}` is `{"input": {"mode":
+ * {"kind": "text", "binding": {"text": "plan"}}}}`, which is what an author writes when the value is
+ * a constant and there is nothing to say about its type. A slot declared in `input` wins, and the
+ * overlap is ordinary rather than a mistake — `args` merges per key down the environment chain
+ * (§7.1a), so an ancestor's default and a state's own typed slot routinely name the same thing, and
+ * the typed one is the more specific statement of the two.
+ *
+ * A string binds as `text` and everything else as `json`, which is the call `parametersFor` already
+ * makes for an expression's arguments — one rule for how a literal reaches a slot rather than two
+ * that could disagree about the kind of `"plan"`.
  */
 function bindIntoSlots(
   declared: Record<string, Parameter<InlineFamily>>,
@@ -457,45 +470,13 @@ function bindIntoSlots(
     out[slot] = { ...out[slot], ...parameter };
   }
   for (const [slot, value] of Object.entries(args ?? {})) {
-    // An authored `input` slot of the same name already answered for this one (see `withArgs`).
+    // An authored `input` slot of the same name already answered for this one.
     if (authored[slot] !== undefined) continue;
     const existing = reach(slot);
     const binding = typeof value === "string" ? { text: value } : { json: value };
     out[slot] = { kind: existing?.kind ?? (typeof value === "string" ? "text" : "json"), ...existing, binding };
   }
   return out;
-}
-
-/**
- * Bind an operation's authored `args` to its input slots, BY NAME.
- *
- * They used to be shoved whole into one slot literally called `config`, so an impl read
- * `inputs.config.mode` rather than `inputs.mode` and the op's shape said nothing about what the call
- * actually passes. That was the only thing it could do while a registered function had no way to
- * declare named parameters: with no slots to bind to, the blob was the whole of what the op could
- * carry. Now that a signature declares slots (`EntrySignature`), an argument has a name to arrive
- * under, and the checker has two sides to compare — a parameter the impl does not accept, and one it
- * requires that nobody passes, both of which the `config` blob made unaskable.
- *
- * A slot the author DECLARED wins over an `args` entry of the same name. The overlap is ordinary
- * rather than a mistake: `args` merges per key down the environment chain (§7.1a), so an ancestor's
- * default and a state's own typed slot routinely name the same thing, and the typed one is the more
- * specific statement of the two.
- *
- * A string binds as `text` and everything else as `json`, which is the same call `parametersFor`
- * makes for an expression's arguments — one rule for how a literal argument reaches a slot, rather
- * than two that could disagree about the kind of `"plan"`.
- */
-function withArgs(
-  input: Record<string, Parameter<InlineFamily>>,
-  args: Record<string, JsonValue> | undefined,
-): Record<string, Parameter<InlineFamily>> {
-  if (args === undefined) return input;
-  for (const [name, value] of Object.entries(args)) {
-    if (input[name] !== undefined) continue;
-    input[name] = typeof value === "string" ? { kind: "text", binding: { text: value } } : { kind: "json", binding: { json: value } };
-  }
-  return input;
 }
 
 /**

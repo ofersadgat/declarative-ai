@@ -330,7 +330,7 @@ export interface OperationFields extends ExecEnvironmentDecl {
    * "binding": {"text": "plan"}}}}`, which is what an author writes when the value is a constant and
    * there is nothing to say about its type. A slot the author declared in `input` wins, since `args`
    * merges per key down the environment chain and the typed declaration is the more specific of the
-   * two statements.
+   * two statements. `bindIntoSlots` is the one place that rule lives.
    *
    * They used to arrive as one blob in a slot called `config`, because a registered function had no
    * way to declare named parameters and there were no slots to bind to. There are now (§7.5.2), and
