@@ -17,6 +17,7 @@
 import type { JsonSchema, SchemaDocument } from "@declarative-ai/json";
 import { resolveTypes } from "@declarative-ai/json";
 import type { Parameter, RefFamily, Signature } from "./model.js";
+import { isRequiredSlot } from "./model.js";
 
 /** How a family turns the `schema` a parameter carries into a schema document. */
 export type SchemaDeref<F extends RefFamily> = (schema: F["schema"]) => JsonSchema;
@@ -36,9 +37,25 @@ export function parameterSchema<F extends RefFamily>(parameter: Parameter<F>, de
   return {}; // untyped json — the universal schema
 }
 
-/** `Schema<I>`: the input value's type under `signature`. */
+/**
+ * `Schema<I>`: the input value's type under `signature` — the object its NAMED slots describe.
+ *
+ * `Signature.input` is a map now, and `I` is still one type, so the map is folded into one object
+ * schema here. That is not a new idea: a state's declared `outputs` are folded into one output schema
+ * by exactly this shape, because the seam below takes one value however many names the author wrote.
+ *
+ * A slot is `required` when it is neither optional nor defaulted ({@link isRequiredSlot}) — the same
+ * rule the output fold uses, so a signature and the operation it describes agree about what may be
+ * left out.
+ */
 export function signatureInputSchema<F extends RefFamily>(signature: Signature<F>, deref: SchemaDeref<F>): JsonSchema {
-  return parameterSchema(signature.input, deref);
+  const properties: Record<string, JsonSchema> = {};
+  const required: string[] = [];
+  for (const [name, parameter] of Object.entries(signature.input)) {
+    properties[name] = parameterSchema(parameter, deref);
+    if (isRequiredSlot(parameter)) required.push(name);
+  }
+  return { type: "object", properties, ...(required.length > 0 ? { required } : {}) } as JsonSchema;
 }
 
 /** `Schema<O>`: the output value's type under `signature`. */
@@ -80,7 +97,11 @@ export function asSignature<F extends RefFamily>(v: unknown): Signature<F> | und
     const kind = (p as Parameter<F>).kind;
     return kind === "text" || kind === "json" || kind === "blob";
   };
-  if (!isParameter(o.input)) return undefined;
+  // Every VALUE of the input map must be a parameter, and an empty map is a legal signature — a
+  // function of no arguments is a function. `{}` passing is the same leniency the output side has
+  // always had for extra keys, not an accident.
+  if (!o.input || typeof o.input !== "object" || Array.isArray(o.input)) return undefined;
+  if (!Object.values(o.input).every(isParameter)) return undefined;
   if (!isParameter(o.output) || typeof (o.output as { name?: unknown }).name !== "string") return undefined;
   return v as Signature<F>;
 }
@@ -90,10 +111,16 @@ export function asSignature<F extends RefFamily>(v: unknown): Signature<F> | und
  * signature a first-class typed datum — so an op whose input is itself a `Signature` has a real schema
  * to bind as `Schema<I>` where `I = Signature`.
  *
- * The `schema` of each parameter is a `$param` HOLE — `input.schema` is the type variable `I`,
+ * The `schema` of each parameter is a `$param` HOLE — an input slot's is the type variable `I`,
  * `output.schema` is `O` — the same holes a dependent row template carries. So a signature's
  * input/output type and its instances' input/output are literally one type variable in the stored
  * schema: "they match" is a fact of the data, not a render-time transform.
+ *
+ * The input side is `additionalProperties` over that shape rather than one property, because the
+ * slots are named by whoever declared them and a meta-schema cannot know the names. Every slot
+ * therefore shares the ONE hole `I` — which is right for what this witness is for: the variable
+ * stands for the input of the signature, and folding the map into that one type is exactly what
+ * {@link signatureInputSchema} does.
  */
 const PARAMETER_KINDS = ["text", "json", "blob"] as const;
 
@@ -104,6 +131,7 @@ const INPUT_PARAMETER_SCHEMA: JsonSchema = {
     kind: { type: "string", enum: [...PARAMETER_KINDS] },
     schema: { $param: "input" },
     index: { type: "number" },
+    optional: { type: "boolean" },
   },
   required: ["kind"],
 };
@@ -116,6 +144,7 @@ const OUTPUT_PARAMETER_SCHEMA: JsonSchema = {
     kind: { type: "string", enum: [...PARAMETER_KINDS] },
     schema: { $param: "output" },
     index: { type: "number" },
+    optional: { type: "boolean" },
   },
   required: ["name", "kind"],
 };
@@ -124,7 +153,7 @@ export const SIGNATURE_META_SCHEMA: JsonSchema = {
   type: "object",
   title: "signature",
   properties: {
-    input: INPUT_PARAMETER_SCHEMA,
+    input: { type: "object", title: "signature-input", additionalProperties: INPUT_PARAMETER_SCHEMA },
     output: OUTPUT_PARAMETER_SCHEMA,
   },
   required: ["input", "output"],

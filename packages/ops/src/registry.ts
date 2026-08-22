@@ -234,6 +234,12 @@ export interface AsyncFunctionOptions {
  * entry agrees with it. That matters most for a callee named from an expression, where the argument
  * types are decided by a DOCUMENT and the implementation is over here; without a signature the two
  * can disagree and nothing notices until the call runs.
+ *
+ * Since `Signature.input` became a map of NAMED slots, this is also how an entry declares how it is
+ * CALLED and not merely what it accepts. `index` on a slot is the positional order an expression
+ * binds against, so `review(doc, "terse")` reaches a host function with nothing written in any
+ * document — which is what removed the need for a host to ship an operation document beside the
+ * implementation just to have somewhere to say that.
  */
 export interface EntrySignature {
   signature?: Signature<InlineFamily>;

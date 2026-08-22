@@ -12,27 +12,32 @@
  * a function badly is not.
  */
 import { describe, expect, it } from "vitest";
-import { HOST_CAPABILITIES, type FunctionRegistry } from "@declarative-ai/exec";
+import { HOST_CAPABILITIES, type FunctionRegistry, type InlineFamily, type JsonSchema, type Parameter } from "@declarative-ai/exec";
 import { loadBundle } from "../src/loader.js";
 import { validateBundle } from "../src/validate.js";
 import type { StateDef } from "../src/format.js";
 
-/** A registry entry that declares what `review` takes — `text` required, `tone` optional. */
+/**
+ * A registry entry that declares what `review` takes — `text` required, `tone` optional.
+ *
+ * The slots are NAMED on the signature itself now, rather than being properties of one object schema
+ * this check had to take apart. Optionality is the slot's own `optional`, which is what the old
+ * `required` array said less directly.
+ */
 const registry = (required: string[] = ["text"]): FunctionRegistry<never, never> => {
   const map = new Map();
+  const slot = (name: string, schema: JsonSchema): Parameter<InlineFamily> => ({
+    kind: "text",
+    schema,
+    ...(required.includes(name) ? {} : { optional: true }),
+  });
   map.set("review", {
     kind: "host",
     capabilities: HOST_CAPABILITIES,
     impl: async () => ({ value: {} }),
     signature: {
-      input: {
-        schema: {
-          type: "object",
-          properties: { text: { type: "string" }, tone: { type: "string" } },
-          ...(required.length > 0 ? { required } : {}),
-        },
-      },
-      output: { name: "output", schema: {} },
+      input: { text: slot("text", { type: "string" }), tone: slot("tone", { type: "string" }) },
+      output: { name: "output", kind: "json", schema: {} },
     },
   });
   return map as FunctionRegistry<never, never>;
@@ -92,14 +97,15 @@ describe("what must NOT be reported", () => {
     expect(report.errors).toEqual([]);
   });
 
-  it("says nothing when the impl takes an OPEN object", () => {
-    // No declared property set constrains nothing — there is no signature to disagree with.
+  it("says nothing when the impl declares NO SLOTS", () => {
+    // An entry that names no slot constrains nothing — which is what every entry written before
+    // signatures existed means, and the reason an empty map is a legal signature rather than an error.
     const map = new Map();
     map.set("review", {
       kind: "host",
       capabilities: HOST_CAPABILITIES,
       impl: async () => ({ value: {} }),
-      signature: { input: { schema: { type: "object" } }, output: { name: "output", schema: {} } },
+      signature: { input: {}, output: { name: "output", kind: "json", schema: {} } },
     });
     expect(validateBundle(loadBundle(state({}), "s"), { functions: map as FunctionRegistry<never, never> }).errors).toEqual([]);
   });

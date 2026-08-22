@@ -532,13 +532,25 @@ keyword.
 #### Signatures and provenance
 
 ```ts
-interface SignatureSlot { kind: RefKind; schema?: JsonSchema; index?: number; }
-interface Signature { input: SignatureSlot; output: SignatureSlot & { name: string }; }
+interface Parameter<F> { kind: RefKind; schema?: F["schema"]; binding?: F["binding"]; index?: number; optional?: boolean; }
+interface Signature<F> { input: { [name: string]: Parameter<F> }; output: Parameter<F> & { name: string }; }
+function isRequiredSlot(parameter: Parameter<F>): boolean;       // neither optional nor defaulted
 ```
 
-A `Signature` is the I/O contract an op implements — one input type, one output type (multi-field inputs
-are just an object-typed input). It carries its schemas **inline as values**, never as references, so
-inference reads them straight off with no deref.
+A `Signature` is the I/O contract an op implements: **named, individually typed input slots**, and one
+output. It is exactly an `Operation`'s I/O half, which is the point — a callee's declared slots ARE what
+arguments bind against, whether the callee is a document, a js/ts parameter list, or a registry entry.
+`index` is the positional order a call binds in; `optional` is permission to omit a slot, and a `binding`
+on a signature slot is the default that answers for a caller who does.
+
+`input` was one `Parameter`, on the reading that multi-field inputs are just an object-typed input. That
+reading left a signature unable to describe the thing it was the contract for, so the one checker that
+needed the names read them back out of `input.schema.properties`, and a host wanting its function callable
+from an expression had to ship an operation *document* beside the implementation — the only place slots
+could be declared. `signatureInputSchema` still produces the single `Schema<I>`, folded from the map.
+
+It carries its schemas **inline as values**, never as references, so inference reads them straight off
+with no deref.
 
 | Export | Purpose |
 | --- | --- |
@@ -669,8 +681,8 @@ model, while the pure schema transforms it composes with (`applyTemplate`, `reso
 down. Source: `signatureSchema.ts`.
 
 ```ts
-function slotSchema(slot: SignatureSlot): JsonSchema;            // inline schema, else the kind's broad type
-function signatureInputSchema(signature: Signature): JsonSchema; // Schema<I>
+function parameterSchema(p: Parameter): JsonSchema;              // inline schema, else the kind's broad type
+function signatureInputSchema(signature: Signature): JsonSchema; // Schema<I> — the object the slots describe
 function signatureOutputSchema(signature: Signature): JsonSchema; // Schema<O>
 function bindSignatureTemplate(template: SchemaDocument, signature?: Signature): JsonSchema;
 function asSignature(v: unknown): Signature | undefined;         // structural guard
@@ -682,10 +694,15 @@ template against it — so a generic op computes its concrete output schema per 
 the map is empty, every variable is unbound and collapses to `{}` ("any"): the generic floor is *any*,
 never an error.
 
+`signatureInputSchema` folds the slot map into one object schema — properties from each slot, `required`
+from the slots `isRequiredSlot` answers for. That is the same lowering a state's declared `outputs` get,
+because the seam below takes one value however many names the author wrote.
+
 `SIGNATURE_META_SCHEMA` is the witness that makes a signature a first-class typed datum: each slot's
-`schema` is a `$param` hole (`input.schema` is the variable `I`, `output.schema` is `O`), so "a signature's
-input/output type and its instances' input/output match" is a fact of the data rather than a render-time
-transform.
+`schema` is a `$param` hole (an input slot's is the variable `I`, `output.schema` is `O`), so "a
+signature's input/output type and its instances' input/output match" is a fact of the data rather than a
+render-time transform. The input side is `additionalProperties` over that shape, since the slot names
+belong to whoever declared them and every slot shares the one hole the fold collapses them into.
 
 ### Op metadata
 

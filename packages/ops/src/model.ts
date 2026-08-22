@@ -155,6 +155,17 @@ export interface Parameter<F extends RefFamily> {
    * with the i-th smallest `index`. Per op, all-set-or-all-unset and distinct. Wiring, not type.
    */
   index?: number;
+  /**
+   * Whether a caller may leave this slot unfilled. Absent ⇒ required, which is the floor every
+   * declared slot has always had.
+   *
+   * It is on the MODEL rather than in a side table because a signature has to be able to say it. A
+   * TypeScript `f(b?: number)` declares an omittable parameter with no value to default to, and
+   * `binding` cannot express that — a bound slot has an answer, an optional one has permission to
+   * have none. Conflating them makes every correct call that omits `b` a type error, which is the
+   * one direction a checker must not get wrong.
+   */
+  optional?: boolean;
 }
 // A `Parameter` carries no name: the NAME of a parameter lives in its container — a key in the
 // `input` map, or `NamedParameter.name` for a standalone `output`.
@@ -264,13 +275,24 @@ export function kindFor(schema: SchemaDocument | undefined): RefKind {
 // --- Signatures --------------------------------------------------------------
 
 /**
- * The I/O contract an op implements: one input type `I`, one output type `O`. Multi-field inputs are
- * just an `I` that is a json object.
+ * The I/O contract an op implements: NAMED, individually typed input slots, and one output.
  *
- * Generic in the ref family, like everything else in this model. `a second name for `Parameter`` is gone: it was
- * `Parameter<InlineFamily>` minus `binding` under a second name — which is why the schema bridge
- * already CAST a `Parameter` to it to read `.kind`. A signature parameter is a parameter that happens never
- * to be bound.
+ * `input` was a single `Parameter`, on the reading that "multi-field inputs are just an `I` that is a
+ * json object". That reading cost more than it saved. An `Operation`'s own `input` is a map, so a
+ * signature could not describe the very thing it was the contract for: a registered function had no
+ * way to say it takes `text` and an optional `tone`, which is why the one checker that wanted to know
+ * (`checkAgainstSignature`) read `input.schema.properties` and `input.schema.required` and rebuilt the
+ * map by hand — and why a host wanting its function callable from an expression had to ship an
+ * operation DOCUMENT alongside the implementation, since only a document could declare slots.
+ *
+ * So a signature is now exactly an operation's I/O half, and the two cannot drift: a callee's declared
+ * slots ARE what arguments bind against, whether the callee is a document, a js/ts parameter list, or
+ * a registry entry. `signatureInputSchema` still produces the one object schema `Schema<I>` meant,
+ * folded from the map the same way a state's `outputs` are folded into one output schema.
+ *
+ * Generic in the ref family, like everything else in this model. A signature parameter is a parameter
+ * that happens never to be bound — except where a DEFAULT is what a `binding` records, which is how a
+ * TypeScript `f(limit = 3)` reaches a caller.
  *
  * A signature's schemas are read through the family's deref (`slotSchema(parameter, deref)`) rather than
  * assumed inline. The inline family's deref is the identity, so the "read it straight off the value"
@@ -278,8 +300,19 @@ export function kindFor(schema: SchemaDocument | undefined): RefKind {
  * assumption baked into the type.
  */
 export interface Signature<F extends RefFamily> {
-  input: Parameter<F>;
+  input: { [name: string]: Parameter<F> };
   output: NamedParameter<F>;
+}
+
+/**
+ * Whether a caller MUST fill this slot: not optional, and with no default of its own.
+ *
+ * One predicate rather than the two-term test spelled out at each site, because the two terms mean
+ * different things and only their conjunction is "required". `optional` is permission to omit;
+ * `binding` on a signature slot is a default that answers for the caller who does.
+ */
+export function isRequiredSlot<F extends RefFamily>(parameter: Parameter<F>): boolean {
+  return parameter.optional !== true && parameter.binding === undefined;
 }
 
 // --- Execution provenance (record shapes; execution itself is NOT here) -------

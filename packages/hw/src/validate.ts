@@ -21,6 +21,7 @@
  *     `T | undefined` never propagates silently.
  */
 import type { FunctionCapabilities, InlineFamily, JsonSchema, JsonValue, NamedParameter, Operation, Parameter, Ref, RefKind, RefTree } from "@declarative-ai/exec";
+import { isRequiredSlot } from "@declarative-ai/exec";
 import { checkBinding as checkBindingGeneric, isSubschema, producerSchemaOf, type CheckerHooks, type CheckIssue, type Schema } from "@declarative-ai/validate";
 import { parseExpression, referencesOf, type Expr } from "./expr.js";
 import { EXPRESSION_REFS, pathOfRef, referencePathsOf } from "./lowerExpr.js";
@@ -560,22 +561,22 @@ function checkAgainstSignature(
   const entry = env.functions?.get(op.functionRef);
   const declared = entry?.signature;
   if (declared === undefined) return; // an entry that declares nothing constrains nothing
-  const expected = declared.input.schema as JsonSchema | undefined;
-  const accepted = expected?.properties;
-  // Only a declared PROPERTY SET constrains anything: an impl taking an open object accepts whatever
-  // the document names, and there is nothing to disagree about.
-  if (accepted === null || typeof accepted !== "object" || Array.isArray(accepted)) return;
+  const accepted = declared.input;
+  // An entry declaring no slots at all constrains nothing — it is the "I take whatever the document
+  // names" case, which is what every entry written before signatures existed means.
+  if (Object.keys(accepted).length === 0) return;
 
   for (const [name, param] of Object.entries(op.input)) {
     // NAMES first, and this is the check that matters: a document parameter the impl has no slot for
     // arrives as an argument nothing reads. Comparing SCHEMAS alone would miss it entirely, because
     // JSON Schema objects are open — an impl declaring `body` happily validates `{text: …}`.
-    if (!Object.hasOwn(accepted, name)) {
+    const slot = accepted[name];
+    if (slot === undefined) {
       err(path, `operation '${op.functionRef}' declares a parameter '${name}' its registered implementation does not accept`);
       continue;
     }
     // Where BOTH sides declare a type, they must agree.
-    const want = (accepted as Record<string, JsonValue>)[name] as JsonSchema | undefined;
+    const want = slot.schema;
     if (param.schema === undefined || want === undefined || isUniversalSchema(want)) continue;
     const check = isSubschema(param.schema as Schema, want as Schema);
     if (!check.ok) {
@@ -591,10 +592,8 @@ function checkAgainstSignature(
   // It is the same check `children.<key>.inputs` already gets ("required child input 'x' is not
   // wired"), asked of an operation. A state that mounts a child badly was a lint error; a state that
   // calls a function badly was not, and there is no reason for the two to differ.
-  const required = expected?.required;
-  if (!Array.isArray(required)) return;
-  for (const name of required) {
-    if (typeof name !== "string" || Object.hasOwn(op.input, name)) continue;
+  for (const [name, slot] of Object.entries(accepted)) {
+    if (!isRequiredSlot(slot) || Object.hasOwn(op.input, name)) continue;
     err(path, `operation '${op.functionRef}' requires an input '${name}', which this state does not pass`);
   }
 }

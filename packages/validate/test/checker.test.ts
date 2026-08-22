@@ -85,7 +85,7 @@ describe("the ONE binding checker (API.md, \"The binding checker\")", () => {
 
   it("checks signature conformance on the output side", () => {
     const op = producerOp({ type: "string" });
-    const result = checkOperation(op, inline, { signature: { input: { kind: "json" }, output: { name: "output", kind: "json", schema: { type: "number" } } } });
+    const result = checkOperation(op, inline, { signature: { input: {}, output: { name: "output", kind: "json", schema: { type: "number" } } } });
     expect(result.errors[0]!.message).toMatch(/signature: producer type 'string'/);
   });
 });
@@ -151,7 +151,7 @@ describe("the checker does not decide universality for itself (§6.2's 'never a 
   it("applies the same rule to signature conformance", () => {
     const op = producerOp({ type: "string" });
     const result = checkOperation(op, inline, {
-      signature: { input: { kind: "json" }, output: { name: "output", kind: "json", schema: { not: { type: "string" } } as JsonSchema } },
+      signature: { input: {}, output: { name: "output", kind: "json", schema: { not: { type: "string" } } as JsonSchema } },
     });
     expect(result.ok).toBe(false);
     expect(result.errors[0]!.message).toMatch(/signature: .*not/);

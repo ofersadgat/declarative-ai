@@ -513,10 +513,10 @@ describe("operations dispatch through the operation executor", () => {
  * as a missing argument at run time.
  */
 describe("a callee document is checked against its registered signature", () => {
-  const withSignature = (props: Record<string, unknown>) => {
+  const withSignature = (slots: Record<string, unknown>) => {
     const registry = registryWithShout({ n: 0 });
     const entry = registry.functions.get("shout") as { signature?: unknown };
-    entry.signature = { input: { kind: "json", schema: { type: "object", properties: props } }, output: { name: "value", kind: "json" } };
+    entry.signature = { input: slots, output: { name: "value", kind: "json" } };
     return new Map([["shout", entry as never]]);
   };
 
@@ -528,13 +528,13 @@ describe("a callee document is checked against its registered signature", () => 
     });
 
   it("says nothing when the document agrees with the implementation", () => {
-    const errors = validateBundle(bundle(), { functions: withSignature({ text: { type: "string" } }) }).errors;
+    const errors = validateBundle(bundle(), { functions: withSignature({ text: { kind: "text", schema: { type: "string" }, index: 0 } }) }).errors;
     expect(errors.map((e) => e.message).join(" | ")).not.toMatch(/does not accept/);
   });
 
   it("reports a document declaring a parameter the implementation does not take", () => {
     // The document's callee declares `text`; the impl says it takes `body`.
-    const errors = validateBundle(bundle(), { functions: withSignature({ body: { type: "string" } }) }).errors;
+    const errors = validateBundle(bundle(), { functions: withSignature({ body: { kind: "text", schema: { type: "string" }, index: 0 } }) }).errors;
     expect(errors.map((e) => e.message).join(" | ")).toMatch(/does not accept/);
   });
 
