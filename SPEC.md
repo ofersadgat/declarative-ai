@@ -1061,11 +1061,21 @@ places an author knows about, and the registry is not one of those — a workflo
 `"path": ["./ops"]` is saying where ITS documents live, not renouncing `claude-code`.
 
 This is what collapses the last separate namespace. `operation.function` used to mean "a name in
-`registry.functions`" and nothing else: it did not search, so a project could not override a host
-function, and a host that wanted its function callable from an expression had to ship an operation
-DOCUMENT alongside the implementation — because registering the implementation said what it does and
-nothing about how it is called. An entry declares its own named, typed parameters now (§7.5.2), so
-`review(doc)` and `"function": "review"` reach the same declaration by the same route.
+`registry.functions`" and nothing else: it did not search, so a state's own call was the one call in
+the system that could not reach a document or a module, and a host that wanted its function callable
+from an expression had to ship an operation DOCUMENT alongside the implementation — because
+registering the implementation said what it does and nothing about how it is called. An entry
+declares its own named, typed parameters now (§7.5.2), so `review(doc)` and `"function": "review"`
+reach the same declaration by the same route.
+
+**What a state adds to the callee it names.** The callee's slot carries the TYPE; the caller's
+carries the VALUE. A state's `input` slot of the same name overrides only what it restates, so a
+caller cannot quietly re-type a parameter it does not own, and an `args` key the callee has no slot
+for is an error — an argument nothing reads, which is exactly what the old `config` blob made
+unaskable. A callee that declared no slots has said nothing to disagree with, so nothing is checked
+against it. A name that resolves nowhere keeps its older meaning: a bare ref the engine looks up at
+dispatch, and the validator warns about rather than refusing, since a state the run never enters
+never needs its function.
 
 **There is no separate runtime concept.** A delegated agent runtime (`claude-code`, and future
 adapters) is a plain function operation naming a registered adapter. So are sub-workflows,

@@ -126,7 +126,7 @@ export function desugarBinding(
   if (isBaseRef(binding)) return binding;
   // An operation document — what a reference in binding position resolves to when it names an
   // operation. §3.1's first tier: the operation itself, as a value, with nothing applied to it.
-  if (isOperationDecl(binding)) return { op: desugarOperation(binding as OperationFields, stateId) };
+  if (isOperationDecl(binding)) return { op: desugarOperation(binding as OperationFields, stateId, undefined, lower) };
 
   if ("expr" in binding) return desugarExpression(binding.expr, where, stateId, lower);
   throw new WorkflowLoadError(`${where}: unrecognized binding form ${JSON.stringify(binding)}`, stateId);
@@ -321,8 +321,9 @@ export function desugarOperation(
   decl: OperationFields,
   stateId: string,
   outputs?: Record<string, NamedParameterDecl>,
-  userFunctions?: UserFunctions,
+  lower: LowerOptions = {},
 ): Operation<InlineFamily> {
+  const userFunctions = lower.userFunctions;
   // An EMBEDDED BODY (SPEC §7.5.1, form 2). The document declares its slots the way a state does and
   // supplies js/ts; the wrapper's parameters are those slots in `positionalOrder`, so a call binds
   // against exactly what the author declared. From here down it is a module like any other.
@@ -388,7 +389,81 @@ export function desugarOperation(
     return op;
   }
   // A FunctionOp — a host function, a sub-workflow, or a delegated runtime adapter alike (§3.1).
-  return { kind: "function", functionRef: decl.function!, input: withArgs(input, decl.args), output };
+  //
+  // `function` is a CALLEE NAME resolved along the search path, exactly as an expression's is. It
+  // used to mean "a name in `registry.functions`" and nothing else, which made a state's own call the
+  // one call in the system that could not reach a document or a module — and made the registry a
+  // namespace of its own, since nothing else could address it. Now that the registry is a contributor
+  // (§7.1) the distinction has nothing left to stand on: `review(doc)` and `"function": "review"`
+  // reach the same declaration by the same route.
+  //
+  // A name that resolves NOWHERE keeps its older meaning — a bare ref the validator warns about and
+  // the engine looks up at dispatch — because that is what a loader with no registry and no
+  // filesystem has always done, and it is what an unregistered function is supposed to be: a warning,
+  // not a load failure (a state the run never enters never needs its function).
+  const callee = lower.resolveOperation?.(decl.function!);
+  if (callee === undefined) {
+    return { kind: "function", functionRef: decl.function!, input: withArgs(input, decl.args), output };
+  }
+  if (callee.kind !== "function") {
+    throw new WorkflowLoadError(
+      `operation names '${decl.function!}', which resolves to a ${callee.kind} operation — a 'function' operation must name a callable`,
+      stateId,
+    );
+  }
+  return {
+    kind: "function",
+    functionRef: callee.functionRef,
+    input: bindIntoSlots(callee.input, input, decl.args, decl.function!, stateId),
+    // The state's own declaration wins where it made one, and the callee's stands where it did not:
+    // an author who writes `outputs` is saying what THIS call returns, while one who writes none is
+    // taking what the callee already declares — which for a module is read off its return type.
+    output: decl.output !== undefined || decl.outputs !== undefined ? output : callee.output,
+  };
+}
+
+/**
+ * Bind a state's authored slots and `args` into the CALLEE's declared ones.
+ *
+ * This is what "a callee is one thing, declared one way" costs at the call site, and it is one rule:
+ * the callee's slot carries the TYPE, the caller's carries the VALUE. A state that declares a slot
+ * the callee also declares keeps the callee's `schema`, `kind` and `index` unless it overrode them —
+ * which is what stops a caller from quietly re-typing a parameter it does not own.
+ *
+ * A name the callee has no slot for is an ERROR, and only where the callee declared slots at all. An
+ * argument nothing reads is the failure this whole change exists to make visible; a callee that
+ * declared nothing has said nothing to disagree with, which is every host function written before
+ * signatures existed.
+ */
+function bindIntoSlots(
+  declared: Record<string, Parameter<InlineFamily>>,
+  authored: Record<string, Parameter<InlineFamily>>,
+  args: Record<string, JsonValue> | undefined,
+  name: string,
+  stateId: string,
+): Record<string, Parameter<InlineFamily>> {
+  const strict = Object.keys(declared).length > 0;
+  const out: Record<string, Parameter<InlineFamily>> = {};
+  for (const [slot, parameter] of Object.entries(declared)) out[slot] = { ...parameter };
+  const reach = (slot: string): Parameter<InlineFamily> | undefined => {
+    if (out[slot] !== undefined) return out[slot];
+    if (strict) {
+      throw new WorkflowLoadError(`operation passes '${slot}', which '${name}' does not accept`, stateId);
+    }
+    return undefined;
+  };
+  for (const [slot, parameter] of Object.entries(authored)) {
+    reach(slot);
+    out[slot] = { ...out[slot], ...parameter };
+  }
+  for (const [slot, value] of Object.entries(args ?? {})) {
+    // An authored `input` slot of the same name already answered for this one (see `withArgs`).
+    if (authored[slot] !== undefined) continue;
+    const existing = reach(slot);
+    const binding = typeof value === "string" ? { text: value } : { json: value };
+    out[slot] = { kind: existing?.kind ?? (typeof value === "string" ? "text" : "json"), ...existing, binding };
+  }
+  return out;
 }
 
 /**
@@ -599,7 +674,7 @@ export function desugarState(
   // and reported by the validator alongside every other one. Throwing here instead aborted the load
   // at the first such state, and the author saw a downstream consequence — "this leaf has no kind" —
   // in place of the mistake they actually made two files away.
-  const operationOrError = describeOperation(split, id, def.outputs, lower.userFunctions);
+  const operationOrError = describeOperation(split, id, def.outputs, lower);
 
   const { operation, environment: _e, inputs: _i, outputs: _o, children: _c, sequence: _s, transitions: _t, ...rest } = def;
   return {
@@ -665,11 +740,11 @@ function describeOperation(
   split: { op: OperationFields } | undefined,
   id: string,
   outputs: Record<string, NamedParameterDecl> | undefined,
-  userFunctions?: UserFunctions,
+  lower: LowerOptions,
 ): { operation?: Operation<InlineFamily>; error?: string } {
   if (split === undefined) return {};
   try {
-    return { operation: desugarOperation(split.op, id, outputs, userFunctions) };
+    return { operation: desugarOperation(split.op, id, outputs, lower) };
   } catch (e) {
     if (e instanceof WorkflowLoadError) return { error: e.message.replace(`${id}: `, "") };
     throw e;
@@ -987,11 +1062,26 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
     return { document: selectProperty(parseReferencedFile(located.file, text), located.property, name), file: located.file };
   };
 
+  /**
+   * Names currently being resolved, so a callee document cannot resolve back into itself.
+   *
+   * `functions/shout.json` declaring `{"kind": "function", "function": "shout"}` is not a mistake —
+   * it is the ordinary shape of a document that declares slots for a registered implementation. But
+   * `function` resolves along the path now, so desugaring it asks for `shout` again and finds the
+   * same document. Suppressing the inner resolution is not a workaround for that; it is what makes
+   * the document mean what it reads as: THESE slots, dispatched to the registered `shout`.
+   *
+   * A genuine cycle across two documents lands here too, and resolves the same way — the inner name
+   * falls back to a bare ref, which the validator then reports if nothing is registered under it.
+   */
+  const resolving = new Set<string>();
+
   const resolveOperationName = (
     name: string,
     stateId: string,
     path: readonly string[] | undefined,
   ): Operation<InlineFamily> | undefined => {
+    if (resolving.has(name)) return undefined;
     const found = resolveDocument(name, stateId, path);
     if (found === undefined) return undefined;
     // A REGISTRY entry: its signature IS its declaration, exactly as a module's parameter list is.
@@ -1011,8 +1101,26 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
     if (document === null || typeof document !== "object" || Array.isArray(document)) {
       throw new WorkflowLoadError(`operation '${name}' resolved to ${typeof document}, not an operation document`, stateId);
     }
-    return desugarOperation(document as OperationFields, stateId, undefined, options.userFunctions);
+    resolving.add(name);
+    try {
+      return desugarOperation(document as OperationFields, stateId, undefined, calleeLower(stateId, path));
+    } finally {
+      resolving.delete(name);
+    }
   };
+
+  /**
+   * The resolution context a CALLEE DOCUMENT is desugared in.
+   *
+   * A callee document is an operation like any other, so its own `function` resolves along the path
+   * and its own expressions resolve names — under the referring state's path, since that is the path
+   * the reference was found on. Only the operation half is offered: a callee document's bindings are
+   * resolved where it was spliced, and handing it `resolveName` here would resolve them twice.
+   */
+  const calleeLower = (stateId: string, path: readonly string[] | undefined): LowerOptions => ({
+    resolveOperation: (inner) => resolveOperationName(inner, stateId, path),
+    ...(options.userFunctions !== undefined ? { userFunctions: options.userFunctions } : {}),
+  });
 
   /**
    * Resolve a bare name in VALUE position — inside an expression — to whatever it names.

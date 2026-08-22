@@ -14,7 +14,8 @@
  *  - its declared slots are what positional arguments bind against;
  *  - a project directory earlier on the path SHADOWS it, and the overlap is reported;
  *  - `$REGISTRY` written into the path moves it, so precedence is authored rather than compiled in;
- *  - an entry that declares no signature still resolves — it simply has no positions to bind.
+ *  - an entry that declares no signature still resolves — it simply has no positions to bind;
+ *  - `operation.function` resolves the SAME way, so a state's own call is not a separate namespace.
  */
 import { describe, expect, it } from "vitest";
 import type { EntrySignature, InlineFamily, Operation, Signature } from "@declarative-ai/exec";
@@ -135,5 +136,83 @@ describe("the sentinel in isolation", () => {
     // The append is conditional on there BEING a registry, so every resolution that predates this
     // walks exactly the path it always did.
     expect(() => resolveReference("shout", { defaultRoot: [OPS], vfs: vfsOf({}) })).toThrow();
+  });
+});
+
+/**
+ * `operation.function` used to mean "a name in `registry.functions`" and did not search — so a state's
+ * own call was the one call in the system that could not reach a document or a module, and the
+ * registry was a namespace only it could address. Both halves of that go away together.
+ */
+describe("a state's own operation resolves its callee the same way", () => {
+  const stateBundle = (op: Record<string, unknown>, opts: { files?: Record<string, string> } = {}) =>
+    loadBundle({ s: { operation: op } } as unknown as Record<string, StateDef>, "s", {
+      functions: entries(),
+      defaultRoot: [OPS],
+      ...(opts.files !== undefined ? { vfs: vfsOf(opts.files) } : {}),
+    });
+
+  const stateOp = (op: Record<string, unknown>, opts: { files?: Record<string, string> } = {}): Operation<InlineFamily> =>
+    stateBundle(op, opts).states["s"]!.operation!;
+
+  /**
+   * An operation the loader could not build is carried as DATA and reported by the validator, rather
+   * than aborting the load — the treatment every incomplete operation already gets, so one bad state
+   * does not hide the rest of a workflow's findings.
+   */
+  const complaintOf = (op: Record<string, unknown>, opts: { files?: Record<string, string> } = {}): string =>
+    stateBundle(op, opts).states["s"]!.operationError ?? "";
+
+  it("takes the callee's declared slots, so `args` bind against a typed parameter", () => {
+    expect(stateOp({ kind: "function", function: "shout", args: { text: "hi" } })).toMatchObject({
+      functionRef: "shout",
+      input: { text: { kind: "text", schema: { type: "string" }, index: 0, binding: { text: "hi" } } },
+    });
+  });
+
+  it("refuses an argument the callee has no slot for", () => {
+    // The failure the `config` blob made unaskable: an argument nothing reads. Only checkable
+    // because the callee declared what it accepts.
+    expect(complaintOf({ kind: "function", function: "shout", args: { txt: "hi" } })).toMatch(
+      /passes 'txt', which 'shout' does not accept/,
+    );
+  });
+
+  it("says nothing about arguments to a callee that declared no slots", () => {
+    // An entry that declared nothing has said nothing to disagree with.
+    expect(stateOp({ kind: "function", function: "plain", args: { anything: 1 } })).toMatchObject({
+      functionRef: "plain",
+      input: { anything: { kind: "json", binding: { json: 1 } } },
+    });
+  });
+
+  it("reaches a project DOCUMENT, and dispatches to the ref that document names", () => {
+    const files = { [`${OPS}/review.json`]: JSON.stringify({ kind: "function", function: "plain", input: { doc: { kind: "text", index: 0 } } }) };
+    expect(stateOp({ kind: "function", function: "review", args: { doc: "d" } }, { files })).toMatchObject({
+      functionRef: "plain",
+      input: { doc: { kind: "text", index: 0, binding: { text: "d" } } },
+    });
+  });
+
+  it("lets a callee document declare slots for the registered function of its OWN name", () => {
+    // `shout.json` naming `shout` is the ordinary shape of a document that types an implementation,
+    // not a cycle: the inner name is suppressed while the outer one is being resolved, so the
+    // document means what it reads as — THESE slots, dispatched to the registered `shout`.
+    const files = { [`${OPS}/shout.json`]: JSON.stringify({ kind: "function", function: "shout", input: { loud: { kind: "text", index: 0 } } }) };
+    expect(stateOp({ kind: "function", function: "shout", args: { loud: "hi" } }, { files })).toMatchObject({
+      functionRef: "shout",
+      input: { loud: { binding: { text: "hi" } } },
+    });
+  });
+
+  it("keeps a name that resolves NOWHERE as a bare ref, for the validator to report", () => {
+    // Not a load failure: a state the run never enters never needs its function, and leaving one
+    // unregistered is how a search context refuses a human gate.
+    expect(stateOp({ kind: "function", function: "absent" })).toMatchObject({ functionRef: "absent", input: {} });
+  });
+
+  it("refuses a `function` naming a PROMPT document, rather than dispatching one as the other", () => {
+    const files = { [`${OPS}/classify.json`]: JSON.stringify({ kind: "prompt", prompt: "Classify: {{.inputs.text}}" }) };
+    expect(complaintOf({ kind: "function", function: "classify" }, { files })).toMatch(/resolves to a prompt operation/);
   });
 });
