@@ -25,7 +25,7 @@ async function runMarking(files: Record<string, StateDef>, rootId: string): Prom
   registry.functions.set(
     "mark",
     hostFunction(async (inputs: Record<string, unknown>) => {
-      const { name, delayMs } = inputs.config as { name: string; delayMs?: number };
+      const { name, delayMs } = inputs as { name: string; delayMs?: number };
       order.push(name);
       log.push(`enter ${name}`);
       if (delayMs !== undefined) await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -125,7 +125,7 @@ describe("a transition is a jump in the sequence", () => {
     registry.functions.set(
       "mark",
       hostFunction(async (inputs: Record<string, unknown>) => {
-        order.push((inputs.config as { name: string }).name);
+        order.push((inputs as { name: string }).name);
         return ok({ done: "x" }) as ExecResult<ResolvedValue, WorkflowMetrics>;
       }, HOST),
     );
@@ -133,7 +133,7 @@ describe("a transition is a jump in the sequence", () => {
       "choose",
       hostFunction(
         async (inputs: Record<string, unknown>) =>
-          ok({ pick: (inputs.config as { answer: string }).answer }) as ExecResult<ResolvedValue, WorkflowMetrics>,
+          ok({ pick: (inputs as { answer: string }).answer }) as ExecResult<ResolvedValue, WorkflowMetrics>,
         HOST,
       ),
     );
@@ -176,7 +176,7 @@ describe("a transition is a jump in the sequence", () => {
     registry.functions.set(
       "mark",
       hostFunction(async (inputs: Record<string, unknown>) => {
-        order.push((inputs.config as { name: string }).name);
+        order.push((inputs as { name: string }).name);
         return ok({ done: "x" }) as ExecResult<ResolvedValue, WorkflowMetrics>;
       }, HOST),
     );
@@ -184,7 +184,7 @@ describe("a transition is a jump in the sequence", () => {
       "choose",
       hostFunction(
         async (inputs: Record<string, unknown>) =>
-          ok({ pick: (inputs.config as { answer: string }).answer }) as ExecResult<ResolvedValue, WorkflowMetrics>,
+          ok({ pick: (inputs as { answer: string }).answer }) as ExecResult<ResolvedValue, WorkflowMetrics>,
         HOST,
       ),
     );

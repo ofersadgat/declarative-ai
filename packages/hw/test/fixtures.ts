@@ -174,7 +174,7 @@ export function specPlanningFiles(): Record<string, StateDef> {
         },
       },
       // An interactive host function — a plain FunctionOp like any other (§3), with its authored
-      // surface bound as the `config` input via `args`.
+      // surface bound to named input slots via `args`.
       operation: {
         kind: "function",
         function: "choose_option",

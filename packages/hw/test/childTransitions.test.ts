@@ -55,8 +55,13 @@ const VFS = {
 async function runMarking(
   files: Record<string, StateDef>,
   rootId: string,
-): Promise<{ order: string[]; outcome: string; reason?: string; probes: string[] }> {
+): Promise<{ order: string[]; finished: string[]; outcome: string; reason?: string; probes: string[] }> {
   const order: string[] = [];
+  // When each leaf FINISHED, as distinct from when it started. Overlap is a claim about the interval
+  // between the two, and `order` alone cannot express it: an async child is started and not awaited,
+  // so how many microtasks its input resolution takes decides which impl body runs first — a fact
+  // about the number of bound slots, not about the scheduler.
+  const finished: string[] = [];
   const probes: string[] = [];
   const registry = newRegistry();
   // Each leaf's output carries a RUN COUNT, so a looped child produces a different value every pass.
@@ -66,11 +71,12 @@ async function runMarking(
   registry.functions.set(
     "mark",
     hostFunction(async (inputs: Record<string, unknown>) => {
-      const { name, fail, delayMs } = inputs.config as { name: string; fail?: boolean; delayMs?: number };
+      const { name, fail, delayMs } = inputs as { name: string; fail?: boolean; delayMs?: number };
       order.push(name);
       const n = (runs.get(name) ?? 0) + 1;
       runs.set(name, n);
       if (delayMs !== undefined) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      finished.push(name);
       if (fail === true) return { error: { classification: "permanent" as const, reason: `${name} failed` } };
       return ok({ done: `${name}#${n}` }) as ExecResult<ResolvedValue, WorkflowMetrics>;
     }, HOST),
@@ -95,7 +101,7 @@ async function runMarking(
   const bundle = loadBundle(files, rootId, { defaultRoot: [FUNCTIONS], roots: { JAIRA: "/p/.jaira", PROJECT: "/p" }, vfs: VFS });
   const engine = new WorkflowEngine({ bundle, registry });
   const result = await engine.run({ inputs: {} });
-  return { order, probes, outcome: result.outcome, ...(result.failure ? { reason: result.failure.reason } : {}) };
+  return { order, finished, probes, outcome: result.outcome, ...(result.failure ? { reason: result.failure.reason } : {}) };
 }
 
 const marker = (name: string, fail = false, delayMs?: number): StateDef => ({
@@ -271,7 +277,7 @@ describe("a child mount's transitions, at the edges", () => {
   it("fires when an ASYNC child finishes, not when it starts", async () => {
     // An async child does not hold the cursor, so the spine walks past it while it runs. Its rule
     // must wait for the completion, or `late` would be entered before `slow` had produced anything.
-    const { order, outcome } = await runMarking(
+    const { order, finished, outcome } = await runMarking(
       {
         root: {
           children: {
@@ -288,8 +294,12 @@ describe("a child mount's transitions, at the edges", () => {
       "root",
     );
     expect(outcome).toBe("success");
-    // `quick` runs while `slow` is still going; `late` only after `slow` reports.
-    expect(order).toEqual(["slow", "quick", "late"]);
+    // `quick` runs while `slow` is still going; `late` only after `slow` reports. Read off COMPLETION
+    // rather than entry: both are started before either finishes, so which of the two impl bodies
+    // runs first is a microtask race that says nothing about the schedule. What the rule promises is
+    // that `late` is not entered until `slow` has reported.
+    expect(finished).toEqual(["quick", "slow", "late"]);
+    expect(order.indexOf("late")).toBe(2);
   });
 
   /**
@@ -421,7 +431,7 @@ describe("a child mount's transitions, at the edges", () => {
     // `trigger`'s rule enters `join`, whose inputs read a still-running async child: the entry parks.
     // Parking is not an answer, so the rule survives to the round that can answer it. Spending it
     // there would strand `join`, which nothing else reaches — it is not a sequence member.
-    const { order, outcome } = await runMarking(
+    const { finished, outcome } = await runMarking(
       {
         root: {
           children: {
@@ -438,7 +448,10 @@ describe("a child mount's transitions, at the edges", () => {
       "root",
     );
     expect(outcome).toBe("success");
-    expect(order).toEqual(["slow", "trigger", "join"]);
+    // By COMPLETION, since `slow` and `trigger` are both in flight before either finishes and which
+    // impl body runs first is a microtask race (see `runMarking`). What matters is that `join` is
+    // last: it could not have been entered until the child its inputs read had reported.
+    expect(finished).toEqual(["trigger", "slow", "join"]);
   });
 
   it("spends the round on a guard that reads a child still running — PENDING is skipped, not deferred", async () => {
@@ -463,7 +476,9 @@ describe("a child mount's transitions, at the edges", () => {
       "root",
     );
     expect(outcome).toBe("success");
-    expect(order).toEqual(["slow", "trigger"]);
+    // Sorted, because the claim is about WHICH children ran and not in what order: `never` is the
+    // one the rule would have entered had PENDING deferred instead of being skipped.
+    expect([...order].sort()).toEqual(["slow", "trigger"]);
   });
 });
 

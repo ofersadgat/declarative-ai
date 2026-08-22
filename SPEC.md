@@ -1037,7 +1037,11 @@ A **function operation** invokes a registered function:
 ```text
 kind        "function"
 function    A name in registry.functions.
-config      The authored surface for this invocation, bound as the operation's `config` input.
+args        The authored arguments, bound to the call's input slots BY NAME. Shorthand for `input`
+            where the value is a constant and there is nothing to say about its type; a slot the
+            author declared in `input` wins. They used to arrive as one blob in a slot called
+            `config`, because a registered function had no way to declare named parameters and
+            there were no slots to bind to — there are now (§7.5.2), and an impl reads `inputs.mode`.
 input       Slots feeding the call.
 output      As above.
 ```
@@ -1247,7 +1251,7 @@ operation block — the slots, wiring, children, and transitions are untouched:
   "operation": {
     "kind": "function",
     "function": "claude-code",
-    "config": { "permissionMode": "plan" },
+    "args": { "permissionMode": "plan" },
     "session": "planning",
     "tools": ["read_file"],
     "permissions": { "profile": "plan" },
@@ -1260,9 +1264,9 @@ operation block — the slots, wiring, children, and transitions are untouched:
 }
 ```
 
-The adapter reads its instruction from the `prompt` input and its authored surface from `config`;
-the engine hands a delegated adapter raw tools, because such an entry declares that it authorizes
-its own loop's calls (§7.4).
+Every authored value reaches the adapter as one named input — `prompt` from the `input` block,
+`permissionMode` from `args`, both in one flat `FunctionInputs`. The engine hands a delegated adapter
+raw tools, because such an entry declares that it authorizes its own loop's calls (§7.4).
 
 ### 7.4 Tool-Call Permissions
 

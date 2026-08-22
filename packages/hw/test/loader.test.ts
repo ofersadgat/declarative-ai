@@ -61,6 +61,56 @@ describe("desugaring (API.md, \"Binding desugaring\")", () => {
   });
 });
 
+/**
+ * `args` is the shorthand for `input`, and it binds BY NAME.
+ *
+ * It used to be shoved whole into one slot literally called `config`, so an impl read
+ * `inputs.config.mode` and the op's shape said nothing about what the call passes. That was all it
+ * could do while a registered function had no way to declare named parameters — with no slots to bind
+ * to, the blob was the whole of what the op could carry.
+ */
+describe("an operation's authored args", () => {
+  const inputOf = (op: Record<string, unknown>): Record<string, unknown> =>
+    (loadBundle({ s: { operation: op } } as unknown as Record<string, StateDef>, "s").states["s"]!.operation as { input: Record<string, unknown> }).input;
+
+  it("becomes one bound slot per argument, not one slot called `config`", () => {
+    expect(inputOf({ kind: "function", function: "f", args: { mode: "plan", depth: 2 } })).toEqual({
+      mode: { kind: "text", binding: { text: "plan" } },
+      depth: { kind: "json", binding: { json: 2 } },
+    });
+  });
+
+  it("binds a string as `text`, the same call an expression's literal argument gets", () => {
+    // One rule for how a literal reaches a slot rather than two that could disagree about the kind
+    // of `"plan"` — `parametersFor` makes the identical call when lowering `f("plan")`.
+    expect(inputOf({ kind: "function", function: "f", args: { s: "x", n: 1, b: true, o: {}, nil: null } })).toMatchObject({
+      s: { kind: "text" },
+      n: { kind: "json" },
+      b: { kind: "json" },
+      o: { kind: "json" },
+      nil: { kind: "json" },
+    });
+  });
+
+  it("yields to a slot the author DECLARED under the same name", () => {
+    // Not a conflict worth refusing: `args` merges per key down the environment chain (§7.1a), so an
+    // ancestor's default and a state's own typed slot routinely name the same thing — and the typed
+    // declaration is the more specific of the two statements.
+    expect(
+      inputOf({
+        kind: "function",
+        function: "f",
+        args: { mode: "plan" },
+        input: { mode: { kind: "text", schema: { type: "string" }, binding: ".inputs.chosen" } },
+      })!["mode"],
+    ).toMatchObject({ kind: "text", schema: { type: "string" } });
+  });
+
+  it("leaves a function op with no args exactly as it was", () => {
+    expect(inputOf({ kind: "function", function: "f" })).toEqual({});
+  });
+});
+
 describe("loadBundle", () => {
   it("loads the spec planning workflow and derives ids", () => {
     const bundle = loadBundle(specPlanningFiles(), PLAN_ID);

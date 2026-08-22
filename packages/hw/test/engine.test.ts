@@ -155,13 +155,14 @@ describe("SPEC §8.2 — function state terminates with validated outputs", () =
     const result = await engine.run({ inputs: { plan_doc: "plan", critique_report: "report" } });
     expect(result.outcome).toBe("success");
     expect(result.outputs).toEqual({ decision: "approve", comments: "lgtm" });
-    // §7.1: the authored function surface arrives as the op's `config` input; the state's own
-    // inputs are spread in at the top level of the same `FunctionInputs`.
-    expect(fn.calls[0]!["config"]).toMatchObject({
+    // §7.1: the authored `args` arrive as NAMED inputs, alongside the state's own — one flat
+    // `FunctionInputs` with no `config` envelope, so an impl reads `inputs.prompt` and not
+    // `inputs.config.prompt`.
+    expect(fn.calls[0]).toMatchObject({
       prompt: "Review the critique result.",
       options: ["approve", "request_changes", "block"],
+      plan_doc: "plan",
     });
-    expect(fn.calls[0]!["plan_doc"]).toBe("plan");
   });
 
   it("rejects an out-of-enum function payload (engine-side validation)", async () => {

@@ -387,11 +387,39 @@ export function desugarOperation(
     return op;
   }
   // A FunctionOp — a host function, a sub-workflow, or a delegated runtime adapter alike (§3.1).
-  // The authored surface rides a bound `config` input; the op shape gains nothing.
-  if (decl.args !== undefined && input.config === undefined) {
-    input.config = { kind: "json", binding: { json: decl.args as JsonValue } };
+  return { kind: "function", functionRef: decl.function!, input: withArgs(input, decl.args), output };
+}
+
+/**
+ * Bind an operation's authored `args` to its input slots, BY NAME.
+ *
+ * They used to be shoved whole into one slot literally called `config`, so an impl read
+ * `inputs.config.mode` rather than `inputs.mode` and the op's shape said nothing about what the call
+ * actually passes. That was the only thing it could do while a registered function had no way to
+ * declare named parameters: with no slots to bind to, the blob was the whole of what the op could
+ * carry. Now that a signature declares slots (`EntrySignature`), an argument has a name to arrive
+ * under, and the checker has two sides to compare — a parameter the impl does not accept, and one it
+ * requires that nobody passes, both of which the `config` blob made unaskable.
+ *
+ * A slot the author DECLARED wins over an `args` entry of the same name. The overlap is ordinary
+ * rather than a mistake: `args` merges per key down the environment chain (§7.1a), so an ancestor's
+ * default and a state's own typed slot routinely name the same thing, and the typed one is the more
+ * specific statement of the two.
+ *
+ * A string binds as `text` and everything else as `json`, which is the same call `parametersFor`
+ * makes for an expression's arguments — one rule for how a literal argument reaches a slot, rather
+ * than two that could disagree about the kind of `"plan"`.
+ */
+function withArgs(
+  input: Record<string, Parameter<InlineFamily>>,
+  args: Record<string, JsonValue> | undefined,
+): Record<string, Parameter<InlineFamily>> {
+  if (args === undefined) return input;
+  for (const [name, value] of Object.entries(args)) {
+    if (input[name] !== undefined) continue;
+    input[name] = typeof value === "string" ? { kind: "text", binding: { text: value } } : { kind: "json", binding: { json: value } };
   }
-  return { kind: "function", functionRef: decl.function!, input, output };
+  return input;
 }
 
 /**
