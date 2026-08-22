@@ -983,7 +983,16 @@ export function snapshotHash(bundle: WorkflowBundle): string {
   const entries = Object.keys(bundle.states)
     .map((id) => [id, hashCanonical(stripDerivedId(bundle.states[id]!))] as const)
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  return sha256Hex(canonicalize({ rootId: bundle.rootId, states: entries }));
+  // The module digest is SPLICED IN only when there is one (SPEC §7.5.5). A js/ts module reached by
+  // name cannot be inlined the way every other reference is, so its content has to reach the identity
+  // some other way or a pinned task would run edited code under an unchanged version. Omitting the
+  // key entirely when absent is what keeps every snapshot taken before modules existed unchanged —
+  // `{ rootId, states }` must hash to exactly what it always did.
+  const document =
+    bundle.moduleDigest === undefined
+      ? { rootId: bundle.rootId, states: entries }
+      : { rootId: bundle.rootId, states: entries, modules: bundle.moduleDigest };
+  return sha256Hex(canonicalize(document));
 }
 
 /** The `id` is the map KEY already, and a variant suffix names a mount rather than content. */

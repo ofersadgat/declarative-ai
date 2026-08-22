@@ -708,6 +708,21 @@ export interface WorkflowBundle {
   /** The states AS AUTHORED (pre-desugaring), kept because the snapshot hash is the identity of
    *  what the author wrote — so improving the lowering never invalidates a stored snapshot. */
   source?: Record<string, StateDef>;
+  /**
+   * One value standing for every js/ts MODULE this workflow reaches — `FrozenModules.digest`
+   * (SPEC §7.5.5).
+   *
+   * `snapshotHash` hashes the RESOLVED states on the stated grounds that "what was referenced is
+   * inlined, and a change to what anything lowers to is a different hash by construction". A module
+   * reached by name breaks that premise: it is not inlined, so without this a task pinned to a
+   * snapshot would run edited code under an unchanged version — the exact failure resolved-form
+   * hashing exists to prevent.
+   *
+   * Absent for a bundle that reaches no module, and absent is not the same as empty: the key is left
+   * out of the hashed document entirely, so every snapshot taken before modules existed keeps its
+   * identity.
+   */
+  moduleDigest?: string;
 }
 
 /**

@@ -37,6 +37,9 @@ export * from "./wireType.js";
 export * from "./marshal.js";
 // A function's signature, read from its TypeScript (SPEC.md §7.5.2).
 export * from "./signature.js";
+// Hashing, approval and the freeze (SPEC.md §7.5.5) — what makes running a user module
+// acceptable, and what makes a frozen run actually frozen.
+export * from "./integrity.js";
 export * from "./shape.js";
 export * from "./expand.js";
 export * from "./loader.js";
