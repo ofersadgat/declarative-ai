@@ -31,6 +31,12 @@ export * from "./functionBody.js";
 // Transpiling and running a user module — the require path, the closure, and the CJS scope
 // (SPEC.md §7.5.4, §7.5.6).
 export * from "./moduleLoader.js";
+// The wire boundary (SPEC.md §7.5.3): a TypeScript type's JSON Schema, and the value adapter
+// between the wire and TypeScript.
+export * from "./wireType.js";
+export * from "./marshal.js";
+// A function's signature, read from its TypeScript (SPEC.md §7.5.2).
+export * from "./signature.js";
 export * from "./shape.js";
 export * from "./expand.js";
 export * from "./loader.js";
