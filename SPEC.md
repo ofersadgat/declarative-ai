@@ -1036,7 +1036,7 @@ A **function operation** invokes a registered function:
 
 ```text
 kind        "function"
-function    A name in registry.functions.
+function    A callee name, resolved along the search `path` like any other (§7.5).
 args        The authored arguments, bound to the call's input slots BY NAME. Shorthand for `input`
             where the value is a constant and there is nothing to say about its type; a slot the
             author declared in `input` wins. They used to arrive as one blob in a slot called
@@ -1045,6 +1045,27 @@ args        The authored arguments, bound to the call's input slots BY NAME. Sho
 input       Slots feeding the call.
 output      As above.
 ```
+
+**The registry is a CONTRIBUTOR on the search path**, spelled `$REGISTRY` where a workflow wants to
+say where it sits. Resolving a callee is therefore one walk over uniform contributors — a document, a
+js/ts symbol, a registered entry — and which one answers is decided by position:
+
+```text
+path         ["./ops", "$INHERITED"]        the registry is appended, so ./ops/review.json wins
+path         ["$REGISTRY", "$INHERITED"]    the registered `review` wins
+```
+
+Omitting `$REGISTRY` puts it last, which is the precedence host-shipped documents used to have and
+for the same reason: what the host provides is a default, not a reservation. A path is a list of
+places an author knows about, and the registry is not one of those — a workflow writing
+`"path": ["./ops"]` is saying where ITS documents live, not renouncing `claude-code`.
+
+This is what collapses the last separate namespace. `operation.function` used to mean "a name in
+`registry.functions`" and nothing else: it did not search, so a project could not override a host
+function, and a host that wanted its function callable from an expression had to ship an operation
+DOCUMENT alongside the implementation — because registering the implementation said what it does and
+nothing about how it is called. An entry declares its own named, typed parameters now (§7.5.2), so
+`review(doc)` and `"function": "review"` reach the same declaration by the same route.
 
 **There is no separate runtime concept.** A delegated agent runtime (`claude-code`, and future
 adapters) is a plain function operation naming a registered adapter. So are sub-workflows,
@@ -1295,10 +1316,17 @@ indistinguishable at the call site from `eq` or `max`.
 
 There is one rule, and everything below is its consequence:
 
-> **A callee is an operation document.** Its declared `input` slots are the signature its positional
-> arguments bind against (§6, "the CALLEE's own parameter order binds the arguments"). What differs
-> between a built-in, a registered function, and a user's own file is only where the name resolves
-> and where the body comes from — never the shape of the call.
+> **A callee is an operation.** Its declared `input` slots are the signature its positional arguments
+> bind against (§6, "the CALLEE's own parameter order binds the arguments"). What differs between a
+> built-in, a registered function, and a user's own file is only where the name resolves and where
+> the body comes from — never the shape of the call.
+
+It said "an operation DOCUMENT" until a registered function could declare slots. It could not, which
+is why the registry was a namespace of its own that nothing searched, and why a host with a function
+to expose had to write a document restating the parameters its implementation already had. A
+registry entry declares them directly now, so the three body forms below sit beside a fourth source
+of a callee — the registry, a contributor on the path like any directory (§7.1) — under one rule
+rather than beside an exception to it.
 
 #### 7.5.1 Three body forms
 

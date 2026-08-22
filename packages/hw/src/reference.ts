@@ -85,6 +85,21 @@ export interface ReferenceOptions {
    */
   symbols?: SymbolIndex;
   /**
+   * Whether the FUNCTION REGISTRY provides a callee of this name (SPEC §7.5, §7.1).
+   *
+   * The registry is a contributor like a directory is, not a fallback consulted once the path has
+   * failed. That distinction is the whole point: a fallback can only ever be last, so a project could
+   * not override a host function, while a contributor sits at a POSITION and the position is
+   * authored. Where the path does not name {@link REGISTRY_ROOT} the registry is appended to it, so
+   * an unqualified workflow keeps the precedence host-shipped documents used to have — a project file
+   * of the same name wins — and one that wants otherwise writes `["$REGISTRY", "$INHERITED"]`.
+   *
+   * A predicate rather than a lookup, for the same reason {@link ReferenceOptions.symbols} is a
+   * function: resolution decides WHERE a name comes from, and what an entry then contributes is the
+   * caller's to read. Absent ⇒ no registry is on the path, which is the behavior that predates this.
+   */
+  registry?: (name: string) => boolean;
+  /**
    * Parsed documents by path, so the prefix rule below does not re-read a file per candidate.
    *
    * Supplied by a caller that resolves many references against one tree — which is every loader.
@@ -126,7 +141,26 @@ export interface ResolvedReference {
   property: string[];
   /** True when the reference named no file — a property of the current one. */
   local: boolean;
+  /**
+   * The REGISTRY entry this reference names, when the search matched at {@link REGISTRY_ROOT}.
+   *
+   * Set instead of `file`, because there is no file: what the name resolves to is an implementation
+   * the host registered. A caller must test this before reading `file`, since a registry hit is
+   * neither a document to parse nor the same-file case `local` marks.
+   */
+  registry?: string;
 }
+
+/**
+ * The search-path entry that stands for the FUNCTION REGISTRY (SPEC §7.1).
+ *
+ * A `$`-spelled sentinel rather than a directory, because it is not one — nothing lists it and
+ * nothing reads bytes out of it. Putting it in the path list anyway is what makes precedence
+ * AUTHORED: `["./ops", "$INHERITED"]` leaves host functions where they were, `["$REGISTRY",
+ * "$INHERITED"]` puts them in front, and both are one line in the workflow rather than a rule
+ * somewhere in a loader.
+ */
+export const REGISTRY_ROOT = "$REGISTRY";
 
 /** Suffixes an extensionless reference probes, in order, and that a canonical id drops. */
 export const DATA_EXTENSIONS = ["json", "yaml", "yml"] as const;
@@ -461,8 +495,10 @@ function locate(
  * warns about a collision within one directory; this is the same hazard across roots, and without it
  * the path is the hazard without the `which -a`.
  *
- * Only meaningful with a filesystem in hand — with no `vfs` every root "matches" trivially, because
- * there is nothing to check existence against. Silent under `shadowing: "override"`, where an
+ * A DIRECTORY entry is only meaningful with a filesystem in hand — with no `vfs` every root "matches"
+ * trivially, because there is nothing to check existence against — so those are skipped. The registry
+ * entry is not: it answers by predicate, so a file shadowing a registered function of the same name
+ * is reportable whether or not anything else is. Silent under `shadowing: "override"`, where an
  * earlier entry shadowing a later one is the caller's whole intent.
  */
 function warnIfShadowed(
@@ -474,8 +510,19 @@ function warnIfShadowed(
   chosen: string,
 ): void {
   const onWarn = options.onWarn;
-  if (!onWarn || options.vfs === undefined || options.shadowing === "override") return;
+  if (!onWarn || options.shadowing === "override") return;
   for (const root of path.slice(matchedAt + 1)) {
+    // The registry answers by predicate, so it is the one entry that can be probed with no `vfs`.
+    if (root === REGISTRY_ROOT) {
+      if (options.registry?.(body) === true) {
+        onWarn(
+          `reference '${reference}' resolves to '${chosen}' but a registered function '${body}' also matches further along the path — ` +
+            `the earlier entry wins, so adding or removing a file changes what this reference means`,
+        );
+      }
+      continue;
+    }
+    if (options.vfs === undefined) continue;
     try {
       // Quiet: the shadowed candidate's own within-directory ambiguities are not this warning's news.
       const other = locate(canonicalAbsolute(`${root}/${body}`), { ...options, onWarn: undefined }, reference);
@@ -498,7 +545,7 @@ function warnIfShadowed(
  * state would be pinned to the base layer and never see the project's override of what it points at.
  */
 function searchBare(body: string, options: ReferenceOptions, reference: string): ResolvedReference {
-  const path = searchPath(options);
+  const path = effectiveSearchPath(options);
   if (path.length === 0) {
     // No root configured: the reference IS its own id, which is what an in-memory bundle means.
     const segments = normalizeSegments(body);
@@ -511,6 +558,14 @@ function searchBare(body: string, options: ReferenceOptions, reference: string):
   // fall-through carries, and it exists entirely for the message at the end.
   const partials: PartialMatch[] = [];
   for (const [index, root] of path.entries()) {
+    // The REGISTRY entry: an entry with no directory behind it, answered by a predicate rather than
+    // by a listing. It sits in the loop rather than before or after it precisely so that whether a
+    // project file wins is decided by where the author put it.
+    if (root === REGISTRY_ROOT) {
+      if (options.registry?.(body) !== true) continue;
+      warnIfShadowed(path, index, body, options, reference, `${REGISTRY_ROOT}/${body}`);
+      return { registry: body, id: body, property: [], local: false };
+    }
     let found;
     try {
       found = locate(canonicalAbsolute(`${root}/${body}`), options, reference);
@@ -523,8 +578,9 @@ function searchBare(body: string, options: ReferenceOptions, reference: string):
     return { file: found.file, id: identityOf(found.file, options), property: [...found.property], local: false };
   }
   // With one root there is no "path" to speak of, so the single lookup's own message — which names
-  // the directory it looked in — says more than a list of one would.
-  if (path.length === 1) throw lastError as Error;
+  // the directory it looked in — says more than a list of one would. `lastError` is unset when the
+  // only entry was the registry, which has no lookup of its own to report.
+  if (path.length === 1 && lastError !== undefined) throw lastError as Error;
   // Somewhere on the path had near misses. That is a different failure from "no such file anywhere",
   // and almost always a typo or a rename, so it reports what WAS found rather than only what was not.
   if (partials.length > 0) {
@@ -576,11 +632,32 @@ function searchRoots(
   throw new ReferenceError_(`reference '${reference}' matches no file under any layer root (${rootPath.join(", ")})`);
 }
 
-/** The search path a bare reference is tried against, in order. */
+/** The DECLARED search path: the roots an author or a host named, and nothing else. */
 function searchPath(options: ReferenceOptions): readonly string[] {
   const d = options.defaultRoot;
   if (d === undefined) return [];
   return typeof d === "string" ? [d] : d;
+}
+
+/**
+ * The path a bare reference is actually tried against: the declared roots, plus the registry.
+ *
+ * The registry is appended rather than required to be written down, and the asymmetry is deliberate.
+ * A path is a list of places an author knows about; the registry is not one of those — a workflow
+ * writing `"path": ["./ops"]` is saying where ITS documents live, not renouncing `claude-code`. So
+ * omission means "wherever it goes by default", and the default is last, which is the precedence
+ * host-shipped documents already had: what the host provides is a default, not a reservation.
+ *
+ * Naming {@link REGISTRY_ROOT} explicitly pins the position instead, and is the whole point of the
+ * sentinel — `["$REGISTRY", "$INHERITED"]` is how a workflow says host functions win.
+ *
+ * Kept apart from {@link searchPath} because {@link identityOf} must not see it: folding a resolved
+ * FILE back against a root that is not a directory can only produce nonsense.
+ */
+function effectiveSearchPath(options: ReferenceOptions): readonly string[] {
+  const declared = searchPath(options);
+  if (options.registry === undefined || declared.includes(REGISTRY_ROOT)) return declared;
+  return [...declared, REGISTRY_ROOT];
 }
 
 /**

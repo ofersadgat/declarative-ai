@@ -16,7 +16,7 @@
  *  - a taken transition CONSUMES the answer, so the state does not act on it twice.
  */
 import { describe, expect, it } from "vitest";
-import { hostFunction, type ExecServices, type FunctionInputs, type JsonValue, type ResolvedValue } from "@declarative-ai/exec";
+import { hostFunction, type ExecServices, type FunctionInputs, type InlineFamily, type JsonValue, type ResolvedValue, type Signature } from "@declarative-ai/exec";
 import { SchemaValidator } from "@declarative-ai/validate";
 import { WorkflowEngine } from "../src/engine.js";
 import { loadBundle } from "../src/loader.js";
@@ -24,21 +24,24 @@ import { InMemoryPersistence, type EngineEvent, type WorkflowMetrics } from "../
 import { newRegistry } from "./fakes.js";
 
 /**
- * The operation document for the deferred function, shipped by the HOST rather than found on the
- * search path (`LoadBundleOptions.documents`) — which is how a host-provided function declares the
- * signature its positional arguments bind against.
+ * The signature the deferred entry declares — the slots its positional arguments bind against.
+ *
+ * This used to be a hand-written operation DOCUMENT shipped through `LoadBundleOptions.documents`,
+ * for the one reason that option existed: registering an implementation said what it does and
+ * nothing about how it is called, so the only place to declare slots was a file. An entry declares
+ * them itself now, and the document — an exact restatement of the impl's own parameters, kept in
+ * step by hand — is gone.
  */
-const AWAIT_EVENT_DOC = {
-  kind: "function",
-  function: "await_event",
+const AWAIT_EVENT_SIGNATURE = {
   input: {
     event: { kind: "text", index: 0 },
-    options: { kind: "json", index: 1 },
+    options: { kind: "json", index: 1, optional: true },
     // Declared, never positional: the loader fills it with the rule the call sits in
     // (`TRANSITION_INPUT`).
-    transition: { kind: "json" },
+    transition: { kind: "json", optional: true },
   },
-};
+  output: { name: "value", kind: "json" },
+} as const;
 
 /** One registration the test can answer, exactly as a UI would. */
 interface Waiter {
@@ -75,6 +78,7 @@ function harness(def: unknown) {
       // The declaration that makes it a WAIT rather than a computation. `memoizable: false` because
       // what it returns is an event, not a function of its arguments.
       { interactive: true, readOnly: true, memoizable: false, deferred: true },
+      { signature: AWAIT_EVENT_SIGNATURE as unknown as Signature<InlineFamily> },
     ),
   );
   registry.functions.set(
@@ -117,7 +121,7 @@ function harness(def: unknown) {
       "dawdling.json": { operation: { kind: "function", function: "dawdle" } },
     },
     "plan",
-    { documents: { await_event: AWAIT_EVENT_DOC } },
+    { functions: registry.functions },
   );
   const persistence = new InMemoryPersistence();
   const engine = new WorkflowEngine({ bundle, registry, validator: new SchemaValidator(), persistence });

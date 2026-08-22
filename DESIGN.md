@@ -1124,6 +1124,34 @@ against one `helper.ts` and execute another, and nothing anywhere would report i
 pure path arithmetic over the search `path` plus an existence test, so it is testable without either
 consumer.
 
+**The registry is a contributor, not a fallback.** ✅ *Implemented — `reference.ts`, `loader.ts`,
+`registryPath.test.ts`.*
+
+`locate()` answers within one directory. The path is walked by `searchBare`, and that is where the
+registry belongs: an entry in the list, matched by a `$REGISTRY` sentinel, answered by a predicate
+rather than by a listing. The alternative — consulting the registry once the path has failed — is
+what `LoadBundleOptions.documents` was, and it has one fatal property: a fallback can only ever be
+last, so a project could not override a host function no matter what it wrote.
+
+Where the path does not name `$REGISTRY`, it is APPENDED. The asymmetry is deliberate and worth
+recording, because "the path is exactly what the author wrote" is the tidier rule and it is wrong
+here: a path lists the places an author knows about, and the registry is not one of those. A workflow
+writing `"path": ["./ops"]` is saying where its own documents live, not renouncing `claude-code`.
+
+Two smaller consequences. `effectiveSearchPath` is kept apart from `searchPath` so `identityOf` never
+sees the sentinel — folding a resolved FILE back against a root that is not a directory can only
+produce nonsense. And `resolveDocument` collapses the path to the registry alone when there is no
+`vfs`, because `splitAtFile` matches anything with nothing to list against: right for the "name a
+state" verb it serves, and here it would let the first root swallow every callee name before the
+registry was ever asked.
+
+`registryOperation` is where the two routes converge: an entry's declared `signature` IS the slot map
+`operationOf` reads off a TypeScript parameter list, so a document, a module symbol and a registry
+entry produce the same `Operation` and nothing downstream branches. An entry with NO signature still
+resolves, to an operation with no slots — every host function written before signatures existed is
+that case, and refusing it would have made putting the registry on the path a breaking change for all
+of them. What it costs is what it should: nothing said what the positions are, so there are none.
+
 **Symbol resolution is a second route, not a change to the first.** ✅ *Implemented —
 `reference.ts`, `symbolResolution.test.ts`.*
 

@@ -41,8 +41,9 @@ import { bindTransitionContext, lowerExpression, type LowerOptions } from "./low
 import { environmentIdentity, mergeOperationFields, resolutionEnvironment } from "./merge.js";
 import { resolveStateRef, StateRefError, type StateRefOptions } from "./ref.js";
 import { expandReferences } from "./expand.js";
-import { isDataFile, isRuntimeReference, MODULE_EXTENSIONS, parseReferencedFile, resolveReference, selectProperty, type Vfs } from "./reference.js";
+import { isDataFile, isRuntimeReference, MODULE_EXTENSIONS, parseReferencedFile, REGISTRY_ROOT, resolveReference, selectProperty, type Vfs } from "./reference.js";
 import type { SymbolIndex } from "./reference.js";
+import type { EntrySignature } from "@declarative-ai/exec";
 import type { UserFunctions } from "./userFunctions.js";
 
 export class WorkflowLoadError extends Error {
@@ -423,6 +424,33 @@ function withArgs(
 }
 
 /**
+ * The operation a REGISTRY entry denotes (SPEC §7.1).
+ *
+ * The registry is a contributor on the search path like a directory is, so a name that resolves there
+ * has to produce the same thing a document or a module symbol produces: an `Operation` whose `input`
+ * slots are what a call binds against. An entry's declared `signature` IS those slots — the same map
+ * `operationOf` reads off a TypeScript parameter list — so the two routes converge here rather than
+ * in three places downstream.
+ *
+ * An entry that declares NO signature still resolves, and produces an operation with no slots. That
+ * is not a degenerate case to reject: it is every host function written before signatures existed,
+ * and refusing it would make putting the registry on the path a breaking change for every one of
+ * them. What it costs is exactly what it should — such a callee cannot be called positionally,
+ * because nothing said what its positions are.
+ */
+export function registryOperation(ref: string, entry: EntrySignature | undefined): Operation<InlineFamily> {
+  const signature = entry?.signature;
+  return {
+    kind: "function",
+    functionRef: ref,
+    // Copied rather than aliased: the loader binds arguments INTO these slots, and a registry entry
+    // is shared by every state that calls it.
+    input: Object.fromEntries(Object.entries(signature?.input ?? {}).map(([name, slot]) => [name, { ...slot }])),
+    output: signature?.output ?? { name: "output", kind: "json" },
+  };
+}
+
+/**
  * The call configuration a prompt operation assembles: every authored field hw does not own itself.
  *
  * "The operation IS the call" (REFERENCES.md §7.2) — `model`, `temperature` and the rest sit
@@ -690,18 +718,18 @@ export interface LoadBundleOptions extends Omit<StateRefOptions, "defaultRoot"> 
    */
   vfs?: Vfs;
   /**
-   * Operation documents the HOST ships, by bare name — searched only where the path finds nothing.
+   * The registry the bundle will run against — a CONTRIBUTOR on the search path (SPEC §7.1).
    *
-   * A call in an expression names a document (§3), and its `input` declarations ARE the signature its
-   * positional arguments bind against (§3.3). That is exactly right for an operation somebody wrote
-   * in a file, and it leaves a host-provided function with nowhere to declare itself: registering the
-   * IMPLEMENTATION says what it does and nothing about how it is called.
+   * Loading reads the registry for the same reason validation does (DESIGN §7): a callee's declared
+   * slots are what a call binds against, and for a host function those slots live on the entry. This
+   * replaced a `documents` option that let a host ship an operation DOCUMENT beside its
+   * implementation, which existed only because registering the implementation said what a function
+   * does and nothing about how it is called. An entry declares that itself now.
    *
-   * So a host may ship the document too. Consulted LAST, so a project file of the same name shadows
-   * it — the same precedence a base-layer document has, and for the same reason: what the host ships
-   * is a default, not a reservation.
+   * Absent ⇒ the registry is not on the path at all, and `operation.function` keeps its older
+   * meaning: a bare name the validator checks and the engine looks up at dispatch.
    */
-  documents?: Readonly<Record<string, unknown>>;
+  functions?: ReadonlyMap<string, EntrySignature>;
   /**
    * How a dotted symbol resolves to the MODULE contributing it (SPEC §7.5.2).
    *
@@ -710,12 +738,7 @@ export interface LoadBundleOptions extends Omit<StateRefOptions, "defaultRoot"> 
    * behavior that predates the feature.
    */
   symbols?: SymbolIndex;
-  /**
-   * Parsed documents, shared across every reference this load resolves.
-   *
-   * Named apart from {@link LoadBundleOptions.documents}, which is the host's SHIPPED operation
-   * documents — two different things that would otherwise collide on one word.
-   */
+  /** Parsed documents, shared across every reference this load resolves. */
   documentCache?: Map<string, unknown>;
   /**
    * The bridge from a resolved js/ts symbol to an operation (SPEC §7.5).
@@ -766,6 +789,11 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
     authored.set(id, def);
   }
   const rootId = resolveStateRef(rootRef, refs);
+
+  // The registry as a path CONTRIBUTOR: a predicate, because resolution decides where a name comes
+  // from and reading what the entry contributes is a separate question with a separate answer.
+  // Built once, since it is asked per callee per state.
+  const registryHas = options.functions === undefined ? undefined : (name: string): boolean => options.functions!.has(name);
 
   const rawById = new Map<string, StateDef>(authored);
 
@@ -904,42 +932,49 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
    * duplicate what `children[].inputs` and `.children.k.outputs.x` already do, with no clear answer
    * for re-entry or the cursor.
    */
-  /** Locate a name along the search `path` and read what is there, or `undefined` if nothing is. */
+  /**
+   * Locate a name along the search `path` and say what is there, or `undefined` if nothing is.
+   *
+   * ONE walk over uniform contributors. Three kinds of thing can answer — a document, a js/ts symbol,
+   * a registry entry — and which one wins is decided by WHERE it sits on the path, never by a
+   * fallback order compiled into this function. That is what lets a project shadow a host function by
+   * putting its own directory first, visibly, in the workflow file.
+   */
   const resolveDocument = (
     name: string,
     stateId: string,
     path: readonly string[] | undefined,
-  ): { document: unknown; file: string; symbol?: readonly string[] } | undefined => {
-    // A HOST-SHIPPED document has no file, so it is reached without one — which is also why it is
-    // tried after the path rather than before: a name that resolves to something on disk is a
-    // document somebody can open, and that always wins.
-    const shipped = (): { document: unknown; file: string } | undefined => {
-      const document = options.documents?.[name];
-      return document === undefined ? undefined : { document, file: `<built-in>/${name}` };
-    };
-    if (options.vfs === undefined) return shipped();
-    const defaultRoot = path !== undefined && path.length > 0 ? path : options.defaultRoot;
+  ): { document: unknown; file?: string; symbol?: readonly string[]; registry?: string } | undefined => {
+    const declared = path !== undefined && path.length > 0 ? path : options.defaultRoot;
+    // With no filesystem, a DIRECTORY entry cannot answer and must not be walked: `splitAtFile`
+    // matches anything when it has nothing to list against, which is right for the "name a state"
+    // verb it serves and would here let the first root on the path swallow every callee name. So the
+    // path collapses to the registry — which needs no `vfs`, since it answers a predicate. An
+    // in-memory bundle with host functions is exactly that case, and it is a real one.
+    if (options.vfs === undefined && registryHas === undefined) return undefined;
+    const defaultRoot = options.vfs === undefined ? [REGISTRY_ROOT] : declared;
     let located;
     try {
       located = resolveReference(name, {
-        vfs: options.vfs,
+        ...(options.vfs !== undefined ? { vfs: options.vfs } : {}),
         from: stateId,
         ...(defaultRoot !== undefined ? { defaultRoot } : {}),
         ...(options.roots !== undefined ? { roots: options.roots } : {}),
         ...(options.symbols !== undefined ? { symbols: options.symbols } : {}),
+        ...(registryHas !== undefined ? { registry: registryHas } : {}),
         ...(options.documentCache !== undefined ? { documents: options.documentCache } : {}),
         ...(options.onWarn !== undefined ? { onWarn: options.onWarn } : {}),
       });
-    } catch (e) {
-      // A name that matches nothing on the path THROWS rather than returning empty-handed, so the
-      // fallback has to be reached from here as well. Only when there is something to fall back to:
-      // with no shipped document of that name the original error is the right one, and it names every
-      // directory that was looked in.
-      const document = shipped();
-      if (document === undefined) throw e;
-      return document;
+    } catch {
+      // A name that matches nothing on the path THROWS rather than returning empty-handed. Callee
+      // resolution is allowed to come back empty — `operation.function` naming an unregistered
+      // function is a validator WARNING, not a load failure — so the miss is swallowed here and the
+      // caller decides. An expression's `resolveName` raises its own error, which says more.
+      return undefined;
     }
-    if (located.file === undefined) return shipped();
+    // A REGISTRY entry has no file to read: its declaration is the entry's own signature.
+    if (located.registry !== undefined) return { document: undefined, registry: located.registry };
+    if (located.file === undefined) return undefined;
     // A MODULE is not read as a document. `parseReferencedFile` returns a `.ts` file's TEXT (which is
     // right for a `.md` prompt and wrong here), and `selectProperty` on text reports "text has no
     // properties" — an error about the wrong thing entirely. A module's value is its EXPORT, reached
@@ -947,8 +982,8 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
     if (isModuleFile(located.file)) {
       return { document: undefined, file: located.file, symbol: located.property };
     }
-    const text = options.vfs.read(located.file);
-    if (text === undefined) return shipped();
+    const text = options.vfs?.read(located.file);
+    if (text === undefined) return undefined;
     return { document: selectProperty(parseReferencedFile(located.file, text), located.property, name), file: located.file };
   };
 
@@ -959,16 +994,18 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
   ): Operation<InlineFamily> | undefined => {
     const found = resolveDocument(name, stateId, path);
     if (found === undefined) return undefined;
+    // A REGISTRY entry: its signature IS its declaration, exactly as a module's parameter list is.
+    if (found.registry !== undefined) return registryOperation(found.registry, options.functions?.get(found.registry));
     // A js/ts SYMBOL: its signature IS its declaration (SPEC §7.5.2), so the operation is read out of
     // the TypeScript rather than out of a JSON block somebody also had to write.
     if (found.symbol !== undefined) {
       if (options.userFunctions === undefined) {
         throw new WorkflowLoadError(
-          `'${name}' resolves to '${found.file}', but this loader was given no way to read a js/ts signature`,
+          `'${name}' resolves to '${found.file!}', but this loader was given no way to read a js/ts signature`,
           stateId,
         );
       }
-      return options.userFunctions.operationFor(found.file, found.symbol).operation;
+      return options.userFunctions.operationFor(found.file!, found.symbol).operation;
     }
     const { document } = found;
     if (document === null || typeof document !== "object" || Array.isArray(document)) {
@@ -993,6 +1030,10 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
   ): Ref<InlineFamily> | undefined => {
     const found = resolveDocument(name, stateId, path);
     if (found === undefined) return undefined;
+    // A registry entry in VALUE position is the operation itself, as a value — the higher-order form
+    // §3.1's first tier already gives a document. There is nothing else it could be: an entry has no
+    // text and no data, only a callable.
+    if (found.registry !== undefined) return { op: registryOperation(found.registry, options.functions?.get(found.registry)) };
     return desugarBinding(bindingForDocument(found.document, isDataFile(found.file)), `reference '${name}'`, stateId, undefined, lower);
   };
 
