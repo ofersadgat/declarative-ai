@@ -21,6 +21,11 @@ export * from "./session.js";
 export * from "./operationNode.js";
 export * from "./ref.js";
 export * from "./reference.js";
+// What a js/ts module CONTRIBUTES to the search path, and the per-directory index that answers for
+// it (SPEC.md §7.5.2). Exported because a host that owns its own approval store builds the index
+// itself — which is the point of `ModuleIndexOptions.approved`.
+export * from "./moduleExports.js";
+export * from "./moduleIndex.js";
 export * from "./shape.js";
 export * from "./expand.js";
 export * from "./loader.js";

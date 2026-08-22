@@ -48,6 +48,7 @@
     "@declarative-ai/ops": "^0.1.0",
     "@declarative-ai/permissions": "^0.1.0",
     "@declarative-ai/validate": "^0.1.0",
+    "typescript": "^5.7.2",
     "yaml": "^2.9.0"
   }
 }
