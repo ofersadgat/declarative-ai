@@ -6,7 +6,9 @@
 > Normative for this library: §2.3–§2.4 (states, state IDs), §3 (state machine
 > semantics), §4 (inputs/outputs/artifacts/conversations), §5 (state
 > file format), §6 (expressions and static validation), §7.3 and §9 (worked examples,
-> used as golden tests), §8 (function states / interactive UI, realized here as
+> used as golden tests), §7.5 (function definitions — the callee side of §6, including the
+> TypeScript signature extractor, the wire/marshalling boundary, and the hash-and-freeze
+> integrity model), §8 (function states / interactive UI, realized here as
 > interactive functions in `registry.functions`), §10.1–§10.4 (statuses, run records, durability, async
 > children), §12 (versioning → snapshot hashing). Sections about tasks,
 > boards, Git isolation, safety policy, and MVP scope describe the JaiRA
@@ -806,6 +808,13 @@ A call may also WAIT (§3.3, "A guard that WAITS stops the list"). The expressio
 synchronous: it resolves to `PENDING` and is re-resolved in a later round, which is the same
 protocol a reference to a running child already follows. Nothing in the language awaits anything.
 
+A callee may also be a **user's own js/ts module** (§7.5), which genuinely does step outside the
+closure above: it can import, mutate, and reach the filesystem. That is not an exception smuggled
+into this section but a different guarantee, made elsewhere and by different means. The language
+stays closed because nothing it can *name* is unvetted — a module runs only when its content hash
+carries an approval, and only from the frozen copy taken before the run started (§7.5.5). Purity is
+preserved for expressions; for modules, provenance replaces it.
+
 ### 6.1 Expression Context
 
 Expressions may read from a controlled context. The namespaces split by **role**.
@@ -1274,7 +1283,419 @@ delegated adapter — a registry entry declaring that it enforces policy through
 receives raw tools and routes its native approval callback back through the same approver, so it is
 gated once, not twice.
 
+### 7.5 Function Definitions
+
+A state's `operation` is one call that state makes. A **function definition** is the other direction:
+a callable an expression names, resolved along the search `path` exactly as §6 describes, and
+indistinguishable at the call site from `eq` or `max`.
+
+There is one rule, and everything below is its consequence:
+
+> **A callee is an operation document.** Its declared `input` slots are the signature its positional
+> arguments bind against (§6, "the CALLEE's own parameter order binds the arguments"). What differs
+> between a built-in, a registered function, and a user's own file is only where the name resolves
+> and where the body comes from — never the shape of the call.
+
+#### 7.5.1 Three body forms
+
+A function definition supplies its body in one of three ways. The first two are documents on the
+search path; the third is a module beside them.
+
+```text
+expression   { "expr": "max(0, 1 - 0.35 * .inputs.severity)" }
+             The closed language of §6. No file to approve, no compiler, no runtime.
+
+embedded     { "kind": "function", "input": {…}, "outputs": {…},
+               "body": "Math.max(0, 1 - 0.35 * severity)" }
+             A JSON document declaring its slots as a state does, with a js/ts body. The
+             engine wraps the body in a synthetic function whose parameters are the declared
+             inputs, in `index` order.
+
+module       functions/confidence.ts
+             A js/ts file. The source is definitive: the signature is READ from it (§7.5.2)
+             rather than declared alongside it.
+```
+
+The three are one authoring surface at three levels of power, and the choice between them is real
+rather than a matter of taste. An expression cannot loop. An embedded body can, and pays for it with
+an approval prompt and a compile step. A module can additionally `require` other code, and pays for
+that with a resolution story.
+
+**Why an embedded body needs no separate approval.** A callee document is *inlined* into the state
+that names it during loading, and `snapshotHash` hashes the resolved form (§12) — so an embedded
+body is already part of the workflow's identity, and editing one produces a different workflow. A
+module cannot be inlined that way, which is exactly why it needs §7.5.5. The two forms differ in
+integrity machinery *because* they differ in whether the body is part of the document.
+
+**A body is a statement list or a single expression**, the distinction an arrow function already
+draws between `x => { return f(x); }` and `x => f(x)`. All three of these are the same function:
+
+```text
+"return Math.max(0, 1 - 0.35 * severity);"
+"Math.max(0, 1 - 0.35 * severity);"
+"Math.max(0, 1 - 0.35 * severity)"
+```
+
+The rule is the obvious one: **a body that parses as a single expression is one, and its value is
+returned.** Anything else is a statement list and must `return` for itself. A trailing semicolon
+decides nothing, since an expression followed by one still parses as an expression statement.
+
+This matters more than the keystrokes it saves. The expression form is what makes the three body
+forms a genuine progression rather than three unrelated syntaxes: an `{ "expr" }` document that
+outgrows the closed language of §6 — it needs a loop, or a built-in the language does not have —
+becomes an embedded body by changing which key it is written under, and the text between the quotes
+often does not change at all.
+
+One inherited ambiguity comes with it. A body beginning with `{` is read as a **statement list**,
+exactly as JavaScript reads it, so an object literal must be parenthesised:
+
+```text
+"{ score: s, reasons: r }"      a block, and a syntax error
+"({ score: s, reasons: r })"    the record a multi-output function returns
+```
+
+**An embedded body may not import.** It is self-contained by construction, which is what keeps the
+property above true. Code that needs imports is a module.
+
+#### 7.5.2 The signature
+
+For a module, TypeScript is the source of truth. A parameter list already carries almost everything
+a `ParameterDecl` (§4.1) holds, and reading it is strictly better than asking an author to restate it
+in JSON where the two can drift:
+
+| Slot field | Read from |
+| --- | --- |
+| name | the parameter name |
+| `index` | the parameter's **position** — so positional binding needs no annotation |
+| `schema` | the parameter's type, converted to the wire schema (§7.5.3) |
+| `optional` | `?`, or a `\| undefined` member |
+| `default` | a parameter default — `function f(limit = 3)` declares the slot's default |
+| `description` | a JSDoc `@param` tag, if present |
+
+A module therefore declares **no** signature in JSON; there is nowhere for one to disagree. An
+embedded body is the opposite case — it has no parameter list to read — so it declares its slots the
+way a state does, and its `index` (or key order) orders the synthetic function's parameters.
+
+Three degradations, all to the same place:
+
+- A `.js` module has no annotations. Every slot is untyped.
+- A parameter typed `any` or `unknown` is untyped.
+- A **generic** function has no instantiation at extraction time, so its type variables are
+  unconstrained and the slots they appear in are untyped. Generic functions are legal and not
+  usefully typed.
+
+"Untyped" means the unconstrained schema, which §6.2 already defines as accepting anything. It is
+reported as a warning naming the parameter, never silently: a slot that accepts anything and is then
+wired into a typed consumer is the failure §6.2 argues against for undeclared outputs, and it should
+be visible in both places.
+
+⚠️ **`noImplicitAny` is load-bearing.** Under a configuration that does not require annotations,
+every unannotated parameter is implicitly `any`, and the rule above turns the whole feature off with
+no error anywhere. The default compiler configuration (§7.5.6) sets it, and disabling it warns.
+
+**Exports, and what a module contributes.** A document on the search path contributes exactly one
+symbol: its own name. A module is different — a file can hold a library — so it contributes a set:
+
+| The module holds | Contributes |
+| --- | --- |
+| a **default export** that is a function | the module's **filename**. `functions/confidence.ts` is called as `confidence`. |
+| a **default export** that is an object | one symbol per key, nested to any depth. `{ text: { slug } }` contributes `text.slug`. |
+| **named exports** | their names, and their contents where they are objects. `export const text = { slug }` also contributes `text.slug`. |
+| **no export at all** | its top-level declarations, which the transpile step exports for it. |
+
+Note what the second row means: for an object export the **filename contributes nothing**. That is
+deliberate, and it is what lets a symbol live wherever its author put it — `text.slug` is `text.slug`
+whether it was written in `text.ts`, in `strings.ts`, or beside forty other helpers in `lib.ts`.
+
+**A prefix match is not a match.** This is the whole resolution rule, and it is ordinary `PATH`
+semantics applied at full symbol depth rather than at the first segment:
+
+> Resolving `text.slug` looks for a file that provides *that whole symbol*. A file providing `text`,
+> or `text.trim`, but not `text.slug`, has **missed** — and a miss continues the search.
+
+**A module is not found by its name.** This is what makes the rule above true rather than merely
+intended, and it is worth stating as mechanism. A *document* is located by matching the reference
+against the directory listing, longest prefix first — which works precisely because a document
+contributes one symbol and its name IS that symbol. Applying the same machinery to modules would
+answer only the coincidental case: `text.slug` living in a file called `text`. It could never find
+`text.slug` in `strings.ts`, because nothing in the reference names `strings`.
+
+So the two are located differently, and in this order:
+
+1. **The document split**, exactly as before. A state file or JSON document always wins, so no
+   existing reference can be captured by a module contributing a matching symbol.
+2. **The module index**, asked for the whole dotted symbol in that directory. Reached only where
+   step 1 finds nothing — which is why this section adds a resolution route rather than altering
+   one.
+
+Then the next entry on the search path, and so on. `text.ts` exporting `{ text: { trim } }` never
+becomes a candidate for `text.slug` at all: it is not a document, and the index is asked for a symbol
+rather than for a filename. Without this the first file whose *first segment* matched would swallow
+the reference and report "no `slug` in `text`" — a lie whenever another file has one.
+
+**The rule applies to documents too**, which is what keeps it a rule rather than a special case for
+modules. `plan.json` is a candidate for `plan.inner` and does not necessarily *hold* an `inner`: if it
+does, it answers and the index is never consulted; if it does not, it has missed, and the search moves
+on to the module contributing that symbol. Without this a document's name would claim its whole dotted
+subtree, and `plan.inner` could never be reached in a directory that also held a `plan.json`.
+
+This is the one place resolution reads a file rather than only listing a directory. Parsed documents
+are cached per file, so the cost is one read each however many references are resolved against them.
+
+**A total miss is RE-RUN with the rule relaxed**, and only to recover the better error. The strict
+pass fails with "names no symbol on the path", which is right when something else might have held the
+symbol and unhelpful when nothing did — the reader wanted to be told that `plan.json` has no `inner`.
+So the relaxed pass, which is exactly the behavior that predates modules, runs again: the first name
+match wins, and the missing property is reported against the file it is missing from, at the point of
+use. Nothing is traded away; the precise diagnostic is recovered rather than replaced.
+
+One consequence worth stating, because it makes an existing warning sharper: two candidate files are
+only AMBIGUOUS when both genuinely provide the symbol. A `user.json` that lacks `address` is not
+competing with `user.address.json` for `user.address`, so the "also matches" warning no longer fires
+for it.
+
+Three consequences:
+
+- **Only a whole-symbol match at two places is shadowing**, and it is reported by the existing
+  search-path shadowing warning (§7.1). Falling through a partial match is silent, because a file
+  that lacks the symbol is not competing for it.
+- **Partial matches are remembered, for the error.** When nothing on the path provides the symbol,
+  the failure names what was found instead — "no `text.slug` on the search path; `lib/text.ts`
+  provides `text.trim` and `text.format`". A near miss is almost always a typo or a stale rename, and
+  the diagnosis is worth more than the refusal.
+- **An explicit reference still pins a file.** Spelling the extension makes the module a document
+  split again — `functions/strings.ts.text.slug` is the file `strings.ts` and the property
+  `text.slug`, through the same `selectProperty` a JSON document's property reference goes through.
+  That is the escape hatch when the path would otherwise answer with someone else's `text.slug`.
+
+A resolved symbol that is **not callable** is data, not an operation — the same shape-mismatch rule
+`bindingForDocument` applies to a resolved document, so a module exporting a table of constants
+contributes a table of constants, readable in a binding and an error in callee position.
+
+#### 7.5.3 The wire boundary
+
+hw's values are JSON. A function's parameters are TypeScript. These are not the same vocabulary, and
+the spec is precise about which one each part of the system speaks:
+
+> **The JSON Schema is the wire type. Marshalling is the adapter between the wire and TypeScript.**
+
+Every static check — `isSubschema`, binding compatibility, expression inference (§6.2) — operates on
+wire types and is untouched by this section. The marshalling table is metadata on the slot, beside
+`kind`, and not part of its schema.
+
+Marshalling is defined **per leaf type**, and its traversal is derived structurally: `Date` has one
+rule, and `Date[]`, `{ when: Date }` and `Date | null` need no further instruction. The table runs in
+both directions — a function returning `Date` is demarshalled back to a wire string before the value
+reaches an output slot.
+
+Two shapes are rejected at signature extraction rather than guessed at:
+
+- **A union whose members are indistinguishable on the wire once marshalled.** `Date | string` is
+  `{"type":"string","format":"date-time"}` against `{"type":"string"}`; nothing at a leaf can decide
+  which rule to apply, so the signature is an authoring error rather than a coin flip.
+- **A type with no wire form at all** — `bigint`, `symbol`, a function, a class instance whose
+  identity is its methods. Accepting one produces a signature that does not describe the call.
+
+Recursive types are fine: the walker follows `$ref` and does not revisit a node it is already inside,
+by the same rule §6.2 uses to cut off output inference.
+
+#### 7.5.4 Module resolution
+
+A module is transpiled to **CommonJS**, because `require` is synchronous and interceptable and the
+ESM loader hooks are neither. Its resolution is not Node's ambient one: the require path is derived
+from the state's search `path` (§7.1), each entry contributing itself and its `node_modules`:
+
+```text
+path            ["$JAIRA/functions", "./ops"]
+require path    ["$JAIRA/functions", "$JAIRA/functions/node_modules",
+                 "./ops",            "./ops/node_modules"]
+```
+
+So a function resolves other code the same way a state resolves a document, and one search path
+governs both.
+
+**A specifier is a reference.** The require hook resolves what a module asks for through the same
+scheme every other reference in this system goes through (§5), not through Node's:
+
+```text
+require('./helper')            relative — resolved against the requiring file, as expected
+require('$JAIRA/lib/review')   a ROOT VARIABLE, the same `$JAIRA` a state's `path` and a
+                               `{"$ref": …}` already resolve
+require('/opt/shared/x')       absolute
+require('helper')              bare — searched along the require path above
+require('zod')                 bare — same search, found in a `node_modules` entry
+```
+
+The point is that an author writes one spelling of "where things are" and it means the same thing in
+a state file, in a `$ref`, and in an import. A function reaching for a shared library should not have
+to know it is inside a module rather than beside one.
+
+Two consequences are worth stating outright, because each is easy to assume the other way:
+
+- **A bare specifier is not the same thing as a dependency.** `require('helper')` finds
+  `$JAIRA/functions/helper.js` before it looks in any `node_modules`. Every rule that treats
+  `node_modules` differently is therefore keyed on the **resolved path** — "is this file under a
+  `node_modules` directory" — never on how the specifier was spelled.
+- **The require path is resolution, not containment.** Node builtins resolve ahead of it, so
+  `require('fs')` works regardless of what the path holds. Nothing in this section is a sandbox;
+  §7.5.5 is what makes that acceptable, and the path is not.
+
+**Type checking uses the same resolver.** The compiler's module resolution is overridden with the
+function above rather than left to `tsconfig` defaults. Two resolvers would let a signature be
+checked against one `helper.ts` and executed against another, with no error anywhere.
+
+#### 7.5.5 Integrity: hashing, approval, and the freeze
+
+The threat model is a single user running their own code on their own machine. The risk is therefore
+not privilege — it is **code changing without the user knowing**, which in a system where an agent
+can write files includes code the user never wrote in the first place.
+
+**Every user file is hashed independently**, and the property to hold is the strong form:
+
+> Every file loaded through the user-module resolver must carry an approved content hash.
+> **An unknown file is an unapproved file.**
+
+The strong form is what covers shadowing: a new file earlier on the search path changes which module
+a specifier resolves to without modifying anything that already existed, and only "unknown means
+unapproved" stops it.
+
+Files resolving under a `node_modules` directory are exempt — their integrity is the lockfile's
+concern, and re-hashing a dependency tree per run buys nothing. Per §7.5.4 this is a test on the
+resolved path, not on the specifier.
+
+**Approval shows a diff, never a hash.** A changed hash carries nothing a person can act on, and
+§7.4's approval gate already holds that an approver must be able to see what it is authorizing. First
+approval and re-approval are distinct questions and are presented as such: the first is "should this
+run at all", the second is "here is what changed".
+
+**Approvals are machine-local and are never synced.** An approval is a statement about a file on one
+disk; propagating it would let one compromised machine confer trust on the rest.
+
+**The freeze.** Before a run starts, the workflow's definition is made immutable, and user files are
+part of that definition:
+
+1. every reachable function module is resolved, and its hash checked against its approval;
+2. any mismatch, and any file with no approval, **stops the run before anything executes** — an
+   error, not a prompt, because a run is not the moment to be deciding what code to trust;
+3. the **transpiled** output of each module is copied into the snapshot directory beside the state
+   files.
+
+Copying the transpiled form rather than the source is what makes a frozen run actually frozen. A
+stored hash can only *detect* drift and refuse; it cannot execute the version that was approved.
+Storing the emitted code also removes the compiler from replay entirely, so a later toolchain upgrade
+cannot change what a pinned run does.
+
+**Those hashes fold into the snapshot hash** (§12). A workflow's identity is what it will do, and a
+module reached by name is part of that. Without this, a task pinned to a snapshot would run edited
+code under an unchanged version — the precise failure snapshot hashing exists to prevent, and the
+reason it hashes the resolved form rather than the authored bytes.
+
+On resume, a run whose frozen copies no longer match the files on disk still executes the **frozen**
+copies, and reports drift. The choice that offers — continue the old run, or start a new one against
+the current code — belongs to the user, so drift surfaces as a decision rather than a log line.
+
+#### 7.5.6 Execution
+
+**Nothing reaches a function but its parameters.** There is no context object, no session handle, no
+ambient binding to the run. This is the closure §6 states for expressions, held one level further
+out, and it is why a function can be understood from its signature alone.
+
+The one carve-out is a **cancellation signal**, which a function may accept as a trailing
+`AbortSignal` parameter. It is a carve-out and not a hole: it carries no workflow data, is absent
+from the wire signature, and exists so that a function can cooperate with the deadline below rather
+than be abandoned by it.
+
+**Nothing leaves but the return value**, and every call is wrapped: a throw, a rejection, or a
+module-load failure becomes a classified `Failure` rather than an exception crossing the seam, so a
+retriable error raised inside a function reaches the retry machinery with its classification intact.
+
+**A deadline is a deadline, not a kill.** A call may be bounded in wall-clock time, and on expiry the
+operation reports `outcome: "timeout"` and the run proceeds. The function itself is *abandoned*, not
+terminated: JavaScript offers no way to stop a promise, and synchronous code cannot be interrupted at
+all — a function that never yields the event loop prevents even the timer from firing. This is stated
+rather than papered over, because a spec promising termination would be promising what the runtime
+cannot deliver. A function that wants to be cancellable takes the signal above.
+
+**Function results are not memoized.** A call is dispatched afresh each time an expression demands
+it, which keeps a function reading a clock, a file, or a network from replaying a stale answer. Two
+consequences follow, and both are already the engine's behavior for deferred calls:
+
+- A call that WAITS is registered **once**, however many guards or rounds demand it (§3.3), and a
+  taken transition consumes its answer — so waiting does not re-dispatch.
+- A call that **completes within a round** has nothing pending, so a guard re-evaluated in a later
+  round calls it again. **A function called from a guard must be idempotent.** This is an authoring
+  rule rather than machinery: guards are re-evaluated by design, and a function with side effects does
+  not belong in one.
+
+**The compiler configuration** has a default that sets `strict` (see §7.5.2 on `noImplicitAny`) and
+`isolatedModules` — the latter because emit is per-file, and an author is better told at check time
+that a construct will not survive that than at run time. A project may override the configuration;
+overriding `noImplicitAny` warns, since it disables typed signatures rather than loosening them.
+
+#### 7.5.7 Example
+
+The three scoring documents of a phase gate, as one module. Every slot below is read from the
+parameter list; nothing about this signature is declared in JSON.
+
+```ts
+// $JAIRA/functions/confidence.ts
+export interface Confidence {
+  score: number;
+  reasons: string[];
+  must_ask: string[];
+}
+
+/**
+ * @param maxSeverityRank blocker=3 … note=0.
+ * @param iteration Converging on pass 3 is not converging.
+ */
+export default function confidence(
+  maxSeverityRank: number,
+  iteration: number,
+  maxIterations = 3,
+  runnerUpMargin = 1,
+  mandatoryMargin = 1,
+): Confidence {
+  const score = Math.max(
+    0,
+    1 - 0.35 * (maxSeverityRank / 3) - 0.25 * (iteration / maxIterations)
+      - 0.2 * (1 - Math.min(1, runnerUpMargin)) - 0.2 * (1 - Math.min(1, mandatoryMargin)),
+  );
+  const reasons: string[] = [];
+  if (maxSeverityRank >= 2) reasons.push("the critique exited at or above the severity threshold");
+  if (iteration > 1) reasons.push("it took more than one pass to converge");
+  const must_ask: string[] = [];
+  if (iteration >= maxIterations) must_ask.push("three rounds that did not converge");
+  return { score, reasons: reasons.slice(0, 3), must_ask };
+}
+```
+
+Called from a state, positionally, in the parameter order the file already fixes:
+
+```json
+{
+  "outputs": {
+    "confidence": { "binding": { "expr": "confidence(.inputs.max_severity_rank, .inputs.iteration)" } }
+  }
+}
+```
+
+**One call, one output.** The three fields reach their consumer as properties of that one value —
+`.children.confidence.outputs.confidence.score` — rather than as three sibling outputs each binding
+its own call. That is not a stylistic preference: function results are not memoized (§7.5.6), so
+three bindings that each name `confidence(…)` are three invocations of it. A function returning a
+record is called once and projected many times.
+
+Three files sharing an unwritten contract over eight caller-declared inputs become one file whose
+contract is its signature. `maxIterations` and the two margins carry defaults, so a caller with no
+exploration to report omits them rather than wiring a constant — and the `empty` seed that existed
+only because the expression grammar has no array literal has nowhere left to be.
+
 ## 8. Function States (Interactive UI)
+
+> **Not to be confused with §7.5.** A *function definition* is a callable an expression names. A
+> *function state*, below, is a state whose operation happens to be of kind `function` and whose
+> registered entry is interactive. They share a word and nothing else.
 
 Human interaction is modeled as a `function` operation whose registered function is interactive — not as a
 special human runtime. An interactive function displays state inputs and returns structured data;
@@ -1736,3 +2157,5 @@ resolved before expanding beyond the MVP:
 16. Entering a state creates a fresh instance; results never leak across
     instances.
 17. Workflow definitions are engine-owned; agents cannot read or modify them.
+18. User code runs only by approved content hash, and only from the copy frozen
+    before the run began.

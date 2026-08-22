@@ -1105,6 +1105,309 @@ arguments, and exactly what JaiRA's app supplies in its richer form.
   model — composed-vs-delegated runtimes, the `Tool` seam, the session-keyed environment overlay, and
   the permission granularities — is specified in §5.1.
 
+### 7.1 User-defined functions
+
+[SPEC.md](SPEC.md) §7.5 specifies the authoring surface — three body forms, a signature read from
+TypeScript, and a hash-and-freeze integrity model. This is where each piece lands.
+
+**It is a third document kind, not a new subsystem.** `resolveDocument` already dispatches a
+resolved name three ways: a binding form is a binding, an operation document is an operation,
+anything else is data. A js/ts module joins that dispatch. Everything downstream of the loader —
+`bindPositionally`, `positionalNames`, fan-out, the checker, the hasher, the engine — is unchanged,
+because a module lowers to the same `FunctionOp` a registered function does. The feature is a
+resolver, an extractor, and a compile cache; the call path already existed.
+
+**One resolver, two consumers.** The require path of SPEC §7.5.4 is built once and handed to both
+`ts.CompilerHost.resolveModuleNames` and the CommonJS require hook. This is the single most
+load-bearing implementation constraint in the section: two resolvers would type-check a signature
+against one `helper.ts` and execute another, and nothing anywhere would report it. The function is
+pure path arithmetic over the search `path` plus an existence test, so it is testable without either
+consumer.
+
+**Symbol resolution is a second route, not a change to the first.** ✅ *Implemented —
+`reference.ts`, `symbolResolution.test.ts`.*
+
+The instinct is to extend `splitAtFile`: it already walks a dotted reference from the longest file
+prefix down, already collects every (file, property) split naming a file that exists, and already
+keeps the runners-up. Adding `.ts` to its extensions and turning a missing property into a
+fall-through looks like the whole job.
+
+It is not, and the reason is worth recording because the wrong version passes a plausible test suite.
+`splitAtFile` finds files by NAME. That is exactly right for a document, whose name IS the one symbol
+it contributes — and structurally unable to find `text.slug` in `strings.ts`, because nothing in the
+reference names `strings`. A name-driven resolver answers only the coincidental case where the symbol
+happens to share its file's name, which is the case the feature does not need.
+
+So `locate()` tries two routes in one directory:
+
+1. `splitAtFile` — the document split, untouched. A document always wins, so nothing that predates
+   modules can be captured by one, and every existing caller resolves exactly as it did.
+2. `ReferenceOptions.symbols` — a `SymbolIndex`, asked for the whole dotted symbol. Reached only
+   where step 1 throws.
+
+`searchBare` and `searchRoots` then fall through entry by entry as they always have, accumulating
+`PartialMatch`es from any `SymbolMissError` so the final failure can say what *was* found. That
+accumulation is the only new state the algorithm carries and it exists entirely for the message.
+
+**`splitAtFile` also filters by whether the document PROVIDES the property**, under a strict flag —
+so the prefix rule is one rule rather than a module special case. This is the only place resolution
+reads a file instead of listing a directory, and `ReferenceOptions.documents` caches the parse so it
+happens once per file rather than once per candidate.
+
+**`resolveReference` runs two passes.** The strict one applies the rule; a `SymbolMissError` from it
+re-runs relaxed, which is precisely the pre-module algorithm — first name match wins, and
+`selectProperty` reports the missing property against the file lacking it, where the value is read.
+If the relaxed pass also finds nothing, the STRICT error is thrown, because that is the one carrying
+the near misses. The alternative was choosing between the new rule and the old diagnostic; re-running
+is cheap enough (documents are cached) that neither has to be given up.
+
+A pleasant side effect: the within-directory "also matches" warning got sharper for free. Two
+candidates are ambiguous only when both genuinely provide the symbol, so a `user.json` lacking
+`address` no longer warns about competing with `user.address.json`.
+
+Resolution stays first-match-wins with its early exit: nothing is merged, no namespace is assembled,
+and the first module contributing the whole symbol ends the search. One symbol resolves to one file,
+which is what keeps §7.5.5's one-file-one-hash property intact — a file that was searched and missed
+is not a contributor and does not enter the snapshot.
+
+**The index.** ✅ *Implemented — `moduleExports.ts`, `moduleIndex.ts`, and their tests.*
+
+`moduleSymbols` reads one module into a table of *fully-qualified symbol* → *property path in the
+export namespace*. The two coordinates differ and conflating them is the bug worth naming:
+`export default { text: { slug } }` contributes the symbol `text.slug` at property
+`["default", "text", "slug"]`. That namespace shape — `default` plus the named exports — is what a
+transpiled CJS `module.exports` already looks like, so a value is read out with the same
+`selectProperty` a JSON document's property goes through.
+
+Extraction is a **parse**, not a `Program`. Contributed symbols are syntactic — the keys an author
+wrote, not the type of anything — so this needs no module resolution, no tsconfig, and none of the
+transitively imported files. Only the *signature* of a symbol actually called needs the checker, and
+that happens later, for the one symbol that was reached rather than for every symbol on the path.
+`typescript` is therefore a dependency of this package but is imported on FIRST USE, so a consumer
+that never sees a `.ts` file never loads the compiler.
+
+`createSymbolIndex` hands back a **synchronous** lookup that reads each directory on FIRST ASK, and
+the reason is not performance. A state's search `path` is discovered *while the tree is being loaded*
+— `resolutionEnvironment` walks the environment chain, and a state may declare its own — so the set
+of directories to index cannot be enumerated in advance. An eager index would either silently miss
+whatever a per-state `path` names or force a two-pass load.
+
+The single `await` is the compiler import; `createSourceFile` and everything after it are ordinary
+synchronous functions, which is why `moduleSymbols` is split into an async wrapper over a sync core
+(`moduleSymbolsWith`). One await at startup, then a sync seam called from a sync resolver called from
+a sync `loadBundle`. `buildModuleIndex` keeps the eager form for the freeze, which has to read
+everything anyway.
+
+Entries are read in sorted order, so which of two files contributing one symbol wins is a property of
+their names rather than of directory-listing order; a collision inside one directory warns, since
+there is no path order to appeal to there.
+
+Parsed tables cache under the same content hash §7.5.5 computes for approval — one hash per file
+serving integrity, this index, and (later) the transpile cache.
+
+It indexes **approved files only**. Otherwise indexing an unapproved module is how a workflow
+discovers it exists, and a file could shadow a symbol before anyone agreed to run it — so "an unknown
+file is an unapproved file" holds for symbols as well as for loads. `ModuleIndexOptions.approved`
+is the seam; absent, every module contributes, which is what an in-memory bundle wants.
+
+Note the ordering constraint this creates. The index makes bare-name resolution depend on module
+*contents*, and contents are what the approval gate governs — so indexing an unapproved module must
+not be how a workflow discovers it is there. The index is built over approved files, and an
+unapproved module contributes nothing until it is approved, which keeps "an unknown file is an
+unapproved file" true of names as well as of loads.
+
+**Embedded bodies compile to the same artifact a module is.** ✅ *Implemented — `functionBody.ts`.*
+
+`synthesizeBody` wraps an authored body in `export default function (…) { … }` and stops there. It
+does not run anything, and that is the point: an embedded body and a module form become the same kind
+of input to the same compiler, so exactly ONE execution path exists downstream rather than a second
+one that has to be kept in step.
+
+`classifyBody` decides statement-list versus single-expression by parsing and asking whether the
+result is exactly one `ExpressionStatement`. Two ordering details are load-bearing:
+
+- **The leading-`{` check runs before the parser is consulted.** `{ score: s }` parses as a labelled
+  statement and `{ score: s, reasons: r }` is a syntax error at the comma — so the parser's answer
+  for an ordinary returned record is "Expression expected at offset 12", which sends the author
+  looking anywhere but at the brace. The brace is the one thing they need to change, so it is checked
+  first and reported as itself.
+- **Syntax errors are reported against the AUTHORED text**, before a wrapper exists. Transpiling to
+  find out would report offsets into generated code the author never wrote.
+
+`returnsSomewhere` asks "is there a return at all", not "does every path return" — an `if` with no
+`else` is ordinary, and definite-assignment analysis is not this checker's job. It descends through
+blocks, conditionals, loops, `try` and `switch`, and stops at function-like nodes, since a return
+inside a callback returns from the callback.
+
+The parameter order comes from `positionalOrder`, lifted out of `lowerExpr` into `format.ts` so a
+call and its callee cannot disagree about argument order — a bug that would otherwise type-check. A
+module form gets that ordering free from its parameter list; an embedded body has none, so the
+document's `index` (or key order) supplies it.
+
+**Transpile and execution split async from sync, and the artifact between them is the frozen one.**
+✅ *Implemented — `moduleLoader.ts`.*
+
+`prepareModules` resolves the import closure and transpiles it (async — the compiler is imported on
+demand); `LoadedModules.execute` runs a module (sync — `require` is, and the engine calling a
+function is no place to await a compiler). The split is not just a signature convenience: what
+`prepare` hands back, the emitted JavaScript for every file in the closure, is exactly what §7.5.5's
+freeze copies into the snapshot. Preparing and running are separate because *approving* and running
+are, and a design where discovering a module's imports required running it would have no moment at
+which to ask. A test pins that gap directly.
+
+The closure is walked from the SOURCE's AST rather than by scanning the emit, so a `require(` inside
+a string literal is not an import — also pinned, because a regex over emitted code is the obvious
+shortcut and it is wrong.
+
+Resolution is `resolveSpecifier`: the reference grammar's four spellings (`$VAR`, relative,
+absolute, bare) over a require path from `requirePathFor`. One subtlety the first implementation got
+wrong and the tests caught: **`./helper.js` must resolve to `helper.ts`.** Under TypeScript's own ESM
+rules an import names the EMITTED file — this package's sources are written that way throughout — so
+without the rewrite a module's imports are unwritable in the dialect the module is written in. The
+exact spelling is still tried first, so a real `.js` beside a `.ts` wins when it is the one named.
+
+Execution is the CommonJS wrapper via `new Function`, not `node:vm`. `vm` is not a security boundary
+and this is not a sandbox (§7.5.4 says so outright), so the honest primitive is the cheap one; a
+`//# sourceURL=` trailer is what puts the module's own path in a stack trace instead of
+`<anonymous>`. The module cache is populated with the empty exports object BEFORE the body runs,
+which is what makes an import cycle terminate with a partial namespace — ordinary CJS semantics, done
+on purpose rather than discovered.
+
+Builtins are refused with a message naming them rather than silently resolving to nothing. Supplying
+them is a host decision, and pretending otherwise would read as containment this layer does not
+provide.
+
+**Signature extraction needs a `Program`, not a parse.** ✅ *Implemented — `signature.ts`,
+`wireType.ts`, `marshal.ts`.*
+
+Resolving an imported interface, flattening a conditional type, or instantiating a generic all
+require the `TypeChecker`; the parser alone yields only names and syntactic annotations. That is why
+it runs HERE, for the one symbol actually called, rather than for every symbol on the path — and why
+it is worth caching. The measured cost bears that out: a first `createProgram` is ~600ms against
+single-digit milliseconds for the whole symbol index.
+
+`createProgram` runs over a `CompilerHost` backed by the workflow's `Vfs`, with
+`resolveModuleNames` overridden to call **`resolveSpecifier`** — literally the function the require
+hook uses. This is the constraint the whole feature turns on: two resolvers would type-check a
+signature against one `helper.ts` and execute another, and nothing anywhere would report it. Only lib
+files fall through to the real disk, because `Date` and `Array` live inside the `typescript` package
+and a checker without them cannot type the very type the marshalling table exists for.
+
+`DEFAULT_COMPILER_OPTIONS` sets `strict` and `noImplicitAny`, and that is load-bearing rather than
+taste: §7.5.2's rule is "`any` → untyped", so under a lax configuration every unannotated parameter
+is implicitly `any` and the feature turns itself off with no error anywhere.
+
+**The conversion fails closed, in two distinct ways.** Keeping them apart is the point, because
+§6.2's checker is deliberately conservative and feeding it machine-translated schemas is exactly how
+that turns into false confidence:
+
+- **Unrepresentable → error.** `bigint`, `symbol`, a function type, `Map`/`Set`. A signature that does
+  not describe the call is worse than one that will not compile, because the lie survives.
+- **Unconstrained → untyped, with a warning.** `any`, `unknown`, an uninstantiated generic. The
+  universal schema is what §6.2 already defines; the warning names the parameter, because silence is
+  precisely what §6.2 argues against for undeclared outputs.
+
+Marshalled types are not an exception to that rule but an instance of it: `Date` is representable
+*because a marshaller exists*, so the table is the whole of what makes a non-JSON type legal and
+adding one means adding a marshaller rather than loosening a check.
+
+**Marshalling is schema-driven, so the traversal composes.** The wire schema carries the marker
+(`format: "date-time"`), and `marshal.ts` walks value and schema together — so `Date` needs one table
+entry and `Date[]`, `{ when: Date }` and a `Date` nested three levels down need none. `needsMarshalling`
+answers "is there anything to do" once per schema and caches it on a `WeakMap`, so an ordinary call
+does not deep-walk its own arguments to discover there was nothing to convert; the fast path returns
+the very same object. One traversal serves both directions, because the document being walked is the
+same and only which half of the marshaller runs at a leaf differs.
+
+Two smaller decisions worth recording. `T | undefined` becomes `optional`, not a union with `null` —
+JSON Schema spells absence as `required`, and conflating them makes every optional member a different
+claim. And the trailing `AbortSignal` of §7.5.6 is dropped from the wire signature entirely rather
+than becoming a slot nobody could fill.
+
+**Emit is per-file `transpileModule`, checking is whole-program.** The two are separate calls with
+separate lifetimes: checking answers "what is the signature and is the body sound", emit answers
+"what runs". `isolatedModules` is set in the default configuration so the constructs per-file emit
+cannot express are refused at check time rather than at run time.
+
+**Three caches, all keyed on the same content hash.** The hash computed for approval also keys the
+extracted signature and the transpiled output, so a file is hashed once and the result serves
+integrity, typing, and emit. The live caches additionally key on the compiler configuration and the
+TypeScript version — emit is not stable across versions (helper emission, downleveling, the CJS
+interop wrapper have all changed), and a cache that ignores the compiler silently serves stale
+semantics after an upgrade. The *frozen* copies need no such key: they hold emitted JavaScript, so
+replay never invokes the compiler at all.
+
+**The snapshot fold.** ✅ *Implemented — `integrity.ts`, `WorkflowBundle.moduleDigest`.*
+
+`snapshotHash` hashes resolved states on the stated grounds that "what was referenced is inlined, and
+a change to what anything lowers to is a different hash by construction". A module reached by name
+breaks that premise — it is not inlined — so `FrozenModules.digest` is spliced into the hashed
+document alongside the states. Without it a task pinned to a snapshot would run edited code under an
+unchanged version, the exact failure resolved-form hashing exists to prevent; with it,
+`workflowIdentify(definition)` (§3.4) continues to mean what it says.
+
+The key is OMITTED entirely when there is no digest, rather than hashed as `undefined` or as an empty
+string. That is what keeps every snapshot taken before modules existed byte-identical —
+`{ rootId, states }` still hashes to what it always did — and it is pinned by a test rather than left
+to inspection.
+
+`moduleDigest` is over `(basename, hash)` pairs, and both halves of that choice are deliberate. Not
+full paths, because those are machine-specific (`/home/…` against `C:/Users/…`) and a snapshot that
+differs between two machines running the same workflow is not an identity. Not content alone, because
+within one directory the winner of a symbol collision is decided by filename order (`moduleIndex`) —
+so a rename can change which code runs while every content hash stays the same. The basename is the
+machine-independent part that captures it.
+
+**Approval and the freeze.** `pendingApprovals` runs the closure walk with no gate, which is the only
+way to discover what a workflow reaches, and is safe precisely because preparing does not execute
+(§7.5.4). It reports the current source alongside the hash — a hash alone is nothing a person can act
+on — and reports `previousHash` only for a re-approval, because "should this run at all" and "here is
+what changed" are different questions and only the second can be answered by looking at a diff.
+
+`freezeModules` then verifies and returns the EMITTED code, which is what makes a frozen run actually
+frozen: a stored hash can only detect drift and refuse, never execute the version that was approved.
+Storing the emit also removes the compiler from replay, so a toolchain upgrade cannot change what a
+pinned run does. Failures name every offending file at once rather than the first, split into "never
+approved" and "changed since approval" — a person about to be asked for approvals wants the list.
+
+`isVendored` keys the `node_modules` exemption on the RESOLVED path. A rule spelled "bare imports are
+exempt" would leave open exactly the hole approval closes, since the require path lets a bare
+specifier reach a plain file in a search entry.
+
+**Validation becomes a function of *(document, registry, approvals)*.** It was already a function of
+document and registry (§3.3) so that "a `functionRef` naming nothing registered" is an authoring
+error rather than a runtime one. Approval status is the same kind of fact, known at the same moment,
+and it produces the same kind of error — with one difference in severity: an unapproved module is a
+*blocking* condition at freeze time, never a warning, because a run is not the moment to decide what
+code to trust.
+
+**Persistence.** hw owns the compiler, the resolver, and the evaluator. The durable approval record
+rides the existing `Persistence` port rather than a new one — it is per-machine state about a file,
+which is what that port is for, and JaiRA's SQLite implementation is where it actually lands. Frozen
+emit is written beside the state files in `.jaira/snapshots/<hash>/`, which already holds the bundle.
+
+**Capabilities.** A user function declares into the existing `pure | host | runtime` union (§3.3)
+rather than sitting outside it, so permission gating and search refusal keep reading a definite value
+instead of falling through an `undefined`. All three are `memoizable: false` per SPEC §7.5.6 —
+freezing pins *which code runs*, and says nothing about whether that code returns the same answer
+twice.
+
+**Deadlines are weaker here than at a provider call, and the type should not pretend otherwise.**
+§3.5's `timeoutMs` is applied as an `AbortSignal` the provider honors. User code honors nothing: the
+signal is offered as an optional trailing parameter (SPEC §7.5.6) and a function is free to ignore
+it. So the enforcement is a race, and a race abandons rather than terminates — and against
+synchronous code that never yields, the timer does not fire at all. `withDeadline`'s in-flight
+cancellation has the same shape and the same limit; this is the existing mechanism applied to a
+callee that cannot be compelled, not a new one. Genuine termination would mean `worker_threads` and
+`terminate()`, which buys a structured-clone boundary (better for `Date`/`Map` than JSON) at the cost
+of per-worker module loading. Not in v1; noted because the marshalling design should know it is a
+plausible destination.
+
+**Dependency consequence.** `typescript` becomes a runtime dependency of hw and brings a Node-only
+path (`require`, fs). It is reached through a dynamic import for the same reason `loadBundleFromDir`
+is — so the cost is paid by callers that define functions in TypeScript and by no one else, and the
+package stays edge-safe when the feature is unused.
+
 ## 8. Consumer Migration Plans
 
 ### 8.1 findmyprompt

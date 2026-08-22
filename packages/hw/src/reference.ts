@@ -77,6 +77,26 @@ export interface ReferenceOptions {
   /** The canonical id of the state doing the referring — the base for `./` and `../`. */
   from?: string;
   vfs?: Vfs;
+  /**
+   * How a dotted symbol is resolved to the module contributing it (SPEC §7.5.2).
+   *
+   * Consulted only where the DOCUMENT split finds nothing, so a state file always beats a module
+   * symbol of the same name and every existing caller resolves exactly as it did.
+   */
+  symbols?: SymbolIndex;
+  /**
+   * Parsed documents by path, so the prefix rule below does not re-read a file per candidate.
+   *
+   * Supplied by a caller that resolves many references against one tree — which is every loader.
+   */
+  documents?: Map<string, unknown>;
+  /**
+   * INTERNAL. Whether a document must actually PROVIDE the property to claim the reference.
+   *
+   * Set by {@link resolveReference}'s two passes and not by callers: the first pass runs strict, and
+   * a total miss re-runs relaxed purely to recover the better error. See the note there.
+   */
+  strictSymbols?: boolean;
   /** Collects non-fatal ambiguities (REFERENCES.md §9). */
   onWarn?: (message: string) => void;
   /**
@@ -110,6 +130,80 @@ export interface ResolvedReference {
 
 /** Suffixes an extensionless reference probes, in order, and that a canonical id drops. */
 export const DATA_EXTENSIONS = ["json", "yaml", "yml"] as const;
+
+/**
+ * Suffixes a MODULE is written with — a js/ts file contributing symbols (SPEC §7.5.2).
+ *
+ * Deliberately NOT added to {@link DATA_EXTENSIONS}, and deliberately not probed by
+ * {@link splitAtFile}. A module is not found by matching its NAME against the reference: see
+ * {@link SymbolIndex} for why that cannot work.
+ */
+export const MODULE_EXTENSIONS = ["ts", "js"] as const;
+
+/**
+ * Resolve a dotted symbol inside ONE directory to the module that contributes it (SPEC §7.5.2).
+ *
+ * ## Why this is not a predicate over candidate files
+ *
+ * Everything else here finds a file by NAME: `splitAtFile` walks the reference from its longest
+ * prefix down, asking the directory listing whether each prefix names something. That works because
+ * a document contributes exactly one symbol — its own path — so the name IS the address.
+ *
+ * A module contributes a SET, and for an object export the filename contributes nothing at all. So
+ * `text.slug` may live in `strings.ts`, in `lib.ts`, or beside forty other helpers — in a file whose
+ * name shares not one character with the reference. No amount of prefix-matching the listing will
+ * find it, and a resolver built that way answers the easy case (`text.slug` in `text.ts`) while
+ * being structurally unable to answer the case the feature exists for.
+ *
+ * Hence an index, keyed on the fully-qualified symbol and owned by whoever can parse modules. This
+ * resolver knows which files exist; only a reader of them knows which symbols they hold.
+ *
+ * Absent — the default — means no module contributes anything, which is the behavior that predates
+ * modules entirely.
+ */
+export type SymbolIndex = (dir: string, symbol: readonly string[]) => SymbolLookup;
+
+/** What a {@link SymbolIndex} answers with. */
+export type SymbolLookup =
+  /** The module providing the symbol, and where inside it the value sits. */
+  | { found: true; file: string; property: readonly string[] }
+  /**
+   * Nothing here provides it — with, optionally, what the directory offers NEARBY.
+   *
+   * `near` is carried purely so the final failure can say "there is no `text.slug`, but `lib/text.ts`
+   * has `text.trim`". A near miss is nearly always a typo or a rename that missed a caller, and that
+   * diagnosis is worth more than the refusal.
+   */
+  | { found: false; near?: readonly PartialMatch[] };
+
+/** A file that held something close to the symbol, but not the symbol. */
+export interface PartialMatch {
+  file: string;
+  /** Fully-qualified symbols this file does contribute, around the miss. */
+  symbols: readonly string[];
+}
+
+/**
+ * Every candidate named a real file or directory; none provided the symbol.
+ *
+ * Distinct from a plain miss because the search treats them identically — both mean "not here, keep
+ * going" — while only this one has something to say once the whole path has been tried.
+ */
+export class SymbolMissError extends ReferenceError_ {
+  constructor(
+    message: string,
+    readonly partials: readonly PartialMatch[],
+  ) {
+    super(message);
+  }
+}
+
+/** The "found these instead" tail shared by every symbol-miss message. */
+function describePartials(partials: readonly PartialMatch[]): string {
+  const useful = partials.filter((p) => p.symbols.length > 0);
+  if (useful.length === 0) return "";
+  return ` — ${useful.map((p) => `'${p.file}' provides ${p.symbols.map((s) => `'${s}'`).join(", ")}`).join("; ")}`;
+}
 
 /**
  * True when a file deserializes to a VALUE rather than to text (REFERENCES.md §4.3).
@@ -242,10 +336,30 @@ function splitAtFile(
       }
     }
   }
-  const best = matches[0];
-  if (!best) {
+  if (matches.length === 0) {
     throw new ReferenceError_(`reference '${original}' matches no file in '${dir}'`);
   }
+
+  // A PREFIX MATCH IS NOT A MATCH, applied to documents (SPEC §7.5.2). Naming a real file is only
+  // half of matching: `plan.json` is a candidate for `plan.inner` and does not necessarily hold an
+  // `inner`, so under the strict pass it MISSES and the search moves on — to the module index, and
+  // then to the next entry on the path. Without this a document's name claims its whole dotted
+  // subtree, and a module contributing `plan.inner` could never be reached.
+  //
+  // Only under the strict pass: the relaxed one is the behaviour that predates modules, kept so a
+  // total miss can be re-run to produce the error that names the file and the missing property.
+  if (options.strictSymbols === true) {
+    const provided = matches.filter((c) => documentProvides(c, options));
+    if (provided.length === 0) {
+      throw new SymbolMissError(
+        `reference '${original}' matches a file in '${dir}' that does not provide it`,
+        matches.map((c) => ({ file: c.file, symbols: [] as string[] })),
+      );
+    }
+    matches.length = 0;
+    matches.push(...provided);
+  }
+  const best = matches[0]!;
   if (matches.length > 1 && options.onWarn) {
     options.onWarn(
       `reference '${original}' matches '${best.file}' but '${matches[1]!.file}' also matches — ` +
@@ -261,6 +375,82 @@ function splitAtFile(
     }
   }
   return best;
+}
+
+/**
+ * Does this document actually hold the property the reference asked of it?
+ *
+ * An empty property path asks for the file AS A WHOLE, which any document provides. Anything else is
+ * a real question about contents, so the file is read and parsed — the one place resolution looks
+ * inside a file rather than only at a directory listing, and why {@link ReferenceOptions.documents}
+ * exists to keep it to once per file.
+ *
+ * A parse FAILURE is not a miss and is allowed to propagate: a malformed document is an error worth
+ * surfacing, and swallowing it here would turn it into a mysterious "resolves to nothing".
+ */
+function documentProvides(candidate: { file: string; property: string[] }, options: ReferenceOptions): boolean {
+  if (candidate.property.length === 0) return true;
+  const vfs = options.vfs;
+  if (vfs === undefined) return true;
+
+  let parsed: unknown;
+  if (options.documents?.has(candidate.file) === true) {
+    parsed = options.documents.get(candidate.file);
+  } else {
+    const text = vfs.read(candidate.file);
+    if (text === undefined) return false;
+    parsed = parseReferencedFile(candidate.file, text);
+    options.documents?.set(candidate.file, parsed);
+  }
+
+  let current = parsed;
+  for (const key of candidate.property) {
+    if (current === null || typeof current !== "object" || Array.isArray(current)) return false;
+    if (!Object.hasOwn(current, key)) return false;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return true;
+}
+
+/**
+ * Find what a reference names in one directory: a DOCUMENT first, then a module SYMBOL.
+ *
+ * The order is what keeps this change invisible to everything that predates it. A document is found
+ * by name and always wins, so no existing reference can be captured by a module that happens to
+ * contribute a matching symbol; the index is reached only where the old resolver would have thrown.
+ *
+ * That is also what implements SPEC §7.5.2's **a prefix match is not a match** — not as a rule
+ * layered on top, but as a consequence of modules never being name-matched in the first place.
+ * `text.ts` holding `{ text: { trim } }` is not a candidate for `text.slug` at all: it is not a
+ * document, and the index answers for the symbol rather than for the filename.
+ */
+function locate(
+  absolutePrefix: string,
+  options: ReferenceOptions,
+  original: string,
+): { file: string; property: readonly string[] } {
+  let documentMiss: unknown;
+  try {
+    return splitAtFile(absolutePrefix, options, original);
+  } catch (e) {
+    documentMiss = e;
+  }
+  const index = options.symbols;
+  if (index === undefined) throw documentMiss;
+
+  const cut = absolutePrefix.lastIndexOf("/");
+  const dir = cut > 0 ? absolutePrefix.slice(0, cut) : "/";
+  const tail = absolutePrefix.slice(cut + 1);
+  if (tail === "") throw documentMiss;
+
+  const lookup = index(dir, tail.split("."));
+  if (lookup.found) return { file: lookup.file, property: lookup.property };
+  const near = lookup.near ?? [];
+  if (near.length === 0) throw documentMiss;
+  throw new SymbolMissError(
+    `reference '${original}' names no symbol in '${dir}'${describePartials(near)}`,
+    near,
+  );
 }
 
 /**
@@ -288,7 +478,7 @@ function warnIfShadowed(
   for (const root of path.slice(matchedAt + 1)) {
     try {
       // Quiet: the shadowed candidate's own within-directory ambiguities are not this warning's news.
-      const other = splitAtFile(canonicalAbsolute(`${root}/${body}`), { ...options, onWarn: undefined }, reference);
+      const other = locate(canonicalAbsolute(`${root}/${body}`), { ...options, onWarn: undefined }, reference);
       onWarn(
         `reference '${reference}' resolves to '${chosen}' but '${other.file}' also matches further along the path — ` +
           `the earlier entry wins, so adding or removing a file changes what this reference means`,
@@ -317,20 +507,32 @@ function searchBare(body: string, options: ReferenceOptions, reference: string):
     return { file: segments.join("/"), id: segments.join("/"), property: [], local: false };
   }
   let lastError: unknown;
+  // Every directory that held something close to the symbol without holding it. The only state the
+  // fall-through carries, and it exists entirely for the message at the end.
+  const partials: PartialMatch[] = [];
   for (const [index, root] of path.entries()) {
     let found;
     try {
-      found = splitAtFile(canonicalAbsolute(`${root}/${body}`), options, reference);
+      found = locate(canonicalAbsolute(`${root}/${body}`), options, reference);
     } catch (e) {
       lastError = e; // not here — try the next entry
+      if (e instanceof SymbolMissError) partials.push(...e.partials);
       continue;
     }
     warnIfShadowed(path, index, body, options, reference, found.file);
-    return { file: found.file, id: identityOf(found.file, options), property: found.property, local: false };
+    return { file: found.file, id: identityOf(found.file, options), property: [...found.property], local: false };
   }
-  // With one root there is no "path" to speak of, so `splitAtFile`'s own message — which names the
-  // file it looked for — says more than a list of one would.
+  // With one root there is no "path" to speak of, so the single lookup's own message — which names
+  // the directory it looked in — says more than a list of one would.
   if (path.length === 1) throw lastError as Error;
+  // Somewhere on the path had near misses. That is a different failure from "no such file anywhere",
+  // and almost always a typo or a rename, so it reports what WAS found rather than only what was not.
+  if (partials.length > 0) {
+    throw new SymbolMissError(
+      `reference '${reference}' names no symbol on the path (${path.join(", ")})${describePartials(partials)}`,
+      partials,
+    );
+  }
   throw new ReferenceError_(`reference '${reference}' matches no file on the path (${path.join(", ")})`);
 }
 
@@ -352,17 +554,25 @@ function searchRoots(
   reference: string,
 ): ResolvedReference {
   let lastError: unknown;
+  const partials: PartialMatch[] = [];
   for (const root of rootPath) {
     let found;
     try {
-      found = splitAtFile(canonicalAbsolute(`${root}/${rest}`), options, reference);
+      found = locate(canonicalAbsolute(`${root}/${rest}`), options, reference);
     } catch (e) {
       lastError = e;
+      if (e instanceof SymbolMissError) partials.push(...e.partials);
       continue;
     }
-    return { file: found.file, id: identityOf(found.file, options), property: found.property, local: false };
+    return { file: found.file, id: identityOf(found.file, options), property: [...found.property], local: false };
   }
   if (rootPath.length === 1) throw lastError as Error;
+  if (partials.length > 0) {
+    throw new SymbolMissError(
+      `reference '${reference}' names no symbol under any layer root (${rootPath.join(", ")})${describePartials(partials)}`,
+      partials,
+    );
+  }
   throw new ReferenceError_(`reference '${reference}' matches no file under any layer root (${rootPath.join(", ")})`);
 }
 
@@ -404,6 +614,34 @@ function identityOf(file: string, options: ReferenceOptions): string {
 
 /** Parse and locate one reference. */
 export function resolveReference(reference: string, options: ReferenceOptions = {}): ResolvedReference {
+  // TWO PASSES, and the second exists only to produce a better message.
+  //
+  // The strict pass applies "a prefix match is not a match" to documents as well as modules, which is
+  // what lets a module contribute `plan.inner` beside a `plan.json`. Its failure mode is a
+  // path-wide "names no symbol anywhere", which is the right answer when something else on the path
+  // might have held it — and a poor one when nothing did, because the reader wanted to be told that
+  // `plan.json` has no `inner`.
+  //
+  // So a total miss RE-RUNS relaxed. That pass is exactly the behaviour that predates modules: the
+  // first name match wins, and `selectProperty` reports the missing property against the file it is
+  // missing from, at the point of use. Re-running is cheap (documents are cached) and it means the
+  // precise diagnostic is recovered rather than traded away for the new rule.
+  if (options.strictSymbols === undefined) {
+    const strict: ReferenceOptions = { ...options, strictSymbols: true, documents: options.documents ?? new Map() };
+    try {
+      return resolveReference(reference, strict);
+    } catch (e) {
+      if (!(e instanceof SymbolMissError)) throw e;
+      try {
+        return resolveReference(reference, { ...strict, strictSymbols: false });
+      } catch {
+        // The relaxed pass found nothing either, so the strict failure — which carries the near
+        // misses — is the more useful of the two.
+        throw e;
+      }
+    }
+  }
+
   const trimmed = reference.trim();
   if (trimmed.length === 0) throw new ReferenceError_("reference is empty");
 
@@ -481,8 +719,8 @@ export function resolveReference(reference: string, options: ReferenceOptions = 
     return searchBare(body, options, reference);
   }
 
-  const { file, property } = splitAtFile(absolutePrefix, options, reference);
-  return { file, id: identityOf(file, options), property, local: false };
+  const { file, property } = locate(absolutePrefix, options, reference);
+  return { file, id: identityOf(file, options), property: [...property], local: false };
 }
 
 // --- Loading a reference's value ---------------------------------------------

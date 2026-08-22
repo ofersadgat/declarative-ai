@@ -78,10 +78,28 @@ describe("the grammar", () => {
   });
 
   it("warns when a shorter candidate also matches", () => {
+    // BOTH candidates must genuinely provide `address` for this to be an ambiguity at all: since
+    // SPEC §7.5.2, a `user.json` that lacks the property is not competing for the reference and
+    // warning about it would be noise. Here it has one, so removing either file really would change
+    // what this reference means.
+    const warnings: string[] = [];
+    const ambiguous = {
+      ...files,
+      [`${ROOT}/types/user.json`]: '{"address": {}}',
+      [`${ROOT}/types/user.address.json`]: "{}",
+    };
+    const o = { ...opts(ambiguous), onWarn: (m: string) => warnings.push(m) };
+    expect(resolveReference("$/types/user.address", o).file).toBe(`${ROOT}/types/user.address.json`);
+    expect(warnings.join("\n")).toMatch(/also matches/);
+  });
+
+  it("does NOT warn when the shorter candidate lacks the property", () => {
+    // `user.json` is `{}`, so it never held `address` — nothing is being shadowed and there is
+    // nothing to report.
     const warnings: string[] = [];
     const o = { ...opts({ ...files, [`${ROOT}/types/user.address.json`]: "{}" }), onWarn: (m: string) => warnings.push(m) };
     expect(resolveReference("$/types/user.address", o).file).toBe(`${ROOT}/types/user.address.json`);
-    expect(warnings.join("\n")).toMatch(/also matches/);
+    expect(warnings.join("\n")).not.toMatch(/also matches/);
   });
 
   it("errors on a directory, an unknown root, and a missing file", () => {
