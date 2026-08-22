@@ -195,11 +195,11 @@ function validateState(
   // over a state's OWN `operation.functionRef`, so `shout(x)` with nothing registered passed lint and
   // then failed mid-run with "no function 'shout' is registered".
   for (const [where, binding] of bindingsOf(def)) {
-    for (const { op } of embeddedOpsOf(binding)) {
+    for (const { op, parameters } of embeddedOpsOf(binding)) {
       // A PROMPT callee needs no registry entry — it dispatches to the prompt executor.
       if (op.kind !== "function") continue;
       checkAgainstRegistry(op.functionRef, where, err, warn, env);
-      checkAgainstSignature(op, where, err, env);
+      checkAgainstSignature(op, suppliedByCall(op, parameters), where, err, env);
     }
   }
 
@@ -390,7 +390,7 @@ function checkOperation(
       // state exists to run was the one call nobody compared against its impl. A state could name
       // every parameter wrongly, or pass nothing at all to a function that requires three arguments,
       // and lint clean right up until dispatch.
-      checkAgainstSignature(op, path, err, env);
+      checkAgainstSignature(op, suppliedByState(op, def), path, err, env);
     }
   } else if (op.user === undefined || op.user === "") {
     warn(`${path}.prompt`, "prompt operation has an empty prompt (no template and no skill)");
@@ -554,6 +554,8 @@ function hooksFor(
  */
 function checkAgainstSignature(
   op: Operation<InlineFamily> & { kind: "function" },
+  /** Whether a required slot of this name will actually have a value at dispatch — see the callers. */
+  supplied: (name: string) => boolean,
   path: string,
   err: (path: string, message: string) => void,
   env: ValidationEnvironment,
@@ -593,9 +595,41 @@ function checkAgainstSignature(
   // wired"), asked of an operation. A state that mounts a child badly was a lint error; a state that
   // calls a function badly was not, and there is no reason for the two to differ.
   for (const [name, slot] of Object.entries(accepted)) {
-    if (!isRequiredSlot(slot) || Object.hasOwn(op.input, name)) continue;
+    if (!isRequiredSlot(slot) || supplied(name)) continue;
     err(path, `operation '${op.functionRef}' requires an input '${name}', which this state does not pass`);
   }
+}
+
+/**
+ * Whether a required slot of a STATE's own operation will have a value at dispatch.
+ *
+ * Two ways it can, and the check needs both. A BOUND slot on the operation is the obvious one. The
+ * other is the engine's own rule: free slots are filled by name from the state's resolved inputs
+ * (`opInputs = { ...instance.inputs, ...resolved.values }`), so a state whose declared input happens
+ * to be called `text` fills the callee's `text` with nothing wired.
+ *
+ * "The operation declares a slot of this name" was the old test, and it stopped meaning anything once
+ * `operation.function` resolved along the path: the callee's slots are copied ONTO the operation, so
+ * every declared parameter is present whether or not anybody supplied it, and the check could never
+ * have fired again.
+ */
+function suppliedByState(op: Operation<InlineFamily> & { kind: "function" }, def: LoadedState): (name: string) => boolean {
+  return (name) => op.input[name]?.binding !== undefined || (def.inputs !== undefined && Object.hasOwn(def.inputs, name));
+}
+
+/**
+ * The same question for an EMBEDDED call, where the answer is a different one.
+ *
+ * A call's arguments ride the producer edge's `parameters`, and `resolveEmbedded` binds those into
+ * the callee's slots and nothing else — there is no enclosing instance to spread in, which is exactly
+ * what makes an expression's call a closed thing. So the state's inputs do not count here, and a slot
+ * the callee itself binds (a document's declared default) does.
+ */
+function suppliedByCall(
+  op: Operation<InlineFamily> & { kind: "function" },
+  parameters: Record<string, Parameter<InlineFamily>> | undefined,
+): (name: string) => boolean {
+  return (name) => parameters?.[name] !== undefined || op.input[name]?.binding !== undefined;
 }
 
 /** Every binding a state carries, with the field that named it — guards included. */

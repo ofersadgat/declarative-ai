@@ -979,6 +979,22 @@ strict, with no truthiness coercion, so a `when` that infers to a number is a va
 rather than a falsy surprise at run time. A `schema` declared on an `{ "expr" }` leaf is an
 *assertion*, checked against the inferred type; it is not the only source of typing.
 
+**A call is checked against its callee's slots.** The callee declares them — a document's `input`, a
+TypeScript parameter list, a registry entry's signature — so both directions are answerable and both
+are answered:
+
+- an argument past the last slot is an **error**. It used to be dropped silently, which was tolerable
+  while slots came from a document written by hand beside the call and is not now that a signature
+  can change under a call site that still type-checks;
+- a parameter the callee has no slot for is an error, and a **required** slot nothing will fill is an
+  error. "Nothing will fill it" is the precise question: a state's operation is dispatched with
+  `{ …the state's resolved inputs, …the operation's bound slots }`, so a state whose declared input
+  shares the slot's name fills it with nothing wired, while an expression's call has no enclosing
+  instance to draw from and its arguments are all it gets.
+
+A callee that declares no slots constrains nothing, which is what an implementation registered
+without a signature has always meant.
+
 **Reachability.** The *type* of a producer edge is always statically known; whether the producer
 has *run* by the time the edge is resolved is a control-flow property, settled by definite-assignment
 analysis over `sequence` and `transitions`. The rule is strict: a reference to a child not proven

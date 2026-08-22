@@ -85,6 +85,42 @@ describe("a required operation input the state never passes", () => {
   });
 });
 
+/**
+ * The check has to survive `operation.function` resolving along the path, and the way it survives is
+ * the point: it stopped asking "does the operation declare a slot of this name" — which the callee's
+ * own slots now answer YES to unconditionally — and started asking whether anything will actually
+ * FILL it.
+ */
+describe("a required parameter is satisfied by whatever will actually fill it", () => {
+  const withCallee = (input: Record<string, unknown>, inputs: Record<string, unknown>) =>
+    validateBundle(
+      loadBundle(
+        {
+          s: {
+            inputs,
+            outputs: { out: { schema: { type: "string" }, binding: ".operation.output.out" } },
+            operation: { kind: "function", function: "review", input, outputs: { out: { schema: { type: "string" } } } },
+          },
+        } as unknown as Record<string, StateDef>,
+        "s",
+        // The registry ON the loader too, so the callee's slots are copied onto the operation — the
+        // arrangement that made the old spelling of this check unfireable.
+        { functions: registry() },
+      ),
+      { functions: registry() },
+    ).errors.map((e) => e.message);
+
+  it("is reported when nothing binds it and no state input shares its name", () => {
+    expect(withCallee({}, { doc: { schema: { type: "string" } } }).join(" | ")).toMatch(/requires an input 'text'/);
+  });
+
+  it("is clean when a STATE INPUT of that name will fill the free slot", () => {
+    // The engine's own rule: `opInputs = { ...instance.inputs, ...resolved.values }`, so a state
+    // whose declared input is called `text` fills the callee's `text` with nothing wired.
+    expect(withCallee({}, { text: { schema: { type: "string" } } })).toEqual([]);
+  });
+});
+
 describe("what must NOT be reported", () => {
   it("says nothing with no registry — the document alone cannot know the signature", () => {
     expect(validateBundle(loadBundle(state({}), "s")).errors).toEqual([]);

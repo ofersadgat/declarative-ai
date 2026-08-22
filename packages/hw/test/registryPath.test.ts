@@ -216,3 +216,34 @@ describe("a state's own operation resolves its callee the same way", () => {
     expect(complaintOf({ kind: "function", function: "classify" }, { files })).toMatch(/resolves to a prompt operation/);
   });
 });
+
+/**
+ * An argument past the callee's last slot used to be dropped SILENTLY by `bindPositionally`.
+ *
+ * Tolerable while a callee's slots came from a document somebody wrote by hand beside the call. Not
+ * now: they are read off a TypeScript parameter list or a registry entry, so a signature can change
+ * under a call site that still type-checks, and the argument that stops arriving does so quietly.
+ */
+describe("a call is checked against the callee's arity", () => {
+  const load = (expr: string): void => {
+    loadBundle({ s: { outputs: { v: { binding: { expr } } }, operation: { kind: "function", function: "plain" } } } as unknown as Record<string, StateDef>, "s", {
+      functions: entries(),
+    });
+  };
+
+  it("accepts exactly as many arguments as there are slots", () => {
+    expect(() => load("shout('hi')")).not.toThrow();
+  });
+
+  it("accepts FEWER — a free slot is filled by name, which is a different question", () => {
+    expect(() => load("shout()")).not.toThrow();
+  });
+
+  it("refuses more, naming the slots there were", () => {
+    expect(() => load("shout('hi', 'again')")).toThrow(/'shout' takes 1 argument \(text\), but 2 were given/);
+  });
+
+  it("says 'no arguments' for a callee that declared no slots at all", () => {
+    expect(() => load("plain(1)")).toThrow(/'plain' takes no arguments, but 1 were given/);
+  });
+});

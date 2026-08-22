@@ -121,9 +121,20 @@ export function lowerExpression(expr: Expr, options: LowerOptions = {}): Ref<Inl
       // The CALLEE's own parameter order binds the arguments (§3.3) — exactly the rule a built-in
       // follows through `OPERATOR_PARAMS`. The only difference is that a built-in's signature ships
       // with the language.
+      const names = positionalNames(resolved);
+      // An argument past the last slot has nowhere to go, and `bindPositionally` DROPS it silently.
+      // That was tolerable while a callee's slots came only from a document somebody wrote by hand
+      // beside the call; it is not now that they are read off a TypeScript parameter list or a
+      // registry entry, where a signature can change under a call site that still type-checks.
+      if (expr.args.length > names.length) {
+        throw new ExprError(
+          `'${expr.op}' takes ${names.length === 0 ? "no arguments" : `${names.length} argument${names.length === 1 ? "" : "s"} (${names.join(", ")})`}, but ${expr.args.length} were given`,
+          0,
+        );
+      }
       return {
         op: resolved,
-        parameters: parametersFor(bindPositionally(expr.args, positionalNames(resolved), down)),
+        parameters: parametersFor(bindPositionally(expr.args, names, down)),
       };
     }
   }
