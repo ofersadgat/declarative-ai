@@ -26,6 +26,8 @@ export * from "./reference.js";
 // itself — which is the point of `ModuleIndexOptions.approved`.
 export * from "./moduleExports.js";
 export * from "./moduleIndex.js";
+// An embedded js/ts body compiled to module source (SPEC.md §7.5.1).
+export * from "./functionBody.js";
 export * from "./shape.js";
 export * from "./expand.js";
 export * from "./loader.js";

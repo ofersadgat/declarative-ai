@@ -25,7 +25,7 @@ import { ExprError, OPERATOR_PARAMS, pathOf, type Expr } from "./expr.js";
 
 /** The operations whose `op` argument is an operation REFERENCE rather than a data path (§3.5). */
 const HIGHER_ORDER_NAMES: ReadonlySet<string> = new Set(["map", "filter", "flatMap", "reduce"]);
-import { RESOLVER_REFS } from "./format.js";
+import { positionalOrder, RESOLVER_REFS } from "./format.js";
 
 /** A producer edge on one operator resolver. Mirrors the loader's `resolverEdge`. */
 function edge(functionRef: string, args: Record<string, Ref<InlineFamily>>): Ref<InlineFamily> {
@@ -181,18 +181,9 @@ function bindPositionally(
   return out;
 }
 
-/**
- * The order an operation binds POSITIONAL arguments in: by declared `index`, else declaration order.
- *
- * `index` is the model's own "positional sort key for bare/tuple ingestion", so an author who wants
- * to be called positionally says so there. A document declaring none still has an order, and using
- * it is friendlier than refusing.
- */
+/** The order an operation binds POSITIONAL arguments in — {@link positionalOrder}, over its slots. */
 function positionalNames(op: Operation<InlineFamily>): string[] {
-  const entries = Object.entries(op.input);
-  const indexed = entries.filter(([, p]) => p.index !== undefined);
-  if (indexed.length === 0) return entries.map(([name]) => name);
-  return indexed.sort(([, a], [, b]) => (a.index ?? 0) - (b.index ?? 0)).map(([name]) => name);
+  return positionalOrder(op.input);
 }
 
 /** Bound argument refs as the `parameters` of a producer edge — the callee's free slots, filled. */

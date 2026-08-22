@@ -200,6 +200,25 @@ export interface ParameterDecl {
   description?: string;
 }
 
+/**
+ * The order slots bind POSITIONAL arguments in: by declared `index`, else declaration order.
+ *
+ * `index` is the model's own "positional sort key for bare/tuple ingestion", so an author who wants
+ * to be called positionally says so there; a document declaring none still has an order, and using
+ * it is friendlier than refusing.
+ *
+ * Shared because two things ask this question and must not drift: a CALL binds its arguments to the
+ * callee's slots (`lowerExpr`), and an embedded body's synthetic wrapper declares its parameters in
+ * the same order (`functionBody`). A caller and its callee disagreeing about argument order is the
+ * kind of bug that type-checks.
+ */
+export function positionalOrder(input: Readonly<Record<string, { index?: number }>>): string[] {
+  const entries = Object.entries(input);
+  const indexed = entries.filter(([, p]) => p.index !== undefined);
+  if (indexed.length === 0) return entries.map(([name]) => name);
+  return indexed.sort(([, a], [, b]) => (a.index ?? 0) - (b.index ?? 0)).map(([name]) => name);
+}
+
 /** A standalone (named) slot as authored — a state's output. */
 export interface NamedParameterDecl extends ParameterDecl {
   name?: string;
@@ -312,6 +331,18 @@ export interface OperationFields extends ExecEnvironmentDecl {
    */
   args?: Record<string, JsonValue>;
   input?: Record<string, ParameterDecl>;
+  /**
+   * An EMBEDDED js/ts body (SPEC §7.5.1) — the middle of the three function-body forms.
+   *
+   * A statement list, or a single expression whose value is returned. The engine wraps it in a
+   * synthetic function whose parameters are the declared `input` slots in `positionalOrder`, so an
+   * embedded body and a module form compile to the same artifact and run down one path.
+   *
+   * It may not import: self-containment is what keeps the body INLINED into this document, and
+   * therefore part of the snapshot identity (§12) rather than a separate file needing its own
+   * approval. Code that needs imports is a module.
+   */
+  body?: string;
   /**
    * What the operation RETURNS, by name — and, for a prompt op, the structured-output contract the
    * model is held to.
