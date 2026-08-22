@@ -1802,7 +1802,7 @@ Suggested MVP interactive functions:
   "operation": {
     "kind": "function",
     "function": "choose_option",
-    "config": {
+    "args": {
       "prompt": "Review the critique result.",
       "options": ["approve", "request_changes", "block"]
     }
@@ -1811,7 +1811,7 @@ Suggested MVP interactive functions:
 ```
 
 The interactive function's authored surface — its prompt text and options — rides the operation's
-`config`, bound as an ordinary input; the operation shape gains nothing for being interactive.
+input slots, one per argument; the operation shape gains nothing for being interactive.
 
 This state declares no transitions: once the operation completes, no
 operations remain, so the state terminates with `terminate.success` and its
