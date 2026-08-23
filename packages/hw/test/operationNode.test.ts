@@ -149,7 +149,7 @@ describe("the load-time lint", () => {
         outputs: { answer: { schema: { type: "string" } } },
         operation: { kind: "prompt", prompt: "go", model: "m" },
         children: { retry: { state: "root" } },
-        transitions: [{ to: "terminate.success", when: "operation.outcome === 'success'" }],
+        transitions: [{ to: "terminate.success", when: ".operation.outcome === 'success'" }],
       },
     };
     expect(errorsFor(files, "root")).toEqual([]);

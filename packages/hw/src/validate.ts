@@ -240,7 +240,25 @@ function validateState(
       if (t.when !== undefined) {
         const path = `${where}[${i}].when`;
         ast = checkExpression(t.when, path, def, childKeys, err);
-        if (ast) {
+        // The guard PARSED but could not be LOWERED — a call naming something that resolves nowhere:
+        // not a document on the search path, not a symbol a module contributes, not an entry the
+        // registry puts there. The loader carries that as data rather than throwing
+        // (`LoadedTransition.whenError`) so one bad guard cannot hide every other mistake in the
+        // workflow, and reporting it is this function's half of that bargain.
+        //
+        // It went unreported, and the failure mode was the worst available: the engine SKIPS a
+        // transition carrying `whenError`, so the rule simply stopped existing. A mistyped callee
+        // read as a workflow with one fewer rule — lint clean, run silent, and where the rule was the
+        // one offering a person a decision, an offer that was never made with nothing to explain why.
+        //
+        // Gated on `ast` because `checkExpression` owns the PARSE diagnostic. A guard that does not
+        // parse fails to lower too, and reporting both would say the same thing twice in two
+        // vocabularies. What is left here is precisely the failure re-parsing cannot see: resolution
+        // needs the search path, the referring state and a filesystem, so it happens at load and only
+        // its verdict reaches this far.
+        if (ast && t.whenError !== undefined) {
+          err(path, `guard could not be resolved: ${t.whenError}`);
+        } else if (ast) {
           // A guard must INFER to boolean — strict, no truthiness coercion (§7.2): a `when` that
           // infers to `number` is a validation error, not a falsy surprise at run time.
           const { schema, unresolved } = inferExpression(ast, scope);

@@ -1012,6 +1012,14 @@ wiring it.
 
 The analysis is deliberately conservative: it proves ordered sequences and refuses everything else.
 
+A guard that cannot be LOWERED is an error too, and it is worth stating separately because it is not
+a parse failure. Resolving a callee needs the search path, the referring state and a filesystem, so it
+happens at load; the loader carries the verdict as data rather than throwing, so one bad guard cannot
+hide the rest of a workflow's mistakes. The engine then SKIPS a transition carrying that verdict —
+reading an unresolvable guard as unconditional would be the worst available interpretation of a typo
+— which makes reporting it mandatory rather than a nicety. Unreported, a mistyped callee produced a
+workflow with one fewer rule and said nothing anywhere.
+
 Warnings, which do not block execution, cover the cases that are suspicious rather than wrong: a
 child state that is not a descendant path of its parent (legal, so shared library states stay
 expressible), a transition back into a `sequence` member with neither `limits.max_iterations` nor a
