@@ -1027,6 +1027,48 @@ already in the run, or an arithmetic verdict over its inputs.
 Static validation cannot settle values, only types. Run-time validation of actual values against
 declared schemas (a nondeterministic producer can emit anything) remains at every boundary.
 
+### 6.3 Arguments: counted, or named
+
+A call binds its arguments to the callee's declared `input` slots. There are two ways to say which
+slot an argument fills, and they mix freely in one argument list:
+
+```text
+positional   review(doc, 'strict')
+             The i-th argument fills the i-th slot, in the callee's own declared order.
+
+named        review(...{ document: doc, mode: 'strict' })
+             The keys of the spread name the slots. Order is irrelevant, and a call whose
+             options grow renumbers nobody.
+```
+
+A spread's operand is a full expression — `...{ a: .inputs.x }`, `...opts`, `...load_config()`. What
+it must be is an object whose type is STATICALLY COMPUTABLE, because binding is static: an argument
+that fills no slot is the mistake the whole form has to keep visible, and nothing can catch it if
+nobody can say which slots were filled.
+
+"Computable" is a question about the TYPE, not about how much the type constrains. `{"properties":
+{"a": {}}}` is fully typable — it declares one property whose type is the unconstrained one — and is
+a perfectly good spread operand. What is refused is a type that declares no properties at all, since
+then nothing names the slots being filled.
+
+Each property's type is then checked against the slot it fills by the rule §6.2 already gives for an
+inferred type meeting a declared one: an unconstrained type is unknown rather than wrong, and
+passes.
+
+That requirement is checked in one of two places, and the difference is worth understanding because
+it is the only difference:
+
+- **Written out** (`...{ mode: 'plan' }`), the keys are in the source, so the call binds at LOAD.
+  A key the callee has no slot for, or a slot filled twice, fails there.
+- **Any other operand** (`...opts`), the keys are in the operand's TYPE — computed against a scope
+  built from the whole loaded workflow, which does not exist while the call is being lowered. So the
+  argument rides on the operation unexpanded, the VALIDATOR checks it under exactly the rules above,
+  and the resolver expands it into the slots at dispatch. An operand whose type declares no
+  properties is a validation error, not an unchecked bind.
+
+Filling one slot twice is refused whichever pair of forms did it — two spreads naming the same key,
+a spread naming what a position already filled, or a call and an `args` block disagreeing (§7.1).
+
 ## 7. Operations and the Execution Environment
 
 ### 7.1 The Operation and Its Environment

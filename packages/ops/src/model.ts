@@ -182,6 +182,24 @@ export interface NamedParameter<F extends RefFamily> extends Parameter<F> {
 }
 
 /**
+ * Arguments that fill an operation's input slots BY NAME, from values whose keys are not known at
+ * load — the deferred half of a spread argument.
+ *
+ * A call site writes `f(...opts)`. Binding it means reading the keys of `opts`, and those come from
+ * its TYPE, computed against a scope built from the whole loaded workflow — long after the call is
+ * lowered. So the argument cannot become `input` entries at load, and this is where it waits: the
+ * validator computes the operand's schema and checks the keys it names against the callee's slots,
+ * and the resolver expands it into them at dispatch, where the value itself is finally in hand.
+ *
+ * Part of the call's IDENTITY exactly as a bound `input` slot is — an op that spreads a different
+ * value is a different op, and must not hit the other's memo.
+ *
+ * A written-out `...{ a: 1 }` never lands here. Its keys are in the source, so it binds into `input`
+ * at load like any other named argument; this is only for the operand whose keys are not.
+ */
+export type SpreadArguments<F extends RefFamily> = F["binding"][];
+
+/**
  * One structured LLM call — exactly findmyprompt's semantics; LLM-only. Its `config` field is the
  * `LlmConfiguration` surface, but this SHAPE imports nothing from `@declarative-ai/llm`: it is text
  * fields + a config field + a schema. The `PromptOp → LlmCallDefinition` LOWERING is llm-specific and
@@ -194,6 +212,7 @@ export interface PromptOp<F extends RefFamily> {
   /** Typed by the `LlmConfiguration` schema. */
   config: F["json"];
   input: { [name: string]: Parameter<F> };
+  spread?: SpreadArguments<F>;
   /** `binding` never set on an output. */
   output: NamedParameter<F>;
 }
@@ -213,6 +232,7 @@ export interface FunctionOp<F extends RefFamily> {
    */
   functionRef: string;
   input: { [name: string]: Parameter<F> };
+  spread?: SpreadArguments<F>;
   output: NamedParameter<F>;
 }
 

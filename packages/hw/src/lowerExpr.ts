@@ -21,19 +21,31 @@
  * is still a walk over the tree rather than a second parse.
  */
 import type { InlineFamily, Operation, Parameter, Ref } from "@declarative-ai/exec";
-import { ExprError, OPERATOR_PARAMS, pathOf, type Expr } from "./expr.js";
+import { ExprError, isSpread, OPERATOR_PARAMS, pathOf, type Argument, type Expr } from "./expr.js";
 
 /** The operations whose `op` argument is an operation REFERENCE rather than a data path (§3.5). */
 const HIGHER_ORDER_NAMES: ReadonlySet<string> = new Set(["map", "filter", "flatMap", "reduce"]);
 import { positionalOrder, RESOLVER_REFS } from "./format.js";
 
 /** A producer edge on one operator resolver. Mirrors the loader's `resolverEdge`. */
-function edge(functionRef: string, args: Record<string, Ref<InlineFamily>>): Ref<InlineFamily> {
+function edge(
+  functionRef: string,
+  args: Record<string, Ref<InlineFamily>>,
+  spread: readonly Ref<InlineFamily>[] = [],
+): Ref<InlineFamily> {
   const input: Record<string, Parameter<InlineFamily>> = {};
   for (const [name, binding] of Object.entries(args)) {
     input[name] = { kind: "text" in binding ? "text" : "json", binding };
   }
-  return { op: { kind: "function", functionRef, input, output: { name: "value", kind: "json" } } };
+  return {
+    op: {
+      kind: "function",
+      functionRef,
+      input,
+      ...(spread.length > 0 ? { spread: [...spread] } : {}),
+      output: { name: "value", kind: "json" },
+    },
+  };
 }
 
 /**
@@ -94,10 +106,16 @@ export function lowerExpression(expr: Expr, options: LowerOptions = {}): Ref<Inl
         // The model already says how a producer edge with no arguments is used — a `prompt`/
         // `function`-kind parameter receives the DEFINITION — so this needs no new mechanism.
         if (HIGHER_ORDER_NAMES.has(expr.op)) {
+          // Positional by contract: the second argument is an operation NAME, which is a position
+          // rather than a value, so there is no slot a spread could fill without first computing the
+          // very thing that must stay uncomputed. Refused outright instead of half-supported.
+          if (expr.args.some(isSpread)) {
+            throw new ExprError(`'${expr.op}' takes its arguments by position, so it cannot be spread into`, 0);
+          }
           const args: Record<string, Ref<InlineFamily>> = {};
-          const array = expr.args[0];
+          const array = expr.args[0] as Expr | undefined;
           if (array !== undefined) args.value = down(array);
-          const applied = expr.args[1];
+          const applied = expr.args[1] as Expr | undefined;
           const name = applied !== undefined ? pathOf(applied) : undefined;
           if (name === undefined) {
             throw new ExprError(`'${expr.op}' takes an operation to apply, named — not an expression`, 0);
@@ -106,11 +124,12 @@ export function lowerExpression(expr: Expr, options: LowerOptions = {}): Ref<Inl
           if (resolved === undefined) throw new ExprError(`'${name.join(".")}' is not a known operation`, 0);
           args.op = { op: resolved };
           // `reduce` takes a seed as its third argument, an ordinary value.
-          const seed = expr.args[2];
+          const seed = expr.args[2] as Expr | undefined;
           if (seed !== undefined) args.initial = down(seed);
           return edge(expr.op, args);
         }
-        return edge(expr.op, bindPositionally(expr.args, builtin, down));
+        const applied = bindArguments(expr.args, builtin, builtin, expr.op, down);
+        return edge(expr.op, applied.bound, applied.spread);
       }
 
       // Not a built-in: the name is a REFERENCE to an operation document. Resolving it needs the
@@ -122,19 +141,13 @@ export function lowerExpression(expr: Expr, options: LowerOptions = {}): Ref<Inl
       // follows through `OPERATOR_PARAMS`. The only difference is that a built-in's signature ships
       // with the language.
       const names = positionalNames(resolved);
-      // An argument past the last slot has nowhere to go, and `bindPositionally` DROPS it silently.
-      // That was tolerable while a callee's slots came only from a document somebody wrote by hand
-      // beside the call; it is not now that they are read off a TypeScript parameter list or a
-      // registry entry, where a signature can change under a call site that still type-checks.
-      if (expr.args.length > names.length) {
-        throw new ExprError(
-          `'${expr.op}' takes ${names.length === 0 ? "no arguments" : `${names.length} argument${names.length === 1 ? "" : "s"} (${names.join(", ")})`}, but ${expr.args.length} were given`,
-          0,
-        );
-      }
+      const applied = bindArguments(expr.args, names, Object.keys(resolved.input), expr.op, down);
       return {
-        op: resolved,
-        parameters: parametersFor(bindPositionally(expr.args, names, down)),
+        // The deferred half of a spread rides on the callee AS APPLIED HERE, which is why this is a
+        // copy: `resolveOperation` may hand back a shared declaration — a registry entry's operation
+        // is one object every caller sees — and a spread belongs to the call, not to the callee.
+        op: applied.spread.length > 0 ? { ...resolved, spread: applied.spread } : resolved,
+        parameters: parametersFor(applied.bound),
       };
     }
   }
@@ -186,27 +199,82 @@ function asRef(op: Operation<InlineFamily> | undefined): Ref<InlineFamily> | und
   return op === undefined ? undefined : { op };
 }
 
-/** Bind ordered arguments to ordered parameter names, ignoring any the callee has no slot for. */
-function bindPositionally(
-  args: readonly Expr[],
+/**
+ * Bind a call's arguments to the callee's slots — positions by count, spreads by name.
+ *
+ * The two forms answer the same question two ways, so they meet here rather than in two walks that
+ * could disagree about which slot got filled. A position is a slot named by counting; a spread is a
+ * slot named outright. Filling one slot twice is refused whichever pair of forms did it, because
+ * both spellings are silent at run time and neither is what an author meant.
+ *
+ * A spread written as an OBJECT LITERAL binds right here: its keys are in the source, so it is
+ * named arguments with extra punctuation and nothing about it needs to wait. Any other operand's
+ * keys live in its TYPE, which is not computable until the validator builds a scope over the loaded
+ * workflow — so it is handed back for {@link SpreadArguments} to carry, checked there and expanded
+ * at dispatch.
+ *
+ * `names` is the POSITIONAL order; `slots` is every name the callee accepts. They differ only for a
+ * callee whose slots are not all positional, and keeping them apart is what lets a spread reach a
+ * slot that positions cannot.
+ *
+ * An argument past the last slot has nowhere to go, and would otherwise be DROPPED silently. That was
+ * tolerable while a callee's slots came only from a document somebody wrote by hand beside the call;
+ * it is not now that they are read off a TypeScript parameter list or a registry entry, where a
+ * signature can change under a call site that still type-checks. The count is over POSITIONAL
+ * arguments alone — a spread names its slots, so it can no more overflow the list than `args` can,
+ * and counting it would report an arity no reader can see in the source.
+ */
+export function bindArguments(
+  args: readonly Argument[],
   names: readonly string[],
+  slots: readonly string[],
+  callee: string,
   lower: (e: Expr) => Ref<InlineFamily>,
-): Record<string, Ref<InlineFamily>> {
-  const out: Record<string, Ref<InlineFamily>> = {};
-  args.forEach((arg, i) => {
-    const name = names[i];
-    if (name !== undefined) out[name] = lower(arg);
-  });
-  return out;
+): { bound: Record<string, Ref<InlineFamily>>; spread: Ref<InlineFamily>[] } {
+  const positional = args.filter((a) => !isSpread(a)).length;
+  if (positional > names.length) {
+    throw new ExprError(
+      `'${callee}' takes ${names.length === 0 ? "no arguments" : `${names.length} argument${names.length === 1 ? "" : "s"} (${names.join(", ")})`}, but ${positional} were given`,
+      0,
+    );
+  }
+  const bound: Record<string, Ref<InlineFamily>> = {};
+  const spread: Ref<InlineFamily>[] = [];
+  const fill = (name: string, ref: Ref<InlineFamily>): void => {
+    if (bound[name] !== undefined) throw new ExprError(`'${callee}' is passed '${name}' twice`, 0);
+    bound[name] = ref;
+  };
+  let position = 0;
+  for (const arg of args) {
+    if (!isSpread(arg)) {
+      const name = names[position++];
+      if (name !== undefined) fill(name, lower(arg));
+      continue;
+    }
+    if (arg.value.type !== "object") {
+      spread.push(lower(arg.value));
+      continue;
+    }
+    for (const entry of arg.value.entries) {
+      // Checked against the callee's slots, not against the positional order: an argument nothing
+      // reads is the failure this whole form has to keep visible, and a spread is exactly where one
+      // hides — a mistyped key is a plausible-looking word rather than an extra comma.
+      if (slots.length > 0 && !slots.includes(entry.key)) {
+        throw new ExprError(`'${callee}' has no parameter '${entry.key}'`, 0);
+      }
+      fill(entry.key, lower(entry.value));
+    }
+  }
+  return { bound, spread };
 }
 
 /** The order an operation binds POSITIONAL arguments in — {@link positionalOrder}, over its slots. */
-function positionalNames(op: Operation<InlineFamily>): string[] {
+export function positionalNames(op: Operation<InlineFamily>): string[] {
   return positionalOrder(op.input);
 }
 
 /** Bound argument refs as the `parameters` of a producer edge — the callee's free slots, filled. */
-function parametersFor(args: Record<string, Ref<InlineFamily>>): Record<string, Parameter<InlineFamily>> {
+export function parametersFor(args: Record<string, Ref<InlineFamily>>): Record<string, Parameter<InlineFamily>> {
   const out: Record<string, Parameter<InlineFamily>> = {};
   for (const [name, binding] of Object.entries(args)) {
     out[name] = { kind: "text" in binding ? "text" : "json", binding };

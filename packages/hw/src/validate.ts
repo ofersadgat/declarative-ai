@@ -153,6 +153,8 @@ function validateState(
   const childKeys = new Set(Object.keys(children));
   const scope = exprScopeOf(def, bundle);
   const reachable = reachabilityOf(def);
+  /** How this state types one binding — see {@link typeOf}. */
+  const typed = typeOf(def.id, def, bundle, scope, reachable, errors, false);
 
   // --- children ---------------------------------------------------------------
   for (const [key, child] of Object.entries(children)) {
@@ -199,7 +201,7 @@ function validateState(
       // A PROMPT callee needs no registry entry — it dispatches to the prompt executor.
       if (op.kind !== "function") continue;
       checkAgainstRegistry(op.functionRef, where, err, warn, env);
-      checkAgainstSignature(op, suppliedByCall(op, parameters), where, err, env);
+      checkAgainstSignature(op, suppliedByCall(op, parameters, typed), where, err, env);
     }
   }
 
@@ -379,6 +381,8 @@ function checkOperation(
   const err = (p: string, m: string): void => {
     errors.push({ stateId, path: p, message: m });
   };
+  /** How this state types one binding — see {@link typeOf}. */
+  const typed = typeOf(stateId, def, bundle, scope, reachable, errors, false);
   if (op.kind === "function") {
     if (typeof op.functionRef !== "string" || op.functionRef.length === 0) {
       err(`${path}.function`, "a function operation must name a function");
@@ -390,12 +394,17 @@ function checkOperation(
       // state exists to run was the one call nobody compared against its impl. A state could name
       // every parameter wrongly, or pass nothing at all to a function that requires three arguments,
       // and lint clean right up until dispatch.
-      checkAgainstSignature(op, suppliedByState(op, def), path, err, env);
+      checkAgainstSignature(op, suppliedByState(op, def, typed), path, err, env);
     }
   } else if (op.user === undefined || op.user === "") {
     warn(`${path}.prompt`, "prompt operation has an empty prompt (no template and no skill)");
   }
   if (op.kind === "prompt") checkWeights(op, path, stateId, errors, warn, env);
+  // A state's operation reaches dispatch without ever being a binding, so its spreads are checked
+  // here rather than in `checkSpreads`. A slot is already filled when the operation BOUND it — which
+  // for a state op is the only spelling there is, `args` and `input` alike having become bindings by
+  // the time they get here.
+  checkSpreadArguments(op, (n) => op.input[n]?.binding !== undefined, path, stateId, typed, errors);
   for (const [name, param] of Object.entries(op.input)) {
     if (param.binding !== undefined) {
       // The state's operation runs BEFORE any child (engine loop step 2/5), so no child output exists
@@ -613,8 +622,16 @@ function checkAgainstSignature(
  * every declared parameter is present whether or not anybody supplied it, and the check could never
  * have fired again.
  */
-function suppliedByState(op: Operation<InlineFamily> & { kind: "function" }, def: LoadedState): (name: string) => boolean {
-  return (name) => op.input[name]?.binding !== undefined || (def.inputs !== undefined && Object.hasOwn(def.inputs, name));
+function suppliedByState(
+  op: Operation<InlineFamily> & { kind: "function" },
+  def: LoadedState,
+  typed: (ref: Ref<InlineFamily>) => JsonSchema,
+): (name: string) => boolean {
+  const spread = spreadKeysOf(op, typed);
+  return (name) =>
+    op.input[name]?.binding !== undefined ||
+    spread.has(name) ||
+    (def.inputs !== undefined && Object.hasOwn(def.inputs, name));
 }
 
 /**
@@ -628,9 +645,30 @@ function suppliedByState(op: Operation<InlineFamily> & { kind: "function" }, def
 function suppliedByCall(
   op: Operation<InlineFamily> & { kind: "function" },
   parameters: Record<string, Parameter<InlineFamily>> | undefined,
+  typed: (ref: Ref<InlineFamily>) => JsonSchema,
 ): (name: string) => boolean {
-  return (name) => parameters?.[name] !== undefined || op.input[name]?.binding !== undefined;
+  const spread = spreadKeysOf(op, typed);
+  return (name) => parameters?.[name] !== undefined || op.input[name]?.binding !== undefined || spread.has(name);
 }
+
+/**
+ * The slot names an operation's deferred spreads will fill.
+ *
+ * A required parameter passed ONLY by `f(...opts)` is passed, and the "requires an input it does not
+ * pass" check has to know it — otherwise the one form that cannot be read at load would be the one
+ * form that always reports a missing argument. Computable here for the same reason the spread is
+ * checked here at all: the keys are in the operand's type, and this is where types exist.
+ */
+function spreadKeysOf(op: Operation<InlineFamily>, typed: (ref: Ref<InlineFamily>) => JsonSchema): ReadonlySet<string> {
+  if (op.spread === undefined || op.spread.length === 0) return EMPTY_SLOT_SET;
+  const out = new Set<string>();
+  for (const ref of op.spread) {
+    for (const key of Object.keys(propertiesOf(typed(ref)) ?? {})) out.add(key);
+  }
+  return out;
+}
+
+const EMPTY_SLOT_SET: ReadonlySet<string> = new Set<string>();
 
 /** Every binding a state carries, with the field that named it — guards included. */
 function* bindingsOf(def: LoadedState): Iterable<[string, Ref<InlineFamily>]> {
@@ -689,10 +727,142 @@ function checkBinding(
       });
     }
   }
+  checkSpreads(binding, path, stateId, typeOf(stateId, def, bundle, scope, reachable, errors, optOut), errors);
   const issues = checkBindingGeneric(binding, consumerSchema, hooksFor(stateId, def, bundle, scope, reachable, errors, optOut), path, {
     optOut,
   });
   for (const issue of issues) errors.push({ stateId, path: issue.path, message: issue.message });
+}
+
+/**
+ * Every DEFERRED spread argument in a binding, checked (SPEC §6.3).
+ *
+ * This is the half of `f(...opts)` the loader could not do. Binding a spread needs the operand's
+ * KEYS, and those come from its type — computable only against a scope built over the whole loaded
+ * workflow, which is to say here and not there. So the loader bound what it could read in the source
+ * and left the rest on the op; this is where the rest is held to the same rules.
+ *
+ * Walked from the BINDING rather than reached through the producer-schema hook, for the reason the
+ * reference walk above gives: a call's arguments live on the ref, and the hook sees only the callee.
+ */
+function checkSpreads(
+  binding: Ref<InlineFamily>,
+  path: string,
+  stateId: string,
+  typed: (ref: Ref<InlineFamily>) => JsonSchema,
+  errors: ValidationIssue[],
+): void {
+  const walk = (node: Ref<InlineFamily>): void => {
+    if (!("op" in node)) return;
+    const producer = node.op;
+    if (typeof producer === "string") return;
+    for (const p of Object.values(producer.input)) if (p.binding) walk(p.binding);
+    for (const p of Object.values(node.parameters ?? {})) if (p.binding) walk(p.binding);
+    for (const ref of producer.spread ?? []) walk(ref);
+    checkSpreadArguments(
+      producer,
+      // A lowered call's arguments are the edge's `parameters`; a slot bound on the callee itself is
+      // the other spelling, and both mean the same thing here — this name already has a value.
+      (name) => node.parameters?.[name] !== undefined || producer.input[name]?.binding !== undefined,
+      path,
+      stateId,
+      typed,
+      errors,
+    );
+  };
+  walk(binding);
+}
+
+/**
+ * One operation's deferred spreads, against the slots they claim to fill.
+ *
+ * Three rules, and the first is the one that makes the other two possible:
+ *
+ *  - the operand must compute to an OBJECT WITH KNOWN KEYS. A spread whose keys nobody can name is
+ *    not an argument list, it is a hope — nothing could say which slot it fills, so nothing could
+ *    catch it filling none of them. Refused, rather than passed through to fail at dispatch.
+ *  - a key the callee has no slot for is an argument nothing reads — the same failure a written-out
+ *    key gets at load, asked one phase later because that is when the key became legible.
+ *  - a key already filled is a slot filled twice, which is silent at run time whichever form did it.
+ *
+ * Only the KEYS are strictly required, because only the keys are what binding cannot proceed without.
+ * "Known keys" is a question about the type and not about how much the type constrains: `{properties:
+ * {a: {}}}` names one slot whose type happens to be the unconstrained one, which is a fully computed
+ * answer and a perfectly good operand. A type declaring no properties is the one that names nothing.
+ *
+ * Each property's type is then checked against the slot it fills by the rule `resolverSchema` already
+ * applies to an inferred type meeting a declared one: an unconstrained type is unknown rather than
+ * wrong, and passes.
+ */
+function checkSpreadArguments(
+  op: Operation<InlineFamily>,
+  bound: (name: string) => boolean,
+  path: string,
+  stateId: string,
+  typed: (ref: Ref<InlineFamily>) => JsonSchema,
+  errors: ValidationIssue[],
+): void {
+  const name = op.kind === "function" ? `'${op.functionRef}'` : "the operation";
+  const err = (message: string): void => {
+    errors.push({ stateId, path, message });
+  };
+  const slots = Object.keys(op.input);
+  for (const ref of op.spread ?? []) {
+    const schema = typed(ref);
+    const properties = propertiesOf(schema);
+    if (properties === undefined || Object.keys(properties).length === 0) {
+      err(
+        `a spread argument to ${name} infers to ${describeSchema(schema)}, whose keys are not known — a spread must compute to an object whose properties are declared, or nothing can say which parameters it fills`,
+      );
+      continue;
+    }
+    for (const [key, declared] of Object.entries(properties)) {
+      if (slots.length > 0 && !slots.includes(key)) {
+        err(`a spread argument passes '${key}', which ${name} does not accept`);
+        continue;
+      }
+      if (bound(key)) {
+        err(`${name} is passed '${key}' twice: once by name and once in a spread`);
+        continue;
+      }
+      const want = op.input[key]?.schema;
+      if (want === undefined || isUniversalSchema(want) || isUniversalSchema(declared)) continue;
+      const check = isSubschema(declared as Schema, want as Schema);
+      if (!check.ok) err(`a spread argument passes '${key}' as a type ${name} does not accept: ${check.reason}`);
+    }
+  }
+}
+
+/**
+ * How this state types ONE binding — the whole producer vocabulary, not the expression subset.
+ *
+ * `inferRef` knows the operators an expression lowers onto; the hw-specific resolvers a BINDING
+ * lowers onto — `scope.get`, `artifact.get`, a child `select` — are typed by `resolverSchema`
+ * behind the shared checker's hook. A spread's operand can be either, since a call form's arguments
+ * are lowered exactly as `input` bindings are, so reading its type through `inferRef` alone made
+ * `f(....inputs.bag)` infer to the universal schema and report keys it could perfectly well see.
+ */
+function typeOf(
+  stateId: string,
+  def: LoadedState,
+  bundle: WorkflowBundle,
+  scope: ExprScope,
+  reachable: Reachability,
+  errors: ValidationIssue[],
+  optOut: boolean,
+): (ref: Ref<InlineFamily>) => JsonSchema {
+  const hooks = hooksFor(stateId, def, bundle, scope, reachable, errors, optOut);
+  // Issues found while typing are DISCARDED here: this walk exists to read a shape, and the binding
+  // it is reading was already checked — or is about to be — by the pass that owns it. Reporting them
+  // twice would double every message a spread's operand happens to contain.
+  return (ref) => producerSchemaOf(ref, hooks, "", [], optOut) ?? ANY_SCHEMA;
+}
+
+/** A schema's declared `properties`, as a map — the one thing a spread's keys can be read from. */
+function propertiesOf(schema: JsonSchema): Record<string, JsonSchema> | undefined {
+  const raw = schema.properties;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  return raw as Record<string, JsonSchema>;
 }
 
 /**

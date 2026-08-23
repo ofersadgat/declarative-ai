@@ -498,13 +498,53 @@ export function resolveEmbedded(
   const bound = parameters ? resolveInputs(parameters, scope) : { values: {} as Record<string, ResolvedValue> };
   if (isPending(bound)) return PENDING;
   if ("error" in bound) return { error: `call argument: ${bound.error}` };
+  const spread = resolveSpread(op, scope);
+  if (isPending(spread)) return PENDING;
+  if ("error" in spread) return spread;
+  const values = { ...spread.values, ...bound.values };
   const input = Object.fromEntries(
     Object.entries(op.input).map(([name, p]) => {
-      const value = bound.values[name];
+      const value = values[name];
       return [name, value === undefined ? p : { ...p, binding: { json: value as JsonValue } }];
     }),
   );
-  return { op: { ...op, input } as Operation<InlineFamily> };
+  // `spread` is DROPPED from the result, not carried: it has become `input` entries, and leaving it
+  // on would make the op hash as though the arguments were still pending — two identities for one
+  // call, and the memo would miss on the second.
+  const { spread: _expanded, ...rest } = op;
+  return { op: { ...rest, input } as Operation<InlineFamily> };
+}
+
+/**
+ * Expand an operation's {@link SpreadArguments} into the values they name (SPEC §6.3).
+ *
+ * The deferred half of `f(...opts)`: at load its keys were in a type nobody had computed yet, and
+ * here they are simply the keys of a value. That asymmetry is the whole reason the field exists —
+ * everything static about the call was checked by the validator, and what is left is a read.
+ *
+ * Later spreads win over earlier ones, and an explicitly bound slot wins over both. The validator
+ * refuses a call whose spread names a slot already filled, so a workflow that reaches this rule was
+ * not checked; it resolves the tie the way the rest of the loader does, with the more specific
+ * statement — a slot the author wrote out by name — beating the bag it came in.
+ */
+function resolveSpread(
+  op: Operation<InlineFamily>,
+  scope: ResolutionScope,
+): { values: Record<string, ResolvedValue> } | Pending | { error: string } {
+  const values: Record<string, ResolvedValue> = {};
+  for (const ref of op.spread ?? []) {
+    const r = resolveRef(ref, scope);
+    if (isPending(r)) return PENDING;
+    if (isResolveError(r)) return { error: `spread argument: ${r.error}` };
+    const value = r.value;
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      return {
+        error: `spread argument resolved to ${value === null ? "null" : Array.isArray(value) ? "an array" : `a ${typeof value}`}, which names no arguments`,
+      };
+    }
+    Object.assign(values, value as Record<string, ResolvedValue>);
+  }
+  return { values };
 }
 
 /**
@@ -529,9 +569,13 @@ export function bindInputs(op: Operation<InlineFamily>, values: Record<string, R
     const declared = input[name];
     input[name] = declared ? { ...declared, binding } : { kind: "json", binding };
   }
+  // A spread has BECOME these values by now — the caller resolved it through `resolveOperationInputs`
+  // — so the field is dropped rather than carried. Leaving it on would hash the op as though its
+  // arguments were still pending, giving one call two identities and costing the memo every hit.
+  const { spread: _expanded, ...rest } = op;
   // `carryCall` because the spread drops a pre-resolved entry, and this runs immediately before the
   // dispatch that would have used it — the one place losing it costs the most.
-  return carryCall(op, { ...op, input } as Operation<InlineFamily>);
+  return carryCall(op, { ...rest, input } as Operation<InlineFamily>);
 }
 
 /**
@@ -566,6 +610,7 @@ export function higherOrderEdgesOf(ref: Ref<InlineFamily>): Ref<InlineFamily>[] 
       if (p.binding) walk(p.binding);
     }
     for (const p of Object.values(node.parameters ?? {})) if (p.binding) walk(p.binding);
+    for (const s of producer.spread ?? []) walk(s);
     if (higherOrderOf(node) !== undefined) out.push(node);
   };
   walk(ref);
@@ -620,13 +665,37 @@ export function embeddedOpsOf(ref: Ref<InlineFamily>): Array<{ op: Operation<Inl
         if (higher !== undefined && name === "op") continue;
         if (p.binding) walk(p.binding);
       }
+      for (const s of producer.spread ?? []) walk(s);
       return;
     }
     for (const p of Object.values(node.parameters ?? {})) if (p.binding) walk(p.binding);
+    // A SPREAD's operand is an argument, so a call inside it must run before this one — `f(...g())`
+    // yields `g` first for exactly the reason `f(g(x))` does.
+    for (const s of producer.spread ?? []) walk(s);
     out.push({ op: producer, ...(node.parameters !== undefined ? { parameters: node.parameters } : {}) });
   };
   walk(ref);
   return out;
+}
+
+/**
+ * An operation's resolved arguments: its bound `input` slots, over its expanded {@link SpreadArguments}.
+ *
+ * The one entry point for "what is this operation being passed", so a spread cannot be forgotten at
+ * one of the two places a call reaches dispatch. A slot the author wrote out by name beats one the
+ * spread named, on the same rule `bindIntoSlots` follows: the more specific statement wins.
+ */
+export function resolveOperationInputs(
+  op: Operation<InlineFamily>,
+  scope: ResolutionScope,
+): { values: Record<string, ResolvedValue> } | Pending | { error: string } {
+  const spread = resolveSpread(op, scope);
+  if (isPending(spread)) return PENDING;
+  if ("error" in spread) return spread;
+  const bound = resolveInputs(op.input, scope);
+  if (isPending(bound)) return PENDING;
+  if ("error" in bound) return bound;
+  return { values: { ...spread.values, ...bound.values } };
 }
 
 /**

@@ -74,7 +74,7 @@ export type Expr =
    * nothing to name; and the name must stay out of the data scope, or `classify(x)` would read as a
    * reference to an undeclared namespace called `classify`.
    */
-  | { type: "apply"; op: string; args: Expr[] }
+  | { type: "apply"; op: string; args: Argument[] }
   /**
    * An OBJECT LITERAL — `{ to_state: 'deploy', urgent: .inputs.severity > 2 }`.
    *
@@ -89,6 +89,26 @@ export type Expr =
    * anybody's positions.
    */
   | { type: "object"; entries: { key: string; value: Expr }[] };
+
+/**
+ * One argument at a call site: an ordinary expression bound by POSITION, or a SPREAD bound by NAME.
+ *
+ * A spread is not an expression — it has no value of its own, it says how a value fills a callee's
+ * slots — so it is a member of this type rather than of {@link Expr}, and every consumer of
+ * `apply.args` is made to decide what it does with one instead of silently treating it as a
+ * positional operand.
+ *
+ * This is what lets `apply` carry named arguments without gaining the "parallel array of keys"
+ * shape the object-literal note above rejects. The names ride INSIDE the argument list, in source
+ * order, so `f(a, ...{ b: 1 })` is one list of two entries that each say how they bind — not one
+ * list of positions plus a second, silent map that has to be kept in step with it.
+ */
+export type Argument = Expr | { type: "spread"; value: Expr };
+
+/** True for the NAMED argument form — the spread. */
+export function isSpread(arg: Argument): arg is { type: "spread"; value: Expr } {
+  return arg.type === "spread";
+}
 
 export class ExprError extends Error {
   constructor(
@@ -167,7 +187,9 @@ const OPERATION_ALIASES: Readonly<Record<string, string>> = {
   messages: RESOLVER_REFS.conversation,
 };
 
-const PUNCT = ["===", "!==", "==", "!=", "<=", ">=", "&&", "||", "<", ">", "!", "?", ":", "(", ")", "[", "]", "{", "}", ".", ",", "/", "*", "+", "-"];
+// Longest match first — the loop below takes the first entry that matches, so `...` has to precede
+// `.` or a spread would lex as three property accesses with nothing between them.
+const PUNCT = ["...", "===", "!==", "==", "!=", "<=", ">=", "&&", "||", "<", ">", "!", "?", ":", "(", ")", "[", "]", "{", "}", ".", ",", "/", "*", "+", "-"];
 const IDENT_START = /[A-Za-z_$]/;
 const IDENT_PART = /[A-Za-z0-9_$]/;
 
@@ -459,15 +481,27 @@ class Parser {
     }
   }
 
-  /** A call's argument list, already past the `(`. */
-  private args(): Expr[] {
-    const out: Expr[] = [];
+  /**
+   * A call's argument list, already past the `(`.
+   *
+   * An entry is positional, or a SPREAD — `...{ mode: 'plan' }`, `...opts` — which binds by name
+   * instead. The two forms mix freely and in any order, because they are answering different
+   * questions: a position says WHICH slot by counting, a spread says which slot by naming it.
+   *
+   * The operand is a full expression rather than a literal restricted form. An object literal is the
+   * spelling that carries its keys in the source and can therefore bind at load; anything else binds
+   * where its type is known, which is the validator (SPEC §6.3). Refusing the general form
+   * here would put the restriction in the grammar, where it does not belong — it is a consequence of
+   * when a type becomes computable, not of what an author is allowed to write.
+   */
+  private args(): Argument[] {
+    const out: Argument[] = [];
     if (this.atPunct(")")) {
       this.next();
       return out;
     }
     for (;;) {
-      out.push(this.ternary());
+      out.push(this.argument());
       if (this.atPunct(",")) {
         this.next();
         continue;
@@ -475,6 +509,13 @@ class Parser {
       this.expectPunct(")");
       return out;
     }
+  }
+
+  /** One argument: `...expr` binds by name, anything else by position. */
+  private argument(): Argument {
+    if (!this.atPunct("...")) return this.ternary();
+    this.next();
+    return { type: "spread", value: this.ternary() };
   }
 
   private primary(): Expr {
@@ -686,7 +727,15 @@ export function evaluate(expr: Expr, context: Record<string, unknown>): ExprValu
  * context does not have.
  */
 function applyOperator(expr: Expr & { type: "apply" }, context: Record<string, unknown>): ExprValue {
-  const arg = (i: number): ExprValue => evaluate(expr.args[i]!, context);
+  // The lazy forms below index their operands, so they need the POSITIONAL argument at `i`. A spread
+  // there could only come from a hand-built AST — `!`, `&&`, `||` and `?:` are written as syntax,
+  // which has no argument list to spread into — so this is a guard of the same kind as `lowerExpression`'s
+  // bare-`self` case rather than a reachable authoring error.
+  const arg = (i: number): ExprValue => {
+    const a = expr.args[i]!;
+    if (isSpread(a)) throw new ExprError(`'${expr.op}' takes its arguments by position, so it cannot be spread into`, 0);
+    return evaluate(a, context);
+  };
   switch (expr.op) {
     case RESOLVER_REFS.not: {
       const v = arg(0);
@@ -722,16 +771,31 @@ function applyOperator(expr: Expr & { type: "apply" }, context: Record<string, u
         // Strict in every argument, unlike the three lazy forms above: PENDING anywhere makes the
         // whole application PENDING rather than reaching an implementation that would read it as a
         // value.
-        const values: unknown[] = [];
-        for (let i = 0; i < expr.args.length; i++) {
-          const v = arg(i);
-          if (isPending(v)) return PENDING;
-          values.push(v);
-        }
+        //
+        // A built-in's parameters are NAMED (`builtin.params`), and positions are only how an author
+        // reaches them — so a spread is not a second calling convention here, it is the same map
+        // filled by key instead of by count. The interpreter can therefore do what lowering cannot:
+        // read the operand's own keys, because by this point it has the value rather than the type.
         const named: Record<string, unknown> = {};
-        builtin.params.forEach((p, i) => {
-          named[p] = values[i];
-        });
+        let position = 0;
+        for (const a of expr.args) {
+          const v = evaluate(isSpread(a) ? a.value : a, context);
+          if (isPending(v)) return PENDING;
+          if (!isSpread(a)) {
+            const p = builtin.params[position++];
+            if (p !== undefined) named[p] = v;
+            continue;
+          }
+          if (v === null || typeof v !== "object" || Array.isArray(v)) {
+            throw new ExprError(`'${expr.op}' was spread a ${v === null ? "null" : Array.isArray(v) ? "array" : typeof v}, which names no arguments`, 0);
+          }
+          for (const [key, value] of Object.entries(v)) {
+            if (!builtin.params.includes(key)) {
+              throw new ExprError(`'${expr.op}' has no parameter '${key}'`, 0);
+            }
+            named[key] = value;
+          }
+        }
         return builtin.fn(named) as ExprValue;
       }
       const op = BINARY_FOR_NAME[expr.op];
@@ -789,7 +853,11 @@ export function referencesOf(expr: Expr): string[][] {
         // The ARGUMENTS read data; the OPERATION NAME does not — it is resolved along the path, not
         // against this instance. Reporting it here would make `classify(x)` look like a read of an
         // undeclared namespace called `classify`.
-        for (const arg of e.args) collect(arg);
+        //
+        // A spread's OPERAND is an argument like any other, and a reference inside it is a read this
+        // state makes: `f(...opts)` reaches `.inputs.opts` exactly as `f(opts.a)` would. Walking
+        // past it would hide that read from the validator's reachability check.
+        for (const arg of e.args) collect(isSpread(arg) ? arg.value : arg);
         return undefined;
       case "object":
         // The VALUES read data; the KEYS are names the author wrote, not paths into anything.

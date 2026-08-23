@@ -16,7 +16,7 @@
  */
 import type { InlineFamily, JsonSchema, JsonValue, Ref } from "@declarative-ai/exec";
 import { BUILTIN_PARAMS } from "./builtins.js";
-import { pathOf, selfPathOf, type Expr } from "./expr.js";
+import { isSpread, pathOf, selfPathOf, type Expr } from "./expr.js";
 import { RESOLVER_REFS } from "./format.js";
 import { pathOfRef } from "./lowerExpr.js";
 
@@ -207,7 +207,16 @@ function infer(expr: Expr, scope: ExprScope, unresolved: string[][]): JsonSchema
       // reported. The RESULT depends on which operation: the built-ins have known signatures, and
       // anything else is a reference to an operation document whose declared output is not in this
       // scope — unknown rather than wrong, until the loader has resolved it.
-      const args = expr.args.map((a) => infer(a, scope, unresolved));
+      //
+      // A SPREAD's operand is inferred for that first reason and then dropped, because the cases
+      // below index their operands: every one of them is written as syntax (`!x`, `a && b`, `a ? b :
+      // c`), which has no argument list to spread into, so `args[0]` must keep meaning "the first
+      // thing the author wrote in that position" rather than "the first entry, whatever kind".
+      const args: JsonSchema[] = [];
+      for (const a of expr.args) {
+        const schema = infer(isSpread(a) ? a.value : a, scope, unresolved);
+        if (!isSpread(a)) args.push(schema);
+      }
       switch (expr.op) {
         case RESOLVER_REFS.conversation:
           return TURNS; // `messages(s)` — see the tree case below, which must agree

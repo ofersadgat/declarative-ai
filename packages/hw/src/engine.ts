@@ -89,7 +89,7 @@ import type {
   TerminationOutcome,
   WorkflowBundle,
 } from "./format.js";
-import { bindElement, bindInputs, embeddedOpsOf, higherOrderEdgesOf, higherOrderOf, isResolvedValue, isResolveError, resolveEmbedded, resolveInputs, resolveRef, type ResolutionScope, type Resolved } from "./resolve.js";
+import { bindElement, bindInputs, embeddedOpsOf, higherOrderEdgesOf, higherOrderOf, isResolvedValue, isResolveError, resolveEmbedded, resolveInputs, resolveOperationInputs, resolveRef, type ResolutionScope, type Resolved } from "./resolve.js";
 import { isByteStream, materialize, MaterializeError } from "./materialize.js";
 import {
   RUN_RESOURCE_KEY,
@@ -1383,9 +1383,9 @@ export class WorkflowEngine {
     // is synchronous and re-run every round, so it reads results rather than producing them; this is
     // the same division of labour a child already has, and the memo below is what stops a guard
     // paying for the same call twice.
-    const embeddedFailure = await this.runEmbeddedOps(instance, op.input);
+    const embeddedFailure = await this.runEmbeddedOps(instance, op.input, op.spread);
     if (embeddedFailure !== undefined) return fail(embeddedFailure);
-    const resolved = resolveInputs(op.input, this.scopeFor(instance));
+    const resolved = resolveOperationInputs(op, this.scopeFor(instance));
     if (isPending(resolved)) {
       return fail({ classification: "permanent", reason: "operation inputs depend on a child that has not resolved" });
     }
@@ -1514,14 +1514,19 @@ export class WorkflowEngine {
    * instance's environment (its session, tools and permissions are the ones in force where the call
    * is written) and returns its value to the binding, with no identity in the run record.
    */
-  private async runEmbeddedOps(instance: Instance, input: Record<string, Parameter<InlineFamily>>): Promise<Failure | undefined> {
-    for (const param of Object.values(input)) {
-      if (!param.binding) continue;
+  private async runEmbeddedOps(
+    instance: Instance,
+    input: Record<string, Parameter<InlineFamily>>,
+    /** A spread's operand is an argument like any other, and may itself be a call (`f(...g())`). */
+    spread: readonly Ref<InlineFamily>[] = [],
+  ): Promise<Failure | undefined> {
+    for (const binding of [...Object.values(input).map((p) => p.binding), ...spread]) {
+      if (!binding) continue;
       // HIGHER-ORDER first (§3.5): one application per element, and how many there are is not known
       // until the array resolves — so this cannot be a static walk like `embeddedOpsOf` is.
-      const higherFailure = await this.runHigherOrder(instance, param.binding);
+      const higherFailure = await this.runHigherOrder(instance, binding);
       if (higherFailure !== undefined) return higherFailure;
-      for (const { op, parameters } of embeddedOpsOf(param.binding)) {
+      for (const { op, parameters } of embeddedOpsOf(binding)) {
         const scope = this.scopeFor(instance);
         // ONE definition of a call's identity, shared with resolution (`resolveEmbedded`): the op
         // with its arguments bound in. Two copies of that rule would hash differently and the memo

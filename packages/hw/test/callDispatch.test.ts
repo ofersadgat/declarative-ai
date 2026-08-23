@@ -90,6 +90,17 @@ const files = {
     function: "shout",
     input: { text: { kind: "text", index: 0 } },
   }),
+  // TYPED slots, so a spread's property types have something to disagree with. Its impl is `noop`
+  // rather than `shout` because `shout` is itself a document here, and a callee naming one binds
+  // into ITS slots — which would make this fixture a call to a one-parameter function.
+  [`${FUNCTIONS}/greet.json`]: JSON.stringify({
+    kind: "function",
+    function: "noop",
+    input: {
+      text: { kind: "text", index: 0, schema: { type: "string" } },
+      times: { kind: "json", index: 1, schema: { type: "integer" } },
+    },
+  }),
 };
 
 function bundleFor(def: unknown) {
@@ -123,6 +134,146 @@ describe("a call runs and its result reaches the binding", () => {
     expect(binding.op.kind).toBe("function");
     expect((binding.op as { functionRef: string }).functionRef).toBe("shout");
     expect(Object.keys(binding.parameters ?? {})).toEqual(["text"]);
+  });
+});
+
+/**
+ * SPREAD arguments (EXPRESSIONS.md §3.4) — the same call, named instead of counted.
+ *
+ * The two halves of the form are pinned apart on purpose, because they happen at different times: a
+ * written-out spread has its keys in the source and binds at LOAD, while any other operand's keys
+ * live in a type nobody has computed yet, so it rides on the op as `spread` and expands at DISPATCH.
+ * A test that only ran the workflow would pass either way and prove neither.
+ */
+describe("a spread argument", () => {
+  const spreadLiteral = {
+    inputs: { issue: { kind: "text", schema: { type: "string" } } },
+    outputs: { loud: { schema: { type: "string" }, binding: { expr: "shout(...{ text: .inputs.issue })" } } },
+    operation: { kind: "function", function: "noop" },
+  };
+  const spreadValue = {
+    inputs: { bag: { kind: "json", schema: { type: "object", properties: { text: { type: "string" } } } } },
+    outputs: { loud: { schema: { type: "string" }, binding: { expr: "shout(....inputs.bag)" } } },
+    operation: { kind: "function", function: "noop" },
+  };
+
+  it("binds a written-out spread into the callee's slots at load, leaving nothing deferred", () => {
+    const binding = bundleFor(spreadLiteral).states.plan!.outputs!.loud!.binding as {
+      op: Operation<InlineFamily>;
+      parameters?: Record<string, unknown>;
+    };
+    expect(Object.keys(binding.parameters ?? {})).toEqual(["text"]);
+    expect(binding.op.spread).toBeUndefined();
+  });
+
+  it("defers a spread whose keys are not in the source, carrying it on the op", () => {
+    const binding = bundleFor(spreadValue).states.plan!.outputs!.loud!.binding as {
+      op: Operation<InlineFamily>;
+      parameters?: Record<string, unknown>;
+    };
+    expect(binding.parameters ?? {}).toEqual({});
+    expect(binding.op.spread).toHaveLength(1);
+  });
+
+  it("reaches the same slots either way when the call actually runs", async () => {
+    const literal = await run(spreadLiteral, { issue: "ship it" });
+    expect(literal.result.outputs?.loud).toBe("SHIP IT");
+    const deferred = await run(spreadValue, { bag: { text: "ship it" } as unknown as ResolvedValue });
+    expect(deferred.result.outcome).toBe("success");
+    expect(deferred.result.outputs?.loud).toBe("SHIP IT");
+  });
+
+  /** The expanded call must hash as the call it became, or a memo written by one spelling is
+   *  invisible to the other and the same work runs twice. */
+  it("is one execution however the argument was spelled", async () => {
+    const { result, calls } = await run(
+      {
+        inputs: { bag: { kind: "json", schema: { type: "object", properties: { text: { type: "string" } } } } },
+        outputs: {
+          a: { schema: { type: "string" }, binding: { expr: "shout(....inputs.bag)" } },
+          b: { schema: { type: "string" }, binding: { expr: "shout(.inputs.bag.text)" } },
+        },
+        operation: { kind: "function", function: "noop" },
+      },
+      { bag: { text: "once" } as unknown as ResolvedValue },
+    );
+    expect(result.outputs?.a).toBe("ONCE");
+    expect(result.outputs?.b).toBe("ONCE");
+    expect(calls.n).toBe(1);
+  });
+
+  it("refuses a written-out key the callee has no slot for", () => {
+    expect(() =>
+      bundleFor({
+        outputs: { loud: { schema: { type: "string" }, binding: { expr: "shout(...{ nope: 'x' })" } } },
+        operation: { kind: "function", function: "noop" },
+      }),
+    ).toThrow(/no parameter 'nope'/);
+  });
+
+  it("refuses one slot filled twice, whichever pair of forms did it", () => {
+    expect(() =>
+      bundleFor({
+        inputs: { issue: { kind: "text", schema: { type: "string" } } },
+        outputs: { loud: { schema: { type: "string" }, binding: { expr: "shout(.inputs.issue, ...{ text: 'x' })" } } },
+        operation: { kind: "function", function: "noop" },
+      }),
+    ).toThrow(/passed 'text' twice/);
+  });
+});
+
+/**
+ * The DEFERRED half of a spread, checked where its keys finally have a type (EXPRESSIONS.md §3.4).
+ *
+ * Every rule here was available to the loader for a written-out `...{ a: 1 }` and unavailable for
+ * `...opts` — same rule, one phase later. What these pin is that the phase is the only difference.
+ */
+describe("validating a deferred spread", () => {
+  const errorsFor = (def: unknown): string[] =>
+    validateBundle(bundleFor(def), {}).errors.map((e) => e.message);
+
+  const withSpread = (bagSchema: unknown, expr: string, extra: Record<string, unknown> = {}) => ({
+    inputs: { bag: { kind: "json", schema: bagSchema } },
+    outputs: { out: { binding: { expr } } },
+    operation: { kind: "function", function: "noop" },
+    ...extra,
+  });
+
+  it("accepts an operand whose properties name the callee's slots", () => {
+    const schema = { type: "object", properties: { text: { type: "string" }, times: { type: "integer" } } };
+    expect(errorsFor(withSpread(schema, "greet(....inputs.bag)"))).toEqual([]);
+  });
+
+  it("refuses an operand whose keys are not knowable", () => {
+    // An object, but one that declares no properties — so nothing can say which parameters it fills.
+    expect(errorsFor(withSpread({ type: "object" }, "greet(....inputs.bag)")).join(" ")).toMatch(
+      /keys are not known/,
+    );
+    // And the same for an operand that is not an object at all.
+    expect(errorsFor(withSpread({ type: "string" }, "greet(....inputs.bag)")).join(" ")).toMatch(
+      /keys are not known/,
+    );
+  });
+
+  it("refuses a key the callee has no slot for", () => {
+    const schema = { type: "object", properties: { nope: { type: "string" } } };
+    expect(errorsFor(withSpread(schema, "greet(....inputs.bag)")).join(" ")).toMatch(
+      /passes 'nope', which 'noop' does not accept/,
+    );
+  });
+
+  it("refuses a slot the call already filled by position", () => {
+    const schema = { type: "object", properties: { text: { type: "string" } } };
+    expect(errorsFor(withSpread(schema, "greet('hi', ....inputs.bag)")).join(" ")).toMatch(
+      /passed 'text' twice/,
+    );
+  });
+
+  it("checks a property's type against the slot it fills", () => {
+    const schema = { type: "object", properties: { times: { type: "string" } } };
+    expect(errorsFor(withSpread(schema, "greet(....inputs.bag)")).join(" ")).toMatch(
+      /passes 'times' as a type 'noop' does not accept/,
+    );
   });
 });
 

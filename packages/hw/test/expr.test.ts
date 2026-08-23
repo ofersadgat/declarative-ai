@@ -225,6 +225,61 @@ describe("calls", () => {
   });
 });
 
+/**
+ * NAMED arguments, spelled as a spread (SPEC §6.3).
+ *
+ * The point of the form is that a name reaches a slot positions cannot — so what these pin is that
+ * the name survives parsing as a name, and that the two forms compose in one argument list rather
+ * than being two calling conventions that happen to share a syntax.
+ */
+describe("spread arguments", () => {
+  const callOf = (src: string) => parseExpression(src) as { type: string; op: string; args: unknown[] };
+
+  it("parses a spread as its own kind of argument, mixed freely with positions", () => {
+    expect(callOf("f(...{ mode: 'plan' })").args).toEqual([
+      { type: "spread", value: { type: "object", entries: [{ key: "mode", value: { type: "lit", value: "plan" } }] } },
+    ]);
+    expect(callOf("f(a, ...{ b: 1 }, c)").args).toHaveLength(3);
+    expect(callOf("f(a, ...{ b: 1 }, c)").args.map((a) => (a as { type: string }).type)).toEqual([
+      "ident",
+      "spread",
+      "ident",
+    ]);
+    // The operand is a full expression, not a literal-only form.
+    expect(callOf("f(...opts)").args).toEqual([{ type: "spread", value: { type: "ident", name: "opts" } }]);
+    expect(callOf("f(...g(1))").args).toEqual([
+      { type: "spread", value: { type: "apply", op: "g", args: [{ type: "lit", value: 1 }] } },
+    ]);
+  });
+
+  it("lexes '...' as one token rather than three property accesses", () => {
+    // The failure this guards is silent: three '.' tokens would parse as member access on nothing
+    // and produce a baffling message about a property name.
+    expect(() => parseExpression("f(...{ a: 1 })")).not.toThrow();
+    expect(parseExpression(".inputs.a")).toEqual(parseExpression(".inputs.a"));
+    expect(() => parseExpression("f(..)")).toThrow(ExprError);
+  });
+
+  it("binds a built-in's parameters by name, and refuses a name it has none for", () => {
+    // `at(value, index)` — the same call, twice, reaching the same two slots two ways.
+    expect(ev("at(.xs, -1)", { xs: ["a", "b", "c"] })).toBe("c");
+    expect(ev("at(...{ value: .xs, index: -1 })", { xs: ["a", "b", "c"] })).toBe("c");
+    expect(ev("at(.xs, ...{ index: 0 })", { xs: ["a", "b", "c"] })).toBe("a");
+    expect(() => ev("at(...{ nope: 1 })", {})).toThrow(/no parameter 'nope'/);
+  });
+
+  it("refuses an operand that names no arguments", () => {
+    expect(() => ev("at(...3)", {})).toThrow(/names no arguments/);
+    expect(() => ev("at(....xs)", { xs: [1, 2] })).toThrow(/names no arguments/);
+  });
+
+  it("reports a reference inside a spread operand, so the read is not hidden", () => {
+    expect(referencesOf(parseExpression("f(...{ a: .inputs.x })"))).toEqual([["inputs", "x"]]);
+    expect(referencesOf(parseExpression("f(...opts.bag)"))).toEqual([]);
+    expect(referencesOf(parseExpression("f(....inputs.bag)"))).toEqual([["inputs", "bag"]]);
+  });
+});
+
 describe("arithmetic", () => {
   it("is sugar for the built-ins, not a node of its own", () => {
     expect(parseExpression("a + b")).toMatchObject({ type: "apply", op: "add" });
