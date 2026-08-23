@@ -19,6 +19,8 @@ import { canonicalize, hashCanonical, kindFor, sha256Hex, type InlineFamily, typ
 import { computeFanOut } from "./fanout.js";
 import {
   bindingForDocument,
+  inferredKind,
+  kindIsAmbiguous,
   RESOLVER_REFS,
   type BindingDecl,
   type ChildDecl,
@@ -133,14 +135,18 @@ export function desugarBinding(
 }
 
 /**
- * An operation document, as distinct from a binding: `kind` says which call it is.
+ * An operation document, as distinct from a binding: it declares WHAT IT RUNS.
  *
- * Safe to test by that key alone — no binding form carries a bare `kind`, since a `Parameter`'s
- * `kind` lives on the slot rather than on the binding inside it.
+ * This used to test `kind` alone, which stopped working the moment `kind` became optional — a
+ * document declaring only `prompt` read as an unrecognized binding form. So it asks the question
+ * `kind` was standing in for, through the same `inferredKind` every other reader uses.
+ *
+ * Safe to test by these keys — no binding form carries any of them. A `Parameter`'s `kind` lives on
+ * the slot rather than on the binding inside it, and no sugar has a `prompt` or a `function`.
  */
 function isOperationDecl(binding: object): boolean {
-  const kind = (binding as { kind?: unknown }).kind;
-  return kind === "prompt" || kind === "function";
+  const fields = binding as OperationFields;
+  return inferredKind(fields) !== undefined || kindIsAmbiguous(fields) || fields.body !== undefined;
 }
 
 /**
@@ -342,16 +348,26 @@ export function desugarOperation(
     }
     return userFunctions.operationForBody(stateId, decl.body, decl.input ?? {}).operation;
   }
-  if (decl.kind === undefined) {
+  if (decl.kind !== undefined && decl.kind !== "prompt" && decl.kind !== "function") {
+    throw new WorkflowLoadError(`operation.kind '${String(decl.kind)}' is not 'prompt' or 'function'`, stateId);
+  }
+  if (kindIsAmbiguous(decl)) {
     throw new WorkflowLoadError(
-      "operation declares no 'kind', and no ancestor's environment supplies one — expected 'prompt' or 'function'",
+      "operation declares both a 'prompt' and a 'function' — write 'kind' to say which of the two it runs",
       stateId,
     );
   }
-  if (decl.kind !== "prompt" && decl.kind !== "function") {
-    throw new WorkflowLoadError(`operation.kind '${String(decl.kind)}' is not 'prompt' or 'function'`, stateId);
+  // WHAT the operation is comes from what it declares (§7.1). An explicit `kind` still settles the
+  // one case the fields cannot, and is checked above; this is every other case, where saying it a
+  // third time could only ever disagree with the two statements already made.
+  const kind = inferredKind(decl);
+  if (kind === undefined) {
+    throw new WorkflowLoadError(
+      "operation declares neither a 'prompt' nor a 'function', and no ancestor's environment supplies one",
+      stateId,
+    );
   }
-  if (decl.kind === "function" && decl.function === undefined) {
+  if (kind === "function" && decl.function === undefined) {
     throw new WorkflowLoadError(
       "function operation names no 'function', and no ancestor's environment supplies one",
       stateId,
@@ -374,7 +390,7 @@ export function desugarOperation(
     ? desugarNamedParameter("output", decl.output, "operation.output", stateId).param
     : outputSlotFor(decl.outputs);
 
-  if (decl.kind === "prompt") {
+  if (kind === "prompt") {
     // The template's `{{.inputs.*}}` scope IS the operation's resolved inputs (§3.1: authored render
     // variables ride bound input slots, never a field on the op shape), so there is nothing to merge
     // in here — every render variable is just one of `input`.

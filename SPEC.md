@@ -1075,10 +1075,23 @@ a spread naming what a position already filled, or a call and an `args` block di
 
 A state declares at most one `operation`, of one of two kinds.
 
+**`kind` is optional.** A prompt operation carries a `prompt`; a function operation names a
+`function`. Those are disjoint, so the discriminator restated what the fields already said and the
+only thing it could add was a way to be wrong. Writing it is still allowed, and it still settles the
+one shape the fields cannot — a block naming both, which is refused unless `kind` says which it
+means. A block naming NEITHER is incomplete, not ambiguous: it inherits its operation from an
+ancestor's `environment` (§7.1a), or it is an error.
+
+The kind is read per LAYER, which is what makes the inheritance chain behave. An `environment`
+supplying only `model` and `tools` declares no kind and belongs to whatever inherits it; one
+carrying a `prompt` is prompt-shaped, and a child that names a `function` is CHANGING the kind — so
+the ancestor's prompt and its model configuration are dropped rather than handed to a gate as if the
+author had written them there.
+
 A **prompt operation** is one structured model call:
 
 ```text
-kind        "prompt"
+kind        "prompt" — optional; a `prompt` already says so.
 prompt      { "template": "…" } or { "skill": "<name>" } — exactly one. Both render with
             {{.inputs.*}} interpolation; a skill resolves through registry.skills.
 system      Optional system prompt.
@@ -1093,7 +1106,7 @@ output      The operation's output slot. Defaults to one object slot built from 
 A **function operation** invokes a registered function:
 
 ```text
-kind        "function"
+kind        "function" — optional; a `function` already says so.
 function    A callee name, resolved along the search `path` like any other (§7.5).
 args        The authored arguments, bound to the call's input slots BY NAME. Shorthand for `input`
             where the value is a constant and there is nothing to say about its type; a slot the

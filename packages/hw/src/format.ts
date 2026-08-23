@@ -311,6 +311,15 @@ export interface ExecEnvironmentDecl {
  * chain has been merged; `environment` never does, because a defaults layer is partial by nature.
  */
 export interface OperationFields extends ExecEnvironmentDecl {
+  /**
+   * Which call this is — OPTIONAL, because the fields below already say.
+   *
+   * A prompt operation carries a `prompt`; a function operation names a `function`. Those are
+   * disjoint, so the discriminator was a third statement of something two others had already made,
+   * and the only thing it could add was a way to be wrong. Writing it is still allowed and still
+   * settles an ambiguity ({@link inferredKind}); leaving it out is not a shorthand for anything,
+   * because there was never a second reading to choose between.
+   */
   kind?: "prompt" | "function";
   /**
    * The prompt, as text. `{{.inputs.x}}` interpolation applies.
@@ -421,6 +430,40 @@ export interface OperationFields extends ExecEnvironmentDecl {
    *  surface does — `xhigh` included, because a delegated agent has such a tier and an author must be
    *  able to write it here or the level cannot be requested at all. */
   reasoning?: { effort?: "low" | "medium" | "high" | "xhigh"; budgetTokens?: number };
+}
+
+/** The fields that make an operation a PROMPT, and the ones that make it a FUNCTION. */
+const PROMPT_FIELDS = ["prompt", "system"] as const;
+const FUNCTION_FIELDS = ["function", "args"] as const;
+
+/**
+ * What KIND of operation a layer declares — read off its fields, or taken from `kind` where the
+ * author wrote one (SPEC §7.1).
+ *
+ * `undefined` means the layer does not say, which is a real answer and not a failure: an
+ * `environment` supplying only `model` and `tools` belongs to whatever operation inherits it, and
+ * an `"operation": {}` is the explicit request to inherit the whole thing.
+ *
+ * An explicit `kind` WINS, and that is the point of keeping it: `{"kind": "prompt", "function": …}`
+ * is the one shape the fields alone cannot resolve, and an author who means it has a way to say so.
+ * Absent that, a layer carrying both is refused rather than guessed at — the two readings run
+ * different machinery, and picking one silently would send the call to the wrong executor.
+ */
+export function inferredKind(fields: OperationFields): "prompt" | "function" | undefined {
+  if (fields.kind !== undefined) return fields.kind;
+  const prompt = PROMPT_FIELDS.some((f) => fields[f] !== undefined);
+  const fn = FUNCTION_FIELDS.some((f) => fields[f] !== undefined);
+  if (prompt && fn) return undefined;
+  return prompt ? "prompt" : fn ? "function" : undefined;
+}
+
+/** True when a layer names both a prompt and a function and did not say which it meant. */
+export function kindIsAmbiguous(fields: OperationFields): boolean {
+  return (
+    fields.kind === undefined &&
+    PROMPT_FIELDS.some((f) => fields[f] !== undefined) &&
+    FUNCTION_FIELDS.some((f) => fields[f] !== undefined)
+  );
 }
 
 /**

@@ -28,7 +28,7 @@
  * tool; a unioning merge would leave no way to take one away.
  */
 import type { JsonValue } from "@declarative-ai/exec";
-import { OPERATION_OWN_FIELDS, type NamedParameterDecl, type OperationFields, type ParameterDecl } from "./format.js";
+import { inferredKind, OPERATION_OWN_FIELDS, type NamedParameterDecl, type OperationFields, type ParameterDecl } from "./format.js";
 
 /** Fields with a merge rule of their own — everything else is nearest-wins, wholesale. */
 const MERGED_FIELDS: ReadonlySet<string> = new Set(["args", "input", "output", "conversation", "permissions", "tools", "path"]);
@@ -144,7 +144,14 @@ function describeSession(value: SessionDeclValue): string {
 export function mergeOperationFields(base: OperationFields, over: OperationFields): OperationFields {
   base = refuseSynonyms(base);
   over = refuseSynonyms(over);
-  if (over.kind !== undefined && base.kind !== undefined && over.kind !== base.kind) {
+  // Read off each layer's OWN fields rather than off `kind`, because `kind` is optional now and the
+  // drop below is the reason that matters. `environment: {prompt, model}` over `operation: {function}`
+  // never writes the word "kind" anywhere, and if the change went unnoticed the gate would inherit
+  // the ancestor's prompt and its model as if the author had written them there — the exact silent
+  // result this whole block exists to prevent, reintroduced by the field it used to key on becoming
+  // optional.
+  const [overKind, baseKind] = [inferredKind(over), inferredKind(base)];
+  if (overKind !== undefined && baseKind !== undefined && overKind !== baseKind) {
     const narrowed: OperationFields = { ...base };
     for (const field of KIND_SPECIFIC) delete narrowed[field];
     // Call configuration belongs to a prompt operation; carrying it onto a function op would hand

@@ -79,15 +79,80 @@ describe("environment inheritance (§5)", () => {
     expect(op.functionRef).toBe("claude-code");
   });
 
+  /**
+   * `kind` is OPTIONAL (§7.1): a prompt operation carries a `prompt`, a function operation names a
+   * `function`, and the discriminator was a third statement of what those two already said.
+   *
+   * The merge case is the one that matters and the one that nearly went wrong. The drop of
+   * kind-specific fields used to fire on `kind` disagreeing, which is a comparison neither layer
+   * makes any more — so a child switching to a function op would have inherited its ancestor's
+   * prompt and model as if it had written them itself.
+   */
+  describe("an operation says what it is (§7.1)", () => {
+    it("infers 'prompt' from a prompt and 'function' from a function", () => {
+      const defs = files();
+      delete defs.root!.environment;
+      defs["root/mid/leaf"] = leaf({ operation: { prompt: "go", model: "m" } });
+      expect(opOf(defs).kind).toBe("prompt");
+
+      const fn = files();
+      delete fn.root!.environment;
+      fn["root/mid/leaf"] = leaf({ operation: { function: "claude-code", args: { mode: "plan" } } });
+      expect(opOf(fn).kind).toBe("function");
+    });
+
+    it("refuses a layer that names both, unless the author says which", () => {
+      const defs = files();
+      delete defs.root!.environment;
+      defs["root/mid/leaf"] = leaf({ operation: { prompt: "go", function: "claude-code" } });
+      expect(loadBundle(defs, "root").states["root/mid/leaf"]!.operationError).toMatch(
+        /declares both a 'prompt' and a 'function'/,
+      );
+      // An explicit `kind` is exactly the way to settle it — which is what keeps the field.
+      defs["root/mid/leaf"] = leaf({ operation: { kind: "prompt", prompt: "go", function: "claude-code" } });
+      expect(opOf(defs).kind).toBe("prompt");
+    });
+
+    it("drops an ancestor's prompt and call config when a child switches to a function, kind unwritten", () => {
+      const defs = files();
+      // A root whose environment is prompt-shaped, saying so only by carrying a prompt.
+      defs.root!.environment = { prompt: "inherited", model: "anthropic/claude-sonnet-5", temperature: 0.2 };
+      delete defs["root/mid"]!.environment;
+      defs["root/mid/leaf"] = leaf({ operation: { function: "claude-code" } });
+      const op = opOf(defs) as unknown as FunctionOp<never>;
+      expect(op.kind).toBe("function");
+      expect(op.functionRef).toBe("claude-code");
+      // Neither the prompt nor the model it was configured with reaches the gate.
+      expect(op).not.toHaveProperty("user", "inherited");
+      expect(loadBundle(defs, "root").states["root/mid/leaf"]!.operation).not.toHaveProperty("config.model");
+    });
+
+    it("still lets an environment supply the whole operation to a leaf that declares none", () => {
+      const defs = files();
+      defs.root!.environment = { function: "claude-code", args: { mode: "plan" } };
+      defs["root/mid/leaf"] = leaf({ operation: {} });
+      const op = opOf(defs) as unknown as FunctionOp<never>;
+      expect(op.kind).toBe("function");
+      expect(op.functionRef).toBe("claude-code");
+    });
+  });
+
   it("reports an operation the chain never completes as a validation error, not a load failure", () => {
     // Carried as data so ONE broken state does not abort the load and hide every other authoring
     // error in the workflow.
+    //
+    // The leaf opts INTO a fully inherited operation and the chain supplies nothing to inherit, which
+    // is the shape that is still incomplete now that `kind` is optional: a leaf declaring `prompt`
+    // says what it is on its own, ancestors or none.
     const defs = files();
     delete defs.root!.environment;
+    defs["root/mid/leaf"] = leaf({ operation: {} });
     const bundle = loadBundle(defs, "root");
-    const leaf = bundle.states["root/mid/leaf"]!;
-    expect(leaf.operation).toBeUndefined();
-    expect(leaf.operationError).toMatch(/declares no 'kind'/);
+    const state = bundle.states["root/mid/leaf"]!;
+    expect(state.operation).toBeUndefined();
+    // The complaint names what is MISSING rather than the discriminator that used to stand in for
+    // it: with `kind` optional, "no kind" would send an author looking for the wrong field.
+    expect(state.operationError).toMatch(/declares neither a 'prompt' nor a 'function'/);
     const report = validateBundle(bundle);
     expect(report.errors).toContainEqual(
       expect.objectContaining({ stateId: "root/mid/leaf", path: "operation" }),
