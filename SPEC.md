@@ -1107,15 +1107,44 @@ A **function operation** invokes a registered function:
 
 ```text
 kind        "function" — optional; a `function` already says so.
-function    A callee name, resolved along the search `path` like any other (§7.5).
+function    A callee name, resolved along the search `path` like any other (§7.5) — or that name
+            APPLIED: `"function": "show_prompt(.inputs.doc, ...{ mode: 'plan' })"`.
 args        The authored arguments, bound to the call's input slots BY NAME. Shorthand for `input`
             where the value is a constant and there is nothing to say about its type; a slot the
             author declared in `input` wins. They used to arrive as one blob in a slot called
             `config`, because a registered function had no way to declare named parameters and
             there were no slots to bind to — there are now (§7.5.2), and an impl reads `inputs.mode`.
 input       Slots feeding the call.
-output      As above.
+output      As above — and optional, because a resolved callee already says what it returns.
 ```
+
+**`function` may be written applied.** `{"function": "review", "args": {"mode": "plan"}}` and
+`{"function": "review(...{ mode: 'plan' })"}` are one operation written two ways. The second is
+parsed with the expression parser, so a call in a `function` field and a call in a binding are the
+same grammar with the same argument rules (§6.3) — there is no second dialect to keep in step. The
+form is available wherever `function` is written: a state's `operation`, an ancestor's
+`environment`, and a callee document alike.
+
+Three consequences follow from it being the same call:
+
+- Arguments are expressions, so `review(.inputs.doc)` reads this state's data exactly as the same
+  text does inside a binding.
+- A positional argument needs a callee whose positions something declared. Naming one that resolves
+  nowhere is an error rather than a warning — unlike the bare-name case below, since there is no
+  signature to give a position meaning. Named arguments carry their own meaning and stay a warning.
+- `args` and an applied `function` may both be present. Saying the same thing twice is ordinary —
+  an inherited call and a nearer `args` routinely restate one value — and saying two different
+  things about one slot in one block is an error, because neither half is the more specific
+  statement and so neither can win.
+
+**What a call returns is the callee's to say.** A state that declares no `output`/`outputs` takes
+the callee's, read off a module's return type, a document's `outputs`, or a registry entry's
+signature. A state that declares one is making an assertion about that same value, and it must
+NARROW: `{"type": "string"}` against a callee's `{"type": ["string", "null"]}` is a state saying it
+knows more about this call site than the signature does, which is legitimate and checkable, while
+contradicting it is an error. It used to be silent — the declaration simply replaced the callee's, so
+a call typed against a value it could never produce validated clean and every consumer downstream was
+checked against fiction. A side that declared nothing has said nothing to disagree with.
 
 **The registry is a CONTRIBUTOR on the search path**, spelled `$REGISTRY` where a workflow wants to
 say where it sits. Resolving a callee is therefore one walk over uniform contributors — a document, a

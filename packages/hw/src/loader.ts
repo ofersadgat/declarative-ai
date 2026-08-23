@@ -16,6 +16,7 @@
  * sugar hash differently but a desugaring change never invalidates a stored snapshot.
  */
 import { canonicalize, hashCanonical, kindFor, sha256Hex, type InlineFamily, type JsonSchema, type JsonValue, type NamedParameter, type Operation, type Parameter, type Ref, type RefKind } from "@declarative-ai/exec";
+import { isSubschema, type Schema } from "@declarative-ai/validate";
 import { computeFanOut } from "./fanout.js";
 import {
   bindingForDocument,
@@ -38,8 +39,8 @@ import {
   type TransitionDecl,
   type WorkflowBundle,
 } from "./format.js";
-import { parseExpression } from "./expr.js";
-import { bindTransitionContext, lowerExpression, type LowerOptions } from "./lowerExpr.js";
+import { ExprError, parseExpression, selfPathOf, type Argument, type Expr } from "./expr.js";
+import { bindArguments, bindTransitionContext, EXPRESSION_REFS, lowerExpression, parametersFor, positionalNames, type LowerOptions } from "./lowerExpr.js";
 import { environmentIdentity, mergeOperationFields, resolutionEnvironment } from "./merge.js";
 import { resolveStateRef, StateRefError, type StateRefOptions } from "./ref.js";
 import { expandReferences } from "./expand.js";
@@ -417,25 +418,167 @@ export function desugarOperation(
   // the engine looks up at dispatch — because that is what a loader with no registry and no
   // filesystem has always done, and it is what an unregistered function is supposed to be: a warning,
   // not a load failure (a state the run never enters never needs its function).
-  const callee = lower.resolveOperation?.(decl.function!);
+  const call = parseCallForm(decl.function!, stateId);
+  const callee = lower.resolveOperation?.(call.callee);
   if (callee === undefined) {
-    return { kind: "function", functionRef: decl.function!, input: bindIntoSlots({}, input, decl.args, decl.function!, stateId), output };
+    // Nothing declared the callee's positions, so nothing can say which slot an unnamed argument
+    // fills. A NAMED one still can — that is the whole difference between the two forms — so the
+    // refusal is exactly as narrow as the missing knowledge.
+    if (call.args.some((a) => a.type !== "spread")) {
+      throw new WorkflowLoadError(
+        `operation calls '${call.callee}' with positional arguments, but the name resolves to no declaration — nothing says what its positions are; pass them by name, or put the callee on the search path`,
+        stateId,
+      );
+    }
+    const applied = applyCallForm(call, undefined, stateId, lower);
+    return {
+      kind: "function",
+      functionRef: call.callee,
+      input: bindIntoSlots({}, input, decl.args, applied.bound, call.callee, stateId),
+      ...(applied.spread.length > 0 ? { spread: applied.spread } : {}),
+      output,
+    };
   }
   if (callee.kind !== "function") {
     throw new WorkflowLoadError(
-      `operation names '${decl.function!}', which resolves to a ${callee.kind} operation — a 'function' operation must name a callable`,
+      `operation names '${call.callee}', which resolves to a ${callee.kind} operation — a 'function' operation must name a callable`,
       stateId,
     );
   }
+  const applied = applyCallForm(call, callee, stateId, lower);
   return {
     kind: "function",
     functionRef: callee.functionRef,
-    input: bindIntoSlots(callee.input, input, decl.args, decl.function!, stateId),
-    // The state's own declaration wins where it made one, and the callee's stands where it did not:
-    // an author who writes `outputs` is saying what THIS call returns, while one who writes none is
-    // taking what the callee already declares — which for a module is read off its return type.
-    output: decl.output !== undefined || decl.outputs !== undefined ? output : callee.output,
+    input: bindIntoSlots(callee.input, input, decl.args, applied.bound, call.callee, stateId),
+    ...(applied.spread.length > 0 ? { spread: applied.spread } : {}),
+    output:
+      decl.output !== undefined || decl.outputs !== undefined
+        ? narrowedOutput(output, callee.output, call.callee, stateId)
+        : callee.output,
   };
+}
+
+/**
+ * The output a call RETURNS, when the state also wrote one down (SPEC §7.1).
+ *
+ * Declaring it is optional, because a resolved callee already says what it returns — read off a
+ * module's return type, a document's `outputs`, or a registry entry's signature. So a state that
+ * writes none is not leaving a hole; it is taking the answer that already exists.
+ *
+ * A state that DOES write one is making an assertion about that same value, and the two have to
+ * agree. Narrowing is what agreement means here — `{"type": "string"}` against a callee's
+ * `{"type": ["string", "null"]}` is a state saying it knows more about this call site than the
+ * signature does, which is legitimate and checkable. Contradicting is not, and it used to be
+ * SILENT: the declaration simply replaced the callee's, so a call typed against a return value it
+ * could never produce validated clean and every consumer downstream was checked against fiction.
+ *
+ * A side that declared nothing has said nothing to disagree with — the rule `bindIntoSlots` and
+ * `checkAgainstSignature` both already follow, applied to the other end of the call.
+ */
+function narrowedOutput(
+  declared: NamedParameter<InlineFamily>,
+  callee: NamedParameter<InlineFamily>,
+  name: string,
+  stateId: string,
+): NamedParameter<InlineFamily> {
+  const want = callee.schema;
+  const said = declared.schema;
+  if (want === undefined || said === undefined || Object.keys(want).length === 0 || Object.keys(said).length === 0) {
+    return declared;
+  }
+  const check = isSubschema(said as Schema, want as Schema);
+  if (!check.ok) {
+    throw new WorkflowLoadError(
+      `operation declares an output '${name}' does not return: ${check.reason}`,
+      stateId,
+    );
+  }
+  return declared;
+}
+
+/**
+ * Read `function` as either spelling: a NAME, or a CALL (SPEC §7.1).
+ *
+ * `{"function": "show_prompt", "args": {"mode": "plan"}}` and `{"function": "show_prompt(...{mode:
+ * 'plan'})"}` are one operation written two ways, and they meet here — the second is parsed with the
+ * expression parser, so a call in a `function` field and a call in a binding are the same grammar
+ * and cannot drift into two dialects of one syntax.
+ *
+ * A bare name is detected by the absence of `(`, which is exact: a function NAME can no more contain
+ * a parenthesis than a file path can, so there is no spelling both readings accept.
+ *
+ * The parse must yield ONE application of a NAMED callee. `a ? f : g` applied is already a parse
+ * error in the language, and anything else that parses — a bare reference, an operator, a literal —
+ * is not a call and is refused here rather than half-read.
+ */
+function parseCallForm(source: string, stateId: string): { callee: string; args: Argument[] } {
+  if (!source.includes("(")) return { callee: source, args: [] };
+  let parsed;
+  try {
+    parsed = parseExpression(source);
+  } catch (e) {
+    throw new WorkflowLoadError(`operation.function '${source}' does not parse as a call: ${(e as ExprError).message}`, stateId);
+  }
+  // An OPERATOR is an application too — `f('a') === 'b'` parses to `op.strictEq(f('a'), 'b')` — so
+  // "did it parse to an apply" is not the question. The question is whether the author NAMED what is
+  // being called, and an operator's name was synthesized by the parser from syntax the author wrote
+  // instead. A resolver is not a callable, and reading one as the callee would take the outermost
+  // operator of an arbitrary expression as the function this state runs.
+  if (parsed.type !== "apply" || EXPRESSION_REFS.has(parsed.op)) {
+    throw new WorkflowLoadError(`operation.function '${source}' is not a call — 'function' names a callee, applied or not`, stateId);
+  }
+  return { callee: parsed.op, args: parsed.args };
+}
+
+/**
+ * Lower a call form's arguments against the callee's slots — the same walk an expression's call uses.
+ *
+ * Shared with `lowerExpression` deliberately: `review(doc)` in a binding and `"function":
+ * "review(doc)"` on an operation are the same call, and a second implementation of "which argument
+ * fills which slot" is exactly the drift that makes two spellings of one thing stop meaning it.
+ *
+ * The ARGUMENTS themselves are lowered as {@link desugarBinding} lowers them, not as an expression
+ * operand — because that is what the form promises. `"function": "shout(.inputs.issue)"` and
+ * `{"function": "shout", "input": {"text": {"binding": ".inputs.issue"}}}` are one operation written
+ * two ways, so `.inputs.issue` has to reach the slot as the same ref either way. Lowering it as an
+ * expression operand instead gave it `context.get` where the binding gives `scope.get` — the same
+ * text, one spelling reading `undefined` for a missing input and the other REFUSING, which is exactly
+ * the divergence an alternate spelling must not introduce.
+ */
+function applyCallForm(
+  call: { callee: string; args: Argument[] },
+  callee: Operation<InlineFamily> | undefined,
+  stateId: string,
+  lower: LowerOptions,
+): { bound: Record<string, Parameter<InlineFamily>>; spread: Ref<InlineFamily>[] } {
+  const names = callee ? positionalNames(callee) : [];
+  const slots = callee ? Object.keys(callee.input) : [];
+  try {
+    const applied = bindArguments(call.args, names, slots, call.callee, (e) =>
+      asArgument(e, stateId, lower),
+    );
+    return { bound: parametersFor(applied.bound), spread: applied.spread };
+  } catch (e) {
+    if (e instanceof WorkflowLoadError) throw e;
+    throw new WorkflowLoadError(`operation.function: ${(e as ExprError).message}`, stateId);
+  }
+}
+
+/**
+ * One argument of a call form, lowered the way the same value written in `input` would be.
+ *
+ * A leading-dot RUNTIME REFERENCE has a binding lowering of its own — `.inputs.x` is `scope.get`,
+ * `.children.c.outputs.y` is a child producer edge — and those are what an authored binding produces.
+ * Everything else is an expression and has only ever had the one lowering. Reconstructing the
+ * reference from the parsed path rather than slicing the source keeps this reading exactly what the
+ * parser read, so the two can not disagree about where the reference ended.
+ */
+function asArgument(expr: Expr, stateId: string, lower: LowerOptions): Ref<InlineFamily> {
+  const path = selfPathOf(expr);
+  if (path !== undefined && path.length > 0) {
+    return desugarBinding(`.${path.join(".")}`, "operation.function", stateId, undefined, lower);
+  }
+  return lowerExpression(expr, lower);
 }
 
 /**
@@ -463,11 +606,21 @@ export function desugarOperation(
  * A string binds as `text` and everything else as `json`, which is the call `parametersFor` already
  * makes for an expression's arguments — one rule for how a literal reaches a slot rather than two
  * that could disagree about the kind of `"plan"`.
+ *
+ * **A CALL FORM's arguments are a third source, and the only one that can CONTRADICT another.**
+ * `args` and `input` are layered — one is shorthand for the other, and the typed declaration is the
+ * more specific statement of the two — but `{"function": "f(...{mode: 'plan'})", "args": {"mode":
+ * "full"}}` is one block saying `mode` twice, differently. Neither half is more specific, so neither
+ * can win: agreeing is fine and disagreeing is refused. That is a narrower rule than "you may not
+ * write both", which would break the ordinary case of an environment's `args` restating what the
+ * inherited call already passes.
  */
 function bindIntoSlots(
   declared: Record<string, Parameter<InlineFamily>>,
   authored: Record<string, Parameter<InlineFamily>>,
   args: Record<string, JsonValue> | undefined,
+  /** What the CALL FORM bound, if `function` was written applied — `f(x)` rather than `f`. */
+  called: Record<string, Parameter<InlineFamily>>,
   name: string,
   stateId: string,
 ): Record<string, Parameter<InlineFamily>> {
@@ -481,15 +634,32 @@ function bindIntoSlots(
     }
     return undefined;
   };
+  /** Refuse a second, DIFFERENT value for a slot the call already filled. */
+  const agree = (slot: string, binding: Ref<InlineFamily> | undefined): void => {
+    const already = called[slot]?.binding;
+    if (already === undefined || binding === undefined) return;
+    if (canonicalize(already as JsonValue) === canonicalize(binding as JsonValue)) return;
+    throw new WorkflowLoadError(
+      `operation passes '${slot}' twice with different values: once in the call to '${name}', once in its own ${authored[slot] !== undefined ? "input" : "args"}`,
+      stateId,
+    );
+  };
+  for (const [slot, parameter] of Object.entries(called)) {
+    reach(slot);
+    out[slot] = { ...out[slot], ...parameter };
+  }
   for (const [slot, parameter] of Object.entries(authored)) {
+    agree(slot, parameter.binding);
     reach(slot);
     out[slot] = { ...out[slot], ...parameter };
   }
   for (const [slot, value] of Object.entries(args ?? {})) {
     // An authored `input` slot of the same name already answered for this one.
     if (authored[slot] !== undefined) continue;
-    const existing = reach(slot);
     const binding = typeof value === "string" ? { text: value } : { json: value };
+    agree(slot, binding);
+    if (called[slot] !== undefined) continue;
+    const existing = reach(slot);
     out[slot] = { kind: existing?.kind ?? (typeof value === "string" ? "text" : "json"), ...existing, binding };
   }
   return out;

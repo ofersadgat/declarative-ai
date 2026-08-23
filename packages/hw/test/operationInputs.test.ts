@@ -65,6 +65,34 @@ describe("a required operation input the state never passes", () => {
     expect(errorsFor({ text: { schema: { type: "string" }, binding: ".inputs.doc" } })).toEqual([]);
   });
 
+  /**
+   * A spread PASSES the slots its operand's type names (SPEC §6.3), and this check has to know it —
+   * otherwise the one argument form that cannot be read at load would be the one form that always
+   * reports a missing argument.
+   */
+  it("counts a deferred spread as passing the slots its type names", () => {
+    const spread = (bag: JsonSchema): string[] =>
+      validateBundle(
+        loadBundle(
+          {
+            s: {
+              inputs: { bag: { schema: bag } },
+              outputs: { out: { schema: { type: "string" }, binding: ".operation.output.out" } },
+              operation: { function: "review(....inputs.bag)", outputs: { out: { schema: { type: "string" } } } },
+            },
+          } as unknown as Record<string, StateDef>,
+          "s",
+        ),
+        { functions: registry() },
+      ).errors.map((e) => e.message);
+
+    expect(spread({ type: "object", properties: { text: { type: "string" } } })).toEqual([]);
+    // And an operand naming only the OPTIONAL slot still leaves the required one unpassed.
+    expect(spread({ type: "object", properties: { tone: { type: "string" } } }).join(" ")).toMatch(
+      /requires an input 'text'/,
+    );
+  });
+
   it("says nothing about an OPTIONAL parameter the state omits", () => {
     // `tone` is declared but not required — leaving it out is the impl's own default, not a fault.
     expect(errorsFor({ text: { schema: { type: "string" }, binding: ".inputs.doc" } }, ["text"])).toEqual([]);

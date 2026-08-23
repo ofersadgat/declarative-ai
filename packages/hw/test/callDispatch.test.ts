@@ -90,6 +90,13 @@ const files = {
     function: "shout",
     input: { text: { kind: "text", index: 0 } },
   }),
+  // A callee that says what it RETURNS, so a state's own declaration has something to agree with.
+  [`${FUNCTIONS}/verdict.json`]: JSON.stringify({
+    kind: "function",
+    function: "noop",
+    outputs: { value: { schema: { type: "string", enum: ["clean", "dirty"] } } },
+    output: { name: "output", kind: "json", schema: { type: "string", enum: ["clean", "dirty"] } },
+  }),
   // TYPED slots, so a spread's property types have something to disagree with. Its impl is `noop`
   // rather than `shout` because `shout` is itself a document here, and a callee naming one binds
   // into ITS slots — which would make this fixture a call to a one-parameter function.
@@ -138,7 +145,7 @@ describe("a call runs and its result reaches the binding", () => {
 });
 
 /**
- * SPREAD arguments (EXPRESSIONS.md §3.4) — the same call, named instead of counted.
+ * SPREAD arguments (SPEC §6.3) — the same call, named instead of counted.
  *
  * The two halves of the form are pinned apart on purpose, because they happen at different times: a
  * written-out spread has its keys in the source and binds at LOAD, while any other operand's keys
@@ -223,7 +230,7 @@ describe("a spread argument", () => {
 });
 
 /**
- * The DEFERRED half of a spread, checked where its keys finally have a type (EXPRESSIONS.md §3.4).
+ * The DEFERRED half of a spread, checked where its keys finally have a type (SPEC §6.3).
  *
  * Every rule here was available to the loader for a written-out `...{ a: 1 }` and unavailable for
  * `...opts` — same rule, one phase later. What these pin is that the phase is the only difference.
@@ -274,6 +281,127 @@ describe("validating a deferred spread", () => {
     expect(errorsFor(withSpread(schema, "greet(....inputs.bag)")).join(" ")).toMatch(
       /passes 'times' as a type 'noop' does not accept/,
     );
+  });
+});
+
+/**
+ * `function` written APPLIED — `"function": "shout(.inputs.issue)"` (SPEC §7.1).
+ *
+ * A second spelling, not a second meaning: the claim these pin is that it lowers to the operation
+ * the `args`/`input` spelling already lowers to. Anything weaker would let the two drift, which is
+ * the entire hazard of offering a form twice.
+ */
+describe("the call form of 'function'", () => {
+  const opOf = (def: unknown) => bundleFor(def).states.plan!.operation!;
+  /** An authoring mistake in an operation is RECORDED, not thrown — the loader defers it so the
+   *  validator reports it beside every other issue, and only entering the state fails the run. */
+  const errorOf = (def: unknown) => bundleFor(def).states.plan!.operationError ?? "";
+
+  it("lowers to exactly what the name-plus-input spelling lowers to", () => {
+    // EXACTLY: an argument reaches the slot as the ref the binding would have produced, so
+    // `.inputs.issue` is `scope.get` on both sides. Anything less makes the alternate spelling a
+    // different operation — one reading `undefined` for a missing input where the other refuses.
+    const declared = {
+      inputs: { issue: { kind: "text", schema: { type: "string" } } },
+      operation: { kind: "function", function: "shout", input: { text: { binding: ".inputs.issue" } } },
+    };
+    const applied = {
+      inputs: { issue: { kind: "text", schema: { type: "string" } } },
+      operation: { kind: "function", function: "shout(.inputs.issue)" },
+    };
+    expect(opOf(applied)).toEqual(opOf(declared));
+  });
+
+  it("does the same for every runtime reference with a binding lowering of its own", () => {
+    const both = (binding: string) => {
+      const base = {
+        inputs: { issue: { kind: "text", schema: { type: "string" } } },
+        children: { c: { state: "plan" } },
+        artifacts: { doc: { schema: { type: "string" } } },
+      };
+      return [
+        opOf({ ...base, operation: { function: "shout", input: { text: { binding } } } }),
+        opOf({ ...base, operation: { function: `shout(${binding})` } }),
+      ];
+    };
+    for (const reference of [".inputs.issue", ".artifacts.doc", ".children.c.outputs.report"]) {
+      const [declared, applied] = both(reference);
+      expect(applied).toEqual(declared);
+    }
+  });
+
+  it("names its arguments with a spread, reaching the same slot", () => {
+    const positional = { operation: { kind: "function", function: "shout('hi')" } };
+    const named = { operation: { kind: "function", function: "shout(...{ text: 'hi' })" } };
+    expect(opOf(named)).toEqual(opOf(positional));
+    expect(opOf(named)).toEqual(opOf({ operation: { kind: "function", function: "shout", args: { text: "hi" } } }));
+  });
+
+  it("lets 'args' restate what the call already passes, and refuses it contradicting", () => {
+    // Agreeing is ordinary: an environment's `args` and an inherited call routinely say the same
+    // thing, and refusing that would break the chain rather than catch a mistake.
+    expect(errorOf({ operation: { kind: "function", function: "shout('hi')", args: { text: "hi" } } })).toBe("");
+    expect(errorOf({ operation: { kind: "function", function: "shout('hi')", args: { text: "bye" } } })).toMatch(
+      /passes 'text' twice with different values/,
+    );
+  });
+
+  it("refuses a positional argument to a callee nothing declares, and allows a named one", () => {
+    // `unknown` is on no search path and in no registry, so nothing says what its positions are.
+    expect(errorOf({ operation: { kind: "function", function: "unknown('hi')" } })).toMatch(
+      /nothing says what its positions are/,
+    );
+    expect(errorOf({ operation: { kind: "function", function: "unknown(...{ text: 'hi' })" } })).toBe("");
+  });
+
+  it("refuses a 'function' that parses as something other than a call", () => {
+    expect(errorOf({ operation: { kind: "function", function: "shout('a') === 'b'" } })).toMatch(/is not a call/);
+    expect(errorOf({ operation: { kind: "function", function: "shout(" } })).toMatch(/does not parse as a call/);
+  });
+
+  it("refuses an argument the callee has no slot for", () => {
+    expect(errorOf({ operation: { kind: "function", function: "shout(...{ nope: 'x' })" } })).toMatch(
+      /no parameter 'nope'/,
+    );
+    expect(errorOf({ operation: { kind: "function", function: "shout('a', 'b')" } })).toMatch(/but 2 were given/);
+  });
+});
+
+/**
+ * What a call RETURNS is the callee's to say (SPEC §7.1) — so declaring it is optional, and
+ * declaring it wrongly is an error rather than an override.
+ *
+ * The second half is the one with teeth. A state's declaration used to simply REPLACE the callee's,
+ * so a call typed against a value it could never produce validated clean and every consumer
+ * downstream was checked against fiction.
+ */
+describe("a call's output type", () => {
+  const opOf = (def: unknown) => bundleFor(def).states.plan!.operation!;
+  const errorOf = (def: unknown) => bundleFor(def).states.plan!.operationError ?? "";
+
+  it("comes from the callee when the state declares none", () => {
+    const op = opOf({ operation: { function: "verdict" } });
+    expect(op.output.schema).toEqual({ type: "string", enum: ["clean", "dirty"] });
+  });
+
+  it("accepts a state's declaration that NARROWS it", () => {
+    expect(
+      errorOf({ operation: { function: "verdict", output: { name: "output", kind: "json", schema: { type: "string", enum: ["clean"] } } } }),
+    ).toBe("");
+  });
+
+  it("refuses one that contradicts it", () => {
+    expect(
+      errorOf({ operation: { function: "verdict", output: { name: "output", kind: "json", schema: { type: "number" } } } }),
+    ).toMatch(/declares an output 'verdict' does not return/);
+  });
+
+  it("leaves a callee that declared nothing with nothing to disagree with", () => {
+    // `shout` says what it takes and not what it returns, which is every function written before
+    // return types were read — a declaration here is the only statement there is.
+    expect(
+      errorOf({ operation: { function: "shout", args: { text: "hi" }, output: { name: "output", kind: "text", schema: { type: "string" } } } }),
+    ).toBe("");
   });
 });
 
