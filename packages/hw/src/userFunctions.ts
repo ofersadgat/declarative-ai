@@ -14,9 +14,12 @@
  * exactly the property SPEC §7.5 opens with: a callee is an operation, and what differs is only
  * where the name resolves and where the body comes from.
  *
- * That also means the capability record is REQUIRED and total, as §3.3 demands. A user function is
- * `pure: false` on the memoizable axis by SPEC §7.5.6 — not memoized — and that is declared here
- * rather than left for something downstream to infer from an `undefined`.
+ * So what this hands a host is `RegisteredFunction` entries, not callables. The difference is the
+ * whole claim: a capability record REQUIRED and total as §3.3 demands, a declared signature the
+ * checker reads, and errors that resolve as data (§4.2). Handing back bare impls left every one of
+ * those to whoever merged them — which made "a user function becomes a registry entry" true only by
+ * convention, and made `memoizable` something a host restated from memory rather than something
+ * SPEC §7.5.6 decided.
  *
  * ## Everything here is synchronous
  *
@@ -24,7 +27,8 @@
  * {@link createUserFunctions}, and every call after that — parse, check, transpile, execute — is an
  * ordinary function call. See `loadCompiler` for why that split is available at all.
  */
-import type { InlineFamily, JsonValue, Operation, Parameter } from "@declarative-ai/exec";
+import type { HostCapabilities, InlineFamily, JsonValue, Operation, Parameter, RegisteredFunction, Signature } from "@declarative-ai/exec";
+import { hostFunction, liftThrowing } from "@declarative-ai/exec";
 import type { JsonSchema } from "@declarative-ai/json";
 import { synthesizeBodyWith, type SynthesizedBody } from "./functionBody.js";
 import type { ParameterDecl } from "./format.js";
@@ -69,8 +73,28 @@ export interface UserFunctions {
   operationFor(file: string, property: readonly string[]): ResolvedUserFunction;
   /** The operation an EMBEDDED body denotes (SPEC §7.5.1, form 2). */
   operationForBody(name: string, body: string, input: Readonly<Record<string, ParameterDecl>>): ResolvedUserFunction;
-  /** Every impl registered so far, by ref — what a host merges into its `CapabilityRegistry`. */
-  readonly impls: ReadonlyMap<string, UserFunctionImpl>;
+  /**
+   * Every function resolved so far as an ORDINARY REGISTRY ENTRY, by ref — what a host merges into
+   * its `CapabilityRegistry`.
+   *
+   * This used to hand back bare callables and leave the host to wrap each one, which made the
+   * opening claim of this module ("a user function becomes a registry entry") true only if whoever
+   * merged them said so. Three things a bare callable could not carry, and every one of them is a
+   * statement something downstream reads without invoking anything:
+   *
+   *  - the CAPABILITIES, required and total per §3.3 — a host inventing them per merge is a host
+   *    guessing at `memoizable`, which SPEC §7.5.6 answers and does not leave open;
+   *  - the SIGNATURE, so `checkAgainstSignature` compares a call against a `.ts` parameter list the
+   *    same way it compares one against a host function's declaration;
+   *  - the error contract — an entry RESOLVES a classified failure (§4.2) rather than throwing, so a
+   *    retriable error raised inside a user function reaches the retry machinery intact.
+   *
+   * `unknown` as the ctx type is the honest one rather than a widening: nothing reaches a user
+   * function but its parameters (SPEC §7.5.6), so there is no context it could name. A parameter of
+   * type `unknown` is assignable from any registry's `Ctx`, which is why this drops into a
+   * `FunctionRegistry<ExecServices, WorkflowMetrics>` with no cast at the merge.
+   */
+  readonly entries: ReadonlyMap<string, RegisteredFunction<unknown, never>>;
   /**
    * Compile every function resolved so far, so they can actually run.
    *
@@ -84,6 +108,21 @@ export interface UserFunctions {
 /** One callable, with the marshalling boundary already wrapped around it. */
 export type UserFunctionImpl = (args: Readonly<Record<string, unknown>>) => Promise<JsonValue>;
 
+/**
+ * What a user function may do, declared into the `pure | host | runtime` union rather than sitting
+ * outside it — so permission gating and search refusal read a definite value (§3.3).
+ *
+ * `host` and not `pure`, because a `pure` impl is synchronous and a user function may be async.
+ *
+ * `memoizable: false` is SPEC §7.5.6 outright: freezing pins WHICH code runs and says nothing about
+ * whether that code returns the same answer twice. `readOnly: false` is the same kind of honesty
+ * about a different axis — §7.5.4 says this is not a sandbox, so a function can write a file, and
+ * declaring otherwise would let one run under a profile that meant to forbid it. `interactive: false`
+ * is a fact rather than a policy: nothing reaches a user function but its parameters, so there is
+ * nothing it could ask a human through.
+ */
+export const USER_FUNCTION_CAPABILITIES: HostCapabilities = { interactive: false, readOnly: false, memoizable: false };
+
 export async function createUserFunctions(options: UserFunctionOptions): Promise<UserFunctions> {
   const context = await loadSignatureContext();
   const ts = await loadCompiler();
@@ -91,7 +130,7 @@ export async function createUserFunctions(options: UserFunctionOptions): Promise
 }
 
 class Facade implements UserFunctions {
-  readonly impls = new Map<string, UserFunctionImpl>();
+  readonly entries = new Map<string, RegisteredFunction<unknown, never>>();
   /** Resolved functions by ref, so one symbol is type-checked once however many states call it. */
   private readonly resolved = new Map<string, ResolvedUserFunction>();
   /** Synthesized bodies by their pseudo-path, so a body compiles once. */
@@ -136,7 +175,7 @@ class Facade implements UserFunctions {
     for (const warning of signature.warnings) this.options.onWarn?.(warning);
 
     const operation = operationOf(ref, signature);
-    this.impls.set(ref, this.implFor(file, property, signature));
+    this.entries.set(ref, entryFor(ref, signature, this.implFor(file, property, signature)));
 
     const result: ResolvedUserFunction = { ref, operation, signature, warnings: signature.warnings };
     this.resolved.set(ref, result);
@@ -210,6 +249,34 @@ function fingerprint(body: string): string {
     hash = Math.imul(hash, 16777619);
   }
   return (hash >>> 0).toString(36);
+}
+
+/**
+ * The registry entry a user function IS.
+ *
+ * `liftThrowing` rather than a bare wrap, and it is the §7.5.6 contract rather than a convenience:
+ * "a throw, a rejection, or a module-load failure becomes a classified `Failure` rather than an
+ * exception crossing the seam". `runFunction` catches a throwing impl too, but that is the FALLBACK
+ * for impls nobody lifted — going through it would classify by the same rules and lose the context
+ * prefix naming which function raised, which is the whole of what a person reads first.
+ */
+function entryFor(ref: string, signature: ExtractedSignature, impl: UserFunctionImpl): RegisteredFunction<unknown, never> {
+  return hostFunction<unknown, never>(liftThrowing((inputs: Record<string, unknown>) => impl(inputs), ref), USER_FUNCTION_CAPABILITIES, {
+    signature: signatureOf(signature),
+  });
+}
+
+/**
+ * A user function's signature in the form a REGISTRY entry declares it.
+ *
+ * The same slots {@link operationOf} builds, which is the point rather than a coincidence: an entry's
+ * `signature` and a callee's `input` are one declaration now (`Signature` is an operation's I/O half),
+ * so a checker comparing a call against a `.ts` parameter list runs the code it runs for a host
+ * function's declaration.
+ */
+export function signatureOf(signature: ExtractedSignature): Signature<InlineFamily> {
+  const op = operationOf("", signature);
+  return { input: op.input, output: op.output };
 }
 
 /**

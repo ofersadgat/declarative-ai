@@ -10,12 +10,14 @@
  * parameters, not about anything named "user function".
  */
 import { describe, expect, it } from "vitest";
-import type { FunctionOp, InlineFamily } from "@declarative-ai/exec";
+import type { FunctionInputs, FunctionOp, InlineFamily } from "@declarative-ai/exec";
+import { isOk, runFunction } from "@declarative-ai/exec";
 import { loadBundle } from "../src/loader.js";
 import { createSymbolIndex } from "../src/moduleIndex.js";
 import { requirePathFor } from "../src/moduleLoader.js";
 import { createUserFunctions, userFunctionRef, type UserFunctions } from "../src/userFunctions.js";
 import type { Vfs } from "../src/reference.js";
+import { newRegistry } from "./fakes.js";
 
 const FN = "/p/functions";
 
@@ -58,6 +60,21 @@ const load = (
 /** The one operation a loaded state carries. */
 const opOf = (bundle: ReturnType<typeof loadBundle>, id = "root"): FunctionOp<InlineFamily> =>
   bundle.states[id]!.operation as FunctionOp<InlineFamily>;
+
+/**
+ * Call a resolved function through its REGISTRY ENTRY, the way the engine does.
+ *
+ * `runFunction` rather than reaching for `entry.impl`, because the entry is the thing under test: a
+ * user function is dispatched by the same code that dispatches a host function, and going around
+ * that would test a callable the engine never touches. Errors are DATA (§4.2), so a failure comes
+ * back as a value and is re-thrown here to keep the assertions about the answer.
+ */
+async function call(h: { userFunctions: UserFunctions }, ref: string, args: Record<string, unknown>): Promise<unknown> {
+  const entry = h.userFunctions.entries.get(ref)!;
+  const result = await runFunction(entry, args as FunctionInputs, undefined);
+  if (!isOk(result)) throw new Error(result.error.reason);
+  return result.value;
+}
 
 /**
  * The operation a lowered `{ expr }` output binding CALLS.
@@ -122,18 +139,54 @@ describe("a state calling a module symbol by bare name", () => {
     load(state, h);
     await h.userFunctions.prepare();
 
-    const impl = h.userFunctions.impls.get(userFunctionRef(`${FN}/lib.ts`, ["confidence"]))!;
-    expect(await impl({ rank: 0, iteration: 0 })).toBeCloseTo(1);
-    expect(await impl({ rank: 3, iteration: 3, maxIterations: 3 })).toBeCloseTo(0.4);
+    const ref = userFunctionRef(`${FN}/lib.ts`, ["confidence"]);
+    expect(await call(h, ref, { rank: 0, iteration: 0 })).toBeCloseTo(1);
+    expect(await call(h, ref, { rank: 3, iteration: 3, maxIterations: 3 })).toBeCloseTo(0.4);
+  });
+
+  it("is an ORDINARY REGISTRY ENTRY — capabilities, signature, errors as data", async () => {
+    // The claim SPEC §7.5 opens with, asked of the registration rather than of the operation:
+    // nothing downstream learns this entry came from a `.ts` file.
+    const h = await harness(files);
+    h.userFunctions.operationFor(`${FN}/lib.ts`, ["confidence"]);
+    const entry = h.userFunctions.entries.get(userFunctionRef(`${FN}/lib.ts`, ["confidence"]))!;
+    expect(entry.kind).toBe("host");
+    // `memoizable: false` is SPEC §7.5.6 — freezing pins which code runs, not what it returns.
+    expect(entry.capabilities).toEqual({ interactive: false, readOnly: false, memoizable: false });
+    // And the signature is the SAME slot map the operation carries, so a checker comparing a call
+    // against a parameter list runs the code it runs for a host function's declaration.
+    expect(entry.signature?.input.rank).toMatchObject({ index: 0, schema: { type: "number" } });
+  });
+
+  it("merges into a real CapabilityRegistry with no wrapping and no cast", async () => {
+    // The gap this closes: `impls` handed back bare callables, so "a user function becomes a registry
+    // entry" was true only if whoever merged them said so — and said the same thing about
+    // capabilities every time, correctly, from memory.
+    const h = await harness(files);
+    h.userFunctions.operationFor(`${FN}/lib.ts`, ["confidence"]);
+    const registry = newRegistry();
+    for (const [ref, entry] of h.userFunctions.entries) registry.functions.set(ref, entry);
+    expect(registry.functions.get(userFunctionRef(`${FN}/lib.ts`, ["confidence"]))?.kind).toBe("host");
+  });
+
+  it("resolves a throw as a CLASSIFIED failure naming the function, rather than rejecting", async () => {
+    // §7.5.6: nothing leaves but the return value. A throw crossing the seam would reach the engine
+    // as an exception instead of reaching the retry machinery with a classification.
+    const h = await harness({ [`${FN}/bad.ts`]: "export function boom(n: number): number { throw new Error(`no: ${n}`); }" });
+    const resolved = h.userFunctions.operationFor(`${FN}/bad.ts`, ["boom"]);
+    await h.userFunctions.prepare();
+    const result = await runFunction(h.userFunctions.entries.get(resolved.ref)!, { n: 1 } as FunctionInputs, undefined);
+    expect(isOk(result)).toBe(false);
+    // The context prefix is what `liftThrowing` buys over `runFunction`'s own catch: which function.
+    expect(!isOk(result) && result.error.reason).toMatch(/user:.*bad\.ts#boom: .*no: 1/);
   });
 
   it("applies a parameter default when the caller omits the slot", async () => {
     const h = await harness(files);
     h.userFunctions.operationFor(`${FN}/lib.ts`, ["confidence"]);
     await h.userFunctions.prepare();
-    const impl = h.userFunctions.impls.get(userFunctionRef(`${FN}/lib.ts`, ["confidence"]))!;
     // `maxIterations` omitted — the default read off the parameter list stands in.
-    expect(await impl({ rank: 3, iteration: 3 })).toBeCloseTo(0.4);
+    expect(await call(h, userFunctionRef(`${FN}/lib.ts`, ["confidence"]), { rank: 3, iteration: 3 })).toBeCloseTo(0.4);
   });
 });
 
@@ -158,8 +211,7 @@ describe("an embedded body in a state file", () => {
     expect(op.input.severity).toMatchObject({ index: 0 });
 
     await h.userFunctions.prepare();
-    const impl = h.userFunctions.impls.get(op.functionRef)!;
-    expect(await impl({ severity: 2 })).toBeCloseTo(0.3);
+    expect(await call(h, op.functionRef, { severity: 2 })).toBeCloseTo(0.3);
   });
 
   it("runs a statement body that returns a record", async () => {
@@ -178,8 +230,7 @@ describe("an embedded body in a state file", () => {
       h,
     );
     await h.userFunctions.prepare();
-    const impl = h.userFunctions.impls.get(opOf(bundle).functionRef)!;
-    expect(await impl({ severity: 2 })).toMatchObject({ high: true });
+    expect(await call(h, opOf(bundle).functionRef, { severity: 2 })).toMatchObject({ high: true });
   });
 
   it("refuses a document that declares both a body and a function", async () => {
@@ -206,8 +257,7 @@ describe("marshalling at the call boundary", () => {
     });
 
     await h.userFunctions.prepare();
-    const impl = h.userFunctions.impls.get(resolved.ref)!;
-    expect(await impl({ at: "2026-08-21T00:00:00.000Z" })).toBe("2026-08-22T00:00:00.000Z");
+    expect(await call(h, resolved.ref, { at: "2026-08-21T00:00:00.000Z" })).toBe("2026-08-22T00:00:00.000Z");
   });
 });
 
@@ -258,8 +308,7 @@ describe("resolution is not execution", () => {
     await h.userFunctions.prepare();
     expect((globalThis as Record<string, unknown>).__loadRan).toBe(false);
 
-    const impl = h.userFunctions.impls.get(userFunctionRef(`${FN}/effect.ts`, ["go"]))!;
-    await impl({ n: 1 });
+    await call(h, userFunctionRef(`${FN}/effect.ts`, ["go"]), { n: 1 });
     expect((globalThis as Record<string, unknown>).__loadRan).toBe(true);
   });
 });

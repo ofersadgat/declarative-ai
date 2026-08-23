@@ -1454,11 +1454,25 @@ rides the existing `Persistence` port rather than a new one — it is per-machin
 which is what that port is for, and JaiRA's SQLite implementation is where it actually lands. Frozen
 emit is written beside the state files in `.jaira/snapshots/<hash>/`, which already holds the bundle.
 
-**Capabilities.** A user function declares into the existing `pure | host | runtime` union (§3.3)
-rather than sitting outside it, so permission gating and search refusal keep reading a definite value
-instead of falling through an `undefined`. All three are `memoizable: false` per SPEC §7.5.6 —
-freezing pins *which code runs*, and says nothing about whether that code returns the same answer
-twice.
+**Capabilities.** ✅ *Implemented — `userFunctions.ts`, `USER_FUNCTION_CAPABILITIES`.*
+
+A user function declares into the existing `pure | host | runtime` union (§3.3) rather than sitting
+outside it, so permission gating and search refusal keep reading a definite value instead of falling
+through an `undefined`. `memoizable: false` per SPEC §7.5.6 — freezing pins *which code runs*, and
+says nothing about whether that code returns the same answer twice. `readOnly: false` is the same
+honesty on a different axis: §7.5.4 says this is not a sandbox, so a function can write a file, and
+declaring otherwise would let one run under a profile that meant to forbid it. `host` rather than
+`pure` because a `pure` impl is synchronous.
+
+That record has to live on an ENTRY, which is why `UserFunctions` hands back `RegisteredFunction`s
+rather than callables. Bare impls left the capabilities, the signature and the error contract to
+whoever merged them — so the claim this module opens with held by convention, and `memoizable` was
+something a host restated from memory rather than something the spec decided. The ctx type is
+`unknown`, which is not a widening but the fact: nothing reaches a user function but its parameters
+(§7.5.6), and an `unknown` parameter is assignable from any registry's `Ctx`, so the merge needs no
+cast. `liftThrowing` supplies the error contract with the function's ref as context — `runFunction`
+would classify a throw by the same rules, but as the fallback for impls nobody lifted, and without
+the prefix naming which function raised.
 
 **Deadlines are weaker here than at a provider call, and the type should not pretend otherwise.**
 §3.5's `timeoutMs` is applied as an `AbortSignal` the provider honors. User code honors nothing: the
