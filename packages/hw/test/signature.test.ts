@@ -12,7 +12,7 @@
  *    §6.2 already defines the universal schema and silence is what it argues against.
  */
 import { describe, expect, it } from "vitest";
-import { extractSignature } from "../src/signature.js";
+import { extractSignature, extractSignatureWith, loadSignatureContext } from "../src/signature.js";
 import { requirePathFor } from "../src/moduleLoader.js";
 import { marshalIn, marshalOut, needsMarshalling } from "../src/marshal.js";
 import type { Vfs } from "../src/reference.js";
@@ -234,6 +234,70 @@ describe("shapes a callee cannot have", () => {
 
   it("refuses a non-callable export, which is data rather than an operation", async () => {
     await expect(signatureOf("export default { a: 1 };")).rejects.toThrow(/is not callable/);
+  });
+});
+
+/**
+ * The third way extraction can fail, and the only one that used to be SILENT.
+ *
+ * `createProgram` reads TypeScript's own `lib.*.d.ts` off the real disk, addressed only by
+ * `ts.getDefaultLibFilePath()` — the directory of the `typescript` module. A host that bundles the
+ * compiler moves that address to its own output directory, which holds no lib files, and the
+ * program then has no global scope at all.
+ *
+ * Neither documented failure mode catches that. Nothing is unrepresentable, so no `WireTypeError`;
+ * nothing widens to the universal schema, so no warning. `string[]` simply types as `{}` and comes
+ * back as a CLOSED empty object — the most restrictive schema in the language, asserted with total
+ * confidence, against which every real value fails §6.2. So the lib is checked, not assumed.
+ */
+describe("the standard library is a precondition, not a convenience", () => {
+  /** The real context with its lib reader removed — exactly what a bundled compiler produces. */
+  const withoutLib = async () => ({ ...(await loadSignatureContext()), readLib: () => undefined });
+
+  const extract = (context: Awaited<ReturnType<typeof withoutLib>>, source: string) =>
+    extractSignatureWith(context, `${FN}/f.ts`, ["default"], {
+      vfs: vfsOf({ [`${FN}/f.ts`]: source }),
+      requirePath: requirePathFor([FN]),
+    });
+
+  it("refuses to read a signature at all when no lib file can be reached", async () => {
+    const context = await withoutLib();
+    expect(() => extract(context, "export default function (): string[] { return []; }")).toThrow(
+      /standard library could not be read/,
+    );
+  });
+
+  it("names the directory it looked in, and the bundling that usually moved it", async () => {
+    const context = await withoutLib();
+    let message = "";
+    try {
+      extract(context, "export default function (): number { return 1; }");
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    // An intrinsic return would have survived the missing lib, which is exactly why the check
+    // cannot be "did this one type come out wrong" — the fault is the program, not the signature.
+    expect(message).toMatch(/Cannot find global type 'Array'/);
+    expect(message).toMatch(/getDefaultLibFilePath/);
+    expect(message).toMatch(/keep 'typescript' external/);
+  });
+
+  it("still reads a signature whose FILE has an ordinary type error — the parameter list is intact", async () => {
+    const source = `const bad: number = 'x' as unknown as number;
+export default function (n: number): string[] { return [String(n), String(bad)]; }`;
+    const { parameters, returns } = await signatureOf(source);
+    expect(parameters).toMatchObject([{ name: "n", schema: { type: "number" } }]);
+    expect(returns).toMatchObject({ type: "array", items: { type: "string" } });
+  });
+
+  it("still reads a signature whose IMPORT does not resolve, warning about the slot it could not type", async () => {
+    const source = `import type { Thing } from './missing.js';
+export default function (): Thing { return null as never; }`;
+    const { returns, warnings } = await signatureOf(source);
+    // Reported rather than refused: an unresolvable import widens ONE slot, and the warning names
+    // it. That is the documented `any` path, not the silent one this block exists for.
+    expect(returns).toEqual({});
+    expect(warnings.join(" ")).toMatch(/untyped/);
   });
 });
 

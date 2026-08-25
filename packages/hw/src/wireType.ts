@@ -19,6 +19,13 @@
  *    slot that accepts anything and is then wired into a typed consumer is the failure §6.2 argues
  *    against for undeclared outputs.
  *
+ * Both rest on the checker having a GLOBAL SCOPE, and neither can notice its absence. Without the
+ * standard library `string[]` resolves to `{}` — an ordinary empty object type, unrepresentable in
+ * no way and unconstrained in no way — so it takes the closed-object path below and comes out as
+ * the narrowest schema there is. That is a precondition rather than a conversion rule, so it is
+ * checked once where the `Program` is built (`signature.ts`'s `createProgram`) instead of being
+ * guessed at per type here.
+ *
  * ## Marshalled types are not exceptions to that
  *
  * `Date` is representable *because a marshaller exists for it* — its wire type is

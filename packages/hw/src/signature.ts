@@ -343,7 +343,35 @@ function createProgram(
       }),
   };
 
-  return ts.createProgram([entry], compilerOptions, host);
+  const program = ts.createProgram([entry], compilerOptions, host);
+
+  // The lib is not optional, and a program without one does not FAIL — it answers wrongly.
+  //
+  // With no `lib.*.d.ts` the checker has no global scope: `Array`, `Date`, `Math` and the rest do
+  // not resolve, so `string[]` types as `{}`. That is the worst possible shape for it to take,
+  // because `{}` is a perfectly ordinary object type — `convertObjectLike` sees no array, no call
+  // signature and no marshalled name, and `convertObject` hands back a CLOSED
+  // `{"type":"object","properties":{}}`. The module note's two failure modes are both bypassed:
+  // nothing was unrepresentable and nothing fell back to the universal schema, so no error is
+  // thrown and no warning is pushed. The extraction simply asserts the most restrictive schema in
+  // the language, and every §6.2 binding check downstream believes it.
+  //
+  // `getGlobalDiagnostics` is precisely this question and no other. It reports "Cannot find global
+  // type 'Array'" when the lib is missing, and stays EMPTY both for ordinary type errors in the
+  // function's own body and for an import that does not resolve — neither of which should stop a
+  // signature being read, since the parameter list is still there to read.
+  const globals = program.getGlobalDiagnostics();
+  if (globals.length > 0) {
+    const first = ts.flattenDiagnosticMessageText(globals[0]!.messageText, " ");
+    throw new SignatureError(
+      `the TypeScript standard library could not be read, so no global type resolves (${first}) — ` +
+        `every signature read without it would be silently wrong. Looked in '${libDir}', which is where ` +
+        `'ts.getDefaultLibFilePath()' points: the directory holding the 'typescript' module itself. A host that ` +
+        `BUNDLES the compiler into its own output moves that address to a directory with no 'lib.*.d.ts' in it, ` +
+        `which is the usual cause — keep 'typescript' external to the bundle`,
+    );
+  }
+  return program;
 }
 
 function extensionOf(ts: typeof TS, file: string): TS.Extension {
