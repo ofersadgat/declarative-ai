@@ -40,7 +40,66 @@ function compare(a: unknown, b: unknown): number {
   return str(a) < str(b) ? -1 : str(a) > str(b) ? 1 : 0;
 }
 
-const same = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+/**
+ * A TOTAL stand-in for `JSON.stringify`, used wherever a value has to be compared or printed.
+ *
+ * `JSON.stringify` is not total, and three of its failure modes are reachable here. A user `.ts`
+ * function's return value enters the dataflow unconverted whenever its schema needs no marshalling
+ * (`marshalOut`), so anything JavaScript can hold can arrive: a CIRCULAR object ("Converting circular
+ * structure to JSON"), a structure deep enough to exhaust the stack, or a BIGINT ("Do not know how to
+ * serialize a BigInt"). Each of those threw straight out of a synchronous resolver — the one place
+ * this module's header says there is no good way to report anything.
+ *
+ * Output is byte-identical to `JSON.stringify` for every value that JSON can represent, which is what
+ * lets it replace it without moving the meaning of `same`. Key ORDER is preserved rather than sorted,
+ * deliberately: sorting would be a better equality, and a different one.
+ */
+function safeKey(v: unknown, seen: Set<object> = new Set(), depth = 0): string {
+  // Deep enough that no honest workflow value reaches it, shallow enough to leave stack to spare.
+  if (depth > 200) return '"[too deep]"';
+  if (v === null || v === undefined) return "null";
+  switch (typeof v) {
+    case "number":
+      // `JSON.stringify(NaN)` is `null`, and matching that here is what keeps the two agreeing.
+      return Number.isFinite(v) ? String(v) : "null";
+    case "boolean":
+      return String(v);
+    case "string":
+      return JSON.stringify(v);
+    case "bigint":
+      // JSON has no bigint. A marker beats a throw, and beats `Number(v)` silently losing precision.
+      return JSON.stringify(`[bigint ${v.toString()}]`);
+    case "function":
+    case "symbol":
+      return "null";
+  }
+  const o = v as Record<string, unknown> & { toJSON?: () => unknown };
+  // `Date` and anything else defining it, exactly as `JSON.stringify` would.
+  if (typeof o.toJSON === "function") {
+    try {
+      return safeKey(o.toJSON(), seen, depth + 1);
+    } catch {
+      return '"[unserializable]"'; // a throwing `toJSON` is the author's bug, not a reason to fail here
+    }
+  }
+  if (seen.has(o)) return '"[circular]"';
+  seen.add(o);
+  try {
+    if (Array.isArray(v)) return `[${v.map((x) => safeKey(x, seen, depth + 1)).join(",")}]`;
+    const parts: string[] = [];
+    for (const [k, val] of Object.entries(o)) {
+      // Omitted from an object and nulled in an array — JSON's own asymmetry, reproduced.
+      if (val === undefined || typeof val === "function" || typeof val === "symbol") continue;
+      parts.push(`${JSON.stringify(k)}:${safeKey(val, seen, depth + 1)}`);
+    }
+    return `{${parts.join(",")}}`;
+  } finally {
+    // Removed on the way out so a value REPEATED in two branches is not mistaken for a cycle.
+    seen.delete(o);
+  }
+}
+
+const same = (a: unknown, b: unknown): boolean => safeKey(a) === safeKey(b);
 
 function define(params: readonly string[], fn: (...values: unknown[]) => unknown): Builtin {
   return { params, fn: (args) => fn(...params.map((p) => args[p])) };
@@ -84,9 +143,24 @@ export const BUILTINS: Readonly<Record<string, Builtin>> = {
   ),
   reverse: define(["value"], (v) => [...arr(v)].reverse()),
   sort: define(["value"], (v) => [...arr(v)].sort(compare)),
+  /**
+   * First occurrence of each distinct value, by the same deep comparison `same` defines.
+   *
+   * Keyed through a Set rather than scanning what has been kept. The scan was `out.some(same)`, which
+   * is O(n²) comparisons and serializes both sides on every one of them: 8,000 distinct elements took
+   * 6.5 SECONDS, 4,000 took one, and the curve keeps going. Being synchronous, that is not a slow
+   * expression — it is the whole process stopped, engine and UI together, by an array that is merely
+   * large. Same result, same order, one pass.
+   */
   unique: define(["value"], (v) => {
     const out: unknown[] = [];
-    for (const item of arr(v)) if (!out.some((x) => same(x, item))) out.push(item);
+    const keys = new Set<string>();
+    for (const item of arr(v)) {
+      const k = safeKey(item);
+      if (keys.has(k)) continue;
+      keys.add(k);
+      out.push(item);
+    }
     return out;
   }),
   /** NOT `push`: every value here is immutable, so this returns a new array. */
@@ -195,7 +269,8 @@ export const BUILTINS: Readonly<Record<string, Builtin>> = {
       return undefined; // total: a malformed document is `undefined`, not a thrown error
     }
   }),
-  to_json: define(["value"], (v) => JSON.stringify(v ?? null)),
+  /** Total, like everything else here: a circular, too-deep or bigint value is described, not thrown. */
+  to_json: define(["value"], (v) => safeKey(v)),
   typeof: define(["value"], (v) =>
     v === null ? "null" : Array.isArray(v) ? "array" : v === undefined ? "undefined" : typeof v,
   ),
