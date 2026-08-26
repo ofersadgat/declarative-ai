@@ -23,6 +23,7 @@ const scope: ResolutionScope = {
   },
   childOutputs: () => undefined,
   scopeValue: () => undefined,
+  optionalInput: () => false,
   artifact: () => undefined,
   conversation: () => undefined,
 };

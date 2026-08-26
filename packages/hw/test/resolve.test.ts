@@ -18,6 +18,7 @@ const scope: ResolutionScope = {
   exprContext: { inputs: { n: 2 } },
   childOutputs: () => undefined,
   scopeValue: (name) => (name === "n" ? 2 : undefined),
+  optionalInput: (name) => name === "maybe",
   artifact: () => undefined,
   conversation: () => undefined,
 };
@@ -201,6 +202,7 @@ describe("operator resolvers", () => {
     exprContext: ctx,
     childOutputs: (key) => (key === "pending" ? PENDING : undefined),
     scopeValue: () => undefined,
+    optionalInput: () => false,
     artifact: () => undefined,
     conversation: () => undefined,
   };

@@ -1206,6 +1206,11 @@ export class WorkflowEngine {
         const v = instance.inputs[name];
         return v === undefined ? undefined : (v as JsonValue);
       },
+      optionalInput: (name) => {
+        if (instance.def.inputs?.[name] === undefined) return false;
+        const meta = instance.def.slotMeta?.[`inputs.${name}`];
+        return meta?.optional === true || meta?.default !== undefined;
+      },
       artifact: (name) => {
         const found = this.artifacts.find((a) => a.name === name);
         return found === undefined ? undefined : (found as unknown as JsonValue);

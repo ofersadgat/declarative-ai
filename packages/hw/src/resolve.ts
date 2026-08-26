@@ -51,6 +51,15 @@ export interface ResolutionScope {
   childOutputs(key: string): JsonValue | Pending | undefined;
   /** This state's resolved input values, by name. */
   scopeValue(name: string): JsonValue | undefined;
+  /**
+   * Whether this state DECLARES `name` as an input whose absence it accepts — `optional: true`, or a
+   * `default` (SPEC §4.1: "slots are required by default; `true` relaxes that").
+   *
+   * Distinguishes the two things an unset input can mean, which {@link scopeValue} cannot: a slot the
+   * author said may be absent, and a name the state does not have at all. The first is a value; the
+   * second is a typo.
+   */
+  optionalInput(name: string): boolean;
   /** A session-owned artifact's content, by name. */
   artifact(name: string): JsonValue | undefined;
   /** A session's transcript, or one message of it. */
@@ -310,7 +319,16 @@ function runResolver(op: Operation<InlineFamily> & { kind: "function" }, scope: 
       const name = text("name");
       if (name === undefined) return { error: "scope producer has no name" };
       const v = scope.scopeValue(name);
-      return v === undefined ? { error: `input '${name}' is not set` } : { value: v };
+      if (v !== undefined) return { value: v };
+      // An OPTIONAL input that nobody filled is `undefined`, not a refusal — the same rule a child
+      // that has not run follows, applied to the other thing a state reads. Refusing here made
+      // `optional: true` mean nothing the moment the slot was passed ALONG: a parent would leave an
+      // optional input unset, correctly, and the child's own wire `.inputs.<name>` would then blow up
+      // one level down for having been given exactly what the author said was acceptable.
+      //
+      // A name the state does not DECLARE still refuses. That is the case this was protecting — a
+      // typo reading as `undefined` — and it is untouched, because the author never opted into it.
+      return scope.optionalInput(name) ? { value: undefined as unknown as JsonValue } : { error: `input '${name}' is not set` };
     }
     case RESOLVER_REFS.artifact: {
       const name = text("name");

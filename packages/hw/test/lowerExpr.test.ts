@@ -67,6 +67,7 @@ function scopeFor(context: Record<string, unknown>): ResolutionScope {
     exprContext: context,
     childOutputs: () => undefined,
     scopeValue: () => undefined,
+    optionalInput: () => false,
     artifact: () => undefined,
     conversation: () => undefined,
   };

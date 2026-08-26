@@ -57,9 +57,7 @@ const leaf = (name: string, opts: { optional?: boolean; delayMs?: number } = {})
       // `args` is JSON config, `input` is where a BINDING goes — the leaf has to read the slot it
       // was entered with, not the string ".inputs.later".
       args: { name, ...(opts.delayMs !== undefined ? { delayMs: opts.delayMs } : {}) },
-      // Read as an EXPRESSION: `.inputs.later` lowers to `scope.get`, which refuses an input that
-      // was never set — deliberate, and a different question from the one under test here.
-      input: { later: { binding: { expr: ".inputs.later" }, optional: true } },
+      input: { later: { binding: ".inputs.later", optional: true } },
     },
   }) as StateDef;
 
@@ -97,6 +95,46 @@ describe("a child that has not run (SPEC §3.4)", () => {
     // `b` is never ENTERED: a required slot with nothing to fill it blocks the child, exactly as
     // before. What changed is only that the refusal now comes from the SLOT, not the resolver.
     expect(r.order).not.toContain("b");
+  });
+});
+
+/**
+ * The same rule, applied to the other thing a state reads.
+ *
+ * An optional input is worth nothing if it cannot be PASSED ALONG: a parent leaves it unset, exactly
+ * as the author said it might be, and the child's own `.inputs.<name>` wire then refuses one level
+ * down for having been handed precisely that. Which is how `feature` failed at `explore → brief`
+ * after the child half of this was fixed.
+ */
+describe("an optional input that nobody filled", () => {
+  /** `outer` takes an optional input, never gets one, and wires it into its child. */
+  const passingAlong = (declare: boolean): Record<string, StateDef> => ({
+    root: {
+      label: "Root",
+      children: { outer: { state: "root/outer", inputs: {} } },
+    } as StateDef,
+    "root/outer": {
+      label: "outer",
+      inputs: { hint: { schema: {}, optional: true } },
+      children: {
+        // `.inputs.hint` when declared; a name the state does not have when not.
+        leaf: { state: "root/outer/leaf", inputs: { later: declare ? ".inputs.hint" : ".inputs.nosuch" } },
+      },
+    } as StateDef,
+    "root/outer/leaf": leaf("leaf", { optional: true }),
+  });
+
+  it("reads as `undefined`, and the consuming slot absorbs it", async () => {
+    const r = await run(passingAlong(true));
+    expect(r.outcome).toBe("success");
+    expect(r.seen["leaf"]).toBeUndefined();
+  });
+
+  it("still REFUSES a name the state does not declare — that is a typo, not an absence", async () => {
+    // The case the refusal was protecting. Untouched: the author never opted into it.
+    const r = await run(passingAlong(false));
+    expect(r.outcome).toBe("error");
+    expect(r.order).not.toContain("leaf");
   });
 });
 
