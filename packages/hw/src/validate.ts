@@ -179,7 +179,9 @@ function validateState(
         continue;
       }
       const consumerMeta = childDef?.slotMeta?.[`inputs.${inputName}`];
-      checkBinding(binding, consumer?.schema, path, id, def, bundle, scope, reachable, errors, isOptOut(consumerMeta));
+      // Asked AT THE MOUNT: a wire into `key` resolves when `key` is entered, so a sibling that runs
+      // after it is not proven for this binding even though it is for the state's own outputs.
+      checkBinding(binding, consumer?.schema, path, id, def, bundle, scope, reachable.enteredAt(key), errors, isOptOut(consumerMeta));
     }
     // Required child inputs must be wired (or defaulted/optional).
     if (childDef) {
@@ -1107,6 +1109,16 @@ function isOptOut(meta: SlotMeta | undefined): boolean {
 interface Reachability {
   /** Children proven to have run on EVERY path reaching the state's evaluation point. */
   always: Set<string>;
+  /**
+   * The same analysis asked at the moment `key` is ENTERED, rather than at the state's own
+   * evaluation point.
+   *
+   * A child mount's input wires resolve when that child is entered — so the members that run AFTER
+   * it are not proven for them, however proven they are for the state's outputs and guards. Asking
+   * the state-level question for a mount is what let `{ "b": { "inputs": { "x": ".children.c…" } } }`
+   * lint clean with `c` declared after `b`, and then fail at run time every single time.
+   */
+  enteredAt(key: string): Reachability;
 }
 
 /**
@@ -1182,7 +1194,20 @@ function reachabilityOf(def: LoadedState): Reachability {
     // A transition that can fire at `earliest` pre-empts every member after it.
     if (def.children?.[key] && earliest >= i) always.add(key);
   });
-  return { always };
+
+  /**
+   * Proven at the point `key` is entered: the members strictly before it, and only those that were
+   * proven at all. A child OUTSIDE the sequence is entered only by a transition and could fire from
+   * anywhere, so nothing precedes it provably — the same conservatism the rest of this applies.
+   */
+  const enteredAt = (key: string): Reachability => {
+    const limit = indexOf.get(key);
+    const proven =
+      limit === undefined ? new Set<string>() : new Set([...always].filter((k) => (indexOf.get(k) ?? Number.POSITIVE_INFINITY) < limit));
+    return { always: proven, enteredAt };
+  };
+
+  return { always, enteredAt };
 }
 
 // --- Expression scope ---------------------------------------------------------

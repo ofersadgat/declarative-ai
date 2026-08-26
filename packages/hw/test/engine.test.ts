@@ -769,7 +769,10 @@ describe("declared outputs at termination (SPEC §3.7)", () => {
     parent: {
       label: "Parent",
       inputs: {},
-      outputs: { report: { schema: { type: "string" }, binding: ".children.never_run.outputs.report" } },
+      // An ARTIFACT that was never registered, not an unrun child: a child that has not run resolves
+      // to `undefined` (SPEC §3.4), so it no longer produces a resolution FAILURE for this block to
+      // carry. `.artifacts.*` still refuses, which is what keeps the case under test reachable.
+      outputs: { report: { schema: { type: "string" }, binding: ".artifacts.never_made" } },
       children: { never_run: { state: "parent/leaf" } },
       // An EMPTY sequence keeps the child out of the spine entirely — the way to say "declared, but
       // only ever entered by a transition" now that an absent sequence means declaration order (§6).
@@ -789,7 +792,7 @@ describe("declared outputs at termination (SPEC §3.7)", () => {
     const { engine } = makeEngine(files(), "parent", () => ok({ report: "r" }));
     const result = await engine.run({ inputs: {} });
     expect(result.outcome).toBe("error");
-    expect(result.failure?.reason).toMatch(/output 'report': child 'never_run' has not run/);
+    expect(result.failure?.reason).toMatch(/output 'report': artifact 'never_made' is not available/);
     expect(result.failure?.reason).not.toMatch(/was not produced/);
   });
 

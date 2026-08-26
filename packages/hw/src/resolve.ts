@@ -218,7 +218,18 @@ function resolveProducer(ref: { op: Operation<InlineFamily> | string; parameters
   const producer = ref.op;
   if (typeof producer === "string") {
     const outputs = scope.childOutputs(producer);
-    if (outputs === undefined) return { error: `child '${producer}' has not run` };
+    // A child that HAS NOT RUN is `undefined`, not an error (SPEC §3.4): "references such as
+    // `children.<id>.outputs` ... evaluate to `undefined` if the child has not run". Refusing here
+    // made the same reference mean two different things depending on which form it was written in —
+    // `".children.c.outputs.x"` lowers to this edge and refused, while `{ expr: ".children.c.outputs.x" }`
+    // lowers to a `member` chain and yielded `undefined` — so a guard was lenient and a wire was not.
+    // Whether an absent value is ACCEPTABLE is the consuming slot's to say, through `optional`/`default`
+    // (§7.2's named opt-out); whether it is REACHABLE at all is the validator's, through the
+    // definite-assignment analysis. Neither question belongs to the resolver.
+    //
+    // IN FLIGHT is still PENDING and not `undefined` — §6 is explicit that a started-but-unfinished
+    // child parks its consumer rather than reading as permanently missing.
+    if (outputs === undefined) return { value: undefined as unknown as JsonValue };
     if (isPending(outputs)) return PENDING;
     return { value: outputs };
   }
@@ -284,13 +295,16 @@ function runResolver(op: Operation<InlineFamily> & { kind: "function" }, scope: 
       if (base === undefined || key === undefined) return { error: "select producer is missing value/key" };
       if (!isResolvedValue(base)) return base;
       const v = base.value;
-      if (v === null || typeof v !== "object" || Array.isArray(v)) {
-        return { error: `cannot select '${key}' from a non-object producer output` };
-      }
-      // OWN properties only: `{ child: "c", output: "constructor" }` used to select off the
-      // prototype and hand a FUNCTION on as the slot's value instead of reporting a missing output.
-      const picked = Object.hasOwn(v, key) ? v[key] : undefined;
-      return picked === undefined ? { error: `producer output has no '${key}'` } : { value: picked };
+      // `select` is the child-output projection and NOTHING else — the loader emits it in exactly one
+      // place, for `.children.<key>.outputs.<name>` — so it reads exactly as `memberOf` does, which is
+      // what the same path means when it is written as an expression. Absence at either step (the child
+      // never ran, or ran without producing this output) is `undefined`, per SPEC §3.4; OWN properties
+      // only, so `.outputs.constructor` is absent rather than a function off the prototype.
+      //
+      // A name the producer does not DECLARE is a load-time error already ("selects output 'x', which
+      // the producer does not declare"), so refusing it again here only ever fired for an optional
+      // output a run legitimately omitted — the one case where `undefined` is the right answer.
+      return produced(memberOf(v, key));
     }
     case RESOLVER_REFS.scope: {
       const name = text("name");

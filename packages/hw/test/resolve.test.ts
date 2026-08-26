@@ -137,8 +137,12 @@ describe("ref TREES — primitives, and what a tree cannot contain", () => {
     expect(value({ refs: { a: { child: "c", note: "not sugar" } } })).toEqual({ a: { child: "c", note: "not sugar" } });
   });
 
-  it("resolves a TOP-LEVEL producer edge as before — only nesting one in a tree is refused", () => {
-    expect(error({ op: "c" })).toMatch(/child 'c' has not run/);
+  it("RESOLVES a top-level producer edge — only nesting one in a tree is refused", () => {
+    // The edge resolves; it does not refuse. A child that has not run is `undefined` (SPEC §3.4),
+    // which is the same answer `{ expr: ".children.c.outputs" }` gives for the same path.
+    const r = resolveRef({ op: "c" }, scope);
+    expect(isResolveError(r)).toBe(false);
+    expect(isResolvedValue(r) && r.value).toBeUndefined();
   });
 });
 
@@ -166,12 +170,20 @@ describe("the select resolver projects own properties only", () => {
     expect(isResolvedValue(r) && r.value).toBe("doc");
   });
 
-  it("refuses a prototype name instead of returning a function", () => {
+  it("never returns a prototype member — an inherited name is absent, not a function", () => {
+    // OWN properties only. `select` reads as `memberOf` does now, so the answer is `undefined`
+    // rather than a refusal — but the hazard this guards is unchanged: a FUNCTION off the
+    // prototype must never reach a slot as its value.
     for (const key of ["constructor", "toString", "hasOwnProperty", "__proto__"]) {
       const r = resolveRef(select(key), withChild);
-      expect(isResolveError(r), key).toBe(true);
-      expect(isResolveError(r) && r.error).toMatch(/producer output has no/);
+      expect(isResolveError(r), key).toBe(false);
+      expect(isResolvedValue(r) && r.value, key).toBeUndefined();
     }
+  });
+
+  it("is `undefined`, not a refusal, for an output the run legitimately omitted", () => {
+    const r = resolveRef(select("absent_optional_output"), withChild);
+    expect(isResolvedValue(r) && r.value).toBeUndefined();
   });
 });
 
@@ -300,21 +312,36 @@ describe("a failure flows into a slot that declares it", () => {
     },
     required: ["error"],
   };
-  /** `{op: "c"}` against a scope where no child has run: "child 'c' has not run". */
-  const unresolvable: Ref<InlineFamily> = { op: "c" };
+  /**
+   * A binding that genuinely cannot resolve. An unset INPUT, not an unrun child: a child that has
+   * not run is `undefined` (SPEC §3.4) and so resolves fine — the strictness there belongs to the
+   * consuming slot's `optional`/`default`, not to the resolver. An input slot that nothing set is
+   * a real fault, and `scope.get` still says so.
+   */
+  const unresolvable: Ref<InlineFamily> = {
+    op: {
+      kind: "function",
+      functionRef: RESOLVER_REFS.scope,
+      input: {
+        scope: { kind: "text", binding: { text: "inputs" } },
+        name: { kind: "text", binding: { text: "never_set" } },
+      },
+      output: { name: "value", kind: "json" },
+    },
+  } as Ref<InlineFamily>;
 
   it("binds the failure when the slot accepts one", () => {
     const out = resolveInputs({ report: { kind: "json", schema: FAILURE as never, binding: unresolvable } }, scope);
     expect(out).toHaveProperty("values");
     const value = (out as { values: Record<string, unknown> }).values.report as { error: Record<string, unknown> };
     expect(value.error.classification).toBe("permanent");
-    expect(value.error.reason).toMatch(/child 'c' has not run/);
+    expect(value.error.reason).toMatch(/input 'never_set' is not set/);
   });
 
   it("terminates when the slot does not — the behaviour every binding had before", () => {
     const out = resolveInputs({ report: { kind: "text", schema: { type: "string" }, binding: unresolvable } }, scope);
     expect(out).toHaveProperty("error");
-    expect((out as { error: string }).error).toMatch(/child 'c' has not run/);
+    expect((out as { error: string }).error).toMatch(/input 'never_set' is not set/);
   });
 
   it("terminates for an untyped slot, so silence never reads as 'I handle errors here'", () => {

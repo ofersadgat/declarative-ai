@@ -282,6 +282,24 @@ describe("validateBundle failure modes", () => {
     expect(report.errors.map((e) => e.message).join("\n")).toMatch(/not proven to have run/);
   });
 
+  it("asks reachability AT THE MOUNT — a wire onto a LATER sibling is not proven", () => {
+    const files = specPlanningFiles();
+    const plan = files[PLAN_ID]!;
+    const keys = Object.keys(plan.children!);
+    const [first, last] = [keys[0]!, keys[keys.length - 1]!];
+    // The first child reads the last one. Proven at the state's own evaluation point — every member
+    // has run by then — but NOT at the moment the first child is entered, which is when its inputs
+    // resolve. Asking the state-level question here is what let this lint clean and then fail on
+    // every single run.
+    // `state` is optional on a mount — it defaults to the conventional child path.
+    const consumer = files[plan.children![first]!.state ?? `${PLAN_ID}/${first}`]!;
+    const slot = Object.keys(consumer.inputs ?? {})[0];
+    if (slot === undefined) throw new Error("fixture has no input to wire");
+    plan.children![first]!.inputs = { ...plan.children![first]!.inputs, [slot]: `.children.${last}.outputs.outcome` };
+    const report = validateBundle(loadBundle(files, PLAN_ID));
+    expect(report.errors.map((e) => e.message).join(" | ")).toMatch(/not proven to have run/);
+  });
+
   it("an optional/defaulted slot is the explicit opt-out from the reachability rule", () => {
     const files = specPlanningFiles();
     // The fixture's `human_decision` reads that same conditionally-reached child, but declares
