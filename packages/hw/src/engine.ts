@@ -730,7 +730,7 @@ export class WorkflowEngine {
       // spine does not start alongside it. `async: true` is the opt-out and the only opt-out —
       // concurrency is a thing an author asks for, not the default a plain sequence falls into.
       const sequence = def.sequence ?? [];
-      const held = instance.heldFor !== undefined && instance.children.get(instance.heldFor)?.status === "running";
+      const held = instance.heldFor !== undefined;
       const nextKey = held ? undefined : sequence.slice(instance.cursor).find((k) => !instance.children.has(k));
       if (nextKey !== undefined) {
         const entered = this.enterChild(instance, nextKey);

@@ -76,6 +76,37 @@ describe("a sequence nobody wrote", () => {
     expect(log).toEqual(["enter a", "exit a", "enter b", "exit b"]);
   });
 
+  it("holds the cursor for a child that fails ON ENTRY — one at a time means one at a time", async () => {
+    // A child blocked on its inputs never awaits anything: it reports and is `done` before
+    // `enterChild` has even returned. The cursor's hold used to test "is it still RUNNING", so a
+    // child that failed this fast read as "nothing to wait for" and the loop walked straight into
+    // the next member — and the next, and the next, entering the whole spine and reporting a
+    // blocked-input error for every one of them. `async: true` is the only opt-out from one-at-a-
+    // time, and a child that failed instantly never asked for it.
+    const { order, outcome } = await runMarking(
+      {
+        root: {
+          label: "Root",
+          children: {
+            a: { state: "root/a" },
+            // Requires an input wired from a child that runs later: unfillable, so `b` blocks.
+            b: { state: "root/b", inputs: { needed: ".children.d.outputs.done" } },
+            c: { state: "root/c" },
+            d: { state: "root/d" },
+          },
+        },
+        "root/a": marker("a"),
+        "root/b": { ...marker("b"), inputs: { needed: { schema: {} } } } as StateDef,
+        "root/c": marker("c"),
+        "root/d": marker("d"),
+      },
+      "root",
+    );
+    expect(outcome).toBe("error");
+    // `a` ran; `b` blocked; NOTHING after it was entered.
+    expect(order).toEqual(["a"]);
+  });
+
   it("lets `async: true` overlap — the one thing the flag means", async () => {
     const { log } = await runMarking(
       {
