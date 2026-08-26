@@ -67,14 +67,29 @@ describe("§8 exit criteria — package independence", () => {
     expect([...dependencyClosure("@declarative-ai/validate")]).toContain("ajv");
   });
 
-  it("depends on exactly ONE workspace package — json, the bottom of the graph", () => {
+  /**
+   * `log` joined `json` here when the logger moved out of this package.
+   *
+   * It is admissible on the same terms `json` is, and the terms are what this test is really about:
+   * both sit at the BOTTOM of the graph — `log` has no dependencies at all, workspace or otherwise —
+   * so neither can drag a layer above llm, or ajv, in behind it. The rule being defended was never
+   * "one edge"; it is "nothing from above, and nothing heavy", which {@link FORBIDDEN} and the ajv
+   * check state directly. The count is still exact so a THIRD edge has to be argued for here.
+   */
+  it("depends only on packages at the bottom of the graph — json and log", () => {
     const workspace = [...dependencyClosure("@declarative-ai/llm")].filter((d) => d.startsWith("@declarative-ai/"));
-    expect(workspace.sort()).toEqual(["@declarative-ai/json", "@declarative-ai/llm"]);
-    // …and the MANIFEST says so directly, not just transitively: exactly one declared workspace edge.
-    // The closure walk alone would still pass if llm gained a second workspace dependency that happened
-    // to depend only on json.
+    expect(workspace.sort()).toEqual(["@declarative-ai/json", "@declarative-ai/llm", "@declarative-ai/log"]);
+    // …and the MANIFEST says so directly, not just transitively: the closure walk alone would still
+    // pass if llm gained another workspace dependency that happened to depend only on json.
     const manifest = JSON.parse(readFileSync(path.join(ROOT, "packages/llm/package.json"), "utf8")) as { dependencies?: Record<string, string> };
-    expect(Object.keys(manifest.dependencies ?? {}).filter((d) => d.startsWith("@declarative-ai/"))).toEqual(["@declarative-ai/json"]);
+    expect(Object.keys(manifest.dependencies ?? {}).filter((d) => d.startsWith("@declarative-ai/")).sort()).toEqual([
+      "@declarative-ai/json",
+      "@declarative-ai/log",
+    ]);
+    // The property that makes `log` safe, asserted rather than assumed: a package with no
+    // dependencies cannot widen anyone's closure.
+    const logManifest = JSON.parse(readFileSync(path.join(ROOT, "packages/log/package.json"), "utf8")) as { dependencies?: Record<string, string> };
+    expect(Object.keys(logManifest.dependencies ?? {})).toEqual([]);
   });
 
   it("no file in llm's MODULE graph imports a layer above it", () => {

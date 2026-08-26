@@ -14,7 +14,7 @@
  * fixture with no network. The orchestrator NEVER overwrites good prices with a bad scrape: a
  * source that fails to fetch, parse, or VALIDATE is skipped, and existing prices stand.
  */
-import { createLogger } from "./logger.js";
+import { createLogger } from "@declarative-ai/log";
 import { deriveIdentity, displayProviderFor, keyForModel, ModelInfo, type ModelInfoInterface } from "./model-catalog.js";
 
 const log = createLogger("engine.providers.model-catalog-source");

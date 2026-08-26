@@ -1,5 +1,5 @@
 import { Output, jsonSchema, streamText, type LanguageModel, type ModelMessage, type StopCondition, type SystemModelMessage, type ToolChoice, type ToolSet } from "ai";
-import { createLogger } from "./logger.js";
+import { createLogger } from "@declarative-ai/log";
 import { ModelInfo } from "./model-catalog.js";
 import { classifyError, decodeWithSchema, describeError, isRateLimit, retryAfterMs as retryAfterMsOf, type JsonSchema, type JsonValue } from "@declarative-ai/json";
 import type { LlmCallResult, LlmFailure, LlmMetrics, LlmOutput, ReasoningSegment, TokenCounts, ToolCall, ToolResult } from "./output.js";

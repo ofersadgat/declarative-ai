@@ -20,6 +20,9 @@
       "path": "./packages/llm/tsconfig.build.json"
     },
     {
+      "path": "./packages/log/tsconfig.build.json"
+    },
+    {
       "path": "./packages/ops/tsconfig.build.json"
     },
     {

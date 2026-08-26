@@ -20,7 +20,7 @@
 import { closeSync, createReadStream, existsSync, mkdirSync, openSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { ModelInfo, type WeightsLocation } from "./model-catalog.js";
-import { createLogger } from "./logger.js";
+import { createLogger } from "@declarative-ai/log";
 
 const log = createLogger("engine.providers.weights");
 

@@ -24,7 +24,7 @@ import type {
   LanguageModelV3StreamPart,
   LanguageModelV3Usage,
 } from "@ai-sdk/provider";
-import { createLogger } from "./logger.js";
+import { createLogger } from "@declarative-ai/log";
 import type { Placement, PlacementProbe, PlacementTier } from "./residency.js";
 import type { ModelInfoInterface, WeightsLocation } from "./model-catalog.js";
 

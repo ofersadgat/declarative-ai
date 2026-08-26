@@ -18,7 +18,7 @@
  *    router configured with a managed server that is never CALLED never starts anything.
  */
 import type { FetchFunction } from "@ai-sdk/provider-utils";
-import { createLogger } from "./logger.js";
+import { createLogger } from "@declarative-ai/log";
 
 const log = createLogger("engine.providers.localServer");
 

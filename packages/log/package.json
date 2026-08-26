@@ -1,0 +1,45 @@
+{
+  "name": "@declarative-ai/log",
+  "version": "0.1.0",
+  "description": "The logging spine: hierarchical scopes, level policy, structured fields, and one swappable sink an application installs to route every package's records wherever it keeps them.",
+  "keywords": [
+    "declarative-ai",
+    "logging",
+    "structured-logging",
+    "typescript"
+  ],
+  "author": "Ofer Sadgat",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ofersadgat/declarative-ai.git",
+    "directory": "packages/log"
+  },
+  "homepage": "https://github.com/ofersadgat/declarative-ai/tree/main/packages/log#readme",
+  "bugs": {
+    "url": "https://github.com/ofersadgat/declarative-ai/issues"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json"
+  },
+  "dependencies": {}
+}

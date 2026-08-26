@@ -21,7 +21,7 @@
  * The scheduler itself never imports `node-llama-cpp`: prediction is a {@link PlacementProbe} seam, so
  * the arbitration logic is testable against invented hardware and the optional peer stays optional.
  */
-import { createLogger } from "./logger.js";
+import { createLogger } from "@declarative-ai/log";
 
 const log = createLogger("engine.providers.residency");
 

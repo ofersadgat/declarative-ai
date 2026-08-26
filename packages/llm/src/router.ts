@@ -3,7 +3,7 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { FetchFunction } from "@ai-sdk/provider-utils";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import type { LanguageModel } from "ai";
-import { createLogger } from "./logger.js";
+import { createLogger } from "@declarative-ai/log";
 import { installLongTimeoutDispatcher } from "./dispatcher.js";
 import { ManagedServer, readyGatedFetch, type ManagedServerSpec } from "./localServer.js";
 import { EmbeddedModelStore, embeddedLanguageModel, type EmbeddedModelResolver } from "./embedded.js";

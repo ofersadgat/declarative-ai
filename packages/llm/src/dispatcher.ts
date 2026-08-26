@@ -1,5 +1,5 @@
 import { Agent, setGlobalDispatcher } from "undici";
-import { createLogger } from "./logger.js";
+import { createLogger } from "@declarative-ai/log";
 
 const log = createLogger("engine.providers.dispatcher");
 

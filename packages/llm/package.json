@@ -51,6 +51,7 @@
     "@ai-sdk/anthropic": "^3.0.81",
     "@ai-sdk/openai-compatible": "^2.0.63",
     "@declarative-ai/json": "^0.1.0",
+    "@declarative-ai/log": "^0.1.0",
     "@openrouter/ai-sdk-provider": "^2.9.0",
     "ai": "^6.0.195",
     "undici": "^7.27.0"
