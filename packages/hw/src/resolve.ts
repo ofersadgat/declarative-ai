@@ -267,6 +267,12 @@ function resolveProducer(ref: { op: Operation<InlineFamily> | string; parameters
 }
 
 /** Run one of the well-known resolver functions (the desugaring targets, §2.1). */
+/** `"NaN"` / `"Infinity"` / `"-Infinity"` when this value is one, else `undefined`. */
+function nonFinite(v: unknown): string | undefined {
+  if (typeof v !== "number" || Number.isFinite(v)) return undefined;
+  return Number.isNaN(v) ? "NaN" : v > 0 ? "Infinity" : "-Infinity";
+}
+
 function runResolver(op: Operation<InlineFamily> & { kind: "function" }, scope: ResolutionScope): Resolved {
   const arg = (name: string): Resolved | undefined => {
     const p = op.input[name] as Parameter<InlineFamily> | undefined;
@@ -389,6 +395,26 @@ function runResolver(op: Operation<InlineFamily> & { kind: "function" }, scope: 
       if (l === undefined || r === undefined) return { error: `'${op.functionRef}' producer is missing left/right` };
       if (!isResolvedValue(l)) return l;
       if (!isResolvedValue(r)) return r;
+      // A COMPARISON AGAINST NaN IS REFUSED, because `false` is the wrong answer twice.
+      //
+      // The arithmetic builtins are total by design: `num()` maps anything non-numeric to NaN rather
+      // than throwing, since a throw in this synchronous resolver would escape into the scheduling
+      // loop. That is the right call, and it is why a missing field or an index off the end becomes
+      // NaN instead of an exception — see `builtins.ts`.
+      //
+      // What it cannot do is make NaN visible. Every comparison against it is false, INCLUDING the
+      // negation: `score < 0.8` is false and `score >= 0.8` is false, so a threshold silently takes
+      // whichever branch the author happened to write second. That is worse than the crash this all
+      // started with — a run that fails is a run someone fixes, and a gate that resolves on a
+      // measurement which does not exist is a decision nobody knows was never made.
+      //
+      // So the value is refused where it is READ rather than papered over where it is made. Together
+      // with the slot check in `engine.ts`, that covers both places an unrepresentable number can
+      // reach: data flowing between states, and a guard deciding where a run goes next.
+      const bad = nonFinite(l.value) ?? nonFinite(r.value);
+      if (bad !== undefined) {
+        return { error: `'${op.functionRef}' compares against ${bad}, which is not a representable JSON number (a missing field or an out-of-range index reaches arithmetic as NaN)` };
+      }
       return { value: applyBinary(BINARY_FOR[op.functionRef]!, l.value, r.value) };
     }
     // The lazy three. `arg` RESOLVES ON DEMAND, so not asking for a branch is not evaluating it —

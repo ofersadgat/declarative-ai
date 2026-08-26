@@ -114,6 +114,14 @@ import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, 
 const WAITING: unique symbol = Symbol("ai-exec/hw transition waiting");
 
 /**
+ * A guard that could not be evaluated at all — distinct from one that evaluated to false.
+ *
+ * A sentinel for the same reason {@link WAITING} is: the three existing answers are a state id, a
+ * wait, and nothing-matched, and "the question is broken" is none of those.
+ */
+const GUARD_FAILED: unique symbol = Symbol("ai-exec/hw transition guard failed");
+
+/**
  * What a call's memo remembers: the value it produced, or the failure it produced.
  *
  * Both are DATA (§5) and both are serializable, which is what lets a host back this with something
@@ -243,6 +251,15 @@ interface ChildRecord {
   outputs?: Record<string, ResolvedValue>;
   /** The child's own operation node — what `children.<key>.operation.*` reads (SPEC.md §6.1). */
   operation?: OperationNode;
+  /**
+   * Why it ended, when it ended badly.
+   *
+   * Carried on the record rather than left in the termination alone because the parent reports an
+   * unhandled child failure from HERE, and "terminated with error" on its own names the outcome
+   * without naming the cause — which is the difference between a message someone can act on and one
+   * they have to reproduce first.
+   */
+  failure?: Failure;
   abort: AbortController;
   promise: Promise<void>;
 }
@@ -296,6 +313,13 @@ interface Instance {
    * on its producer.
    */
   heldFor?: string;
+  /**
+   * Why a transition GUARD refused, when one did.
+   *
+   * Carried on the instance because `firstMatchingTransition` answers in a vocabulary of outcomes
+   * ("take this one", "wait", "nothing matched") that has nowhere to put a sentence.
+   */
+  guardFailure?: Failure;
   /** The child most recently ENTERED — what `run.cursor` reports to a guard. */
   entered?: string;
   /**
@@ -550,8 +574,17 @@ export class WorkflowEngine {
   // --- events ---------------------------------------------------------------
 
   private emit(event: EngineEvent): void {
+    // The JOURNAL is allowed to throw. It is the durable record, and a write that failed silently
+    // would leave a replay missing an event it has no way to know it is missing — so the failure
+    // travels, and `enterChild` turns it into a run failure with a reason rather than a stall.
     this.config.persistence?.record(event, this.clock.now());
-    this.config.onEvent?.(event);
+    // An OBSERVER is not. `onEvent` is a tap for whoever is watching; a listener that throws is a
+    // bug in the listener, and taking the run down with it would make watching a run change it.
+    try {
+      this.config.onEvent?.(event);
+    } catch {
+      // Nothing to report it with that is not itself an observer.
+    }
   }
 
   // --- instance loop --------------------------------------------------------
@@ -673,6 +706,9 @@ export class WorkflowEngine {
         // no transition handles it, the cursor is free to walk on from where it stopped.
         instance.heldFor = undefined;
         const step = this.takeTransition(instance, eligible);
+        // A rule that cannot be evaluated ends the state. Carrying on would let the next rule answer
+        // a question this one was supposed to decide.
+        if (step === "guard-failed") return this.finish(instance, "error", guardFailureOf(instance));
         if (step === "terminated-success") return await this.finishSuccess(instance);
         if (step === "terminated-error") return this.finish(instance, "error", errorOf(instance, "terminate.error"));
         if (step === "terminated-canceled") return this.finish(instance, "canceled");
@@ -697,7 +733,7 @@ export class WorkflowEngine {
           const rec = instance.children.get(key);
           return this.finish(instance, "error", {
             classification: "permanent",
-            reason: `child '${key}' terminated with ${rec?.outcome ?? "error"} and no transition handled it`,
+            reason: unhandledChildReason(key, rec),
           });
         }
       }
@@ -767,6 +803,7 @@ export class WorkflowEngine {
         continue;
       }
       const final = this.takeTransition(instance, this.finishedInRunOrder(instance));
+      if (final === "guard-failed") return this.finish(instance, "error", guardFailureOf(instance));
       if (final === "waiting") {
         // The state has nothing left to run and would terminate — except that a guard is waiting on
         // an answer, and a state that terminates while a person is being asked where it should go has
@@ -800,7 +837,7 @@ export class WorkflowEngine {
         const rec = instance.children.get(key);
         return this.finish(instance, "error", {
           classification: "permanent",
-          reason: `child '${key}' terminated with ${rec?.outcome ?? "error"} and no transition handled it`,
+          reason: unhandledChildReason(key, rec),
         });
       }
       return await this.finishSuccess(instance);
@@ -812,12 +849,13 @@ export class WorkflowEngine {
     instance: Instance,
     /** The children this round answers for — snapshotted before the round awaited anything. */
     eligible: readonly string[],
-  ): "none" | "entered" | "parked" | "waiting" | "terminated-success" | "terminated-error" | "terminated-canceled" | "terminated-timeout" {
+  ): "none" | "entered" | "parked" | "waiting" | "guard-failed" | "terminated-success" | "terminated-error" | "terminated-canceled" | "terminated-timeout" {
     const taken = this.firstMatchingTransition(instance, eligible);
     // WAITING is not an answer, so the round consumes nothing: the children this round was to answer
     // for are still owed an answer, and they get it from the round that runs when the call settles.
     // Consuming here would lose their completions entirely, exactly as a park would.
     if (taken === WAITING) return "waiting";
+    if (taken === GUARD_FAILED) return "guard-failed";
     // A child's list is eligible for the round its completion triggered and no other, so the round
     // consumes it — whether or not anything matched. Only the SNAPSHOT is consumed: a child that
     // finished while this round was awaiting its guard calls has not been answered by it, and wiping
@@ -869,7 +907,10 @@ export class WorkflowEngine {
    * sequence, then any child the sequence omits, in declaration order. Nothing about async completion
    * order is stable enough to branch on, so the tie is broken by something an author wrote down.
    */
-  private firstMatchingTransition(instance: Instance, eligible: readonly string[]): { to: string } | typeof WAITING | undefined {
+  private firstMatchingTransition(
+    instance: Instance,
+    eligible: readonly string[],
+  ): { to: string } | typeof WAITING | typeof GUARD_FAILED | undefined {
     // One flag, reset before each guard: whether resolving THIS guard reached a deferred call that is
     // still waiting. That is the difference between the two kinds of PENDING a guard can produce —
     // see the WAITING branch below.
@@ -877,7 +918,9 @@ export class WorkflowEngine {
     const scope = this.scopeFor(instance, (_op, _key, inFlight) => {
       if (inFlight) deferred = true;
     });
-    const firstOf = (transitions: readonly LoadedTransition[] | undefined): { to: string } | typeof WAITING | undefined => {
+    const firstOf = (
+      transitions: readonly LoadedTransition[] | undefined,
+    ): { to: string } | typeof WAITING | typeof GUARD_FAILED | undefined => {
       for (const t of transitions ?? []) {
         // A guard that failed to lower never fires: validation blocks the run, and reading it as
         // unconditional would be the worst possible interpretation of a typo.
@@ -906,10 +949,24 @@ export class WorkflowEngine {
           if (deferred) return WAITING;
           continue; // skipped this round (SPEC §6/§10.4)
         }
-        // A lowered expression cannot yield an ERROR on data: every operator's failure case is
-        // "producer is missing X", a malformed tree the loader cannot emit, and reading a missing
-        // namespace or property yields `undefined` rather than refusing. So there is no fourth
-        // outcome to give a bespoke path to — a non-value simply does not take the transition.
+        // A guard that REFUSED stops the state; it does not quietly fail to match.
+        //
+        // This used to be impossible, and the comment here said so: every operator's failure case was
+        // "producer is missing X" — a malformed tree the loader cannot emit — and reading a missing
+        // namespace or property yields `undefined` rather than refusing, so no guard could error on
+        // DATA. Comparing against a non-finite number is the first that can (see `resolve.ts`), which
+        // means there is now a fourth outcome and it needs somewhere to go.
+        //
+        // Skipping would reproduce in the engine exactly the bug the refusal exists to stop: a rule
+        // that cannot be evaluated would read as a rule that did not apply, and the run would fall
+        // through to whatever was written next as though the question had been answered.
+        if (isResolveError(r)) {
+          instance.guardFailure = r.failure ?? {
+            classification: "permanent",
+            reason: `a transition guard to '${t.to}' could not be evaluated: ${r.error}`,
+          };
+          return GUARD_FAILED;
+        }
         if (isResolvedValue(r) && r.value) return { to: t.to };
       }
       return undefined;
@@ -1010,6 +1067,10 @@ export class WorkflowEngine {
       record.status = "done";
       record.outcome = term.outcome;
       record.outputs = term.outputs;
+      // Kept alongside the outcome so the parent can say WHY an unhandled failure ended the state.
+      // Without it the report is "terminated with error", which names the outcome and loses the one
+      // sentence that identifies the slot, the call, or the value actually responsible.
+      record.failure = term.failure;
       // The child's operation node, so `children.<key>.operation.*` reads what its call reported —
       // including, for a prompt op, the conversation position it ended at (SPEC.md §6.1).
       record.operation = term.operation;
@@ -1024,7 +1085,46 @@ export class WorkflowEngine {
     };
 
     instance.children.set(key, record);
-    record.promise = run();
+    // A THROW anywhere in the child's own execution is a run FAILURE, never a stall.
+    //
+    // `run()` is deliberately not awaited — that is what lets the parent carry on and a sibling run
+    // alongside it — so an exception inside it had nowhere to go: the promise rejected, nothing held
+    // a handler for it, and the parent went on waiting for a `notify` that only the normal path ever
+    // signals. The run hung with the process idle, the heartbeat still ticking, and the rejection
+    // printed to a console nobody was reading.
+    //
+    // Anything can raise in there: a host's journal callback, a memo key that cannot be canonicalized
+    // because a bound argument is NaN, a bug in the engine itself. None of them is a reason to stop
+    // answering, and every one of them is a reason to fail this child the way any other permanent
+    // failure fails it — so a transition can handle it, and the run ends with a reason attached.
+    record.promise = run().catch((e: unknown) => {
+      const failure: Failure = {
+        classification: "permanent",
+        reason: `child '${key}' crashed: ${e instanceof Error ? e.message : String(e)}`,
+      };
+      record.status = "done";
+      record.outcome = "error";
+      record.failure = failure;
+      // Defensively, because the callback that writes the journal is itself a candidate for having
+      // been what threw: the record above is what the parent actually reads, so losing this event
+      // costs the trail, not the outcome.
+      try {
+        this.emit({
+          type: "instance.terminated",
+          instanceId: record.instanceId,
+          stateId: decl.state,
+          outcome: "error",
+          failure,
+        });
+      } catch {
+        // Nothing left to report it with.
+      }
+      if (instance.children.get(key) === record) {
+        if (!instance.justFinished.includes(key)) instance.justFinished.push(key);
+        instance.unhandledFailures.add(key);
+      }
+      instance.notify.signal();
+    });
     return "started";
   }
 
@@ -1348,6 +1448,20 @@ export class WorkflowEngine {
       }
       return undefined;
     }
+    // NaN and the infinities are refused HERE, ahead of the schema and whether there is one.
+    //
+    // JSON Schema cannot do this: `typeof NaN === "number"`, so NaN satisfies `{"type":"number"}` and
+    // travels as a well-typed value. It then survives every hop — one state's output is the next
+    // one's input — until something needs its CANONICAL form, and canonical JSON (RFC 8785) has no
+    // spelling for it. That throw lands wherever the value finally got hashed, naming a memo key
+    // rather than the slot that produced a number nothing can represent.
+    //
+    // The journal makes it worse by hiding it: `JSON.stringify(NaN)` is `null`, so the recorded
+    // event shows a plausible null and the trail says nothing happened.
+    //
+    // So: fail at the boundary the bad value CROSSES, and name the slot that produced it.
+    const nonFinite = nonFiniteAt(value);
+    if (nonFinite !== undefined) return `${label} is ${nonFinite.what}${nonFinite.path}, which is not a representable JSON number`;
     const schema = slot.schema;
     if (schema === undefined || Object.keys(schema).length === 0) return undefined; // unconstrained
     if (isArtifactRef(value)) return undefined; // an artifact carries its own identity, not the slot's shape
@@ -2617,6 +2731,73 @@ export class WorkflowEngine {
  * Schema's own `contentEncoding`/`contentMediaType` instead. The slot's `contentMediaType` IS the
  * artifact's content format.
  */
+/**
+ * Why an unhandled child failure ended the state, in one line.
+ *
+ * The outcome alone ("terminated with error") names WHAT happened and never why, so the cause had to
+ * be reconstructed from the journal — or, for a child that crashed rather than failed, from a console.
+ */
+/** The reason a guard refused, with a fallback so the outcome is never a failure with no sentence. */
+function guardFailureOf(instance: Instance): Failure {
+  return instance.guardFailure ?? { classification: "permanent", reason: "a transition guard could not be evaluated" };
+}
+
+function unhandledChildReason(key: string, rec: ChildRecord | undefined): string {
+  const outcome = rec?.outcome ?? "error";
+  const cause = rec?.failure?.reason;
+  return cause === undefined
+    ? `child '${key}' terminated with ${outcome} and no transition handled it`
+    : `child '${key}' terminated with ${outcome} and no transition handled it: ${cause}`;
+}
+
+/**
+ * The first NaN or Infinity anywhere in a slot value, with the path that reaches it.
+ *
+ * Deep rather than top-level: a state's output is as often a record or a list of scores as a bare
+ * number, and one unrepresentable member poisons the whole value the moment anything canonicalizes
+ * it. Binary leaves are skipped — they are bytes, not numbers, and walking them would be pointless
+ * work on the largest values in the system.
+ */
+function nonFiniteAt(
+  value: unknown,
+  path = "",
+  /**
+   * Cycle and depth protection, because this runs on EVERY slot value and a slot value is not
+   * guaranteed to be JSON. A user `.ts` function's return enters the dataflow unconverted when its
+   * schema needs no marshalling (`marshalOut`), so a circular object can reach here — and a check
+   * added to stop a run hanging must not become the thing that exhausts the stack.
+   */
+  seen: Set<object> = new Set(),
+  depth = 0,
+): { what: string; path: string } | undefined {
+  if (typeof value === "number") {
+    if (Number.isFinite(value)) return undefined;
+    const what = Number.isNaN(value) ? "NaN" : value > 0 ? "Infinity" : "-Infinity";
+    return { what, path: path === "" ? "" : ` at ${path}` };
+  }
+  if (value === null || typeof value !== "object") return undefined;
+  if (value instanceof Uint8Array || isByteStream(value)) return undefined;
+  // Past this, unrepresentable numbers are not what the value's problem is.
+  if (depth > 200 || seen.has(value)) return undefined;
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) {
+        const found = nonFiniteAt(value[i], `${path}[${i}]`, seen, depth + 1);
+        if (found !== undefined) return found;
+      }
+      return undefined;
+    }
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      const found = nonFiniteAt(v, path === "" ? k : `${path}.${k}`, seen, depth + 1);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  } finally {
+    seen.delete(value);
+  }
+}
+
 function isArtifactSlot(slot: Parameter<InlineFamily>): boolean {
   return slot.kind === "blob";
 }
