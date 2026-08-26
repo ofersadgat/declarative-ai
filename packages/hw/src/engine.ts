@@ -991,7 +991,14 @@ export class WorkflowEngine {
       } else if ("error" in resolved && typeof resolved.error === "string") {
         // Input validation failure blocks the state (SPEC §3.3/§4.1); surfaced to the
         // parent as an error termination it can branch on.
-        this.emit({ type: "instance.blocked", instanceId: -1, stateId: decl.state, reason: resolved.error });
+        this.emit({
+          type: "instance.blocked",
+          instanceId: -1,
+          stateId: decl.state,
+          childKey: key,
+          parentInstanceId: instance.id,
+          reason: resolved.error,
+        });
         term = { outcome: "error", failure: { classification: "permanent", reason: resolved.error } };
       } else {
         term = await this.runInstance(decl.state, childDef, resolved.values!, childAbort, key, instance);

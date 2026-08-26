@@ -68,7 +68,15 @@ export type OperationKind = "prompt" | "function";
 
 export type EngineEvent =
   | { type: "instance.entered"; instanceId: number; stateId: string; childKey?: string; parentInstanceId?: number; inputs: Record<string, ResolvedValue> }
-  | { type: "instance.blocked"; instanceId: number; stateId: string; reason: string }
+  /**
+   * A child that could not be ENTERED, because its input wiring did not resolve.
+   *
+   * `instanceId` is `-1` — nothing became an instance, which is the whole event. So the MOUNT is the
+   * only address it has: `stateId` names the state definition, and one definition is mounted under
+   * several keys in several parents (`explore` sits under all six phases of the feature workflow).
+   * Without the parent and the key, a reader is told a block happened somewhere and not where.
+   */
+  | { type: "instance.blocked"; instanceId: number; stateId: string; childKey?: string; parentInstanceId?: number; reason: string }
   | { type: "operation.started"; instanceId: number; stateId: string; op: OperationKind }
   /**
    * `operationId` is the content hash of the op AS DISPATCHED (`hashOperation` over the value the
