@@ -31,7 +31,7 @@ import { WorkflowEngine, type CallCache } from "./engine.js";
 import type { WorkflowBundle } from "./format.js";
 import { isByteStream, materialize, MaterializeError } from "./materialize.js";
 import { snapshotHash } from "./loader.js";
-import type { Persistence, WorkflowMetrics } from "./ports.js";
+import type { Persistence, ReplaySource, WorkflowMetrics } from "./ports.js";
 import { emptyWorkflowMetrics, mergeWorkflowMetrics } from "./ports.js";
 import { validateBundle } from "./validate.js";
 
@@ -61,6 +61,13 @@ export interface WorkflowExecutorOptions {
    *  keeps the AI SDK out of this package's dependency graph. */
   prompt?: Executor<ExecServices, WorkflowMetrics>;
   persistence?: Persistence;
+  /**
+   * What a stopped run already answered — supplying it makes this a RESUME (see {@link ReplaySource}).
+   *
+   * Forwarded for the same reason `persistence` and `callCache` are: the engine is constructed
+   * inside this executor, so without this the seam exists and nothing outside hw can reach it.
+   */
+  replay?: ReplaySource;
   /**
    * The conversation store this run's transcripts live in.
    *
@@ -199,6 +206,7 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
       // than treated as a pass.
       validator: ctx.validator ? syncOnly(ctx.validator) : undefined,
       persistence: this.options.persistence,
+      ...(this.options.replay !== undefined ? { replay: this.options.replay } : {}),
       // The two CALL seams (EXPRESSIONS.md §3), forwarded so a host can reach them: the engine is
       // constructed in here, so without this they exist and nothing can supply them.
       ...(this.options.callCache !== undefined ? { callCache: this.options.callCache } : {}),

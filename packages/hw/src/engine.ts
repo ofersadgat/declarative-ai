@@ -62,7 +62,7 @@ import {
   isOk,
   resolveCalls,
 } from "@declarative-ai/exec";
-import type { WorkflowMetrics } from "./ports.js";
+import type { InstanceAddress, ReplaySource, WorkflowMetrics } from "./ports.js";
 import {
   createToolGate,
   PermissionLedger,
@@ -187,6 +187,15 @@ export interface EngineConfig {
    *  hw schemas are inline documents, so a sync validator is the inline family's truth. */
   validator?: SyncOutputValidator;
   persistence?: Persistence;
+  /**
+   * What a stopped run already answered — supplying it makes this run a RESUME (see
+   * {@link ReplaySource}).
+   *
+   * There is no second entry point and no separate "start here": the run begins at the root as it
+   * always does, and every operation this source can answer is taken rather than dispatched. The
+   * frontier is wherever the answers stop.
+   */
+  replay?: ReplaySource;
   /** Forwarded to runtimes/functions (rate limiter, meter, ...) as their `services`. `validator`/session
    *  store are supplied by the engine. */
   services?: ExecServices;
@@ -291,6 +300,22 @@ interface Instance {
    * cannot read a journal: that inaccessibility is the whole reason this namespace exists.
    */
   operation?: OperationNode;
+  /**
+   * Where this instance sits in the tree — the key a {@link ReplaySource} is asked with.
+   *
+   * Carried rather than computed on demand because it is only knowable on the way IN: an occurrence
+   * counts entries under one key in one parent, so it has to be taken when the entry happens. After
+   * the fact the parent's `children` map holds one record per key and the count is gone.
+   */
+  address: InstanceAddress;
+  /**
+   * How many times each child key has been entered under this instance, ever.
+   *
+   * Distinct from `children`, which holds the LIVE record per key: a sequence reset deletes the
+   * entry there, and a loop's iterations would all read as occurrence 0. This one only counts up, so
+   * two iterations of one child are two addresses.
+   */
+  entries: Map<string, number>;
   iteration: number;
   /** Whether the state's single operation has run (§7.1: a state has ONE operation). */
   opRun: boolean;
@@ -487,6 +512,21 @@ function modelOfOp(op: Operation<InlineFamily>): string | undefined {
   return typeof model === "string" ? model : undefined;
 }
 
+/**
+ * This instance's address, counting the entry as it takes it.
+ *
+ * MUTATES the parent's tally, which is the only way an occurrence can be right: it means "how many
+ * times this key had been entered before now", and only the moment of entry knows that. Reading it
+ * back off `children` later would answer 0 every time, because a sequence reset deletes the record
+ * a loop's previous iteration left there.
+ */
+function addressOf(parent: Instance | undefined, childKey: string | undefined): InstanceAddress {
+  if (parent === undefined || childKey === undefined) return [];
+  const occurrence = parent.entries.get(childKey) ?? 0;
+  parent.entries.set(childKey, occurrence + 1);
+  return [...parent.address, { childKey, occurrence }];
+}
+
 function resourceKeyFor(def: LoadedState, parent: Instance | undefined): string {
   // `scopeSession` rather than `environment.session`: the latter exists only on a state that declares
   // an operation, and declaring a session on a composite ROOT is the ordinary way to give a whole
@@ -608,6 +648,11 @@ export class WorkflowEngine {
       // Resolved once, on entry, from the parent's bundle and this state's own declaration — so a
       // subtree that declares nothing shares its enclosing bundle rather than minting one per state.
       resourceKey: resourceKeyFor(def, parent),
+      // Taken on the way in, for the reason the field documents: an occurrence is a count of entries
+      // and there is nothing left to count once the entry is over. A root has no child key and
+      // therefore no step, so the run itself is the empty address.
+      address: addressOf(parent, childKey),
+      entries: new Map(),
       iteration: 0,
       opRun: false,
       children: new Map(),
@@ -1472,6 +1517,58 @@ export class WorkflowEngine {
   // --- operations -----------------------------------------------------------
 
   /**
+   * Take a recorded answer for this state's operation instead of making the call.
+   *
+   * `undefined` means there is no answer for this address and the operation must run — which is how
+   * a {@link ReplaySource} expresses the frontier. A returned object means the operation is settled,
+   * with `failure` set if the recorded value does not satisfy what the state declares.
+   *
+   * The result is fed through exactly the path a dispatched one takes — the operation node, then
+   * `acceptOpOutputs`, then the completion event — so a replayed state is indistinguishable
+   * downstream from one that ran. Anything less and `finish()` would be resolving this state's
+   * outputs against a scope half-filled.
+   *
+   * Two things are deliberately NOT carried across:
+   *
+   *  - **Spend.** The recorded metrics belong to the run that paid them. Rolling them into
+   *    `childCost` here would bill a resumed run for calls it did not make, and every roll-up over a
+   *    task would then double-count. `operation.cost` is absent on a replayed state for the same
+   *    reason — no money moved.
+   *  - **The transcript refresh.** A dispatched prompt op re-reads its conversation so a
+   *    `{ conversation }` binding sees what the call just added. Nothing was added here, and the
+   *    turns the original call appended are already in the store.
+   */
+  private replayOperation(
+    instance: Instance,
+    op: Operation<InlineFamily>,
+    kind: OperationKind,
+  ): { failure?: Failure } | undefined {
+    const recorded = this.config.replay?.operationAt(instance.address);
+    if (recorded === undefined) return undefined;
+    const session =
+      recorded.session === undefined ? undefined : publishedSession(recorded.session.position, recorded.session.conversation);
+    // `model` from the record first: a route may have resolved a bare id to something the op's own
+    // config never names, and the recorded answer came from whatever actually served it.
+    instance.operation = operationNodeOf("success", undefined, recorded.model ?? modelOfOp(op), session, recorded.value);
+    const failure = this.acceptOpOutputs(instance, kind, recorded.value, op.output.kind);
+    // A recorded value that fails this state's own output contract is a real failure and travels as
+    // one. It should be unreachable — the definition is pinned, so the shape that satisfied it once
+    // satisfies it now — which is exactly why it must be loud if it ever happens rather than being
+    // smoothed over into a re-dispatch.
+    if (failure) return { failure };
+    this.emit({
+      type: "operation.completed",
+      instanceId: instance.id,
+      stateId: instance.stateId,
+      op: kind,
+      ...(recorded.operationId !== undefined ? { operationId: recorded.operationId } : {}),
+      // No `metrics`, and the omission is the honest report: metrics mean "this run measured this",
+      // and this run did not run it. See the header.
+    });
+    return {};
+  }
+
+  /**
    * Run the state's operation (§7.4): resolve its bindings against the run context, then dispatch
    * the RESOLVED op by kind — a `PromptOp` to `registry.prompt` (the llm leaf runner), a
    * `FunctionOp` to `registry.functions`. Sub-workflows, composite units, and delegated agent
@@ -1498,6 +1595,17 @@ export class WorkflowEngine {
       });
       return failure;
     };
+
+    // REPLAY, before anything is resolved and long before anything is dispatched (§ResumeSource).
+    //
+    // Ahead of `runEmbeddedOps` deliberately: a call embedded in this operation's bindings exists to
+    // produce an argument, and an operation whose answer is already known needs no arguments. Running
+    // them anyway would re-execute the one class of thing this whole path exists to avoid.
+    //
+    // (An embedded call is not addressable — it has no state and no identity in the run record, by
+    // design — so replaying one is `callCache`'s job, keyed by content hash, and not this seam's.)
+    const replayed = this.replayOperation(instance, op, kind);
+    if (replayed !== undefined) return replayed.failure === undefined ? undefined : fail(replayed.failure);
 
     // Resolve every BOUND input; FREE slots are filled by name from the state's own inputs (the
     // model's §3.8 rule). Bound values win, because a binding is what the author wrote on THIS

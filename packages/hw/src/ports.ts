@@ -135,10 +135,75 @@ export type EngineEvent =
  * Durable run recording (SPEC §10.2/§10.3). The engine calls `record` at every step;
  * implementations persist (JaiRA: SQLite) or buffer (in-memory). v1 executes runs
  * in-process; cross-restart resume is built by consumers on top of this record
- * stream plus the snapshot hash.
+ * stream plus the snapshot hash — see {@link ReplaySource}, which is the other half of that
+ * sentence: this port writes the stream, that one reads it back.
  */
 export interface Persistence {
   record(event: EngineEvent, atMs: number): void;
+}
+
+/** One step of an instance's address: which declared child, and which entry under it. */
+export interface InstanceAddressStep {
+  childKey: string;
+  /** 0-based, in entry order — a loop's second iteration is occurrence 1. */
+  occurrence: number;
+}
+
+/**
+ * Where an instance sits in the tree, root-first. The empty address IS the root.
+ *
+ * Deliberately neither the instance id nor the operation's content hash. Ids are minted
+ * `nextInstanceId++` as the engine walks, so a second walk mints its own and the two agree only by
+ * luck; the content hash collides whenever a loop dispatches the identical operation twice, which is
+ * exactly why an operation record carries an attempt number. A position in the tree is stable across
+ * runs of one pinned definition, which is the only comparison a replay ever makes.
+ */
+export type InstanceAddress = readonly InstanceAddressStep[];
+
+/** What a previous run recorded for one state's operation. */
+export interface ReplayedOperation {
+  /** What the call returned, exactly as the executor produced it. */
+  value: ResolvedValue;
+  /**
+   * The conversation position the call ended at, for an operation that ran in one.
+   *
+   * Supplied so `operation.output.session` reads on a replayed state as it did on the original — a
+   * later state threading `{"expr": ".children.plan.operation.output.session"}` binds to a position,
+   * and a resume that dropped it would resolve that expression to nothing. Absent means the
+   * operation had no conversation, and the namespace is absent exactly as it would have been.
+   */
+  session?: { position: string; conversation: string };
+  /** The model that actually served it, for `operation.model`. */
+  model?: string;
+  /**
+   * The content id of the call this answer was read out of.
+   *
+   * Stamped onto the replayed `operation.completed` so the resumed run's own journal still names the
+   * record behind the answer. hw does not interpret it: whether an id minted under an earlier run
+   * means anything under a later one is a question about how the host scopes its record store.
+   */
+  operationId?: string;
+}
+
+/**
+ * The answers a stopped run already produced, for a run re-entering it.
+ *
+ * Resume here is a deterministic FAST-FORWARD rather than a rehydration: the run starts at the root
+ * as usual, and at every operation this source can answer, the answer is taken instead of the call
+ * being made. The engine therefore rebuilds its own instance tree by walking it again, and resolves
+ * each state's declared outputs with its own `finish()` — so no part of an instance has to be
+ * reconstructed from outside, and no engine logic gets a second implementation to drift from.
+ *
+ * The last clause is the safety property the whole shape exists for. An operation with side effects
+ * — a file written, a changeset applied, an agent editing a worktree — is not re-executed on the way
+ * back to where the run stopped, because it is not dispatched at all.
+ *
+ * A source answering `undefined` is saying "this one still has to run", which is how the frontier is
+ * expressed: there is no separate declaration of where to resume, only the point at which the
+ * answers run out.
+ */
+export interface ReplaySource {
+  operationAt(address: InstanceAddress): ReplayedOperation | undefined;
 }
 
 /** The bundled in-memory persistence — embedding & tests. */
