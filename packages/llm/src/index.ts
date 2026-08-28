@@ -11,6 +11,7 @@
  * lowering and depends on both this package and `exec`.
  */
 export * from "./files.js";
+export * from "./entry.js";
 export * from "./output.js";
 export * from "./prompt.js";
 export * from "./llmConfig.js";

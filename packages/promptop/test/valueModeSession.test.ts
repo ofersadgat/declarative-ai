@@ -31,6 +31,7 @@ import {
   type SessionStore,
 } from "@declarative-ai/exec";
 import type { ModelMessage } from "ai";
+import { thinkingOfEntries } from "@declarative-ai/llm";
 import { PromptExecutor } from "../src/executor.js";
 import { fakeRunner, okOutcome, promptOp } from "./fakes.js";
 
@@ -74,7 +75,7 @@ describe("a value-mode core under withSessionPosition/withRecord", () => {
     expect(records).toHaveLength(1);
     const messages = defaultMessagesOf(records[0]!) as ModelMessage[];
     expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
-    expect(messages[1]).toEqual({ role: "assistant", content: '{"answer":"4"}' });
+    expect(messages[1]).toEqual({ role: "assistant", content: [{ type: "text", text: '{"answer":"4"}' }] });
   });
 
   it("carries the provider handle, so the next call can resume rather than start afresh", async () => {
@@ -116,10 +117,10 @@ describe("a value-mode core under withSessionPosition/withRecord", () => {
 
   it("leaves a RECORD-mode payload whole rather than replacing it with the report", async () => {
     // Both channels are populated now, so `close` has to choose — and the payload is the richer one:
-    // it carries `thinking` and the tool trace, which a `{ messages }` report does not. Preferring the
-    // report unconditionally was safe only while a record-mode core reported nothing.
+    // its entries carry the reasoning and the tool trace, which a `{ messages }` report does not.
+    // Preferring the report unconditionally was safe only while a record-mode core reported nothing.
     const store = new MapSessionStore<ModelMessage>();
-    const { runner } = fakeRunner([okOutcome({ thinking: [{ text: "considering" }] as never })]);
+    const { runner } = fakeRunner([okOutcome({ entries: [{ kind: "message", role: "assistant", provider: "test", timestamp: "t", content: [{ type: "thinking", thinking: "considering" }] }] } as never)]);
     const seam = store as unknown as SessionStore;
     const core = new PromptExecutor({ runner });
     const stack = withSessionPosition(
@@ -129,8 +130,10 @@ describe("a value-mode core under withSessionPosition/withRecord", () => {
 
     await stack.start(promptOp(), await positionIn(store, "review")).result;
 
-    const stored = store.bySession("review")[0]!.result?.value as { thinking?: unknown[] };
+    const stored = store.bySession("review")[0]!.result?.value as { entries?: never[] };
+    // The wire history is DERIVED from those entries — one array, projected on read.
+    // Two: the request half the executor prepends, and the answer the runner reported.
     expect(defaultMessagesOf(store.bySession("review")[0]!)).toHaveLength(2);
-    expect(stored.thinking).toHaveLength(1);
+    expect(thinkingOfEntries(stored.entries ?? [])).toHaveLength(1);
   });
 });

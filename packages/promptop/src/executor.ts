@@ -33,7 +33,7 @@ import { emptyEvents, finishedHandle, isOk, systemClock } from "@declarative-ai/
 import {
   createModelRouter,
   executeLlmCall,
-  emptyLlmMetrics, mergeLlmMetrics,
+  emptyLlmMetrics, mergeLlmMetrics, entriesOfMessages, providerOf,
   type CallDeps,
   type LlmCallResult,
   type LlmMetrics,
@@ -42,6 +42,7 @@ import {
   type LlmCallEnvironment,
   type ModelMessage,
   type ModelRouter,
+  type RawMessage,
   type ToolExecutor,
 } from "@declarative-ai/llm";
 import { lowerPromptOp, type LoweringOptions } from "./lowering.js";
@@ -437,7 +438,12 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
     // What the executor DOES owe the delta is the request half: `sent` is prepended below so the
     // stored payload is the whole exchange rather than only what came back.
     if (session !== undefined && call.value !== undefined && sent.length > 0) {
-      call = { ...call, value: { ...call.value, messages: [...sent, ...(call.value.messages ?? [])] } };
+      // Onto ENTRIES, which is where the conversation lives now — the payload holds one array and
+      // the wire history is projected from it. Prepending to a `messages` field the call no longer
+      // writes would store the request half where nothing reads it, and the stored exchange would be
+      // the answer with no question in front of it.
+      const asked = entriesOfMessages(sent as RawMessage[], { provider: providerOf(call.value.model), at: new Date().toISOString() });
+      call = { ...call, value: { ...call.value, entries: [...asked, ...(call.value.entries ?? [])] } };
     }
 
     const output = call.value;

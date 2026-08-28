@@ -1,5 +1,6 @@
 import { MockLanguageModelV3 } from "ai/test";
 import { beforeAll, describe, expect, expectTypeOf, it } from "vitest";
+import { thinkingOfEntries, toolUsesOfEntries } from "../src/entry.js";
 import type { JsonValue } from "@declarative-ai/json";
 import { typedSchema } from "../src/generate.js";
 import { ModelInfo } from "../src/model-catalog.js";
@@ -264,7 +265,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
     });
 
     expect(errorOf(out)).toBeUndefined();
-    expect(out.value?.thinking).toEqual([{ type: "reasoning", text: "2 plus 2 is 4", textOffset: 0 }]);
+    expect(thinkingOfEntries(out.value?.entries ?? [])).toEqual([{ type: "thinking", thinking: "2 plus 2 is 4" }]);
     expect(out.value?.value).toEqual({ answer: "4" });
   });
 
@@ -292,10 +293,9 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
     expect(errorOf(out)).toBeUndefined();
     // Output is the TEXT channel, not the calculator's args.
     expect(out.value?.value).toEqual({ answer: "4" });
-    // The intermediate tool is preserved as a discriminated trace segment, not output.
-    expect(out.value?.thinking).toEqual([
-      { type: "tool-call", text: '{"expr":"2+2"}', textOffset: 0, toolName: "calculator" },
-    ]);
+    // The intermediate tool is a `tool_use` BLOCK: the entry format has one place for a call,
+    // and it is not the reasoning list.
+    expect(toolUsesOfEntries(out.value?.entries ?? [])).toMatchObject([{ type: "tool_use", name: "calculator" }]);
   });
 
   it("backfills toolName onto the trace block when args stream before the tool is named", async () => {
@@ -317,9 +317,7 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
     });
 
     expect(out.value?.value).toEqual({ answer: "4" });
-    expect(out.value?.thinking).toEqual([
-      { type: "tool-call", text: '{"q":"hi"}', textOffset: 0, toolName: "search" },
-    ]);
+    expect(toolUsesOfEntries(out.value?.entries ?? [])).toMatchObject([{ type: "tool_use", name: "search" }]);
   });
 });
 

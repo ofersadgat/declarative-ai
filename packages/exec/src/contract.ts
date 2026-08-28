@@ -592,7 +592,23 @@ export type MessagesOf<Msg> = (record: { result?: { value?: unknown } }) => read
 
 /** The default: a payload carrying `messages`, which is what a prompt op's `LlmOutput` does. */
 export const defaultMessagesOf = <Msg>(record: { result?: { value?: unknown } }): readonly Msg[] => {
-  const value = record.result?.value as { messages?: readonly Msg[] } | undefined;
+  const value = record.result?.value as { entries?: readonly unknown[]; messages?: readonly Msg[] } | undefined;
+  // The wire history is DERIVED from the record's entries — one array holds the conversation, and
+  // what a consumer wants as `{ role, content }` is a projection of it rather than a second copy
+  // stored beside it (JaiRA's RECORDS.md). Structural on purpose: this package knows nothing about
+  // the message types, and a message entry already IS the shape a caller wants.
+  const entries = value?.entries;
+  if (Array.isArray(entries)) {
+    const out: Msg[] = [];
+    for (const raw of entries) {
+      const entry = raw as { kind?: unknown; role?: unknown; content?: unknown; sidechain?: unknown };
+      // A SUBAGENT's turns are not the main thread's wire history. Folding them in is how a record
+      // comes to claim the conversation said what a subagent said.
+      if (entry?.kind !== "message" || entry.sidechain !== undefined) continue;
+      out.push({ role: entry.role, content: entry.content } as Msg);
+    }
+    return out;
+  }
   return value?.messages ?? [];
 };
 

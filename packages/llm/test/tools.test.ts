@@ -1,6 +1,7 @@
 import { jsonSchema, stepCountIs, tool } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { describe, expect, it } from "vitest";
+import { toolResultsOfEntries, toolUsesOfEntries } from "../src/entry.js";
 import { generateStructured } from "../src/generate.js";
 import { executeLlmCall, type CallDeps } from "../src/call.js";
 import { fakeRouter, generateFlat, stream, usage, errorOf } from "./fakes.js";
@@ -46,9 +47,9 @@ describe("tools — single-turn (no executor)", () => {
     expect((captured?.tools as Array<{ name?: string }>).map((t) => t.name)).toContain("get_weather");
     expect(JSON.stringify(captured?.toolChoice)).toContain("required");
     // The model's tool call is surfaced first-class (parsed input), not executed.
-    expect(out.value?.toolCalls).toHaveLength(1);
-    expect(out.value?.toolCalls?.[0]).toMatchObject({ toolName: "get_weather", input: { city: "NYC" } });
-    expect(out.value?.toolResults).toBeUndefined();
+    expect(toolUsesOfEntries(out.value?.entries ?? [])).toHaveLength(1);
+    expect(toolUsesOfEntries(out.value?.entries ?? [])[0]).toMatchObject({ name: "get_weather", input: { city: "NYC" } });
+    expect(toolResultsOfEntries(out.value?.entries ?? [])).toEqual([]);
   });
 });
 
@@ -80,8 +81,8 @@ describe("tools — executed loop", () => {
     expect(errorOf(out)).toBeUndefined();
     expect(executedWith).toEqual({ city: "NYC" }); // executor ran with the parsed input
     expect(out.value?.value).toBe("It is sunny in NYC."); // final model turn after the tool result
-    expect(out.value?.toolCalls?.[0]).toMatchObject({ toolName: "get_weather", input: { city: "NYC" } });
-    expect(out.value?.toolResults?.[0]?.output).toMatchObject({ tempF: 72, city: "NYC" });
+    expect(toolUsesOfEntries(out.value?.entries ?? [])[0]).toMatchObject({ name: "get_weather", input: { city: "NYC" } });
+    expect(toolResultsOfEntries(out.value?.entries ?? [])[0]?.data).toMatchObject({ tempF: 72, city: "NYC" });
   });
 });
 
@@ -116,8 +117,8 @@ describe("executeLlmCall — tool declarations + injected executors", () => {
     expect(errorOf(out)).toBeUndefined();
     expect(executed).toBe(true); // the injected executor ran (declaration → ToolSet → loop)
     expect(out.value?.value).toBe("It is sunny in NYC.");
-    expect(out.value?.toolCalls?.[0]).toMatchObject({ toolName: "get_weather", input: { city: "NYC" } });
-    expect(out.value?.toolResults?.[0]?.output).toMatchObject({ tempF: 72 });
+    expect(toolUsesOfEntries(out.value?.entries ?? [])[0]).toMatchObject({ name: "get_weather", input: { city: "NYC" } });
+    expect(toolResultsOfEntries(out.value?.entries ?? [])[0]?.data).toMatchObject({ tempF: 72 });
   });
 
   it("declaration WITHOUT an injected executor is single-turn (call returned, not run)", async () => {
@@ -134,7 +135,7 @@ describe("executeLlmCall — tool declarations + injected executors", () => {
     );
 
     expect(errorOf(out)).toBeUndefined();
-    expect(out.value?.toolCalls?.[0]).toMatchObject({ toolName: "get_weather", input: { city: "NYC" } });
-    expect(out.value?.toolResults).toBeUndefined();
+    expect(toolUsesOfEntries(out.value?.entries ?? [])[0]).toMatchObject({ name: "get_weather", input: { city: "NYC" } });
+    expect(toolResultsOfEntries(out.value?.entries ?? [])).toEqual([]);
   });
 });

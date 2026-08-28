@@ -13,6 +13,7 @@
  * metrics, so a provider failure had to be re-classified on its way anywhere useful.
  */
 import type { ModelMessage } from "ai";
+import type { Entry } from "./entry.js";
 import type { Failure, JsonValue, ResultWithMetrics } from "@declarative-ai/json";
 import type { GeneratedFile } from "./files.js";
 
@@ -176,9 +177,19 @@ export interface LlmOutput<T = JsonValue> {
    * and the payload's `value` is the op's output value.
    */
   value?: T;
-  thinking?: ReasoningSegment[];
-  toolCalls?: ToolCall[];
-  toolResults?: ToolResult[];
+  /**
+   * THE CONVERSATION — every message and session event this call produced, in order, main chain and
+   * subagents alike (JaiRA's RECORDS.md).
+   *
+   * One array where there were five fields plus a captured log beside them. `thinking`,
+   * `toolCalls` and `toolResults` were PROJECTIONS of `messages` and are computed from this now
+   * ({@link thinkingOfEntries} and friends) — measured reconstructible 21 times out of 21, at a cost
+   * of 178 KB per record for the two tool indexes alone. `sidechains` was the same conversation
+   * under a second key space, and joins here on {@link BaseEntry.sidechain}.
+   *
+   * Absent when the call produced nothing, e.g. an error before the model responded.
+   */
+  entries?: Entry[];
   /** FILES the model generated (image/audio/…). They land in a `blob`-kind output parameter; there is
    *  deliberately no parallel `artifacts` channel on the execution result (DESIGN §3.7). */
   files?: GeneratedFile[];
@@ -224,28 +235,6 @@ export interface LlmOutput<T = JsonValue> {
    * interleave them faithfully. Opaque by the same rule as the live stream's `provider_event`.
    */
   providerEvents?: Array<{ index: number; event: JsonValue }>;
-  /**
-   * Lines of the transport's own ON-DISK session record that never rode the stream — a delegated
-   * agent's context injections (`attachment` lines), its structured tool-execution records
-   * (`toolUseResult`), its bookkeeping (`queue-operation`, `ai-title`), and the per-line
-   * uuid/parentUuid threading and timestamps the wire strips.
-   *
-   * Folded in by a HOST's capture step at record close, not produced by the call itself: the file is
-   * the agent's, prunable on its schedule, so copying at close is the only honest capture. `index`
-   * pins each line to how many main-chain message lines preceded it IN THE FILE (a resumed session's
-   * file spans the whole conversation, so a sliced capture keeps file positions rather than
-   * renumbering). Opaque by the same rule as {@link providerEvents}.
-   */
-  nativeLines?: Array<{ index: number; line: JsonValue }>;
-  /**
-   * The same capture for the SUBAGENT conversations, which keep their own on-disk files — keyed by
-   * the spawning tool call's id, exactly as {@link sidechains} is, so the native lines and the
-   * streamed conversation they annotate join on the key they already share. A spawn whose meta file
-   * (the id's source) was missing is keyed `agent-<agentId>` rather than dropped. `meta` is the
-   * agent's own sidecar (agentType, description), kept because nothing else records why the
-   * subagent existed.
-   */
-  nativeSidechains?: Record<string, { agentId: string; meta?: JsonValue; lines: Array<{ index: number; line: JsonValue }> }>;
 }
 
 /**

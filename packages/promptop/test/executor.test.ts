@@ -1,6 +1,6 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import type { ExecResult, ExecServices, InlineFamily, Operation, Tool } from "@declarative-ai/exec";
-import type { LlmMetrics, LlmOutput } from "@declarative-ai/llm";
+import { thinkingOfEntries, type LlmMetrics, type LlmOutput } from "@declarative-ai/llm";
 import { PromptExecutor, createPromptExecutor } from "../src/executor.js";
 import { fakeRunner, okOutcome, promptOp, errorOf } from "./fakes.js";
 
@@ -29,7 +29,7 @@ describe("PromptExecutor (core) — outcome mapping", () => {
     // rode on the execution result before this refactor; nothing downstream ever read them.
     expect("toolCalls" in out).toBe(false);
     expect("finishReason" in out).toBe(false);
-    expect("thinking" in out).toBe(false);
+    expect("entries" in out).toBe(false);
     // Metrics DO cross, because spend and timing are what execution aggregates.
     expect(out.metrics.costUsd).toBe(0.001);
     expect(typeof out.metrics.startMs).toBe("number");
@@ -184,7 +184,7 @@ describe("core — tools and blob outputs", () => {
 describe("executePromptOp — the op-level call (no projection)", () => {
   it("lowers the op and returns the FULL LlmCallResult — thinking and finishReason intact", async () => {
     const { runner, calls } = fakeRunner([
-      okOutcome({ thinking: [{ type: "reasoning", text: "hmm", textOffset: 0 }] }),
+      okOutcome({ entries: [{ kind: "message", role: "assistant", provider: "test", timestamp: "t", content: [{ type: "thinking", thinking: "hmm" }] }] }),
     ]);
     const { executePromptOp } = await import("../src/executor.js");
     const out = await executePromptOp(promptOp(), { modelRouter: undefined as never }, { runner });
@@ -192,7 +192,7 @@ describe("executePromptOp — the op-level call (no projection)", () => {
     expect(calls[0]!.def.prompt).toBe("What is 2+2?");
     expect(errorOf(out)).toBeUndefined();
     expect(out.value?.value).toEqual({ answer: "4" });
-    expect(out.value?.thinking?.[0]?.text).toBe("hmm"); // the payload the Executor projection would drop
+    expect(thinkingOfEntries(out.value?.entries ?? [])[0]?.thinking).toBe("hmm"); // the payload the Executor projection would drop
     expect(out.value?.finishReason).toBe("stop");
   });
 
@@ -210,7 +210,7 @@ describe("executePromptOp — the op-level call (no projection)", () => {
 
 describe("returnRecord — the payload ALONGSIDE the value, never instead of it", () => {
   it("hands back the full payload when the recorder asks, without changing the value", async () => {
-    const { runner } = fakeRunner([okOutcome({ thinking: [{ type: "reasoning", text: "hmm", textOffset: 0 }] })]);
+    const { runner } = fakeRunner([okOutcome({ entries: [{ kind: "message", role: "assistant", provider: "test", timestamp: "t", content: [{ type: "thinking", thinking: "hmm" }] }] })]);
     const { compose } = await import("@declarative-ai/exec");
     const { withBudget, withRateLimit } = await import("../src/wrappers.js");
     const { PassthroughRateLimiter } = await import("@declarative-ai/exec");
@@ -227,7 +227,7 @@ describe("returnRecord — the payload ALONGSIDE the value, never instead of it"
     expect(result.value).toEqual({ answer: "4" });
     const payload = (result as { record?: LlmOutput }).record;
     expect(payload?.value).toEqual({ answer: "4" });
-    expect(payload?.thinking?.[0]?.text).toBe("hmm");
+    expect(thinkingOfEntries(payload?.entries ?? [])[0]?.thinking).toBe("hmm");
     expect(payload?.finishReason).toBe("stop");
     // …and it SURVIVES the wrapper stack, which is the property that has to hold: `withMetrics`
     // rebuilds the result on every re-report, so an unnamed extra would be silently dropped.
@@ -235,7 +235,7 @@ describe("returnRecord — the payload ALONGSIDE the value, never instead of it"
   });
 
   it("reports no payload when nobody asked — the default is unchanged", async () => {
-    const { runner } = fakeRunner([okOutcome({ thinking: [{ type: "reasoning", text: "hmm", textOffset: 0 }] })]);
+    const { runner } = fakeRunner([okOutcome({ entries: [{ kind: "message", role: "assistant", provider: "test", timestamp: "t", content: [{ type: "thinking", thinking: "hmm" }] }] })]);
     const out = await createPromptExecutor({ runner }).start(promptOp(), {}).result;
     expect(out.value).toEqual({ answer: "4" }); // the op's output value, payload projected away
     expect(out).not.toHaveProperty("record");
@@ -245,6 +245,6 @@ describe("returnRecord — the payload ALONGSIDE the value, never instead of it"
     // A call that produced turns and then failed still produced them; the record is evidence.
     const { runner } = fakeRunner([okOutcome({ error: { classification: "api-retriable", reason: "overloaded" } })]);
     const out = await createPromptExecutor({ runner }).start(promptOp(), { returnRecord: true }).result;
-    expect((out as { record?: LlmOutput }).record?.messages).toHaveLength(1);
+    expect((out as { record?: LlmOutput }).record?.entries).toHaveLength(1);
   });
 });

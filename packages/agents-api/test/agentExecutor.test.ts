@@ -11,6 +11,7 @@
  * vocabulary — so a test like this could not be written at all.
  */
 import { describe, expect, it } from "vitest";
+import { thinkingOfEntries, toolResultsOfEntries, toolUsesOfEntries } from "@declarative-ai/llm";
 import { isOk, sessionOutcomeOf, promptOp, resolveSessionRef, type ExecEvent, type ExecServices, type ResolvedSession, type Tool } from "@declarative-ai/exec";
 import type { LlmOutput, ModelMessage } from "@declarative-ai/llm";
 import { PromptExecutor } from "@declarative-ai/promptop";
@@ -315,23 +316,41 @@ describe("lossless output — what the agent produced reaches the caller", () =>
   });
 
   it("hands back the agent's OWN log, verbatim — not one synthesized assistant turn", async () => {
-    const messages = (await payloadOf(fullTurn)).messages ?? [];
-    expect(messages).toHaveLength(4);
-    expect(messages[0]).toEqual({ role: "assistant", content: [{ type: "thinking", thinking: "check the file" }] });
-    expect(messages[2]).toEqual({ role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ZEPHYR" }] });
+    const entries = (await payloadOf(fullTurn)).entries ?? [];
+    expect(entries).toHaveLength(4);
+    // The blocks are NORMALIZED — one vocabulary whichever transport produced them — but nothing is
+    // dropped and nothing is invented: a signature that must go back byte-identical still does.
+    expect(entries[0]).toMatchObject({
+      kind: "message",
+      role: "assistant",
+      content: [{ type: "thinking", thinking: "check the file", signature: "sig-1" }],
+    });
+    // The provider's own spelling, kept: `tool_use_id`/`content` rather than the neutral names the
+    // read-side projections use. Storing the translation instead is what would break a replay.
+    expect(entries[2]).toMatchObject({
+      kind: "message",
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ZEPHYR" }],
+    });
   });
 
-  it("keeps thinking with its signature, positioned against the output text it accompanies", async () => {
+  it("keeps thinking with its signature, where the block that carried it sits", async () => {
+    // Derived rather than stored beside the log: `thinking` was a projection of exactly these
+    // messages, and the record used to hold both.
     const payload = await payloadOf(fullTurn);
-    expect(payload.thinking).toEqual([
-      { type: "reasoning", text: "check the file", textOffset: 0, providerMetadata: { anthropic: { signature: "sig-1" } } },
+    expect(thinkingOfEntries(payload.entries ?? [])).toEqual([
+      { type: "thinking", thinking: "check the file", signature: "sig-1" },
     ]);
   });
 
   it("keeps the tool calls and the results that answered them", async () => {
     const payload = await payloadOf(fullTurn);
-    expect(payload.toolCalls).toEqual([{ toolCallId: "toolu_1", toolName: "Read", input: { path: "a.txt" } }]);
-    expect(payload.toolResults).toEqual([{ toolCallId: "toolu_1", output: "ZEPHYR" }]);
+    expect(toolUsesOfEntries(payload.entries ?? [])).toEqual([
+      { type: "tool_use", id: "toolu_1", name: "Read", input: { path: "a.txt" } },
+    ]);
+    expect(toolResultsOfEntries(payload.entries ?? [])).toEqual([
+      { type: "tool_result", toolUseId: "toolu_1", text: "ZEPHYR" },
+    ]);
   });
 
   it("carries every token count plus rawUsage, so costUsd stays recomputable", async () => {
@@ -395,14 +414,19 @@ describe("lossless output — what the agent produced reaches the caller", () =>
   it("keeps a subagent's turns OUT of the main log and in a sidechain keyed by the spawning call", async () => {
     const payload = await payloadOf(withSubagent);
     // The main thread: Task call, its report, the final answer — and nothing the subagent said.
-    expect((payload.messages ?? []).map((m) => JSON.stringify(m))).not.toContain(expect.stringContaining("I am the subagent"));
-    expect(payload.messages).toHaveLength(3);
-    expect(payload.sidechains?.["toolu_task"]).toEqual([
-      { role: "assistant", content: [{ type: "text", text: "I am the subagent" }] },
-      { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_sub", content: "sub data" }] },
+    const main = (payload.entries ?? []).filter((e) => e.sidechain === undefined);
+    expect(JSON.stringify(main)).not.toContain("I am the subagent");
+    expect(main).toHaveLength(3);
+    // One array, and the subagent's turns are IN it — marked, not filed under a second key space.
+    const sub = (payload.entries ?? []).filter((e) => e.sidechain?.id === "toolu_task");
+    expect(sub).toMatchObject([
+      { kind: "message", role: "assistant", content: [{ type: "text", text: "I am the subagent" }] },
+      { kind: "message", role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_sub", content: "sub data" }] },
     ]);
     // The projections are the MAIN thread's: the subagent's tool results are not the agent's own.
-    expect(payload.toolResults).toEqual([{ toolCallId: "toolu_task", output: "the report" }]);
+    expect(toolResultsOfEntries(payload.entries ?? [])).toEqual([
+      { type: "tool_result", toolUseId: "toolu_task", text: "the report" },
+    ]);
     // The subagent's answer text never leaks into the main answer.
     expect(payload.value).toBe("Done.");
   });

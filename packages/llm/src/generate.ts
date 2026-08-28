@@ -3,6 +3,7 @@ import { createLogger } from "@declarative-ai/log";
 import { ModelInfo } from "./model-catalog.js";
 import { classifyError, decodeWithSchema, describeError, isRateLimit, retryAfterMs as retryAfterMsOf, type JsonSchema, type JsonValue } from "@declarative-ai/json";
 import type { LlmCallResult, LlmFailure, LlmMetrics, LlmOutput, ReasoningSegment, TokenCounts, ToolCall, ToolResult } from "./output.js";
+import { entriesOfMessages, providerOf, type RawMessage } from "./entry.js";
 import type { GeneratedFile } from "./files.js";
 import type { LlmCallDefinition, SamplingConfiguration } from "./llmConfig.js";
 import { promptAsMessages, type CallPromptInput } from "./prompt.js";
@@ -288,16 +289,17 @@ export async function generateStructured<T = JsonValue>(
     // here, the single construction site — the §4 Ajv boundary is what makes that assertion sound.
     const output: LlmOutput<T> = {
       value: args.value as T | undefined,
-      thinking: thinking.length > 0 ? thinking : undefined,
-      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-      toolResults: toolResults.length > 0 ? toolResults : undefined,
       files: producedFiles.length > 0 ? producedFiles : undefined,
       finishReason: args.finishReason,
       // Which model answered, resolved — see `LlmOutput.model`. Recorded on every branch, including
       // the failure one below: "which model refused" is exactly the question a failure raises.
       model: modelId,
       // What the call APPENDED, verbatim, for a caller mirroring the conversation (DESIGN.md §1.6).
-      ...(responseMessages.length > 0 ? { messages: responseMessages } : {}),
+      // ONE array: `thinking`, `toolCalls` and `toolResults` were projections of exactly this and
+      // are computed from it now (`thinkingOfEntries` and friends), rather than stored beside it.
+      ...(responseMessages.length > 0
+        ? { entries: entriesOfMessages(responseMessages as RawMessage[], { provider: providerOf(modelId), at: new Date().toISOString() }) }
+        : {}),
     };
     const metrics = metricsOf(args.tokens);
     if (args.failure) {

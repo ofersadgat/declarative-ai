@@ -3,7 +3,7 @@ import type { BudgetMeter, BudgetMetrics, BudgetReservation, CallEstimate, Capab
 import { EXEC_METRICS_ALGEBRA, MapMemoCache, RUNTIME_CAPABILITIES, compose, withMemoize, wrapHandle } from "@declarative-ai/exec";
 import type { ModelMessage } from "ai";
 import { createPromptExecutor } from "../src/executor.js";
-import { ResidencyManager, PlacementRefused, type Placement } from "@declarative-ai/llm";
+import { ResidencyManager, PlacementRefused, entriesOfMessages, type Placement } from "@declarative-ai/llm";
 import { withBudget, withModelManager, withRateLimit, withSession } from "../src/wrappers.js";
 import { fakeRunner, okOutcome, promptOp, sessionStack, transcripts, errorOf } from "./fakes.js";
 
@@ -487,7 +487,7 @@ describe("withSession — append-only conversation", () => {
     await sessionStack(seam, createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
     expect(contentsOf(store, "chat-1")).toEqual([
       { role: "user", content: "What is 2+2?" },
-      { role: "assistant", content: '{"answer":"4"}' },
+      { role: "assistant", content: [{ type: "text", text: '{"answer":"4"}' }] },
     ]);
   });
 
@@ -506,7 +506,7 @@ describe("withSession — append-only conversation", () => {
       { role: "tool", content: [{ type: "tool-result", toolCallId: "t1", toolName: "lookup", output: { type: "json", value: 4 } }] },
       { role: "assistant", content: [{ type: "text", text: '{"answer":"4"}' }] },
     ];
-    const { runner } = fakeRunner([okOutcome({ messages: appended })]);
+    const { runner } = fakeRunner([okOutcome({ entries: entriesOfMessages(appended, { provider: "test", at: "t" }) })]);
     await sessionStack(seam, createPromptExecutor({ runner })).start(promptOp({}, { sessionId: "chat-1@0" }), {}).result;
     expect(contentsOf(store, "chat-1").slice(1)).toEqual(appended);
   });
@@ -521,7 +521,7 @@ describe("withSession — append-only conversation", () => {
     // everything through the AI SDK are stateless.
     expect(calls[1]!.def.messages).toEqual([
       { role: "user", content: "What is 2+2?" },
-      { role: "assistant", content: '{"answer":"4"}' },
+      { role: "assistant", content: [{ type: "text", text: '{"answer":"4"}' }] },
       { role: "user", content: "What is 2+2?" },
     ]);
     expect(calls[1]!.def.sessionId).toBeUndefined();

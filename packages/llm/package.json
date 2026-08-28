@@ -26,6 +26,10 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./entry": {
+      "types": "./dist/entry.d.ts",
+      "default": "./dist/entry.js"
+    },
     "./model-catalog": {
       "types": "./dist/model-catalog.d.ts",
       "default": "./dist/model-catalog.js"

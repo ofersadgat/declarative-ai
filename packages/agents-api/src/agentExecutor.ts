@@ -41,11 +41,22 @@ import type {
   LlmCallResult,
   LlmMetrics,
   LlmOutput,
+  Entry,
   ModelMessage,
+  RawMessage,
   ReasoningSegment,
   ToolCall,
   ToolResult,
 } from "@declarative-ai/llm";
+import { entriesOfMessages } from "@declarative-ai/llm";
+
+/**
+ * Whose vocabulary a delegated agent's `providerData` and block types belong to.
+ *
+ * The transport IS the provider here: a delegated agent hands back its own log in its own shape, and
+ * a reader has to know which one to interpret an unrecognized block by.
+ */
+const AGENT_PROVIDER = "anthropic";
 import { PromptExecutor, type PromptExecutorOptions } from "@declarative-ai/promptop";
 import { failureOf, type Capabilities, type RuntimeCapabilities } from "@declarative-ai/ops";
 import type { BudgetMeter, BudgetMetrics, ExecMetrics } from "@declarative-ai/exec";
@@ -541,6 +552,21 @@ export class AgentExecutor extends PromptExecutor {
           metrics: this.agentMetrics(startMs, result),
         };
       }
+      // Stamped with ONE time for the whole call: the stream reports no per-message clock, and an
+      // entry with no timestamp cannot be merged with a captured one later.
+      const at = new Date().toISOString();
+      const entries: Entry[] = [
+        ...entriesOfMessages(turn.messages as RawMessage[], { provider: AGENT_PROVIDER, at }),
+        // A subagent's turns carry the call that spawned them, so the main thread never comes to
+        // claim it said what a subagent said — which is why they were a separate field before.
+        ...[...turn.sidechains].flatMap(([parentToolUseId, messages]) =>
+          entriesOfMessages(messages as RawMessage[], {
+            provider: AGENT_PROVIDER,
+            at,
+            sidechain: { id: parentToolUseId, parentToolUseId },
+          }),
+        ),
+      ];
       const output: LlmOutput = {
         // The terminal message's answer, falling back to what the turns themselves carried. An
         // INTERRUPTED run is the case: its terminal message has no text, and the partial answer exists
@@ -554,12 +580,11 @@ export class AgentExecutor extends PromptExecutor {
         // The agent's own log, verbatim. It used to be one synthesized assistant turn carrying the
         // final text, under a comment claiming a delegated agent hands back nothing else. It does hand
         // it back — every turn, on the same wire — and we were discarding it.
-        ...(turn.messages.length > 0 ? { messages: turn.messages } : {}),
-        ...(turn.thinking.length > 0 ? { thinking: turn.thinking } : {}),
-        ...(turn.toolCalls.length > 0 ? { toolCalls: turn.toolCalls } : {}),
-        ...(turn.toolResults.length > 0 ? { toolResults: turn.toolResults } : {}),
+        // ONE array. `thinking`/`toolCalls`/`toolResults` were projections OF these messages and
+        // are computed from the entries now; `sidechains` was the same conversation under a second
+        // key space. Measured on one record, the two tool indexes alone were 178 KB of restatement.
+        ...(entries.length > 0 ? { entries } : {}),
         ...(result.sessionId !== undefined ? { providerSessionId: result.sessionId } : {}),
-        ...(turn.sidechains.size > 0 ? { sidechains: Object.fromEntries(turn.sidechains) } : {}),
         ...(turn.providerEvents.length > 0 ? { providerEvents: turn.providerEvents } : {}),
       };
       return { value: output, metrics: this.agentMetrics(startMs, result) };
@@ -964,7 +989,14 @@ export class AgentExecutor extends PromptExecutor {
         // provider's log rather than a reconstruction; an Anthropic message and a `ModelMessage` are
         // both `{role, content}` with provider-shaped parts, so this is a cast and not a translation —
         // and a translation is precisely what would break the signed thinking blocks inside it.
-        if (msg.message !== undefined) turn.messages.push(msg.message as unknown as ModelMessage);
+        // The SIGNATURE arrives beside the message rather than inside it, and Anthropic requires it
+        // back byte-identical. Stamping it onto the thinking block here — the one place the two are
+        // known to belong together — is what keeps the entry lossless; correlating them later, off a
+        // record that had already dropped one side, is the reconstruction this format exists to stop.
+        if (msg.message !== undefined) {
+          signThinking(msg.message as unknown as { content?: unknown }, msg.thinking);
+          turn.messages.push(msg.message as unknown as ModelMessage);
+        }
         for (const block of msg.thinking ?? []) {
           turn.thinking.push({
             type: "reasoning",
@@ -1124,4 +1156,26 @@ export class AgentExecutor extends PromptExecutor {
  */
 export class AgentApiExecutor extends AgentExecutor {
   static override readonly kind: string = "agent-api";
+}
+
+/**
+ * Copy a streamed thinking block's SIGNATURE onto the message block it belongs to, in place.
+ *
+ * The transport reports the two on one event but in two places: `message.content` holds the text and
+ * `thinking[]` holds the provider metadata. Anthropic requires the signature back byte-identical, so
+ * a record keeping only the message would replay a reasoning block the provider then refuses.
+ *
+ * Paired by ORDER within the event — the arrays are the provider's own, emitted together, and there
+ * is no id on either side to join. A mismatch drops the signature rather than guessing: an unsigned
+ * block is a block that cannot be replayed, which is visible, where a wrongly-signed one is not.
+ */
+function signThinking(message: { content?: unknown }, thinking: readonly { providerMetadata?: unknown }[] | undefined): void {
+  if (thinking === undefined || thinking.length === 0 || !Array.isArray(message.content)) return;
+  let seen = 0;
+  for (const block of message.content as Array<Record<string, unknown>>) {
+    if (block === null || typeof block !== "object" || block["type"] !== "thinking") continue;
+    const meta = thinking[seen++]?.providerMetadata as Record<string, { signature?: unknown }> | undefined;
+    const signature = meta === undefined ? undefined : Object.values(meta).find((v) => typeof v?.signature === "string")?.signature;
+    if (typeof signature === "string" && block["signature"] === undefined) block["signature"] = signature;
+  }
 }
