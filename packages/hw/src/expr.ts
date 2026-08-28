@@ -662,7 +662,17 @@ export function applyBinary(op: BinaryOp, l: unknown, r: unknown): boolean {
  */
 export function memberOf(obj: unknown, prop: string): unknown {
   if (obj === undefined || obj === null) return undefined;
-  if (typeof obj === "string" || Array.isArray(obj)) return prop === "length" ? obj.length : undefined;
+  if (typeof obj === "string") return prop === "length" ? obj.length : undefined;
+  // An ARRAY answers `length`, and then its OWN named properties — which a JSON array never has, and
+  // an engine-built one does: `.children.critique.outcome` reads the current pass off the array of
+  // them, and `.operation.output.session` reads the position off a call that returned a list. Both
+  // hang a name on the array deliberately, so refusing to look was refusing to answer the spelling
+  // the engine itself had constructed. Own properties only, exactly as the object case: a native
+  // lookup would reach `constructor` and every prototype method.
+  if (Array.isArray(obj)) {
+    if (prop === "length") return obj.length;
+    return Object.hasOwn(obj, prop) ? (obj as unknown as Record<string, unknown>)[prop] : undefined;
+  }
   if (typeof obj === "object") {
     return Object.hasOwn(obj as object, prop) ? (obj as Record<string, unknown>)[prop] : undefined;
   }

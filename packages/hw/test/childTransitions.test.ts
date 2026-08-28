@@ -184,8 +184,8 @@ describe("a transition written on a child mount", () => {
     });
     // One scope, spelled the same way it is spelled anywhere else in the state: the guard fires, the
     // cursor jumps to `taken`, and `b` stays skipped.
-    expect((await runMarking(files(".children.a.outputs.done == 'a#1'"), "root")).order).toEqual(["a", "taken"]);
-    expect((await runMarking(files(".children.a.outputs.done == 'nope'"), "root")).order).toEqual(["a", "b", "taken"]);
+    expect((await runMarking(files(".children.a.output.done == 'a#1'"), "root")).order).toEqual(["a", "taken"]);
+    expect((await runMarking(files(".children.a.output.done == 'nope'"), "root")).order).toEqual(["a", "b", "taken"]);
   });
 
   it("HANDLES the child's failure, rather than merely reacting to it", async () => {
@@ -256,7 +256,7 @@ describe("a transition written on a child mount", () => {
         root: {
           children: {
             a: { state: "root/a" },
-            b: { state: "root/b", transitions: [{ to: "elsewhere", when: ".children.a.outputs.done == 'a#1'" }] },
+            b: { state: "root/b", transitions: [{ to: "elsewhere", when: ".children.a.output.done == 'a#1'" }] },
             elsewhere: { state: "root/elsewhere" },
           },
           sequence: ["a", "b"],
@@ -316,8 +316,8 @@ describe("a child mount's transitions, at the edges", () => {
       {
         root: {
           children: {
-            a: { state: "root/a", async: true, transitions: [{ to: "never", when: "probe(.children.a.outputs.done) === 'NOPE'" }] },
-            b: { state: "root/b", async: true, transitions: [{ to: "never", when: "probe(.children.b.outputs.done) === 'NOPE'" }] },
+            a: { state: "root/a", async: true, transitions: [{ to: "never", when: "probe(.children.a.output.done) === 'NOPE'" }] },
+            b: { state: "root/b", async: true, transitions: [{ to: "never", when: "probe(.children.b.output.done) === 'NOPE'" }] },
             never: { state: "root/never" },
           },
           sequence: ["a", "b"],
@@ -342,8 +342,8 @@ describe("a child mount's transitions, at the edges", () => {
       {
         root: {
           children: {
-            a: { state: "root/a", async: true, transitions: [{ to: "never", when: "slowProbe(.children.a.outputs.done) === 'NOPE'" }] },
-            b: { state: "root/b", async: true, transitions: [{ to: "after", when: "probe(.children.b.outputs.done) === 'B#1'" }] },
+            a: { state: "root/a", async: true, transitions: [{ to: "never", when: "slowProbe(.children.a.output.done) === 'NOPE'" }] },
+            b: { state: "root/b", async: true, transitions: [{ to: "after", when: "probe(.children.b.output.done) === 'B#1'" }] },
             after: { state: "root/after" },
             never: { state: "root/never" },
           },
@@ -372,7 +372,7 @@ describe("a child mount's transitions, at the edges", () => {
           children: {
             retry: {
               state: "root/retry",
-              transitions: [{ to: "retry", when: "probe(.children.retry.outputs.done) !== 'STOP' && .run.iteration < 3" }],
+              transitions: [{ to: "retry", when: "probe(.children.retry.output.done) !== 'STOP' && .run.iteration < 3" }],
             },
           },
           sequence: ["retry"],
@@ -437,7 +437,7 @@ describe("a child mount's transitions, at the edges", () => {
           children: {
             slow: { state: "root/slow", async: true },
             trigger: { state: "root/trigger", transitions: [{ to: "join" }] },
-            join: { state: "root/join", inputs: { from: ".children.slow.outputs.done" } },
+            join: { state: "root/join", inputs: { from: ".children.slow.output.done" } },
           },
           sequence: ["slow", "trigger"],
         },
@@ -464,7 +464,7 @@ describe("a child mount's transitions, at the edges", () => {
         root: {
           children: {
             slow: { state: "root/slow", async: true },
-            trigger: { state: "root/trigger", transitions: [{ to: "never", when: ".children.slow.outputs.done === 'slow#1'" }] },
+            trigger: { state: "root/trigger", transitions: [{ to: "never", when: ".children.slow.output.done === 'slow#1'" }] },
             never: { state: "root/never" },
           },
           sequence: ["slow", "trigger"],
@@ -501,12 +501,12 @@ describe("the lint over a child mount's transitions", () => {
   });
 
   it("holds a guard to the same boolean rule the state's own list follows", () => {
-    const { errors } = bundleWith([{ to: "b", when: ".children.a.outputs.done" }]);
+    const { errors } = bundleWith([{ to: "b", when: ".children.a.output.done" }]);
     expect(errors.map((e) => e.path)).toContain("children.a.transitions[0].when");
     expect(errors[0]!.message).toContain("must infer to boolean");
   });
 
   it("accepts a well-formed one", () => {
-    expect(bundleWith([{ to: "b", when: ".children.a.outputs.done == 'a#1'" }]).errors).toEqual([]);
+    expect(bundleWith([{ to: "b", when: ".children.a.output.done == 'a#1'" }]).errors).toEqual([]);
   });
 });

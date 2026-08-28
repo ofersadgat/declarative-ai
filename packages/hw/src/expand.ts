@@ -9,7 +9,7 @@
  * every one of those passes sees a document as authored-in-full and needs no knowledge of
  * references at all.
  *
- * A RUNTIME reference (`.children.critique.outputs.outcome`) is left alone here. It sits in a
+ * A RUNTIME reference (`.children.critique.output.outcome`) is left alone here. It sits in a
  * binding, it addresses this instance's data, and the desugarer lowers it like any other binding.
  */
 import { mergeOperationFields } from "./merge.js";

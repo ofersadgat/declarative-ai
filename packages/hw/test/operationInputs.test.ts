@@ -48,7 +48,7 @@ const state = (input: Record<string, unknown>): Record<string, StateDef> =>
     s: {
       inputs: { doc: { schema: { type: "string" } } },
       outputs: { out: { schema: { type: "string" }, binding: ".operation.output.out" } },
-      operation: { kind: "function", function: "review", input, outputs: { out: { schema: { type: "string" } } } },
+      operation: { kind: "function", function: "review", input, output: { out: { schema: { type: "string" } } } },
     },
   }) as unknown as Record<string, StateDef>;
 
@@ -78,7 +78,7 @@ describe("a required operation input the state never passes", () => {
             s: {
               inputs: { bag: { schema: bag } },
               outputs: { out: { schema: { type: "string" }, binding: ".operation.output.out" } },
-              operation: { function: "review(....inputs.bag)", outputs: { out: { schema: { type: "string" } } } },
+              operation: { function: "review(....inputs.bag)", output: { out: { schema: { type: "string" } } } },
             },
           } as unknown as Record<string, StateDef>,
           "s",
@@ -127,7 +127,7 @@ describe("a required parameter is satisfied by whatever will actually fill it", 
           s: {
             inputs,
             outputs: { out: { schema: { type: "string" }, binding: ".operation.output.out" } },
-            operation: { kind: "function", function: "review", input, outputs: { out: { schema: { type: "string" } } } },
+            operation: { kind: "function", function: "review", input, output: { out: { schema: { type: "string" } } } },
           },
         } as unknown as Record<string, StateDef>,
         "s",

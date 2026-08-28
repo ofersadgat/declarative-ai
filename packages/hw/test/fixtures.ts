@@ -17,6 +17,9 @@ import type { StateDef } from "../src/format.js";
 const artifact = (format: string) => ({ kind: "blob", schema: { type: "string", contentMediaType: format } }) as const;
 const str = () => ({ schema: { type: "string" } }) as const;
 const strArray = () => ({ schema: { type: "array", items: { type: "string" } } }) as const;
+/** What a CALL returns where the state stores it as an artifact: a string, no `kind`. The kind is
+ *  the SLOT's business — `.operation.output` says what came back, the state says what it is. */
+const markdownText = (format: string) => ({ schema: { type: "string", contentMediaType: format } }) as const;
 
 export const PLAN_ID = "feature/plan";
 
@@ -33,33 +36,33 @@ export function specPlanningFiles(): Record<string, StateDef> {
       outputs: {
         outcome: {
           schema: { type: "string", enum: ["complete", "blocked"] },
-          binding: { expr: ".children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'" },
+          binding: { expr: ".children.critique.output.outcome === 'clean' ? 'complete' : 'blocked'" },
         },
-        plan_doc: { ...artifact("markdown"), binding: ".children.context.outputs.plan_doc" },
+        plan_doc: { ...artifact("markdown"), binding: ".children.context.output.plan_doc" },
         // A "passthrough" output: the whole child result as ONE value. `*` is required now that a
         // bare `{ child }` selects the slot's own name instead.
-        critique: { binding: ".children.critique.outputs" },
+        critique: { binding: ".children.critique.output" },
       },
       children: {
         goals: { state: "feature/plan/goals", inputs: { issue: ".inputs.issue" } },
         context: {
           state: "feature/plan/context",
-          inputs: { issue: ".inputs.issue", goals: ".children.goals.outputs.goals" },
+          inputs: { issue: ".inputs.issue", goals: ".children.goals.output.goals" },
         },
         critique: {
           state: "feature/plan/critique",
           inputs: {
-            plan_doc: ".children.context.outputs.plan_doc",
+            plan_doc: ".children.context.output.plan_doc",
             severity_threshold: { text: "significant" },
           },
           // Every rule here is about `critique`, so all three live on its mount (SPEC §3.3) and this
           // state declares no `transitions` of its own. On the mount they are not merely false until
           // `critique` runs again after a re-plan — they are not evaluated until it finishes.
           transitions: [
-            { to: "terminate.success", when: ".children.critique.outputs.outcome === 'clean'" },
+            { to: "terminate.success", when: ".children.critique.output.outcome === 'clean'" },
             {
               to: "goals",
-              when: ".children.critique.outputs.outcome === 'needs_changes' && .run.iteration < .limits.max_iterations",
+              when: ".children.critique.output.outcome === 'needs_changes' && .run.iteration < .limits.max_iterations",
             },
             { to: "terminate.success", when: ".children.critique.outcome === 'success'" },
           ],
@@ -76,7 +79,7 @@ export function specPlanningFiles(): Record<string, StateDef> {
         kind: "prompt",
         prompt: "Extract goals from {{.inputs.issue}}.",
         model: "planner",
-        outputs: { goals: strArray() },
+        output: { goals: strArray() },
       },
     },
     "feature/plan/context": {
@@ -87,7 +90,7 @@ export function specPlanningFiles(): Record<string, StateDef> {
         kind: "prompt",
         prompt: "Write the plan for {{.inputs.issue}}.",
         model: "planner",
-        outputs: { plan_doc: artifact("markdown") },
+        output: { plan_doc: markdownText("markdown") },
       },
     },
     "feature/plan/critique": {
@@ -107,7 +110,7 @@ export function specPlanningFiles(): Record<string, StateDef> {
         human_decision: {
           schema: { type: "string", enum: ["approve", "request_changes", "block"] },
           optional: true,
-          binding: ".children.human_review.outputs.decision",
+          binding: ".children.human_review.output.decision",
         },
       },
       environment: { conversation: { mode: "full_history" } },
@@ -117,10 +120,10 @@ export function specPlanningFiles(): Record<string, StateDef> {
         prompt: "Review the plan document. Find significant weaknesses at or above the configured severity threshold. Return structured output matching this state's output schema.",
         // What the CALL returns. `human_decision` is not here: it comes from a child when the state
         // terminates, so asking the model for it would be a contract the model cannot meet.
-        outputs: {
+        output: {
           outcome: { schema: { type: "string", enum: ["clean", "needs_changes", "blocked"] } },
           weaknesses: strArray(),
-          critique_report: artifact("markdown"),
+          critique_report: markdownText("markdown"),
         },
       },
       children: {
@@ -156,7 +159,7 @@ export function specPlanningFiles(): Record<string, StateDef> {
         kind: "prompt",
         prompt: "Fix the listed weaknesses.",
         model: "fixer",
-        outputs: { resolution: str() },
+        output: { resolution: str() },
       },
     },
     "feature/plan/critique/human_review": {
@@ -179,7 +182,7 @@ export function specPlanningFiles(): Record<string, StateDef> {
         kind: "function",
         function: "choose_option",
         args: { prompt: "Review the critique result.", options: ["approve", "request_changes", "block"] },
-        outputs: {
+        output: {
           decision: { schema: { type: "string", enum: ["approve", "request_changes", "block"] } },
           comments: { schema: { type: "string", format: "markdown" }, optional: true },
         },
@@ -196,15 +199,15 @@ export function specFanoutFiles(): Record<string, StateDef> {
     review: {
       label: "Fan-out Review",
       inputs: { change: str() },
-      outputs: { summary: { ...str(), binding: ".children.synthesize.outputs.summary" } },
+      outputs: { summary: { ...str(), binding: ".children.synthesize.output.summary" } },
       children: {
         claude_review: { state: "review/agent_review", async: true, inputs: { change: ".inputs.change" } },
         codex_review: { state: "review/agent_review", async: true, inputs: { change: ".inputs.change" } },
         synthesize: {
           state: "review/synthesize",
           inputs: {
-            review_a: ".children.claude_review.outputs.report",
-            review_b: ".children.codex_review.outputs.report",
+            review_a: ".children.claude_review.output.report",
+            review_b: ".children.codex_review.output.report",
           },
         },
       },

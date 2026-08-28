@@ -168,15 +168,15 @@ function desugarExpression(source: string, where: string, stateId: string, lower
   }
 }
 
-/** The child a spread republishes — `.children.<key>.outputs`, the whole object it fans out. */
+/** The child a spread republishes — `.children.<key>.output`, the whole object it fans out. */
 function spreadChildOf(binding: BindingDecl | undefined): string | undefined {
   if (typeof binding !== "string") return undefined;
   const parts = binding.split(".");
-  return parts.length === 4 && parts[0] === "" && parts[1] === "children" && parts[3] === "outputs" ? parts[2] : undefined;
+  return parts.length === 4 && parts[0] === "" && parts[1] === "children" && parts[3] === "output" ? parts[2] : undefined;
 }
 
 /**
- * Lower a RUNTIME reference — `.children.critique.outputs.outcome` — to a producer edge
+ * Lower a RUNTIME reference — `.children.critique.output.outcome` — to a producer edge
  * (REFERENCES.md §5).
  *
  * This is the ONLY spelling. `{ child }`, `{ input }`, `{ artifact }` and `{ conversation }` each
@@ -202,10 +202,15 @@ function desugarRuntimeReference(reference: string, where: string, stateId: stri
     }
     case "children": {
       const [child, section, ...tail] = rest;
-      if (child === undefined) bad("must name a child, as '.children.<key>.outputs.<name>'");
-      if (section === undefined || section === "outputs") {
-        // `.children.c.outputs` is the whole object; `.children.c.outputs.x` projects one output.
+      if (child === undefined) bad("must name a child, as '.children.<key>.output.<name>'");
+      if (section === undefined || section === "output") {
+        // `.children.c.output` is the whole object; `.children.c.output.x` projects one output.
         // hw states lower to single-object-output ops, so a named output IS a property select.
+        //
+        // SINGULAR, matching `.operation.output` and the `output` an operation declares: plural is
+        // where a name is DECLARED, singular is where a value is READ. The producer edge resolves to
+        // the CURRENT pass, which is what the bare spelling has always meant; an earlier pass is
+        // reached by index, `.children.c[-2].output.x`, and lowers as an expression.
         const childEdge: Ref<InlineFamily> = { op: child! };
         if (tail.length === 0) return childEdge;
         return resolverEdge(RESOLVER_REFS.select, { value: childEdge, key: { text: tail.join(".") } });
@@ -379,17 +384,14 @@ export function desugarOperation(
     input[name] = desugarParameter(p, `operation.input.${name}`, stateId).param;
   }
 
-  // The op's output, in precedence order: the single slot the author declared outright (the only way
-  // to say "the whole return value is a blob"), then the operation's OWN `outputs` map, then — for a
-  // state that declares neither — the state's unbound outputs.
+  // The op's output: the operation's OWN `output` map when it has one, and otherwise — for a state
+  // that declares none — the state's unbound outputs.
   //
-  // The middle case is the one that matters. An operation that names what it returns owns its own
+  // The first case is the one that matters. An operation that names what it returns owns its own
   // signature, so the model's structured-output contract comes from the call rather than from
   // whatever the state around it happens to publish, and `.operation.output.<name>` has names to
-  // expose. The last case is the older rule, kept for states that still lean on it.
-  const output = decl.output
-    ? desugarNamedParameter("output", decl.output, "operation.output", stateId).param
-    : outputSlotFor(decl.outputs);
+  // expose. The second is the older rule, kept for states that still lean on it.
+  const output = outputSlotFor(decl.output, stateId);
 
   if (kind === "prompt") {
     // The template's `{{.inputs.*}}` scope IS the operation's resolved inputs (§3.1: authored render
@@ -451,10 +453,7 @@ export function desugarOperation(
     functionRef: callee.functionRef,
     input: bindIntoSlots(callee.input, input, decl.args, applied.bound, call.callee, stateId),
     ...(applied.spread.length > 0 ? { spread: applied.spread } : {}),
-    output:
-      decl.output !== undefined || decl.outputs !== undefined
-        ? narrowedOutput(output, callee.output, call.callee, stateId)
-        : callee.output,
+    output: decl.output !== undefined ? narrowedOutput(output, callee.output, call.callee, stateId) : callee.output,
   };
 }
 
@@ -568,7 +567,7 @@ function applyCallForm(
  * One argument of a call form, lowered the way the same value written in `input` would be.
  *
  * A leading-dot RUNTIME REFERENCE has a binding lowering of its own — `.inputs.x` is `scope.get`,
- * `.children.c.outputs.y` is a child producer edge — and those are what an authored binding produces.
+ * `.children.c.output.y` is a child producer edge — and those are what an authored binding produces.
  * Everything else is an expression and has only ever had the one lowering. Reconstructing the
  * reference from the parsed path rather than slicing the source keeps this reading exactly what the
  * parser read, so the two can not disagree about where the reference ended.
@@ -720,9 +719,37 @@ function callConfigOf(decl: OperationFields): Record<string, JsonValue> {
  * state now says what it publishes and the operation says what it returns, with a binding between
  * them.
  */
-function outputSlotFor(outputs: Record<string, NamedParameterDecl> | undefined): NamedParameter<InlineFamily> {
-  const produced = Object.entries(outputs ?? {});
+function outputSlotFor(output: Record<string, ParameterDecl> | undefined, stateId?: string): NamedParameter<InlineFamily> {
+  const produced = Object.entries(output ?? {});
   if (produced.length === 0) return defaultOutput();
+  // A LONE entry with an EXPLICIT `kind` means the return IS that value, not a record with one
+  // field. That is the only way to say the two things a map otherwise cannot — "the whole return is
+  // a blob" (§4.4) and "the whole return is this list", where a wrapper would make
+  // `.operation.output.output` the spelling for the value.
+  //
+  // Explicit is the whole signal: `{ goals: { schema: <array> } }` is a contract for an object with
+  // a `goals` field, and `{ goals: { kind: "json", schema: <array> } }` is the list itself. The
+  // schemas are identical, so nothing but the author's `kind` can tell them apart.
+  //
+  // Which is why `kind` on a MULTI-entry map is refused rather than ignored. Reading it only when
+  // the map happens to hold one entry would put a cliff under the author: adding a second output
+  // would silently turn a bare return into a wrapped one, changing what the callee must hand back
+  // and breaking every binding onto it, with nothing said. A map with two entries IS a JSON object
+  // contract and its fields are JSON, so a `kind` there had no meaning to lose.
+  const [soleName, sole] = produced[0]!;
+  if (produced.length === 1 && sole.kind !== undefined) {
+    return { name: soleName, kind: sole.kind, ...(sole.schema !== undefined ? { schema: sole.schema } : {}) };
+  }
+  for (const [name, decl] of produced) {
+    if (decl.kind !== undefined) {
+      throw new WorkflowLoadError(
+        `operation.output.${name}: declares kind '${decl.kind}', but an operation returning more than one name returns a ` +
+          `JSON object and its fields are JSON. Drop the kind here, or declare it on the STATE's output slot, which is ` +
+          `where "what this value IS" belongs.`,
+        stateId,
+      );
+    }
+  }
   const properties: Record<string, JsonValue> = {};
   const required: string[] = [];
   for (const [name, decl] of produced) {
@@ -771,7 +798,7 @@ export function desugarState(
         const child = spreadChildOf(decl.binding);
         if (child === undefined) {
           throw new WorkflowLoadError(
-            `outputs.${name}: a '${SPREAD_SUFFIX}' output must bind a child's outputs — '.children.<key>.outputs'`,
+            `outputs.${name}: a '${SPREAD_SUFFIX}' output must bind a child's output — '.children.<key>.output'`,
             id,
           );
         }
@@ -792,12 +819,19 @@ export function desugarState(
   // finishes (§3.3), and lowering them differently would make the same guard mean two things.
   const lowerTransitions = (list: TransitionDecl[] | undefined): LoadedTransition[] | undefined =>
     list?.map((t) => {
-      if (t.when === undefined) return { ...t };
+      // The overrides desugar exactly as a mount's wiring does — same scope, same forms — so a
+      // reader has one rule for "what fills a child's input" wherever it is written.
+      const wired: Record<string, Ref<InlineFamily>> = {};
+      for (const [name, binding] of Object.entries(t.inputs ?? {})) {
+        wired[name] = desugarBinding(binding, `transitions.${t.to}.inputs.${name}`, id, undefined, lower);
+      }
+      const withInputs = t.inputs === undefined ? {} : { inputRefs: wired };
+      if (t.when === undefined) return { ...t, ...withInputs };
       try {
-        return { ...t, whenRef: bindTransitionContext(lowerExpression(parseExpression(t.when), lower), t.to) };
+        return { ...t, ...withInputs, whenRef: bindTransitionContext(lowerExpression(parseExpression(t.when), lower), t.to) };
       } catch (e) {
         // Carried, not thrown — see `LoadedTransition.whenError`.
-        return { ...t, whenError: (e as Error).message };
+        return { ...t, ...withInputs, whenError: (e as Error).message };
       }
     });
 
@@ -891,7 +925,7 @@ function expandOutputSpreads(state: LoadedState, states: Record<string, LoadedSt
         name: target,
         kind: slot.kind,
         ...(slot.schema !== undefined ? { schema: slot.schema } : {}),
-        binding: desugarBinding(`.children.${spread.child}.outputs.${name}`, `outputs.${spread.prefix}${SPREAD_SUFFIX}`, state.id),
+        binding: desugarBinding(`.children.${spread.child}.output.${name}`, `outputs.${spread.prefix}${SPREAD_SUFFIX}`, state.id),
       };
       const childMeta = childState.slotMeta?.[`outputs.${name}`];
       const optional = spread.optional ?? childMeta?.optional;
@@ -1171,7 +1205,7 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
    * interact, so a child named `classify` and a callee `classify` simply coexist. An earlier draft
    * had a declared child win, on a "lexical scope beats a module path" analogy; but a child is a
    * STATE (with its own children, sequence, transitions and limits), and "calling" one would
-   * duplicate what `children[].inputs` and `.children.k.outputs.x` already do, with no clear answer
+   * duplicate what `children[].inputs` and `.children.k.output.x` already do, with no clear answer
    * for re-entry or the cursor.
    */
   /**

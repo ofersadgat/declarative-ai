@@ -19,8 +19,16 @@ import { FakePromptExecutor, newRegistry } from "./fakes.js";
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
 
-/** A state whose prompt operation declares a BLOB output — a generated file, not a JSON record. */
+/**
+ * A state whose prompt operation declares a BLOB output — a generated file, not a JSON record.
+ *
+ * The op's `output` is a ONE-ENTRY map carrying `kind: "blob"`, which is how the map form says the
+ * whole return is bytes rather than an object with a bytes-shaped field. Keyed by the state's first
+ * produced slot so the multi-slot case below still declares one blob against two slots, which is the
+ * arity the engine refuses.
+ */
 function blobStates(outputs: Record<string, unknown>): Record<string, StateDef> {
+  const first = Object.keys(outputs)[0] ?? "image";
   return {
     render: {
       label: "Render",
@@ -30,7 +38,7 @@ function blobStates(outputs: Record<string, unknown>): Record<string, StateDef> 
         kind: "prompt",
         prompt: "Draw a diagram.",
         model: "artist",
-        output: { kind: "blob", schema: { type: "string", contentMediaType: "image/png" } },
+        output: { [first]: { kind: "blob", schema: { type: "string", contentMediaType: "image/png" } } },
       },
     } as StateDef,
   };
@@ -58,7 +66,7 @@ function runFunction(produce: () => ResolvedValue, mediaType = "image/png") {
       label: "Render",
       inputs: {},
       outputs: { image: slot } as StateDef["outputs"],
-      operation: { kind: "function", function: "generate_file", output: slot },
+      operation: { kind: "function", function: "generate_file", output: { image: slot } },
     } as StateDef,
   };
   const registry = newRegistry();

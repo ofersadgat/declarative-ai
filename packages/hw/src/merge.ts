@@ -184,9 +184,10 @@ export function mergeOperationFields(base: OperationFields, over: OperationField
 
   const input = mergeSlotMap(base.input, over.input);
   if (input !== undefined) out.input = input;
-  if (over.output !== undefined) {
-    out.output = base.output ? (mergeParameter(base.output, over.output) as NamedParameterDecl) : over.output;
-  }
+  // `output` is a slot map like `input` now, so it merges as one — per NAME, with an overriding
+  // layer restating only the fields it changes, rather than replacing the whole declaration.
+  const output = mergeSlotMap(base.output, over.output);
+  if (output !== undefined) out.output = output;
 
   if (over.conversation !== undefined) {
     out.conversation = base.conversation ? { ...base.conversation, ...over.conversation } : over.conversation;

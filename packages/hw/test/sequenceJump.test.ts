@@ -90,7 +90,7 @@ describe("a sequence nobody wrote", () => {
           children: {
             a: { state: "root/a" },
             // Requires an input wired from a child that runs later: unfillable, so `b` blocks.
-            b: { state: "root/b", inputs: { needed: ".children.d.outputs.done" } },
+            b: { state: "root/b", inputs: { needed: ".children.d.output.done" } },
             c: { state: "root/c" },
             d: { state: "root/d" },
           },

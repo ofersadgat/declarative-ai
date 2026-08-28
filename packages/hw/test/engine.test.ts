@@ -402,13 +402,13 @@ describe("SPEC §10.4 — async children and the dataflow join", () => {
         inputs: {},
         // `slow` is ASYNC, so the reachability rule (§7.2) forbids a `{ child }` binding here —
         // the pending-tolerant `{ expr }` leaf is the async equivalent.
-        outputs: { got: { schema: { type: "string" }, binding: { expr: ".children.slow.outputs.val" } } },
+        outputs: { got: { schema: { type: "string" }, binding: { expr: ".children.slow.output.val" } } },
         children: {
           slow: { state: "parent/slow", async: true, inputs: {} },
           quick: { state: "parent/quick", inputs: {} },
         },
         sequence: ["slow", "quick"],
-        transitions: [{ to: "terminate.success", when: ".children.slow.outputs.val === 'done'" }],
+        transitions: [{ to: "terminate.success", when: ".children.slow.output.val === 'done'" }],
       },
       "parent/slow": {
         inputs: {},
@@ -445,7 +445,7 @@ describe("SPEC §10.4 — async children and the dataflow join", () => {
         outputs: {},
         children: {
           never: { state: "parent/never", async: true, inputs: {} },
-          waiting: { state: "parent/waiting", inputs: { x: { expr: ".children.never.outputs.v" } } },
+          waiting: { state: "parent/waiting", inputs: { x: { expr: ".children.never.output.v" } } },
         },
         sequence: ["never", "waiting"],
       },
@@ -1487,7 +1487,7 @@ describe("the conversation and the resource bundle are different keys", () => {
       environment: { session: "shared" },
       children: { first: { state: "leaf" }, second: { state: "leaf2" } },
       sequence: ["first", "second"],
-      outputs: { r: { binding: ".children.second.outputs.r" } },
+      outputs: { r: { binding: ".children.second.output.r" } },
     },
     leaf: {
       outputs: { r: { schema: { type: "string" } } },
@@ -1567,7 +1567,7 @@ describe("the conversation and the resource bundle are different keys", () => {
           review: { state: "reviewer", inputs: { thread: { expr: ".children.plan.operation.output.session" } } },
         },
         sequence: ["plan", "review"],
-        outputs: { r: { binding: ".children.review.outputs.r" } },
+        outputs: { r: { binding: ".children.review.output.r" } },
       },
       planner: {
         outputs: { r: { schema: { type: "string" } } },
@@ -1615,7 +1615,7 @@ describe("the conversation and the resource bundle are different keys", () => {
       root: {
         children: { first: { state: "leaf" }, second: { state: "leaf2" } },
         sequence: ["first", "second"],
-        outputs: { r: { binding: ".children.second.outputs.r" } },
+        outputs: { r: { binding: ".children.second.output.r" } },
       },
       leaf: {
         outputs: { r: { schema: { type: "string" } } },

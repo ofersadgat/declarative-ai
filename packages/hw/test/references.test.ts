@@ -201,7 +201,7 @@ describe("runtime references", () => {
     const defs = {
       "w.json": {
         inputs: { issue: { schema: { type: "string" } } },
-        outputs: { plan: { schema: { type: "string" }, binding: ".children.c.outputs.plan" } },
+        outputs: { plan: { schema: { type: "string" }, binding: ".children.c.output.plan" } },
         children: { c: { state: "./c", inputs: { issue: ".inputs.issue" } } },
       },
       "w/c.json": {
@@ -219,7 +219,7 @@ describe("runtime references", () => {
   it("reads the whole outputs object without a projection", () => {
     const defs = {
       "w.json": {
-        outputs: { all: { binding: ".children.c.outputs" } },
+        outputs: { all: { binding: ".children.c.output" } },
         children: { c: { state: "./c" } },
       },
       "w/c.json": { outputs: { plan: { schema: { type: "string" } } }, operation: { kind: "prompt", prompt: "go", model: "m" } },
@@ -242,7 +242,7 @@ describe("runtime references", () => {
     });
     // With the dot it reads the child. Without it, the same text is a DOCUMENT reference — resolved
     // against the filesystem, where nothing of that name exists.
-    expect(bundle(withBinding(".children.c.outputs.x")).states.w!.outputs!.x!.binding).toMatchObject({
+    expect(bundle(withBinding(".children.c.output.x")).states.w!.outputs!.x!.binding).toMatchObject({
       op: { kind: "function", functionRef: "select" },
     });
     expect(() => bundle(withBinding("children.c.outputs.x"))).toThrow(/matches no file/);

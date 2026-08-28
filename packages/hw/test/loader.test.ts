@@ -34,7 +34,7 @@ describe("desugaring (API.md, \"Binding desugaring\")", () => {
     const outcome = plan.outputs!["outcome"]!.binding as { op: { kind: string; functionRef: string; input: Record<string, { binding?: unknown }> } };
     expect(outcome.op.kind).toBe("function");
     expect(outcome.op.functionRef.startsWith("op.")).toBe(true);
-    expect(referencePathsOf(outcome as never)).toContainEqual(["children", "critique", "outputs", "outcome"]);
+    expect(referencePathsOf(outcome as never)).toContainEqual(["children", "critique", "output", "outcome"]);
   });
 
   it("an operation's declared output is what the OPERATION produces — bound outputs excluded", () => {
@@ -198,7 +198,7 @@ describe("validateBundle failure modes", () => {
     // Written where the fixture writes them — on the mount — so the lowering and the reference check
     // are exercised through the child list, not only the state's own.
     const guards = files[PLAN_ID]!.children!["critique"]!.transitions!;
-    guards[0]!.when = ".children.critique.outputs.outcome ===";
+    guards[0]!.when = ".children.critique.output.outcome ===";
     guards[2]!.when = ".children.nonchild.outcome === 'success'";
     files[PLAN_ID]!.outputs!["outcome"]!.binding = { expr: ".bogusroot.x" };
     const report = validateBundle(loadBundle(files, PLAN_ID));
@@ -236,7 +236,7 @@ describe("validateBundle failure modes", () => {
     const files = specPlanningFiles();
     const plan = files[PLAN_ID]!;
     delete plan.limits;
-    plan.transitions = [{ to: "goals", when: ".children.critique.outputs.outcome === 'needs_changes'" }];
+    plan.transitions = [{ to: "goals", when: ".children.critique.output.outcome === 'needs_changes'" }];
     const report = validateBundle(loadBundle(files, PLAN_ID));
     expect(report.warnings.map((w) => w.message).join("\n")).toMatch(/can cycle/);
   });
@@ -245,7 +245,7 @@ describe("validateBundle failure modes", () => {
     const files = specPlanningFiles();
     const plan = files[PLAN_ID]!;
     delete plan.limits;
-    plan.transitions = [{ to: "goals", when: ".children.critique.outputs.outcome === 'needs_changes' && .run.iteration < 3" }];
+    plan.transitions = [{ to: "goals", when: ".children.critique.output.outcome === 'needs_changes' && .run.iteration < 3" }];
     const report = validateBundle(loadBundle(files, PLAN_ID));
     expect(report.warnings.filter((w) => /can cycle/.test(w.message))).toEqual([]);
   });
@@ -260,7 +260,7 @@ describe("validateBundle failure modes", () => {
   it("type-checks a producer edge against the consuming slot (§7.3)", () => {
     const files = specPlanningFiles();
     // The `goals` child produces a string ARRAY; wire it into the string-typed `issue` slot instead.
-    files[PLAN_ID]!.children!["context"]!.inputs!.issue = ".children.goals.outputs.goals";
+    files[PLAN_ID]!.children!["context"]!.inputs!.issue = ".children.goals.output.goals";
     const report = validateBundle(loadBundle(files, PLAN_ID));
     expect(report.errors.map((e) => e.message).join("\n")).toMatch(/not type-compatible/);
   });
@@ -277,7 +277,7 @@ describe("validateBundle failure modes", () => {
     const critique = files["feature/plan/critique"]!;
     // `human_review` is reachable only through a CONDITIONAL transition, so a REQUIRED slot reading
     // it could observe nothing — the hole the strict rule closes.
-    critique.outputs!["weaknesses"]!.binding = ".children.human_review.outputs.decision";
+    critique.outputs!["weaknesses"]!.binding = ".children.human_review.output.decision";
     const report = validateBundle(loadBundle(files, PLAN_ID));
     expect(report.errors.map((e) => e.message).join("\n")).toMatch(/not proven to have run/);
   });
@@ -323,9 +323,9 @@ describe("a resolved definition is plain JSON", () => {
       environment: { kind: "prompt", model: "m", session: "s", tools: ["bash"] },
       inputs: { issue: { schema: { type: "string" }, default: "significant", optional: true, description: "d" } },
       outputs: {
-        "ctx_*": { binding: ".children.ctx.outputs" },
-        verdict: { binding: { expr: ".children.ctx.outputs.n > 1" } },
-        whole: { binding: ".children.ctx.outputs" },
+        "ctx_*": { binding: ".children.ctx.output" },
+        verdict: { binding: { expr: ".children.ctx.output.n > 1" } },
+        whole: { binding: ".children.ctx.output" },
       },
       children: { ctx: { state: "root/ctx", inputs: { seed: ".inputs.issue" } } },
       sequence: ["ctx"],

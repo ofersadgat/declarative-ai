@@ -358,7 +358,7 @@ describe("the merge rules (§5)", () => {
 
   it("replaces a binding rather than merging its keys", () => {
     const merged = mergeOperationChain([
-      { input: { prompt: { kind: "text", binding: ".children.a.outputs.x" } } },
+      { input: { prompt: { kind: "text", binding: ".children.a.output.x" } } },
       { input: { prompt: { binding: ".inputs.instruction" } } },
     ]);
     // A merged binding would be `{ child, output, input }` — not a binding at all.
@@ -447,23 +447,23 @@ describe("output bindings (§3.4)", () => {
   };
 
   it("defaults `output` to the slot's own name", () => {
-    const root = loadBundle(withOutputs({ plan_doc: { binding: ".children.context.outputs.plan_doc" } }), "root").states.root!;
+    const root = loadBundle(withOutputs({ plan_doc: { binding: ".children.context.output.plan_doc" } }), "root").states.root!;
     expect(selectedKey(root, "plan_doc")).toBe("plan_doc");
   });
 
   it("still honours an explicit `output` that differs from the slot", () => {
-    const root = loadBundle(withOutputs({ summary: { binding: ".children.context.outputs.notes" } }), "root").states.root!;
+    const root = loadBundle(withOutputs({ summary: { binding: ".children.context.output.notes" } }), "root").states.root!;
     expect(selectedKey(root, "summary")).toBe("notes");
   });
 
   it("takes the child's whole output object with `*`", () => {
-    const root = loadBundle(withOutputs({ everything: { binding: ".children.context.outputs" } }), "root").states.root!;
+    const root = loadBundle(withOutputs({ everything: { binding: ".children.context.output" } }), "root").states.root!;
     // No `select` projection at all — the producer edge itself is the value.
     expect(root.outputs!.everything!.binding).toEqual({ op: "context" });
   });
 
   it("spreads a child's outputs under a prefix", () => {
-    const root = loadBundle(withOutputs({ "ctx_*": { binding: ".children.context.outputs" } }), "root").states.root!;
+    const root = loadBundle(withOutputs({ "ctx_*": { binding: ".children.context.output" } }), "root").states.root!;
     expect(Object.keys(root.outputs!).sort()).toEqual(["ctx_notes", "ctx_plan_doc"]);
     expect(selectedKey(root, "ctx_plan_doc")).toBe("plan_doc");
     // Each spread slot keeps the schema and the optionality of the output it republishes.
@@ -472,15 +472,15 @@ describe("output bindings (§3.4)", () => {
   });
 
   it("spreads unprefixed with a bare `*` key", () => {
-    const root = loadBundle(withOutputs({ "*": { binding: ".children.context.outputs" } }), "root").states.root!;
+    const root = loadBundle(withOutputs({ "*": { binding: ".children.context.output" } }), "root").states.root!;
     expect(Object.keys(root.outputs!).sort()).toEqual(["notes", "plan_doc"]);
   });
 
   it("lets an explicitly declared slot win over the spread", () => {
     const root = loadBundle(
       withOutputs({
-        "ctx_*": { binding: ".children.context.outputs" },
-        ctx_plan_doc: { schema: { type: "string" }, binding: ".children.context.outputs.notes" },
+        "ctx_*": { binding: ".children.context.output" },
+        ctx_plan_doc: { schema: { type: "string" }, binding: ".children.context.output.notes" },
       }),
       "root",
     ).states.root!;
@@ -489,7 +489,7 @@ describe("output bindings (§3.4)", () => {
 
   it("refuses a spread that does not bind a child", () => {
     expect(() => loadBundle(withOutputs({ "ctx_*": { binding: { expr: "1 + 1" } } }), "root")).toThrow(
-      /must bind a child's outputs/,
+      /must bind a child's output/,
     );
   });
 });

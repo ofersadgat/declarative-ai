@@ -220,7 +220,7 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
         if (event.type === "operation.completed" && event.metrics) {
           events.push({ type: "child_result", ref: { label: event.stateId }, metrics: event.metrics });
         } else if (event.type === "transition.taken") {
-          events.push({ type: "progress", message: `${event.stateId} → ${event.to} (iteration ${event.iteration})` });
+          events.push({ type: "progress", message: `${event.stateId} → ${event.to} (step ${event.index})` });
         } else if (event.type === "instance.entered") {
           events.push({ type: "progress", message: `entered ${event.stateId}` });
         } else if (event.type === "instance.terminated") {

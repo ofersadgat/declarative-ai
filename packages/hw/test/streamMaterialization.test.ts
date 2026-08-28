@@ -100,7 +100,7 @@ const blobSlot = { kind: "blob", schema: { type: "string", contentMediaType: "ap
 function fanoutStates(consumerKeys: string[], alsoReadsMetadata = false): Record<string, StateDef> {
   const children: Record<string, unknown> = { producer: { state: "parent/producer" } };
   for (const key of consumerKeys) {
-    children[key] = { state: "parent/consumer", inputs: { data: ".children.producer.outputs.img" } };
+    children[key] = { state: "parent/consumer", inputs: { data: ".children.producer.output.img" } };
   }
   const metadataOutput = alsoReadsMetadata
     ? { outputs: { spend: { schema: { type: "number" }, binding: ".children.producer.operation.cost" } } }
@@ -110,7 +110,7 @@ function fanoutStates(consumerKeys: string[], alsoReadsMetadata = false): Record
     "parent/producer": {
       label: "Producer",
       outputs: { img: blobSlot },
-      operation: { kind: "function", function: "gen", output: blobSlot },
+      operation: { kind: "function", function: "gen", output: { img: blobSlot } },
     } as StateDef,
     "parent/consumer": {
       label: "Consumer",
@@ -252,7 +252,7 @@ describe("blob OUTPUT and RESULT materialization (§7.3, rule 3)", () => {
       render: {
         label: "Render",
         outputs: { image: blobSlot },
-        operation: { kind: "function", function: "gen", output: blobSlot },
+        operation: { kind: "function", function: "gen", output: { image: blobSlot } },
       } as StateDef,
     };
     return { definition: loadBundle(states, "render"), stream };

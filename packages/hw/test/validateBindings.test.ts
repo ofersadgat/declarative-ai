@@ -117,8 +117,8 @@ describe("what a producer edge may name (§7.4)", () => {
     // The operation resolves its inputs before any child runs, so a producer edge to a child here can
     // only ever fail at run time ("child 'helper' has not run"). Caught statically instead. An
     // operation input is a value/scope form or an embedded operation — never a reach into children.
-    expect(messages(withBinding(".children.helper.outputs"), "root")).toMatch(/operation input cannot reference child 'helper'/);
-    expect(messages(withBinding(".children.helper.outputs.result"), "root")).toMatch(/operation input cannot reference child 'helper'/);
+    expect(messages(withBinding(".children.helper.output"), "root")).toMatch(/operation input cannot reference child 'helper'/);
+    expect(messages(withBinding(".children.helper.output.result"), "root")).toMatch(/operation input cannot reference child 'helper'/);
   });
 
   it("still accepts the session-owned resolvers, whose contents are only known at run time", () => {
@@ -144,7 +144,7 @@ describe("an untyped output adopts the type of what fills it (§6.2)", () => {
     root: {
       label: "Root",
       inputs: { seed: { schema: seed } },
-      outputs: { answer: { schema: { type: "string" }, binding: ".children.helper.outputs.result" } },
+      outputs: { answer: { schema: { type: "string" }, binding: ".children.helper.output.result" } },
       children: { helper: { state: "root/helper", inputs: { seed: ".inputs.seed" } } },
       sequence: ["helper"],
     } as StateDef,
@@ -186,14 +186,14 @@ describe("an untyped output adopts the type of what fills it (§6.2)", () => {
       root: {
         label: "Root",
         inputs: { seed: { schema: { type: "string" } } },
-        outputs: { answer: { binding: ".children.loop.outputs.back" } },
+        outputs: { answer: { binding: ".children.loop.output.back" } },
         children: { loop: { state: "root/loop", inputs: { seed: ".inputs.seed" } } },
         sequence: ["loop"],
       } as StateDef,
       "root/loop": {
         label: "Loop",
         inputs: { seed: { schema: { type: "string" } } },
-        outputs: { back: { binding: ".children.again.outputs.answer" } },
+        outputs: { back: { binding: ".children.again.output.answer" } },
         children: { again: { state: "root", inputs: { seed: ".inputs.seed" } } },
         sequence: ["again"],
       } as StateDef,

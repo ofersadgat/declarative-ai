@@ -71,7 +71,7 @@ describe("the load-time lint", () => {
       root: {
         children: { plan: { state: "leaf" }, review: { state: "leaf" } },
         sequence: ["plan", "review"],
-        outputs: { r: { binding: ".children.review.outputs.answer" } },
+        outputs: { r: { binding: ".children.review.output.answer" } },
       },
       leaf: promptLeaf(),
     };
@@ -88,7 +88,7 @@ describe("the load-time lint", () => {
       root: {
         children: { plan: { state: "leaf" }, review: { state: "consumer", inputs: { s: { expr } } } },
         sequence: ["plan", "review"],
-        outputs: { r: { binding: ".children.review.outputs.answer" } },
+        outputs: { r: { binding: ".children.review.output.answer" } },
       },
       leaf: promptLeaf(),
       consumer: { ...promptLeaf(), inputs: { s: { schema: {} } } },
@@ -104,7 +104,7 @@ describe("the load-time lint", () => {
       root: {
         children: { gate: { state: "gate" }, review: { state: "leaf" } },
         sequence: ["gate", "review"],
-        outputs: { r: { binding: ".children.review.outputs.answer" } },
+        outputs: { r: { binding: ".children.review.output.answer" } },
       },
       gate: { outputs: { decision: { schema: { type: "string" } } }, operation: { kind: "function", function: "choose_option" } },
       leaf: { ...promptLeaf(), inputs: { s: { schema: {} } } },
@@ -122,7 +122,7 @@ describe("the load-time lint", () => {
       root: {
         children: { plan: { state: "leaf" }, review: { state: "leaf" } },
         sequence: ["plan", "review"],
-        outputs: { r: { binding: ".children.review.outputs.answer" } },
+        outputs: { r: { binding: ".children.review.output.answer" } },
       },
       leaf: promptLeaf(),
       consumer: { ...promptLeaf(), inputs: { s: { schema: {} } } },

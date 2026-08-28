@@ -1,8 +1,8 @@
 /**
  * A child that HAS NOT RUN is `undefined` (SPEC §3.4), not a resolution failure.
  *
- * The two spellings of the same path used to disagree: `".children.c.outputs.x"` lowers to a
- * producer edge and REFUSED, while `{ expr: ".children.c.outputs.x" }` lowers to a `member` chain
+ * The two spellings of the same path used to disagree: `".children.c.output.x"` lowers to a
+ * producer edge and REFUSED, while `{ expr: ".children.c.output.x" }` lowers to a `member` chain
  * and yielded `undefined`. Since a guard is always lowered as an expression and a wire usually is
  * not, the split read as "guards are lenient, wiring is strict" — which is not a rule anyone wrote.
  *
@@ -71,7 +71,7 @@ const files = (wire: unknown, opts: { optional?: boolean } = {}): Record<string,
   "root/c": leaf("c", { optional: true }),
 });
 
-const EDGE = ".children.c.outputs.done";
+const EDGE = ".children.c.output.done";
 
 describe("a child that has not run (SPEC §3.4)", () => {
   it("resolves to `undefined`, and an OPTIONAL slot absorbs it", async () => {
@@ -170,7 +170,7 @@ describe("in flight is not absent", () => {
         label: "Root",
         children: {
           slow: { state: "root/slow", async: true },
-          reader: { state: "root/reader", inputs: { later: ".children.slow.outputs.done" } },
+          reader: { state: "root/reader", inputs: { later: ".children.slow.output.done" } },
         },
       } as StateDef,
       "root/slow": leaf("slow", { optional: true, delayMs: 20 }),

@@ -316,11 +316,45 @@ interface Instance {
    * two iterations of one child are two addresses.
    */
   entries: Map<string, number>;
+  /**
+   * Transitions this instance has taken — EVERY one, forward jumps and the exit included.
+   *
+   * What `run.iteration` used to count, and what an author almost never meant by it: a forward
+   * `{ "when": …, "to": "draft" }` that skips a child spends one, so a `max_iterations` budget
+   * written against the old spelling was short by however many jumps the spine happened to take.
+   * Kept under the name that says what it is.
+   */
+  index: number;
+  /**
+   * PASSES: transitions backward into a sequence member at or before the one most recently
+   * entered.
+   *
+   * The number a re-plan loop is actually written against, and the index into a child's history:
+   * one pass is one row across every child, which holds only if the counter moves when the spine
+   * goes back and stays put when it goes on.
+   */
   iteration: number;
   /** Whether the state's single operation has run (§7.1: a state has ONE operation). */
   opRun: boolean;
-  /** Live child records by child key; `undefined`/absent = never ran or superseded. */
+  /**
+   * Live child records by child key; `undefined`/absent = never ran or superseded.
+   *
+   * ALWAYS the last entry of {@link passes} — the two are one object, not two copies, so every
+   * existing read and write through `children` lands on the current pass without knowing there are
+   * others.
+   */
   children: Map<string, ChildRecord>;
+  /**
+   * Every pass, oldest first — `.children.<key>` is the sequence of records this key held, one per
+   * pass, and `[-1]` is the live one.
+   *
+   * A pass begins on a BACKWARD transition (see `Instance.iteration`) by copying the current map, so
+   * a child the reset does not clear carries forward BY REFERENCE: index `i` means the same pass for
+   * every key, which is what lets a guard compare a draft with the critique that judged it. Before
+   * this, the sequence reset deleted the record outright and a loop's earlier passes were
+   * unreachable — the wire was authorable and resolved to nothing, every time.
+   */
+  passes: Array<Map<string, ChildRecord>>;
   /**
    * How far along `sequence` the cursor has moved. A transition into a sequence member is a JUMP: it
    * sets the cursor there, so members BEFORE it stay skipped. Scanning from 0 for the first member
@@ -504,6 +538,38 @@ function operationOutputOf(value: ResolvedValue | undefined, session?: Published
   return { ...(record["session"] === undefined ? { session: position } : {}), ...record } as JsonValue;
 }
 
+/** One pass's view of a child, as an expression reads it. `undefined` = it did not run in that pass. */
+function passView(rec: ChildRecord | undefined): Record<string, unknown> | undefined {
+  if (rec === undefined) return undefined;
+  // IN FLIGHT is PENDING and not absence: a consumer of a running child WAITS, where a consumer of
+  // one that never ran proceeds without it. Collapsing the two is what silently drops an optional
+  // input instead of parking on it.
+  if (rec.status === "running") return { output: PENDING, outcome: PENDING, operation: PENDING };
+  return { output: rec.outputs ?? {}, outcome: rec.outcome, operation: rec.operation ?? {} };
+}
+
+/**
+ * A child key as an expression sees it: the array of its passes, which ALSO answers as its last one.
+ *
+ * `.children.critique[-2].output` reads the pass before this one; `.children.critique.output` reads
+ * the current pass, because the live view's own properties are hung on the array. One value serves
+ * both spellings, so neither the interpreter nor the producer resolver needs a rule about which is
+ * meant — `memberOf` finds an own property, `at` indexes, and the array is the array either way.
+ *
+ * The same move `operationOutputOf` makes for a prompt op returning a list with `session` on it: a
+ * JS array carries named properties, and using that is what keeps the two readings one object rather
+ * than two that can drift.
+ */
+function passesOf(instance: Instance, key: string): unknown {
+  const views = instance.passes.map((pass) => passView(pass.get(key)));
+  const live = views[views.length - 1];
+  const array = views as unknown as Record<string, unknown>;
+  // `{}` for a key that has never run, matching what a never-entered child has always read as — so
+  // `.children.k.outcome` is `undefined` rather than an error before `k` has been anywhere.
+  for (const [name, value] of Object.entries(live ?? {})) array[name] = value;
+  return array;
+}
+
 /** The model an operation resolved to — read off the config the call was actually made with. */
 function modelOfOp(op: Operation<InlineFamily>): string | undefined {
   const config = (op as { config?: unknown }).config;
@@ -653,9 +719,13 @@ export class WorkflowEngine {
       // therefore no step, so the run itself is the empty address.
       address: addressOf(parent, childKey),
       entries: new Map(),
+      index: 0,
       iteration: 0,
       opRun: false,
-      children: new Map(),
+      // One pass to start with, and `children` IS it — see the field docs. Assigned below, because
+      // the two names have to reach the same Map object.
+      children: undefined as unknown as Map<string, ChildRecord>,
+      passes: [],
       cursor: 0,
       justFinished: [],
       unhandledFailures: new Set(),
@@ -664,6 +734,9 @@ export class WorkflowEngine {
       notify: new Notifier(),
       deferredKeys: new Set(),
     };
+    // Pass 0, with `children` and `passes[0]` the same Map — the invariant every read depends on.
+    instance.children = new Map();
+    instance.passes.push(instance.children);
     this.emit({
       type: "instance.entered",
       instanceId: instance.id,
@@ -913,13 +986,27 @@ export class WorkflowEngine {
       consumeEligibility();
       return "none";
     }
-    instance.iteration++;
+    // A PASS is a step BACKWARD, and the comparison is against the member most recently ENTERED
+    // rather than against `cursor`: the cursor sits at 0 before anything has run, which would read
+    // the very first entry into `sequence[0]` as a loop back onto itself.
+    const isPass = this.isBackwardJump(instance, taken.to);
+    // The rule's own wiring, resolved in the world its GUARD read — before the pass opens and
+    // before the reset (see `resolveTransitionInputs`), and before ANY of this is spent or
+    // journalled. A rule waiting on a value has not fired, so nothing here may act as though it had.
+    const handed = this.resolveTransitionInputs(instance, taken.inputRefs);
+    if (handed === PENDING) {
+      if (!this.hasRunningChildren(instance)) consumeEligibility();
+      return "parked";
+    }
+    instance.index++;
+    if (isPass) instance.iteration++;
     this.consumeDeferred(instance);
     this.emit({
       type: "transition.taken",
       instanceId: instance.id,
       stateId: instance.stateId,
       to: taken.to,
+      index: instance.index,
       iteration: instance.iteration,
     });
     instance.unhandledFailures.clear(); // a taken transition handles preceding child failures
@@ -927,9 +1014,21 @@ export class WorkflowEngine {
       consumeEligibility();
       return `terminated-${taken.to.slice("terminate.".length) as TerminationOutcome}` as const;
     }
-    const entered = this.enterChild(instance, taken.to);
+    // The new pass opens BEFORE the entry, so the sequence reset inside `enterChild` clears members
+    // out of the new map and leaves the old one whole. That is the whole mechanism: history survives
+    // because the reset is no longer the only copy it could delete from.
+    if (isPass) {
+      instance.children = new Map(instance.children);
+      instance.passes.push(instance.children);
+    }
+    const entered = this.enterChild(instance, taken.to, handed);
     if (entered === "parked") {
-      instance.iteration--; // the entry did not actually happen
+      instance.index--; // the entry did not actually happen
+      if (isPass) {
+        instance.iteration--;
+        instance.passes.pop();
+        instance.children = instance.passes[instance.passes.length - 1]!;
+      }
       // A park is not an answer, so the eligibility survives — but only while something is still
       // running that could resolve what the target waits on. With nothing running it can never
       // resolve, and holding the eligibility open would spin the loop re-parking forever instead of
@@ -939,6 +1038,24 @@ export class WorkflowEngine {
     }
     consumeEligibility();
     return "entered";
+  }
+
+  /**
+   * Whether `to` steps BACK into the sequence — the test that makes a transition a PASS.
+   *
+   * At or before the member most recently entered, so a child re-entering itself counts: `draft`
+   * transitioning to `draft` is the loop everyone means by the word. `terminate.*` and a child
+   * outside the sequence are neither forward nor back; they are not passes.
+   *
+   * Measured against `entered` rather than `cursor` because the cursor is 0 before any child has
+   * run, which would read the first ordinary entry into `sequence[0]` as a loop.
+   */
+  private isBackwardJump(instance: Instance, to: string): boolean {
+    const sequence = instance.def.sequence ?? [];
+    const target = sequence.indexOf(to);
+    if (target < 0 || instance.entered === undefined) return false;
+    const from = sequence.indexOf(instance.entered);
+    return from >= 0 && target <= from;
   }
 
   /**
@@ -955,7 +1072,9 @@ export class WorkflowEngine {
   private firstMatchingTransition(
     instance: Instance,
     eligible: readonly string[],
-  ): { to: string } | typeof WAITING | typeof GUARD_FAILED | undefined {
+    // The RULE that fired travels with the answer, not just its target: a transition may carry its
+    // own wiring for the child it enters, and which rule matched is the only thing that knows it.
+  ): { to: string; inputRefs?: Record<string, Ref<InlineFamily>> } | typeof WAITING | typeof GUARD_FAILED | undefined {
     // One flag, reset before each guard: whether resolving THIS guard reached a deferred call that is
     // still waiting. That is the difference between the two kinds of PENDING a guard can produce —
     // see the WAITING branch below.
@@ -970,7 +1089,7 @@ export class WorkflowEngine {
         // A guard that failed to lower never fires: validation blocks the run, and reading it as
         // unconditional would be the worst possible interpretation of a typo.
         if (t.whenError !== undefined) continue;
-        if (t.whenRef === undefined) return { to: t.to };
+        if (t.whenRef === undefined) return { to: t.to, ...(t.inputRefs !== undefined ? { inputRefs: t.inputRefs } : {}) };
         deferred = false;
         const r = resolveRef(t.whenRef, scope);
         if (isPending(r)) {
@@ -1012,7 +1131,7 @@ export class WorkflowEngine {
           };
           return GUARD_FAILED;
         }
-        if (isResolvedValue(r) && r.value) return { to: t.to };
+        if (isResolvedValue(r) && r.value) return { to: t.to, ...(t.inputRefs !== undefined ? { inputRefs: t.inputRefs } : {}) };
       }
       return undefined;
     };
@@ -1041,7 +1160,7 @@ export class WorkflowEngine {
    * A SYNC child holds the cursor until it resolves (SPEC §10.4); an `async` one does not, which is
    * the entire difference between the two and the only place the flag is read.
    */
-  private enterChild(instance: Instance, key: string): "started" | "parked" {
+  private enterChild(instance: Instance, key: string, overrides?: Record<string, ResolvedValue>): "started" | "parked" {
     const decl = instance.def.children?.[key];
     if (!decl) throw new Error(`${instance.stateId}: transition/sequence names undeclared child '${key}'`);
 
@@ -1063,7 +1182,9 @@ export class WorkflowEngine {
       }
     }
 
-    const resolved = this.resolveChildInputs(instance, decl);
+    // The transition's own wiring, over the mount's, per NAME. Only a TAKEN transition supplies
+    // any: the sequence cursor reaches a child by walking, which says nothing about why.
+    const resolved = this.resolveChildInputs(instance, decl, overrides);
     if (resolved === PENDING) return "parked";
 
     instance.entered = key;
@@ -1289,10 +1410,7 @@ export class WorkflowEngine {
   private exprContext(instance: Instance): Record<string, unknown> {
     const children: Record<string, unknown> = {};
     for (const key of Object.keys(instance.def.children ?? {})) {
-      const rec = instance.children.get(key);
-      if (!rec) children[key] = {};
-      else if (rec.status === "running") children[key] = { outputs: PENDING, outcome: PENDING, operation: PENDING };
-      else children[key] = { outputs: rec.outputs ?? {}, outcome: rec.outcome, operation: rec.operation ?? {} };
+      children[key] = passesOf(instance, key);
     }
     const artifacts: Record<string, unknown> = {};
     for (const a of this.artifacts) artifacts[a.name] = a;
@@ -1311,6 +1429,7 @@ export class WorkflowEngine {
       // very child it named. Empty string before any child is entered, so a comparison is false
       // rather than an error.
       run: {
+        index: instance.index,
         iteration: instance.iteration,
         cursor: instance.entered ?? "",
         position: instance.entered !== undefined ? (instance.def.sequence?.indexOf(instance.entered) ?? -1) : -1,
@@ -1423,9 +1542,51 @@ export class WorkflowEngine {
    * `Ref<InlineFamily>` after loading, so this is one uniform resolution — no expression/literal
    * branch. PENDING ⇒ parked (the dataflow join); `{error}` ⇒ blocked; else the resolved values.
    */
+  /**
+   * A taken rule's own wiring, resolved in the world its GUARD saw.
+   *
+   * Called before the pass opens and before the sequence reset, which is the whole point: a rule
+   * reads one conversation. `when` asks whether the review said revise and `inputs` hands over what
+   * the review found, and those are the same review — so `.children.review.output.findings` means
+   * the pass that fired, exactly as the guard's `.children.review.output.verdict` did.
+   *
+   * Resolving it after the entry instead would have made the CURRENT pass mean the one being
+   * abandoned in the guard and the one being started in the wiring, and an author would have had to
+   * write `[-2]` in one half of an object whose other half says nothing of the kind.
+   *
+   * A PENDING here parks the transition, as a child input does: the rule is about a value that has
+   * not settled, and taking the branch without it would enter the target with the input missing.
+   */
+  private resolveTransitionInputs(
+    instance: Instance,
+    refs: Record<string, Ref<InlineFamily>> | undefined,
+  ): Record<string, ResolvedValue> | typeof PENDING | undefined {
+    if (refs === undefined) return undefined;
+    const scope = this.scopeFor(instance);
+    const values: Record<string, ResolvedValue> = {};
+    for (const [name, ref] of Object.entries(refs)) {
+      const r = resolveRef(ref, scope);
+      if (isPending(r)) return PENDING;
+      // A resolve ERROR is left for the mount to report against the slot it belongs to: an override
+      // that answers nothing falls back, and the child's own requirement is what says whether that
+      // is a problem. Reporting here would name the rule for a fault in the value.
+      if (isResolveError(r)) continue;
+      if (r.value !== undefined) values[name] = r.value;
+    }
+    return values;
+  }
+
   private resolveChildInputs(
     instance: Instance,
     decl: LoadedChild,
+    /**
+     * A taken transition's own wiring, ALREADY RESOLVED, which wins per NAME.
+     *
+     * Values rather than refs because the two halves are resolved at different moments on purpose:
+     * the rule's wiring reads the world its guard read, and the mount's reads the world the child
+     * is entering. See `TransitionDecl.inputs` and the call site in `takeTransition`.
+     */
+    overrides?: Record<string, ResolvedValue>,
   ): typeof PENDING | { values?: Record<string, ResolvedValue>; error?: string } {
     const childDef = this.config.bundle.states[decl.state];
     if (!childDef) return { error: `unknown state '${decl.state}'` };
@@ -1433,9 +1594,12 @@ export class WorkflowEngine {
     const values: Record<string, ResolvedValue> = {};
     for (const [name, slot] of Object.entries(childDef.inputs ?? {})) {
       const meta = childDef.slotMeta?.[`inputs.${name}`];
+      // Per NAME, so a transition restates only what it changes and everything else still comes
+      // from the mount — the child's other inputs do not become this transition's problem.
+      const handed = overrides?.[name];
       const wire = decl.inputs?.[name];
-      let v: ResolvedValue | undefined;
-      if (wire !== undefined) {
+      let v: ResolvedValue | undefined = handed;
+      if (v === undefined && wire !== undefined) {
         const r = resolveRef(wire, scope);
         if (isPending(r)) return PENDING;
         if (isResolveError(r)) return { error: `${decl.state}: input '${name}': ${r.error}` };

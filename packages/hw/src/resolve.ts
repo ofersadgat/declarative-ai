@@ -219,6 +219,23 @@ function resolveTree(tree: RefTree<InlineFamily>, scope: ResolutionScope): Resol
 }
 
 /**
+ * Whether an array a HIGHER-ORDER call is about to fan out over is still settling.
+ *
+ * `operand` collapses a pending value it is HANDED; it says nothing about one sitting inside a
+ * container. That is fine for an eager built-in — `at(xs, -1)` returns the element and the collapse
+ * happens on the way out — but `map`/`filter`/`flatMap`/`reduce` do not evaluate here at all: the
+ * engine dispatches one call PER ELEMENT, so a pending element would be bound into a call as though
+ * it were data.
+ *
+ * The array of a child's passes is the case that made this reachable — its last entry is the pass
+ * now running. Parking is the same answer the object-literal resolver gives for the same reason: a
+ * container holding a sentinel is not one a consumer can read.
+ */
+function hasPendingElement(values: readonly unknown[]): boolean {
+  return values.some((v) => isPending(v));
+}
+
+/**
  * Resolve a PRODUCER edge. A local key names a declared child — resolved against the run (already
  * run ⇒ reuse its outputs; in flight ⇒ PENDING). An embedded op is either one of the well-known
  * resolvers the loader synthesized, or an author-embedded operation the engine must run.
@@ -230,7 +247,7 @@ function resolveProducer(ref: { op: Operation<InlineFamily> | string; parameters
     // A child that HAS NOT RUN is `undefined`, not an error (SPEC §3.4): "references such as
     // `children.<id>.outputs` ... evaluate to `undefined` if the child has not run". Refusing here
     // made the same reference mean two different things depending on which form it was written in —
-    // `".children.c.outputs.x"` lowers to this edge and refused, while `{ expr: ".children.c.outputs.x" }`
+    // `".children.c.output.x"` lowers to this edge and refused, while `{ expr: ".children.c.output.x" }`
     // lowers to a `member` chain and yielded `undefined` — so a guard was lenient and a wire was not.
     // Whether an absent value is ACCEPTABLE is the consuming slot's to say, through `optional`/`default`
     // (§7.2's named opt-out); whether it is REACHABLE at all is the validator's, through the
@@ -469,6 +486,7 @@ function runResolver(op: Operation<InlineFamily> & { kind: "function" }, scope: 
       const seed = operand("initial");
       if (source === undefined || !isResolvedValue(source)) return source ?? { error: "'reduce' has no array" };
       if (!Array.isArray(source.value)) return { error: "'reduce' expects an array" };
+      if (hasPendingElement(source.value)) return PENDING;
       if (seed !== undefined && !isResolvedValue(seed)) return seed;
 
       let acc = (seed?.value ?? null) as JsonValue;
@@ -492,6 +510,7 @@ function runResolver(op: Operation<InlineFamily> & { kind: "function" }, scope: 
       if (source === undefined) return { error: `'${op.functionRef}' has no array` };
       if (!isResolvedValue(source)) return source;
       if (!Array.isArray(source.value)) return { error: `'${op.functionRef}' expects an array` };
+      if (hasPendingElement(source.value)) return PENDING;
 
       const results: JsonValue[] = [];
       for (const element of source.value) {

@@ -85,8 +85,8 @@ const FLAT: Record<string, StateDef> = {
   root: {
     label: "Root",
     outputs: {
-      first: { schema: {}, binding: ".children.a.outputs.answer" },
-      second: { schema: {}, binding: ".children.b.outputs.answer" },
+      first: { schema: {}, binding: ".children.a.output.answer" },
+      second: { schema: {}, binding: ".children.b.output.answer" },
     },
     children: { a: { state: "root/a" }, b: { state: "root/b" } },
     sequence: ["a", "b"],
@@ -99,18 +99,18 @@ const FLAT: Record<string, StateDef> = {
 const LOOP: Record<string, StateDef> = {
   root: {
     label: "Root",
-    outputs: { last: { schema: {}, binding: ".children.loop.outputs.last" } },
+    outputs: { last: { schema: {}, binding: ".children.loop.output.last" } },
     children: { loop: { state: "root/loop" } },
     sequence: ["loop"],
   },
   "root/loop": {
     label: "Loop",
-    outputs: { last: { schema: {}, binding: ".children.tick.outputs.answer" } },
+    outputs: { last: { schema: {}, binding: ".children.tick.output.answer" } },
     children: { tick: { state: "root/loop/tick" } },
     sequence: ["tick"],
     transitions: [
-      { to: "tick", when: ".run.cursor === 'tick' && .children.tick.outputs.answer === 'again' && .run.iteration < .limits.max_iterations" },
-      { to: "terminate.success", when: ".run.cursor === 'tick' && .children.tick.outputs.answer !== 'again'" },
+      { to: "tick", when: ".run.cursor === 'tick' && .children.tick.output.answer === 'again' && .run.iteration < .limits.max_iterations" },
+      { to: "terminate.success", when: ".run.cursor === 'tick' && .children.tick.output.answer !== 'again'" },
     ],
     limits: { max_iterations: 5 },
   },

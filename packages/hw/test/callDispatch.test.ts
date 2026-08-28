@@ -94,8 +94,7 @@ const files = {
   [`${FUNCTIONS}/verdict.json`]: JSON.stringify({
     kind: "function",
     function: "noop",
-    outputs: { value: { schema: { type: "string", enum: ["clean", "dirty"] } } },
-    output: { name: "output", kind: "json", schema: { type: "string", enum: ["clean", "dirty"] } },
+    output: { value: { kind: "json", schema: { type: "string", enum: ["clean", "dirty"] } } },
   }),
   // TYPED slots, so a spread's property types have something to disagree with. Its impl is `noop`
   // rather than `shout` because `shout` is itself a document here, and a callee naming one binds
@@ -324,7 +323,7 @@ describe("the call form of 'function'", () => {
         opOf({ ...base, operation: { function: `shout(${binding})` } }),
       ];
     };
-    for (const reference of [".inputs.issue", ".artifacts.doc", ".children.c.outputs.report"]) {
+    for (const reference of [".inputs.issue", ".artifacts.doc", ".children.c.output.report"]) {
       const [declared, applied] = both(reference);
       expect(applied).toEqual(declared);
     }
@@ -386,13 +385,13 @@ describe("a call's output type", () => {
 
   it("accepts a state's declaration that NARROWS it", () => {
     expect(
-      errorOf({ operation: { function: "verdict", output: { name: "output", kind: "json", schema: { type: "string", enum: ["clean"] } } } }),
+      errorOf({ operation: { function: "verdict", output: { value: { kind: "json", schema: { type: "string", enum: ["clean"] } } } } }),
     ).toBe("");
   });
 
   it("refuses one that contradicts it", () => {
     expect(
-      errorOf({ operation: { function: "verdict", output: { name: "output", kind: "json", schema: { type: "number" } } } }),
+      errorOf({ operation: { function: "verdict", output: { value: { kind: "json", schema: { type: "number" } } } } }),
     ).toMatch(/declares an output 'verdict' does not return/);
   });
 
@@ -400,7 +399,7 @@ describe("a call's output type", () => {
     // `shout` says what it takes and not what it returns, which is every function written before
     // return types were read — a declaration here is the only statement there is.
     expect(
-      errorOf({ operation: { function: "shout", args: { text: "hi" }, output: { name: "output", kind: "text", schema: { type: "string" } } } }),
+      errorOf({ operation: { function: "shout", args: { text: "hi" }, output: { value: { kind: "text", schema: { type: "string" } } } } }),
     ).toBe("");
   });
 });
@@ -504,8 +503,8 @@ describe("a call's arguments are visible to the static passes", () => {
         children: { c: { state: "./c" } },
         outputs: {
           // TWO consumers of the same child output — one direct, one through a call.
-          direct: { schema: { type: "string" }, binding: ".children.c.outputs.doc" },
-          shouted: { schema: { type: "string" }, binding: { expr: "shout(.children.c.outputs.doc)" } },
+          direct: { schema: { type: "string" }, binding: ".children.c.output.doc" },
+          shouted: { schema: { type: "string" }, binding: { expr: "shout(.children.c.output.doc)" } },
         },
       },
       "plan/c.json": {
@@ -520,7 +519,7 @@ describe("a call's arguments are visible to the static passes", () => {
   it("reports a call argument that reads an undeclared child", () => {
     const bundle = loadWith({
       "plan.json": {
-        outputs: { v: { schema: { type: "string" }, binding: { expr: "shout(.children.ghost.outputs.x)" } } },
+        outputs: { v: { schema: { type: "string" }, binding: { expr: "shout(.children.ghost.output.x)" } } },
         operation: { kind: "function", function: "noop" },
       },
     });
@@ -641,12 +640,12 @@ describe("a call inside a guard", () => {
       operation: { kind: "function", function: "noop" },
     };
     const parent = {
-      outputs: { done: { schema: { type: "string" }, binding: ".children.b.outputs.done" } },
+      outputs: { done: { schema: { type: "string" }, binding: ".children.b.output.done" } },
       operation: { kind: "function", function: "noop" },
       children: {
         // The argument is `a`'s OWN output, so a premature evaluation is visible as a second call
         // under a different argument rather than being hidden by the content-addressed memo.
-        a: { state: "./a", transitions: [{ to: "b", when: "shout(.children.a.outputs.done) === 'OK'" }] },
+        a: { state: "./a", transitions: [{ to: "b", when: "shout(.children.a.output.done) === 'OK'" }] },
         b: { state: "./b" },
       },
       sequence: ["a", "b"],

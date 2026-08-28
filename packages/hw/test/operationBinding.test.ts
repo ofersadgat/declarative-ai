@@ -26,7 +26,7 @@ const boundTo = (binding: string): Record<string, StateDef> => ({
       summary: { schema: { type: "string" }, binding },
     },
     // The call says what it returns; the state says what it publishes.
-    operation: { kind: "prompt", prompt: "go", outputs: { report: { schema: { type: "string" } } } },
+    operation: { kind: "prompt", prompt: "go", output: { report: { schema: { type: "string" } } } },
   },
 });
 
@@ -52,7 +52,7 @@ describe("`operation` is a binding namespace", () => {
               answer: { schema: { type: "string" }, binding: ".operation.output.answer" },
               where: { binding: ".operation.output.session" },
             },
-            operation: { kind: "prompt", prompt: "go", outputs: { answer: { schema: { type: "string" } } } },
+            operation: { kind: "prompt", prompt: "go", output: { answer: { schema: { type: "string" } } } },
           },
         },
         "s",
@@ -163,7 +163,7 @@ describe("`operation.outputs` is the call's signature", () => {
       operation: {
         kind: "prompt",
         prompt: "go",
-        outputs: {
+        output: {
           report: { schema: { type: "string" } },
           score: { schema: { type: "number" } },
         },
@@ -205,16 +205,18 @@ describe("`operation.outputs` is the call's signature", () => {
     expect(errorsFor(files, "s").length).toBeGreaterThan(0);
   });
 
-  it("still lets an author declare the single slot outright, for a blob return", () => {
-    // §4.4: a delegated agent hands back ONE value, not a record — which the map cannot express.
+  it("says a blob return with a ONE-ENTRY map carrying the kind", () => {
+    // §4.4: a delegated agent hands back ONE value, not a record. A lone entry that declares its
+    // `kind` is how the map says so — the bytes ARE the value, and `report` names it rather than
+    // being a field wrapped around it.
     const bundle = loadBundle(
       {
         s: {
-          outputs: { report: { binding: ".operation.output.report" } },
+          outputs: { report: { binding: ".operation.output" } },
           operation: {
             kind: "function",
             function: "agent",
-            output: { name: "report", kind: "blob", schema: { type: "string", contentMediaType: "text/markdown" } },
+            output: { report: { kind: "blob", schema: { type: "string", contentMediaType: "text/markdown" } } },
           },
         },
       },
@@ -223,6 +225,30 @@ describe("`operation.outputs` is the call's signature", () => {
     const output = (bundle.states["s"] as unknown as { operation: { output: { kind: string; name: string } } }).operation.output;
     expect(output.kind).toBe("blob");
     expect(output.name).toBe("report");
+  });
+
+  it("REFUSES a kind on a multi-entry map, rather than reading it only when the map is short", () => {
+    // The cliff this closes: were the kind read only on a lone entry, adding a second output would
+    // silently rewrap the return and break every binding onto it, with nothing said.
+    // Carried as data, not thrown: an operation that will not build is one state's problem, and the
+    // loader reports the rest of the bundle rather than stopping at the first bad one.
+    const bundle = loadBundle(
+      {
+        s: {
+          outputs: { report: { binding: ".operation.output.report" } },
+          operation: {
+            kind: "function",
+            function: "agent",
+            output: {
+              report: { kind: "blob", schema: { type: "string", contentMediaType: "text/markdown" } },
+              summary: { schema: { type: "string" } },
+            },
+          },
+        },
+      },
+      "s",
+    );
+    expect(bundle.states["s"]?.operationError ?? "").toMatch(/output\.report: declares kind 'blob'/);
   });
 });
 
@@ -242,7 +268,7 @@ describe("a non-object operation output", () => {
         kind: "prompt",
         prompt: "split {{.inputs.feature_description}} into features",
         input: { feature_description: { schema: { type: "string" }, binding: ".inputs.feature_description" } },
-        output: { schema: { type: "array", items: { type: "string" } } },
+        output: { features: { kind: "json", schema: { type: "array", items: { type: "string" } } } },
       },
     },
   });

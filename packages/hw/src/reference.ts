@@ -8,7 +8,7 @@
  * ```text
  *   feature/plan                          a file, whole
  *   feature/plan.outputs.plan_doc         a property of that file
- *   .children.critique.outputs.outcome    a property of THIS file
+ *   .children.critique.output.outcome    a property of THIS file
  *   ./goals   ../shared/lint              relative to the referring state's own id
  *   $/types/markdown                      `$` is shorthand for `$JAIRA`
  *   /opt/workflows/review                 absolute

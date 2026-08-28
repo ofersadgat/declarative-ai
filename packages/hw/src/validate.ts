@@ -233,10 +233,46 @@ function validateState(
   // One check for both lists: a child's transitions are the state's, narrowed to the round that child
   // finishes in (SPEC §3.3), so every rule about a target, a guard's type and a cycle holds identically
   // — only the path in the message says which list the author wrote it in.
-  const checkTransitions = (list: readonly LoadedTransition[] | undefined, where: string): void =>
+  /**
+   * `mountKey` is the child whose list this is, absent for the state's own.
+   *
+   * It decides what a rule's WIRING may read. A rule on a child's mount fires in the round that
+   * child finished, so that child has demonstrably run — and asking the question at the TARGET's
+   * mount instead said the opposite, refusing `.children.b.output.x` on `b`'s own rule. The way
+   * out of that would have been to declare the slot optional, which is exactly the pressure that
+   * produced the silent-empty input this whole change exists to end.
+   */
+  const checkTransitions = (list: readonly LoadedTransition[] | undefined, where: string, mountKey?: string): void =>
     (list ?? []).forEach((t, i) => {
       if (!TERMINATES.has(t.to) && !childKeys.has(t.to)) {
         err(`${where}[${i}].to`, `'${t.to}' is neither a declared child nor a terminate.* outcome`);
+      }
+      // A transition's own wiring for the child it enters, checked exactly as the mount's is: same
+      // scope, same reachability question, same "does the target declare this name" rule. Silence
+      // here would be the failure this whole feature exists to end — a wire that reads as correct
+      // and fills nothing.
+      // The LOWERED wiring — `checkBinding` reads producer edges, and the mount's loop is handed
+      // the same thing for the same reason.
+      for (const [name, binding] of Object.entries(t.inputRefs ?? {})) {
+        const path = `${where}[${i}].inputs.${name}`;
+        if (TERMINATES.has(t.to)) {
+          err(path, `'${t.to}' terminates the state; there is no child to pass inputs to`);
+          continue;
+        }
+        const target = children[t.to];
+        const targetDef = target === undefined ? undefined : bundle.states[target.state];
+        const consumer = targetDef?.inputs?.[name];
+        if (targetDef && targetDef.inputs && !consumer) {
+          err(path, `'${t.to}' declares no input '${name}'`);
+          continue;
+        }
+        const meta = targetDef?.slotMeta?.[`inputs.${name}`];
+        // Reachability is asked AT THE RULE, which is where the value actually resolves — before
+        // the pass opens and before the reset. On a child's mount that proves the child itself as
+        // well as everything before it; on the state's own list it proves what always runs.
+        const at = mountKey === undefined ? reachable : reachable.enteredAt(mountKey);
+        const proven = mountKey === undefined ? at : { ...at, always: new Set([...at.always, mountKey]) };
+        checkBinding(binding, consumer?.schema, path, id, def, bundle, scope, proven, errors, isOptOut(meta));
       }
       let ast: Expr | undefined;
       if (t.when !== undefined) {
@@ -290,7 +326,7 @@ function validateState(
     });
 
   checkTransitions(def.transitions, "transitions");
-  for (const [key, child] of Object.entries(children)) checkTransitions(child.transitions, `children.${key}.transitions`);
+  for (const [key, child] of Object.entries(children)) checkTransitions(child.transitions, `children.${key}.transitions`, key);
 
   // --- declared slots ---------------------------------------------------------
   for (const [section, slots] of [
@@ -1243,8 +1279,13 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle, seen: ReadonlySet
     return { type: "object", properties };
   };
 
-  // Each child exposes its `outputs` and its termination `outcome` — the two things the engine puts
-  // in the expression context for it (SPEC §3.6).
+  // Each child exposes its `output` and its termination `outcome` — the two things the engine puts
+  // in the expression context for it (SPEC §3.6) — as of every PASS it took.
+  //
+  // The schema is an ARRAY of that view which also declares the view's own properties, because the
+  // value is: `.children.c[-2].output` indexes a pass, `.children.c.output` reads the current one,
+  // and both have to check. An array schema carrying `properties` is unusual and exact, the same way
+  // `operationNodeSchema` types a prompt op that returns a list with `session` hung on it.
   const childrenProps: Record<string, JsonValue> = {};
   const outcomeSchema: JsonValue = { type: "string", enum: [...TERMINATE_OUTCOMES] };
   for (const [key, child] of Object.entries(def.children ?? {})) {
@@ -1256,13 +1297,15 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle, seen: ReadonlySet
     const childOperation = childState
       ? operationNodeSchema(childState.operation?.kind, outputDeclOf(childState))
       : undefined;
+    const passProperties: Record<string, JsonValue> = {
+      output: outputs as JsonValue,
+      outcome: outcomeSchema,
+      ...(childOperation !== undefined ? { operation: childOperation as JsonValue } : {}),
+    };
     childrenProps[key] = {
-      type: "object",
-      properties: {
-        outputs: outputs as JsonValue,
-        outcome: outcomeSchema,
-        ...(childOperation !== undefined ? { operation: childOperation as JsonValue } : {}),
-      },
+      type: "array",
+      items: { type: "object", properties: passProperties } as JsonValue,
+      properties: passProperties,
     } as JsonValue;
   }
 
@@ -1286,6 +1329,8 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle, seen: ReadonlySet
     run: {
       type: "object",
       properties: {
+        // Every transition taken. `iteration` counts only the backward ones — see `Instance.index`.
+        index: { type: "integer" } as JsonValue,
         iteration: { type: "integer" } as JsonValue,
         // Where the sequence cursor is, by child key and by index — so a guard can say "if we are
         // at x and y holds, go to z". Typed as the declared child keys, so a typo is a lint error

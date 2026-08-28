@@ -127,7 +127,8 @@ export type EngineEvent =
       /** `error` covers a cancelled wait too — a failure is data, and this says which kind arrived. */
       outcome: "value" | "error";
     }
-  | { type: "transition.taken"; instanceId: number; stateId: string; to: string; iteration: number }
+  /** `index` counts every transition; `iteration` counts only the backward ones — the passes. */
+  | { type: "transition.taken"; instanceId: number; stateId: string; to: string; index: number; iteration: number }
   | { type: "child.superseded"; instanceId: number; stateId: string; childKey: string }
   | { type: "instance.terminated"; instanceId: number; stateId: string; outcome: TerminationOutcome; failure?: Failure };
 

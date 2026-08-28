@@ -140,7 +140,7 @@ describe("ref TREES — primitives, and what a tree cannot contain", () => {
 
   it("RESOLVES a top-level producer edge — only nesting one in a tree is refused", () => {
     // The edge resolves; it does not refuse. A child that has not run is `undefined` (SPEC §3.4),
-    // which is the same answer `{ expr: ".children.c.outputs" }` gives for the same path.
+    // which is the same answer `{ expr: ".children.c.output" }` gives for the same path.
     const r = resolveRef({ op: "c" }, scope);
     expect(isResolveError(r)).toBe(false);
     expect(isResolvedValue(r) && r.value).toBeUndefined();

@@ -57,7 +57,7 @@ describe("a state with no operation and no children", () => {
       root: {
         label: "Root",
         outputs: { verdict: { schema: { type: "string" }, binding: ".operation.output.verdict" } },
-        operation: { kind: "prompt", model: "m", prompt: "go", outputs: { verdict: { schema: { type: "string" } } } },
+        operation: { kind: "prompt", model: "m", prompt: "go", output: { verdict: { schema: { type: "string" } } } },
       } as StateDef,
     };
     expect(warnings(files, "root")).toBe("");

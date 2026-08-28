@@ -33,7 +33,7 @@ describe("property access", () => {
   });
 
   it("access on undefined/missing/null yields undefined (implicit optional chaining)", () => {
-    expect(ev(".children.x.outputs.y", ctx)).toBe(undefined);
+    expect(ev(".children.x.output.y", ctx)).toBe(undefined);
     expect(ev(".inputs.gone.deeper.still", ctx)).toBe(undefined);
     expect(ev(".n.prop", { n: null })).toBe(undefined);
     expect(ev(".b.prop", { b: 42 })).toBe(undefined);
@@ -196,9 +196,9 @@ describe("calls", () => {
    * like a read of an undeclared namespace called `classify` — and the validator would reject it.
    */
   it("keeps the callee out of the data references, but not the arguments", () => {
-    const ast = parseExpression("classify(.children.review.outputs.plan, .inputs.n)");
+    const ast = parseExpression("classify(.children.review.output.plan, .inputs.n)");
     expect(referencesOf(ast)).toEqual([
-      ["children", "review", "outputs", "plan"],
+      ["children", "review", "output", "plan"],
       ["inputs", "n"],
     ]);
   });
@@ -364,42 +364,42 @@ describe("purity — rejected constructs", () => {
 
 describe("PENDING propagation (SPEC §6/§10.4)", () => {
   const ctx = {
-    children: { review: { outputs: PENDING }, done: { outputs: { report: "r" }, outcome: "success" } },
+    children: { review: { output: PENDING }, done: { output: { report: "r" }, outcome: "success" } },
     flag: false,
     truthy: 1,
   };
 
   it("member access through PENDING is PENDING", () => {
-    expect(ev(".children.review.outputs.report", ctx)).toBe(PENDING);
-    expect(ev(".children.review.outputs", ctx)).toBe(PENDING);
+    expect(ev(".children.review.output.report", ctx)).toBe(PENDING);
+    expect(ev(".children.review.output", ctx)).toBe(PENDING);
   });
 
   it("operators touching PENDING yield PENDING", () => {
-    expect(ev(".children.review.outputs.report === 'x'", ctx)).toBe(PENDING);
-    expect(ev("!.children.review.outputs", ctx)).toBe(PENDING);
-    expect(ev(".children.review.outputs.n < 3", ctx)).toBe(PENDING);
-    expect(ev(".children.review.outputs.ok ? 1 : 2", ctx)).toBe(PENDING);
+    expect(ev(".children.review.output.report === 'x'", ctx)).toBe(PENDING);
+    expect(ev("!.children.review.output", ctx)).toBe(PENDING);
+    expect(ev(".children.review.output.n < 3", ctx)).toBe(PENDING);
+    expect(ev(".children.review.output.ok ? 1 : 2", ctx)).toBe(PENDING);
   });
 
   it("short-circuits on determinate values only", () => {
-    expect(ev(".flag && .children.review.outputs.ok", ctx)).toBe(false); // false && PENDING
-    expect(ev(".truthy || .children.review.outputs.ok", ctx)).toBe(1); // true || PENDING
-    expect(ev(".children.review.outputs.ok && .flag", ctx)).toBe(PENDING); // PENDING && x
-    expect(ev(".children.review.outputs.ok || .flag", ctx)).toBe(PENDING); // PENDING || x
-    expect(ev(".truthy && .children.review.outputs.ok", ctx)).toBe(PENDING); // true && PENDING
+    expect(ev(".flag && .children.review.output.ok", ctx)).toBe(false); // false && PENDING
+    expect(ev(".truthy || .children.review.output.ok", ctx)).toBe(1); // true || PENDING
+    expect(ev(".children.review.output.ok && .flag", ctx)).toBe(PENDING); // PENDING && x
+    expect(ev(".children.review.output.ok || .flag", ctx)).toBe(PENDING); // PENDING || x
+    expect(ev(".truthy && .children.review.output.ok", ctx)).toBe(PENDING); // true && PENDING
   });
 
   it("resolved children evaluate normally alongside pending ones", () => {
     expect(ev(".children.done.outcome === 'success'", ctx)).toBe(true);
-    expect(ev(".children.done.outputs.report", ctx)).toBe("r");
+    expect(ev(".children.done.output.report", ctx)).toBe("r");
   });
 });
 
 describe("referencesOf (static analysis)", () => {
   it("collects root-anchored paths", () => {
-    const ast = parseExpression(".children.critique.outputs.outcome === 'clean' && .run.iteration < .limits.max_iterations");
+    const ast = parseExpression(".children.critique.output.outcome === 'clean' && .run.iteration < .limits.max_iterations");
     expect(referencesOf(ast)).toEqual([
-      ["children", "critique", "outputs", "outcome"],
+      ["children", "critique", "output", "outcome"],
       ["run", "iteration"],
       ["limits", "max_iterations"],
     ]);
@@ -429,7 +429,7 @@ describe("spec example expressions evaluate as documented", () => {
   });
 
   it("§9 planning outcome mapping", () => {
-    const ctx = { children: { critique: { outputs: { outcome: "clean" } }, context: { outputs: { plan_doc: "p" } } } };
-    expect(ev(".children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'", ctx)).toBe("complete");
+    const ctx = { children: { critique: { output: { outcome: "clean" } }, context: { output: { plan_doc: "p" } } } };
+    expect(ev(".children.critique.output.outcome === 'clean' ? 'complete' : 'blocked'", ctx)).toBe("complete");
   });
 });

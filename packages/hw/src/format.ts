@@ -133,7 +133,7 @@ export type BindingDecl =
   | Ref<InlineFamily>
   /**
    * A RUNTIME reference (REFERENCES.md §5) — a leading-dot path into this instance's data:
-   * `.children.critique.outputs.outcome`, `.inputs.issue`, `.artifacts.design_doc`.
+   * `.children.critique.output.outcome`, `.inputs.issue`, `.artifacts.design_doc`.
    *
    * Always current-instance: a runtime reference into another file would have no instance to
    * resolve against, since a state can run many times. Cross-file references are transclusion,
@@ -366,24 +366,21 @@ export interface OperationFields extends ExecEnvironmentDecl {
    * What the operation RETURNS, by name — and, for a prompt op, the structured-output contract the
    * model is held to.
    *
-   * A map, like `input`, because an operation returns named values exactly as it takes them. It used
-   * to be one `output` slot, and the contract was derived from the STATE's unbound outputs instead:
-   * the operation borrowed its own signature from whatever the state around it happened to declare,
-   * which is why the result had no address of its own and could only be received, never renamed or
-   * transformed on the way through.
+   * A map, like `input`, because an operation returns named values exactly as it takes them. The KEY
+   * is the name, so nothing declares one twice; these are the names `.operation.output.<name>`
+   * exposes, and what a state's outputs bind FROM.
    *
-   * These names are what `.operation.output.<name>` exposes, and what a state's outputs bind FROM.
-   */
-  outputs?: Record<string, NamedParameterDecl>;
-  /**
-   * The single lowered output slot, as authored.
+   * ONE field, singular, matching the read. There used to be a second — a `outputs` map beside a
+   * single `output` slot, the map lowered into the slot — because {@link outputSlotFor} dropped each
+   * entry's `kind` and always produced `json`, which left the single form as the only way to say
+   * "the whole return value is a blob" (§4.4). It honours `kind` on a lone entry now, so a
+   * one-entry map says that, and the second field has nothing left to say.
    *
-   * Still here because the executor seam takes ONE output — a prompt op asks the model for one
-   * object, a delegated agent hands back one blob — so `outputs` is lowered INTO this. Declaring it
-   * directly is how an author says something the map cannot: that the whole return value is a blob
-   * (§4.4), rather than a record of named fields.
+   * The map is not redundant sugar either way: most declarations name more than one output, and what
+   * the map buys is `required`, derived per entry from `optional`/`default` rather than restated by
+   * hand beside the properties it has to stay in step with.
    */
-  output?: NamedParameterDecl;
+  output?: Record<string, ParameterDecl>;
   /**
    * The ordered roots a BARE reference is searched along, inherited down the tree (EXPRESSIONS.md
    * §4). Shell `PATH` semantics: first match wins, and only the first entry produces bare ids.
@@ -603,6 +600,23 @@ export interface TransitionDecl {
   /** Guard expression; absent = unconditional. Must INFER to boolean (§7.2) — strict, no
    *  truthiness coercion. */
   when?: string;
+  /**
+   * Inputs this transition hands the target, overriding the mount's wiring for the names it gives.
+   *
+   * The mount says what a child ALWAYS takes; a transition says what it takes WHEN IT ARRIVES THIS
+   * WAY. Those are different questions the moment a child can be reached from more than one place,
+   * and without this the second one has no answer: several siblings may send control back to one
+   * child, each with its own evidence for doing so, and a mount can only name a value that is true
+   * of all of them. Coalescing at the mount does not work either — every candidate has a value from
+   * the previous pass, so "the findings that sent me here" is unanswerable there.
+   *
+   * The transition KNOWS which one fired. Saying it here is the only place the question is decided
+   * rather than guessed.
+   *
+   * Resolved in the PARENT's scope, exactly as `children[].inputs` is, and merged over it per NAME:
+   * a transition restates only what it changes.
+   */
+  inputs?: Record<string, BindingDecl>;
 }
 
 /**
@@ -617,6 +631,8 @@ export interface TransitionDecl {
  */
 export interface LoadedTransition extends TransitionDecl {
   whenRef?: Ref<InlineFamily>;
+  /** {@link TransitionDecl.inputs}, desugared — the same producer edges a mount's wiring lowers to. */
+  inputRefs?: Record<string, Ref<InlineFamily>>;
   /**
    * Why the guard could not be lowered — carried as DATA, not thrown.
    *

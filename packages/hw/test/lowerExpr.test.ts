@@ -21,7 +21,7 @@ const CONTEXTS: Record<string, Record<string, unknown>> = {
     children: {
       done: { outputs: { plan: "# Plan", n: 3 }, outcome: "success" },
       failed: { outputs: {}, outcome: "error" },
-      running: { outputs: PENDING, outcome: PENDING },
+      running: { output: PENDING, outcome: PENDING },
       unstarted: {},
     },
     run: { iteration: 2, cursor: "done", position: 1 },
@@ -43,9 +43,9 @@ const EXPRESSIONS = [
   // prototype must stay unreachable through both paths
   ".inputs.issue.constructor", ".inputs.nested.toString", ".inputs.list.map",
   // children, in all four shapes §1.3 distinguishes
-  ".children.done.outputs.plan", ".children.done.outputs", ".children.done", ".children.done.outcome",
-  ".children.unstarted.outputs.plan", ".children.unstarted.outcome",
-  ".children.failed.outcome", ".children.missing.outputs.x",
+  ".children.done.output.plan", ".children.done.output", ".children.done", ".children.done.outcome",
+  ".children.unstarted.output.plan", ".children.unstarted.outcome",
+  ".children.failed.outcome", ".children.missing.output.x",
   // operators
   ".inputs.n === 2", ".inputs.n == '2'", ".inputs.n !== 2", ".inputs.n != '2'",
   ".inputs.n < 3", ".inputs.n <= 2", ".inputs.n > 3", ".inputs.n >= 2",
@@ -59,7 +59,7 @@ const EXPRESSIONS = [
   ".inputs.flag ? 1 : .inputs.n > 1 ? 2 : 3",
   // combinations
   ".run.cursor === 'done' && .outputs.severity === 'high'",
-  ".children.done.outcome === 'success' && .children.done.outputs.n > 2",
+  ".children.done.outcome === 'success' && .children.done.output.n > 2",
 ];
 
 function scopeFor(context: Record<string, unknown>): ResolutionScope {
@@ -99,8 +99,8 @@ describe("lowering preserves the interpreter's semantics", () => {
 describe("PENDING propagates through a lowered tree exactly as it does through the interpreter", () => {
   const ctx = CONTEXTS.populated!;
   for (const src of [
-    ".children.running.outputs",
-    ".children.running.outputs.plan",
+    ".children.running.output",
+    ".children.running.output.plan",
     ".children.running.outcome === 'success'",
     "!.children.running.outcome",
     // The short-circuit cases: a determinate side decides, past a pending one.
@@ -138,8 +138,8 @@ describe("pathOfRef recovers the reference a lowered sub-tree reads", () => {
   const pathOf = (src: string): string[] | undefined => pathOfRef(lowerExpression(parseExpression(src)));
 
   it("reads back a root-anchored path", () => {
-    expect(pathOf(".children.done.outputs.plan")).toEqual(["children", "done", "outputs", "plan"]);
-    expect(pathOf(".children.done.outputs")).toEqual(["children", "done", "outputs"]);
+    expect(pathOf(".children.done.output.plan")).toEqual(["children", "done", "output", "plan"]);
+    expect(pathOf(".children.done.output")).toEqual(["children", "done", "output"]);
     expect(pathOf(".children.done")).toEqual(["children", "done"]);
     expect(pathOf(".children.done.outcome")).toEqual(["children", "done", "outcome"]);
     expect(pathOf(".inputs")).toEqual(["inputs"]);
@@ -191,7 +191,7 @@ describe("inference over the tree agrees with inference over the AST", () => {
     ".inputs", ".inputs.issue", ".inputs.n", ".inputs.flag",
     ".inputs.list.length", ".inputs.issue.length", ".inputs.nested.deep",
     ".outputs.severity",
-    ".children.done.outputs.plan", ".children.done.outcome", ".children.done.outputs",
+    ".children.done.output.plan", ".children.done.outcome", ".children.done.output",
     ".inputs.n === 2", ".inputs.n < 3", "!.inputs.flag",
     ".run.iteration < .limits.max_iterations",
     ".inputs.flag && .inputs.issue", ".inputs.flag || .inputs.issue",
@@ -199,7 +199,7 @@ describe("inference over the tree agrees with inference over the AST", () => {
     ".inputs.flag ? .inputs.n : 3",
     ".run.cursor === 'done' && .outputs.severity === 'high'",
     // the mistakes the validator has to keep catching
-    ".nope", ".inputs.missing", ".inputs.nested.gone", ".children.done.outputs.absent",
+    ".nope", ".inputs.missing", ".inputs.nested.gone", ".children.done.output.absent",
   ];
 
   for (const src of SOURCES) {
