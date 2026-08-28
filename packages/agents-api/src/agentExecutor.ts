@@ -555,8 +555,34 @@ export class AgentExecutor extends PromptExecutor {
       // Stamped with ONE time for the whole call: the stream reports no per-message clock, and an
       // entry with no timestamp cannot be merged with a captured one later.
       const at = new Date().toISOString();
+      const said = entriesOfMessages(turn.messages as RawMessage[], { provider: AGENT_PROVIDER, at });
+      // The events, spliced back among the turns they arrived between.
+      //
+      // They were pinned by `index` — how many main turns preceded each — precisely so a reader could
+      // interleave them, which meant every reader had to do the interleaving and could get it wrong.
+      // Doing it HERE, once, is what lets them be entries rather than a second array: the pin becomes
+      // the position, and `kind: "event"` is the format's own word for a session fact that is not a
+      // message (RECORDS.md §2.2).
+      const main: Entry[] = [];
+      let pending = 0;
+      for (let k = 0; k <= said.length; k++) {
+        while (pending < turn.providerEvents.length && turn.providerEvents[pending]!.index === k) {
+          const raw = turn.providerEvents[pending]!.event;
+          const type = (raw as { type?: unknown } | null)?.type;
+          main.push({
+            kind: "event",
+            provider: AGENT_PROVIDER,
+            timestamp: at,
+            // VERBATIM in `data`, opaque by the same rule the live stream's `provider_event` follows.
+            // `type` is lifted out so a reader can name the row without interpreting the payload.
+            event: { type: typeof type === "string" ? type : "provider_event", data: raw },
+          });
+          pending += 1;
+        }
+        if (k < said.length) main.push(said[k]!);
+      }
       const entries: Entry[] = [
-        ...entriesOfMessages(turn.messages as RawMessage[], { provider: AGENT_PROVIDER, at }),
+        ...main,
         // A subagent's turns carry the call that spawned them, so the main thread never comes to
         // claim it said what a subagent said — which is why they were a separate field before.
         ...[...turn.sidechains].flatMap(([parentToolUseId, messages]) =>
@@ -582,10 +608,10 @@ export class AgentExecutor extends PromptExecutor {
         // it back — every turn, on the same wire — and we were discarding it.
         // ONE array. `thinking`/`toolCalls`/`toolResults` were projections OF these messages and
         // are computed from the entries now; `sidechains` was the same conversation under a second
-        // key space. Measured on one record, the two tool indexes alone were 178 KB of restatement.
+        // key space; `providerEvents` was the rest of it under a third, pinned by an index every
+        // reader had to re-splice. Measured on one record, the two tool indexes alone were 178 KB.
         ...(entries.length > 0 ? { entries } : {}),
         ...(result.sessionId !== undefined ? { providerSessionId: result.sessionId } : {}),
-        ...(turn.providerEvents.length > 0 ? { providerEvents: turn.providerEvents } : {}),
       };
       return { value: output, metrics: this.agentMetrics(startMs, result) };
     } catch (e) {

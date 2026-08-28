@@ -58,10 +58,36 @@ export interface BaseEntry {
    * on the record, once.
    */
   providerData?: Record<string, JsonValue>;
+  /**
+   * What the HOST measured about this entry, as distinct from what the provider stamped on it.
+   *
+   * `timestamp` is the provider's own clock and goes back on the wire; these are numbers only a
+   * streaming consumer can take, and nobody can recover afterwards: when the first fragment of this
+   * turn appeared, and how long the model spent thinking before it began answering — the
+   * "thought for 12 s" a viewer shows.
+   *
+   * ON THE ENTRY rather than in a parallel array beside the conversation. An array of stamps aligned
+   * by index is a join, and a join is the thing this format exists to remove: a shift of one labels
+   * every turn with its neighbour's duration, which is worse than no label at all.
+   */
+  timing?: { at?: number; startedAt?: number; thoughtMs?: number };
 }
 
 export interface MessageEntry extends BaseEntry {
   kind: "message";
+  /**
+   * This turn was still being written when the record was last written.
+   *
+   * A conversation is ONE array that grows as fragments arrive, so the turn in flight is an entry
+   * like any other — there is deliberately no second field holding "the partial" beside the finished
+   * ones, because two encodings of one conversation is what this format replaced.
+   *
+   * What a reader must NOT do is treat it as something the model finished saying. It is not
+   * replayable — half an assistant turn is not the exchange that happened — and a viewer renders it
+   * as the tail it is. This flag is what carries that, and it is a property OF the entry, so it
+   * travels with the thing it describes and disappears when the finished turn replaces it.
+   */
+  partial?: boolean;
   /**
    * The provider's own role. `"user"` / `"assistant"` are the two every transport has; the AI SDK
    * also writes `"tool"` for a result turn and `"system"` for a preamble, and a provider may add

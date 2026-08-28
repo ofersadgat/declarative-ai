@@ -35,7 +35,7 @@
  * approver or a tool set is how an agent ends up running with its own defaults while the workflow
  * believes it is gated.
  */
-import type { AgentQuery, AgentQueryOptions, AgentStreamMessage, BinaryDeps } from "@declarative-ai/agents-api";
+import type { AgentQuery, AgentQueryOptions, AgentRun, AgentStreamMessage, BinaryDeps } from "@declarative-ai/agents-api";
 import { claudeOptionsRefusal, DEFAULT_SETTING_SOURCES, defaultBinaryDeps, readAgentMessage, resolveAgentBinary } from "@declarative-ai/agents-api";
 import { defaultStartMcpBridge, type McpBridge, type StartMcpBridge } from "./mcpBridge.js";
 import { mcpConfigJson, PERMISSION_PROMPT_TOOL } from "./mcpProtocol.js";
@@ -192,6 +192,18 @@ export function cliArgv(opts: AgentQueryOptions, config: CliAgentOptions = {}, b
     "-p",
     "--output-format",
     "stream-json",
+    // STREAMING INPUT — the flag the control protocol lives behind.
+    //
+    // Under `--input-format text` (the default) the prompt is written once and stdin is closed, so the
+    // only mid-run signal this adapter had was `kill()`: the PROCESS ends, the turn does not, and the
+    // partial answer dies with it. As a stream, stdin stays open and carries `control_request`, which
+    // is how `interrupt()` ends a turn and still gets a `result` back.
+    //
+    // Measured against claude 2.1.246: the interrupt is acknowledged in ~1 ms and the turn settles as
+    // `subtype: "error_during_execution"`. The simpler `{"type":"interrupt"}` some clients send is
+    // SILENTLY IGNORED — no response, no error, and the turn runs to completion — so it is not used.
+    "--input-format",
+    "stream-json",
     // `stream-json` output requires `--verbose` in non-interactive mode.
     "--verbose",
     // STREAMING. The SDK sibling passes `includePartialMessages: true`; this is the same request under
@@ -245,7 +257,19 @@ export function cliArgv(opts: AgentQueryOptions, config: CliAgentOptions = {}, b
 
 /** Build a CLI-driven agent query. */
 export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
-  return async function* cliAgentQuery(opts: AgentQueryOptions): AsyncIterable<AgentStreamMessage> {
+  return (opts: AgentQueryOptions): AgentRun => {
+    /**
+     * The live child, once there is one — what {@link AgentRun.interrupt} writes to.
+     *
+     * Held here rather than inside the generator because the two have different lifetimes: the caller
+     * holds the run and may interrupt it at any moment, while the generator is a body that has not
+     * necessarily started. Before it starts there is no process and nothing to interrupt, which is
+     * the same answer as "already finished".
+     */
+    let live: AgentProcess | undefined;
+    let controls = 0;
+
+    const messages = async function* cliAgentQuery(): AsyncIterable<AgentStreamMessage> {
     // REFUSE BEFORE SPAWNING, exactly as the codex sibling does. `applySession` makes these two
     // mutually exclusive by construction — a handle is threaded only when the transport is NOT
     // replaying — so this is unreachable from the executor and guards a hand-built seam call. It stays
@@ -310,10 +334,16 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
       const c = spawn([command, ...cliArgv(opts, config, bridge?.url)], {
         cwd: opts.cwd,
         ...(opts.env !== undefined ? { env: opts.env } : {}),
-        // The prompt, on the channel that has no length limit — see {@link cliArgv}.
-        stdin: opts.prompt,
+        // The prompt as the stream's first message — still the channel with no length limit (see
+        // {@link cliArgv}), now in the shape a stream-json session reads. The CLI emits NOTHING until
+        // it has input, so this goes in immediately rather than after any handshake.
+        stdin: `${JSON.stringify({ type: "user", message: { role: "user", content: opts.prompt ?? "" }, parent_tool_use_id: null })}
+`,
+        // Held open, because closing it is what ENDS the session — see `endInput` below.
+        keepInputOpen: true,
       });
       child = c;
+      live = c;
 
       onAbort = (): void => c.kill();
       if (opts.abortSignal?.aborted) c.kill();
@@ -340,7 +370,13 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
         // "result":"Not logged in · Please run /login"}` with exit 0 — which the mapping turns into an
         // error rather than into the agent's answer.
         const normalized = readAgentMessage(msg);
-        if (normalized.type === "result") sawResult = true;
+        if (normalized.type === "result") {
+          sawResult = true;
+          // CLOSE THE INPUT. Under streaming input the CLI waits for another message rather than
+          // exiting when a turn finishes, so without this a completed run never settles and `c.exit`
+          // never resolves. Measured: closing stdin exits 0.
+          c.endInput?.();
+        }
         // A CLI-level `{"error": "..."}` line has no `type` we recognise, so it would otherwise pass
         // through opaquely. It is run-fatal and has to reach the adapter as such.
         if (normalized.type === "provider_event" && typeof msg["error"] === "string") {
@@ -366,7 +402,36 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
       // subprocess outlives the run — with the abort listener just removed, nothing can reach it any
       // more — while a leaked listener would keep answering permission questions for a run that ended.
       child?.kill();
+      live = undefined;
       await bridge?.close();
     }
+    };
+
+    const stream = messages();
+    return {
+      [Symbol.asyncIterator]: () => stream[Symbol.asyncIterator](),
+      /**
+       * End the current TURN, not the process — the whole point of the streaming channel above.
+       *
+       * NOT cancellation. The turn stops, a `result` still arrives (with `subtype`
+       * `"error_during_execution"`), and the call settles with whatever the agent had produced. That
+       * is what lets "stop and tell me what you found" be answered with what was found, where
+       * `kill()` answers it by throwing the answer away.
+       *
+       * Fire-and-forget by design: the control response is an acknowledgement, and the observable
+       * outcome is the run settling, which the caller is already awaiting. Idempotent — a second
+       * interrupt is another request the CLI answers the same way, and one sent after the process has
+       * gone writes to nothing.
+       */
+      interrupt: async (): Promise<void> => {
+        const write = live?.write;
+        // No process, or a spawn seam that cannot write: there is nothing to interrupt. A fake spawn
+        // in a test is the ordinary case, and failing loudly there would make every such test assert
+        // an error it does not care about.
+        if (write === undefined) return;
+        write(`${JSON.stringify({ type: "control_request", request_id: `req_${++controls}`, request: { subtype: "interrupt" } })}
+`);
+      },
+    };
   };
 }

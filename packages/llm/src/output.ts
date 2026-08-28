@@ -208,33 +208,6 @@ export interface LlmOutput<T = JsonValue> {
    *  session field: it is something the call PRODUCED. The execution envelope used to carry a
    *  `session.id` that was just the caller's own logical key echoed back, read by nobody. */
   providerSessionId?: string;
-  /**
-   * The messages this call APPENDED to the conversation, verbatim — assistant turns, tool calls and
-   * tool results, in the order the provider produced them.
-   *
-   * The provider's own log rather than a reconstruction. `value` / `thinking` / `toolCalls` above are
-   * a PROJECTION for a consumer that wants one field; this is what has to go back on the wire next
-   * turn, and a lossier round-trip breaks it — an Anthropic reasoning part carries a signature that
-   * must come back byte-identical, and `providerOptions` is where every provider keeps that sort of
-   * thing.
-   *
-   * Absent when the call produced nothing, e.g. an error before the model responded.
-   */
-  messages?: ModelMessage[];
-  /**
-   * Conversations the call ran BESIDE this one — a subagent per spawning tool call, keyed by that
-   * call's id (the stream's `parent_tool_use_id`). Same contract as {@link messages}: the provider's
-   * own log, verbatim, in arrival order. Kept OUT of `messages` because they are not part of the
-   * main thread's wire history — folding them in is how a record comes to claim the main thread
-   * said things a subagent said.
-   */
-  sidechains?: Record<string, ModelMessage[]>;
-  /**
-   * Provider events with no neutral home — session init, compaction boundaries, rate-limit windows —
-   * in arrival order, each pinned to how many main-thread messages preceded it, so a reader can
-   * interleave them faithfully. Opaque by the same rule as the live stream's `provider_event`.
-   */
-  providerEvents?: Array<{ index: number; event: JsonValue }>;
 }
 
 /**

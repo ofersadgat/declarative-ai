@@ -15,11 +15,16 @@ function fakeSpawn(
   stdins: (string | undefined)[];
   killed: () => boolean;
   cwds: (string | undefined)[];
+  /** Everything written to the child AFTER launch — the steering channel. */
+  written: string[];
+  ended: () => boolean;
 } {
   const argv: string[][] = [];
   const cwds: (string | undefined)[] = [];
   const stdins: (string | undefined)[] = [];
+  const written: string[] = [];
   let wasKilled = false;
+  let wasEnded = false;
   const spawn: SpawnProcess = (a, opts) => {
     argv.push(a);
     cwds.push(opts.cwd);
@@ -35,10 +40,14 @@ function fakeSpawn(
         wasKilled = true;
       },
       exit: Promise.resolve(exitCode),
+      write: (line) => void written.push(line),
+      endInput: () => {
+        wasEnded = true;
+      },
     };
     return proc;
   };
-  return { spawn, argv, stdins, cwds, killed: () => wasKilled };
+  return { spawn, argv, stdins, cwds, written, ended: () => wasEnded, killed: () => wasKilled };
 }
 
 const inputs = (): FunctionInputs => ({ prompt: "do it", config: {} });
@@ -48,6 +57,8 @@ describe("cliArgv — the flags one run is configured with", () => {
     expect(cliArgv({ prompt: "hi", permissionMode: "plan", allowedTools: ["Read", "Bash"] })).toEqual([
       "-p",
       "--output-format",
+      "stream-json",
+      "--input-format",
       "stream-json",
       "--verbose",
       "--include-partial-messages",
@@ -64,6 +75,8 @@ describe("cliArgv — the flags one run is configured with", () => {
     expect(cliArgv({ prompt: "hi", allowedTools: [] })).toEqual([
       "-p",
       "--output-format",
+      "stream-json",
+      "--input-format",
       "stream-json",
       "--verbose",
       "--include-partial-messages",
@@ -555,11 +568,13 @@ describe("the model flag", () => {
  * reason, through the same seam.
  */
 describe("the prompt channel", () => {
-  it("writes the prompt to stdin rather than argv", async () => {
+  it("writes the prompt to stdin rather than argv, as the stream's first message", async () => {
     const { spawn, argv, stdins } = fakeSpawn(['{"type":"result","result":"done"}']);
     for await (const _ of createCliAgentQuery({ spawn })({ prompt: "summarise this" })) void _;
 
-    expect(stdins[0]).toBe("summarise this");
+    // A stream-json session reads MESSAGES, so the prompt is one — the channel is unchanged and its
+    // shape is what the control protocol costs.
+    expect(JSON.parse(stdins[0]!)).toMatchObject({ type: "user", message: { role: "user", content: "summarise this" } });
     expect(argv[0]).not.toContain("summarise this");
   });
 
@@ -570,8 +585,48 @@ describe("the prompt channel", () => {
     const { spawn, argv, stdins } = fakeSpawn(['{"type":"result","result":"done"}']);
     for await (const _ of createCliAgentQuery({ spawn })({ prompt: huge })) void _;
 
-    expect(stdins[0]).toHaveLength(66_000);
+    expect((JSON.parse(stdins[0]!) as { message: { content: string } }).message.content).toHaveLength(66_000);
     expect(argv[0]!.join(" ").length).toBeLessThan(1_000);
+  });
+});
+
+describe("steering — ending a turn without ending the process", () => {
+  it("sends a control_request the CLI understands, not the shape it silently ignores", async () => {
+    const { spawn, written } = fakeSpawn(['{"type":"result","result":"done"}']);
+    const run = createCliAgentQuery({ spawn })({ prompt: "count to 400" });
+    // Pull one message so the process exists — before that there is nothing to interrupt.
+    const it0 = run[Symbol.asyncIterator]();
+    await it0.next();
+
+    await run.interrupt!();
+
+    expect(written).toHaveLength(1);
+    // Measured against claude 2.1.246: this shape is acknowledged in ~1 ms, while the simpler
+    // `{"type":"interrupt"}` is accepted, ignored, and the turn runs to completion — a stop that
+    // reports success and changes nothing, which is the exact failure this whole path exists to end.
+    expect(JSON.parse(written[0]!)).toMatchObject({ type: "control_request", request: { subtype: "interrupt" } });
+  });
+
+  it("is idempotent, and says nothing at all when there is no process to say it to", async () => {
+    const { spawn, written } = fakeSpawn(['{"type":"result","result":"done"}']);
+    const run = createCliAgentQuery({ spawn })({ prompt: "hi" });
+    // Before the stream is pulled the generator has not run, so no child exists yet.
+    await expect(run.interrupt!()).resolves.toBeUndefined();
+    expect(written).toEqual([]);
+
+    const it0 = run[Symbol.asyncIterator]();
+    await it0.next();
+    await run.interrupt!();
+    await run.interrupt!();
+    expect(written).toHaveLength(2);
+  });
+
+  it("closes the input when the turn settles, or a completed run would never exit", async () => {
+    // Under streaming input the CLI waits for another message rather than exiting on `result`. Without
+    // this the process outlives every run and `exit` never resolves.
+    const { spawn, ended } = fakeSpawn(['{"type":"result","result":"done"}']);
+    for await (const _ of createCliAgentQuery({ spawn })({ prompt: "hi" })) void _;
+    expect(ended()).toBe(true);
   });
 });
 

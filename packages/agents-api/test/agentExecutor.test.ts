@@ -317,17 +317,20 @@ describe("lossless output — what the agent produced reaches the caller", () =>
 
   it("hands back the agent's OWN log, verbatim — not one synthesized assistant turn", async () => {
     const entries = (await payloadOf(fullTurn)).entries ?? [];
-    expect(entries).toHaveLength(4);
+    // The turns, indexed among themselves. The array also carries the session events now — they are
+    // entries too (RECORDS.md §2.2) — so a position in it is not a position among the turns.
+    const said = entries.filter((e) => e.kind === "message");
+    expect(said).toHaveLength(4);
     // The blocks are NORMALIZED — one vocabulary whichever transport produced them — but nothing is
     // dropped and nothing is invented: a signature that must go back byte-identical still does.
-    expect(entries[0]).toMatchObject({
+    expect(said[0]).toMatchObject({
       kind: "message",
       role: "assistant",
       content: [{ type: "thinking", thinking: "check the file", signature: "sig-1" }],
     });
     // The provider's own spelling, kept: `tool_use_id`/`content` rather than the neutral names the
     // read-side projections use. Storing the translation instead is what would break a replay.
-    expect(entries[2]).toMatchObject({
+    expect(said[2]).toMatchObject({
       kind: "message",
       role: "user",
       content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ZEPHYR" }],
@@ -414,7 +417,7 @@ describe("lossless output — what the agent produced reaches the caller", () =>
   it("keeps a subagent's turns OUT of the main log and in a sidechain keyed by the spawning call", async () => {
     const payload = await payloadOf(withSubagent);
     // The main thread: Task call, its report, the final answer — and nothing the subagent said.
-    const main = (payload.entries ?? []).filter((e) => e.sidechain === undefined);
+    const main = (payload.entries ?? []).filter((e) => e.sidechain === undefined && e.kind === "message");
     expect(JSON.stringify(main)).not.toContain("I am the subagent");
     expect(main).toHaveLength(3);
     // One array, and the subagent's turns are IN it — marked, not filed under a second key space.
@@ -431,10 +434,16 @@ describe("lossless output — what the agent produced reaches the caller", () =>
     expect(payload.value).toBe("Done.");
   });
 
-  it("records provider events pinned to their place among the turns", async () => {
+  it("records a provider event as an entry, in the place it happened", async () => {
     const payload = await payloadOf(withSubagent);
-    // After the third main-thread message, before the fourth — where it happened.
-    expect(payload.providerEvents).toEqual([{ index: 2, event: { type: "system", subtype: "compact_boundary" } }]);
+    // The pin became the POSITION: after two main-thread turns, before the third — where it
+    // happened. It used to ride a second array carrying an index every reader had to re-splice.
+    const entries = payload.entries ?? [];
+    expect(entries[2]).toMatchObject({
+      kind: "event",
+      event: { type: "system", data: { type: "system", subtype: "compact_boundary" } },
+    });
+    expect(entries.filter((e) => e.kind === "event")).toHaveLength(1);
   });
 
   it("tags a subagent's live `message` events with the spawning call", async () => {

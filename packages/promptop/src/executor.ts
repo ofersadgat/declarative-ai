@@ -518,21 +518,22 @@ async function priorMessages(session: ResolvedSession<ModelMessage>): Promise<Mo
 function sessionOutcomeOfCall(
   ctx: ExecServices,
   output: LlmOutput | undefined,
-): { session?: { messages?: readonly ModelMessage[]; providerSessionId?: string } } {
+): { session?: { providerSessionId?: string } } {
   if (output === undefined) return {};
-  const { messages, providerSessionId } = output;
-  if ((messages === undefined || messages.length === 0) && providerSessionId === undefined) return {};
-  // Reported when a conversation is in play, OR whenever there is a PROVIDER HANDLE at all. The second
-  // clause is not redundant: a handle is the one thing a caller cannot recover by any other means — it
-  // is minted remotely and never appears in the projected value — so withholding it because no local
-  // position was resolved would discard the only record that a remote conversation exists.
-  if (ctx.session === undefined && providerSessionId === undefined) return {};
-  return {
-    session: {
-      ...(messages !== undefined && messages.length > 0 ? { messages } : {}),
-      ...(providerSessionId !== undefined ? { providerSessionId } : {}),
-    },
-  };
+  const { providerSessionId } = output;
+  // NO MESSAGES. A prompt call's payload IS the conversation — its `entries` carry the reasoning and
+  // the tool trace as well as the turns — and `SessionOutcome.messages` exists for the other case,
+  // "an executor whose payload is not already a conversation". Reporting a derived copy here made a
+  // store choose between two versions of one thing, and it chose the poorer: a record-mode payload
+  // was replaced by a flattening of itself.
+  //
+  // `ctx` stays in the signature because the caller passes it and the shape is the seam's, not this
+  // function's to narrow.
+  void ctx;
+  if (providerSessionId === undefined) return {};
+  // A handle is the one thing a caller cannot recover by any other means — minted remotely, never in
+  // the projected value — so it is reported whether or not a local position was ever resolved.
+  return { session: { providerSessionId } };
 }
 
 /** Convenience factory mirroring the class constructor — the BARE core (no wrappers). Compose the

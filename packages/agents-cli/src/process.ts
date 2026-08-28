@@ -34,11 +34,41 @@ export interface AgentProcess {
    * Optional so a fake process need not model it: absent ⇒ the exit code is the whole story.
    */
   launchFailure?: () => Error | undefined;
+  /**
+   * Write one more line to the agent's stdin, after it has started.
+   *
+   * The whole basis of STEERING. A `-p` subprocess is handed its prompt once and its stdin is closed,
+   * so the only mid-run signal an adapter has is `kill()` — which ends the process, not the turn, and
+   * throws away the partial answer along with it. With stdin open the CLI's control protocol is
+   * reachable: an interrupt ends the TURN and a `result` still arrives, so "stop and tell me what you
+   * found" can be answered with what was found.
+   *
+   * Optional because a fake process need not model it, and because its absence is the honest signal
+   * that this transport cannot steer — `createCliAgentQuery` reads exactly that to decide whether to
+   * offer `interrupt()` at all.
+   */
+  write?: (line: string) => void;
+  /**
+   * Close stdin — which is what ENDS the session when the input channel is a stream.
+   *
+   * Not a courtesy: under `--input-format stream-json` the CLI waits for another message rather than
+   * exiting when a turn finishes, so without this a completed run never settles. Measured against
+   * claude 2.1.246: closing stdin exits 0.
+   */
+  endInput?: () => void;
 }
 
 /** How a process is launched. `stdin` is the second way to hand an agent its instruction. */
 export interface SpawnOptions {
   cwd?: string;
+  /**
+   * Keep stdin OPEN after the initial write, so the adapter can say more later.
+   *
+   * The difference between an agent you hand a prompt to and one you can steer. Closing stdin is how
+   * a `stream-json` session ENDS, so an adapter that wants to interrupt or add a message must ask for
+   * the channel to stay open and close it itself ({@link AgentProcess.endInput}).
+   */
+  keepInputOpen?: boolean;
   /** The environment the child runs under. Absent ⇒ it inherits this process's, which is what a CLI
    *  needs by default (PATH, HOME, and whatever credential the binary reads). */
   env?: NodeJS.ProcessEnv;
@@ -151,7 +181,7 @@ export async function defaultSpawn(): Promise<SpawnProcess> {
       // "inherit", but stating it explicitly invites a later `{...opts.env}` that hands the child an
       // EMPTY environment and strips its PATH and credentials.
       ...(opts.env !== undefined ? { env: opts.env } : {}),
-      stdio: [opts.stdin === undefined ? "ignore" : "pipe", "pipe", "ignore"],
+      stdio: [opts.stdin === undefined && opts.keepInputOpen !== true ? "ignore" : "pipe", "pipe", "ignore"],
       windowsHide: true,
     });
     const lines = readline.createInterface({ input: child.stdout!, crlfDelay: Infinity });
@@ -162,18 +192,26 @@ export async function defaultSpawn(): Promise<SpawnProcess> {
       lines.close();
     });
 
+    // An agent that fails to start, or that answers before reading its whole prompt, leaves a write
+    // to a closed pipe — an EPIPE that arrives as an 'error' EVENT on the stream, which is
+    // unhandled-throw territory just like the child's own. The run's real outcome is the exit code.
+    child.stdin?.on("error", () => {});
     if (opts.stdin !== undefined) {
-      // An agent that fails to start, or that answers before reading its whole prompt, leaves this
-      // write to a closed pipe — an EPIPE that arrives as an 'error' EVENT on the stream, which is
-      // unhandled-throw territory just like the child's own. The run's real outcome is the exit code.
-      child.stdin?.on("error", () => {});
-      child.stdin?.end(opts.stdin);
+      // Written either way; only the CLOSE depends on whether the caller means to say more.
+      if (opts.keepInputOpen === true) child.stdin?.write(opts.stdin);
+      else child.stdin?.end(opts.stdin);
     }
 
     return {
       lines,
       kill: () => void child.kill(),
       launchFailure: () => spawnError,
+      ...(child.stdin !== null
+        ? {
+            write: (line: string): void => void child.stdin?.write(line),
+            endInput: (): void => void child.stdin?.end(),
+          }
+        : {}),
       exit: new Promise<number>((resolve) => {
         child.on("error", () => resolve(-1));
         child.on("close", (code) => resolve(spawnError ? -1 : (code ?? 0)));

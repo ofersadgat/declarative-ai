@@ -27,7 +27,7 @@ import { createCliAgentQuery, type CliAgentOptions } from "./cliQuery.js";
  * wrapping. Both gates open. The two facts are one invariant: declare `callback` only where a call really
  * does reach `ctx.approve`.
  */
-export const CLI_DELEGATED_CAPS: RuntimeCapabilities = { ...DELEGATED_CAPS, policyEnforcement: "callback", sessionSteering: false };
+export const CLI_DELEGATED_CAPS: RuntimeCapabilities = { ...DELEGATED_CAPS, policyEnforcement: "callback", sessionSteering: true };
 
 /**
  * The honest record when the agent uses its OWN built-in tools (`injectTools: false`, or a `nativeTools`
@@ -41,17 +41,24 @@ export const CLI_DELEGATED_CAPS: RuntimeCapabilities = { ...DELEGATED_CAPS, poli
  * adapter just as it does to a `callback` one, so the declaration makes no difference — a pre-existing
  * gap in the engine, not one this record can close.
  */
-export const CLI_CONFIG_ONLY_CAPS: RuntimeCapabilities = { ...DELEGATED_CAPS, policyEnforcement: "config", sessionSteering: false };
+export const CLI_CONFIG_ONLY_CAPS: RuntimeCapabilities = { ...DELEGATED_CAPS, policyEnforcement: "config", sessionSteering: true };
 
 /**
- * Neither CLI adapter STEERS, and saying so is the point.
+ * The claude CLI adapter STEERS; the codex one does not.
  *
- * The Agent SDK carries `interrupt` / `setPermissionMode` / `setModel` because it speaks the control
- * protocol over a streaming-input channel. A `-p` subprocess does not: the only mid-run signal this
- * adapter has is `kill()`, which ends the PROCESS, not the turn — so the agent's partial answer is lost
- * rather than returned. Offering `interrupt` on top of that would answer "stop and tell me what you
- * found" by throwing away what it found, which is exactly the confusion `sessionSteering` exists to
- * prevent: a caller reads the record and decides whether to render a Stop button, before pressing one.
+ * `interrupt` is what `sessionSteering` promises here, and it is real: the adapter drives the CLI
+ * over `--input-format stream-json`, so a `control_request` reaches a running turn. The turn ends
+ * early, a `result` still arrives, and the call settles with the partial answer — which is the
+ * difference between "stop and tell me what you found" and `kill()`, which answers that by throwing
+ * the answer away. Measured against claude 2.1.246: acknowledged in ~1 ms, and the process stays
+ * alive afterwards, which is what lets a PAUSE hold a warm session instead of releasing it.
+ *
+ * `send` / `setPermissionMode` / `setModel` are still absent. The channel now exists for all three,
+ * but absent means unsupported and a caller reads these to decide what to offer — so they arrive when
+ * they are implemented, not when they become possible.
+ *
+ * codex keeps `sessionSteering: false`: SIGINT to that subprocess is a kill, not a graceful turn end,
+ * and offering `interrupt` on top of it would be the confusion this capability exists to prevent.
  */
 
 export interface CliAgentFunctionOptions extends Omit<ClaudeCodeFunctionOptions, "query">, CliAgentOptions {}

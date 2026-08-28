@@ -9,6 +9,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { hostFunction, type ExecResult, type HostCapabilities, type ResolvedValue } from "@declarative-ai/exec";
+import type { JsonValue } from "@declarative-ai/json";
 import { newRegistry, ok } from "./fakes.js";
 import { WorkflowEngine } from "../src/engine.js";
 import { loadBundle } from "../src/loader.js";
@@ -56,7 +57,7 @@ async function run(
   registry.functions.set(
     "tally",
     hostFunction(async (inputs: Record<string, unknown>) => {
-      const { name, answer } = inputs as { name: string; answer: ResolvedValue };
+      const { name, answer } = inputs as { name: string; answer: JsonValue };
       dispatched.push(name);
       return ok({ answer }) as ExecResult<ResolvedValue, WorkflowMetrics>;
     }, HOST),
@@ -74,7 +75,7 @@ async function run(
   };
 }
 
-const leaf = (name: string, answer: ResolvedValue): StateDef => ({
+const leaf = (name: string, answer: JsonValue): StateDef => ({
   label: name,
   outputs: { answer: { schema: {} } },
   operation: { kind: "function", function: "tally", args: { name, answer } },

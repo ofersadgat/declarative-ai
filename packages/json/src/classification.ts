@@ -21,6 +21,12 @@
  *  - `"deadline"` — the unit hit its time budget; the surrounding window/run decides to yield.
  *  - `"out-of-credits"` — a budget/wallet reservation was refused; retrying cannot succeed until top-up.
  *  - `"canceled"` — an explicit caller cancel (abort signal); not a failure of the unit itself.
+ *  - `"interrupted"` — a caller stop that CAUGHT the unit mid-turn: it was running, it was cut, and
+ *    what it had produced is in the record with a session handle beside it. Distinct from `canceled`
+ *    because only this one promises there is something to continue — a unit canceled before it
+ *    dispatched has no session at all, and a reader cannot tell those apart from `canceled` alone.
+ *    Never auto-retried: a person stopped it, and re-running it immediately is the opposite of what
+ *    they asked for.
  *  - `"policy-denied"` — the safety policy blocked a required action; deterministic for this policy.
  */
 export type ErrorClass =
@@ -30,6 +36,7 @@ export type ErrorClass =
   | "deadline"
   | "out-of-credits"
   | "canceled"
+  | "interrupted"
   | "policy-denied";
 
 /**
@@ -47,6 +54,7 @@ export const ERROR_CLASSES = [
   "deadline",
   "out-of-credits",
   "canceled",
+  "interrupted",
   "policy-denied",
 ] as const satisfies readonly ErrorClass[];
 
