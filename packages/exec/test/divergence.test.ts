@@ -1,15 +1,19 @@
 /**
- * Divergence and resync (DESIGN.md §1.6).
+ * Divergence (DESIGN.md §1.6) — asserted on the LINEAGE, which is the only place it shows.
  *
- * The remote can move without us — Managed Agents compacts server-side on its own, a Claude Code
+ * The remote can move without us: Managed Agents compacts server-side on its own, a Claude Code
  * session can be resumed outside JaiRA. Then our mirror describes a conversation the provider no
- * longer has, and the digest no longer describes what it will send.
+ * longer has. The check is exact rather than heuristic — we RESUMED a handle, the call reports the one
+ * it actually ran in, and on an append those must agree.
  *
- * The check is exact rather than heuristic: we RESUMED a handle, the call reports the one it actually
- * ran in, and on an append those must agree.
+ * These used to assert through an `onDivergence` callback that the tests supplied and NOTHING in
+ * production did, so they passed on a channel no run ever used: `checkDivergence` computed the
+ * mismatch, called a hook nobody had registered, and returned. The detection and the response both
+ * live in the store now — `correctLineage` moves the record onto a branch — so these assert what the
+ * lineage looks like afterwards, which is what a run actually gets.
  */
 import { describe, expect, it } from "vitest";
-import { createOperationExecutor, MapSessionStore, newCapabilityRegistry, runtimeFunction, RUNTIME_CAPABILITIES, withRecord, withSessionPosition , type DivergenceOptions } from "../src/index.js";
+import { createOperationExecutor, MapSessionStore, newCapabilityRegistry, runtimeFunction, RUNTIME_CAPABILITIES, withRecord, withSessionPosition } from "../src/index.js";
 import type { ExecServices, Executor, ExecResult, ResolvedValue } from "../src/index.js";
 import { EXEC_METRICS_ALGEBRA, wrapHandle } from "../src/index.js";
 
@@ -27,19 +31,9 @@ function agent(handle: string | undefined, text = "ok"): Executor<ExecServices> 
   };
 }
 
-/**
- * Divergence deps ride on the WRAPPER now, not on `ExecServices`.
- *
- * Both were read by one private function in `record.ts` and written by whoever composed this wrapper —
- * a handoff between two adjacent layers, travelling through a bundle meant for services an executor
- * needs at arbitrary depth. Passing them here is the same information, stated where a reader can see
- * which layer consumes it.
- */
-const stack = (store: MapSessionStore, core: Executor<ExecServices>, divergence: DivergenceOptions = {}): Executor =>
-  withSessionPosition(
-    { sessions: store, ...divergence },
-    withRecord({ records: store as never }, core as never),
-  ) as never;
+/** The session stack a host composes — the same one `wiring.ts` builds, with nothing extra. */
+const stack = (store: MapSessionStore, core: Executor<ExecServices>): Executor =>
+  withSessionPosition({ sessions: store }, withRecord({ records: store as never }, core as never)) as never;
 
 const op = { kind: "function", functionRef: "x", input: {}, output: { kind: "json" } } as never;
 
@@ -55,83 +49,66 @@ async function positionIn(store: MapSessionStore, ref: string, fork = false): Pr
 
 
 describe("divergence detection", () => {
-  it("says nothing while the provider stays where we left it", async () => {
+  it("stays in one conversation while the provider stays where we left it", async () => {
     const store = new MapSessionStore();
-    const seen: unknown[] = [];
-    const onDivergence = (e: unknown): void => void seen.push(e);
-    await stack(store, agent("sess-a"), { onDivergence }).start(op, await positionIn(store, "chat")).result;
-    await stack(store, agent("sess-a"), { onDivergence }).start(op, await positionIn(store, "chat")).result;
-    expect(seen).toEqual([]);
+    await stack(store, agent("sess-a")).start(op, await positionIn(store, "chat")).result;
+    const out = await stack(store, agent("sess-a")).start(op, await positionIn(store, "chat")).result;
+    expect(out.metrics.sessionRef).toBe("chat@2");
+    expect(store.messages("chat")).toHaveLength(2);
   });
 
-  it("REPORTS a handle that changed under an append, with both ids", async () => {
-    // Server-side compaction, or somebody resuming the session outside JaiRA.
-    const store = new MapSessionStore();
-    const seen: Array<{ resumed: string; reported: string }> = [];
-    const onDivergence = (e: unknown): void => void seen.push(e as never);
-    await stack(store, agent("sess-a"), { onDivergence }).start(op, await positionIn(store, "chat")).result;
-    await stack(store, agent("sess-MOVED"), { onDivergence }).start(op, await positionIn(store, "chat")).result;
-    expect(seen).toHaveLength(1);
-    expect(seen[0]).toMatchObject({ resumed: "sess-a", reported: "sess-MOVED" });
-  });
-
-  it("RESYNCS onto a new conversation rather than carrying on", async () => {
-    // Carrying on would keep appending against a mirror we know is wrong, and the id is a content
-    // commitment — the same reasoning that makes an unresolvable id an error applies here.
-    const store = new MapSessionStore();
-    const first = await stack(store, agent("sess-a")).start(op, await positionIn(store, "chat")).result;
-    const second = await stack(store, agent("sess-MOVED")).start(op, await positionIn(store, "chat")).result;
-    expect(second.metrics.sessionRef).not.toBe(first.metrics.sessionRef);
-    expect(second.metrics.sessionRef).toContain("~resync");
-  });
-
-  it("re-reads from the provider when the adapter offers a way to", async () => {
-    const store = new MapSessionStore();
-    const readSession = { read: async (): Promise<readonly unknown[]> => [{ role: "user", content: "what the provider actually has" }] };
-    await stack(store, agent("sess-a"), { readSession }).start(op, await positionIn(store, "chat")).result;
-    const out = await stack(store, agent("sess-MOVED"), { readSession }).start(op, await positionIn(store, "chat")).result;
-    expect(store.messages(out.metrics.sessionRef!)).toEqual([{ role: "user", content: "what the provider actually has" }]);
-  });
-
-  it("starts the resync EMPTY when there is no read API, visibly on the edge", async () => {
-    // The Messages API has none — and being stateless, cannot diverge in the first place. An adapter
-    // that can diverge but cannot be read leaves an empty conversation, which the edge records rather
-    // than passing off as one that happened to have nothing in it.
+  it("branches when the handle changed under an append — server-side compaction, or an outside resume", async () => {
     const store = new MapSessionStore();
     await stack(store, agent("sess-a")).start(op, await positionIn(store, "chat")).result;
     const out = await stack(store, agent("sess-MOVED")).start(op, await positionIn(store, "chat")).result;
-    expect(store.messages(out.metrics.sessionRef!)).toEqual([]);
-    expect(out.metrics.sessionRef).toContain("~resync");
+    expect(out.metrics.sessionRef).not.toBe("chat@2");
+    expect(out.metrics.sessionRef).toContain("diverged");
   });
 
-  it("survives a read API that throws — an empty resync beats a wrong mirror", async () => {
+  /**
+   * ONE answer, and it is the store's.
+   *
+   * This used to `resync` — mint a separate conversation re-read from the provider — and report that
+   * on `sessionRef`. Meanwhile the store settling the record had already moved it onto a branch whose
+   * handle is the remote actually used. Two answers to one mismatch: the record on one lineage, every
+   * later reader pointed at the other, and with no read API wired the other was EMPTY.
+   *
+   * So the store decides where the record belongs and this reports where it landed.
+   */
+  it("carries on in the branch the store moved the record to, not a conversation of its own", async () => {
     const store = new MapSessionStore();
-    const readSession = {
-      read: async (): Promise<readonly unknown[]> => {
-        throw new Error("provider unreachable");
-      },
-    };
-    await stack(store, agent("sess-a"), { readSession }).start(op, await positionIn(store, "chat")).result;
-    const out = await stack(store, agent("sess-MOVED"), { readSession }).start(op, await positionIn(store, "chat")).result;
-    expect(out.metrics.sessionRef).toContain("~resync");
+    const first = await stack(store, agent("sess-a")).start(op, await positionIn(store, "chat")).result;
+    const second = await stack(store, agent("sess-MOVED")).start(op, await positionIn(store, "chat")).result;
+
+    expect(second.metrics.sessionRef).not.toBe(first.metrics.sessionRef);
+    // Not a rival conversation…
+    expect(second.metrics.sessionRef).not.toContain("~resync");
+    // …but a branch of the one it was claimed in, and the turn is IN it rather than beside it.
+    expect(second.metrics.sessionRef).toContain("diverged");
+    expect(store.messages(second.metrics.sessionRef!)).toHaveLength(2);
   });
 
-  it("does NOT call a FORK divergence — a new handle is what a native fork returns", async () => {
+  it("leaves the trunk meaning what every ref into it meant", async () => {
     const store = new MapSessionStore();
-    const seen: unknown[] = [];
-    const onDivergence = (e: unknown): void => void seen.push(e);
-    await stack(store, agent("sess-a"), { onDivergence }).start(op, await positionIn(store, "chat")).result;
-    await stack(store, agent("sess-forked"), { onDivergence }).start(op, await positionIn(store, "chat", true)).result;
-    expect(seen).toEqual([]);
+    await stack(store, agent("sess-a")).start(op, await positionIn(store, "chat")).result;
+    await stack(store, agent("sess-MOVED")).start(op, await positionIn(store, "chat")).result;
+    // The trunk keeps only the turn that really happened in `sess-a`.
+    expect(store.messages("chat")).toHaveLength(1);
   });
 
-  it("says nothing when no handle was resumed — a stateless provider cannot diverge", async () => {
+  it("does NOT branch a FORK again — a new handle is exactly what a fork returns", async () => {
     const store = new MapSessionStore();
-    const seen: unknown[] = [];
-    const onDivergence = (e: unknown): void => void seen.push(e);
-    await stack(store, agent(undefined), { onDivergence }).start(op, await positionIn(store, "chat")).result;
-    await stack(store, agent(undefined), { onDivergence }).start(op, await positionIn(store, "chat")).result;
-    expect(seen).toEqual([]);
+    await stack(store, agent("sess-a")).start(op, await positionIn(store, "chat")).result;
+    const out = await stack(store, agent("sess-forked")).start(op, await positionIn(store, "chat", true)).result;
+    // One branch — the fork the caller asked for — and not a second one on top of it.
+    expect(out.metrics.sessionRef).not.toContain("diverged");
+  });
+
+  it("stays in one conversation when no handle was resumed — a stateless provider cannot diverge", async () => {
+    const store = new MapSessionStore();
+    await stack(store, agent(undefined)).start(op, await positionIn(store, "chat")).result;
+    const out = await stack(store, agent(undefined)).start(op, await positionIn(store, "chat")).result;
+    expect(out.metrics.sessionRef).toBe("chat@2");
   });
 });
 
@@ -179,12 +156,12 @@ describe("a delegated agent's session outcome survives dispatch", () => {
     expect(resumed).toBe("sess-a");
   });
 
-  it("still reports divergence when the dispatched call ran somewhere else", async () => {
+  it("still branches when the DISPATCHED call ran somewhere else", async () => {
+    // The same correction, reached through the dispatcher — which is how a delegated agent gets here,
+    // and the path where the outcome used to be projected away before anything could read it.
     const store = new MapSessionStore();
-    const seen: Array<{ resumed: string; reported: string }> = [];
-    const onDivergence = (e: unknown): void => void seen.push(e as never);
-    await stack(store, dispatcherFor("sess-a") as never, { onDivergence }).start(op, await positionIn(store, "chat")).result;
-    await stack(store, dispatcherFor("sess-MOVED") as never, { onDivergence }).start(op, await positionIn(store, "chat")).result;
-    expect(seen).toHaveLength(1);
+    await stack(store, dispatcherFor("sess-a") as never).start(op, await positionIn(store, "chat")).result;
+    const out = await stack(store, dispatcherFor("sess-MOVED") as never).start(op, await positionIn(store, "chat")).result;
+    expect(out.metrics.sessionRef).toContain("diverged");
   });
 });

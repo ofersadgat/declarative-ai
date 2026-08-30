@@ -211,7 +211,18 @@ export function cliArgv(opts: AgentQueryOptions, config: CliAgentOptions = {}, b
     // too. `--help` on 2.1.142: "Include partial message chunks as they arrive (only works with --print
     // and --output-format=stream-json)" — both of which are already above.
     "--include-partial-messages",
-    ...(opts.resume !== undefined ? ["--resume", opts.resume, ...(opts.forkSession === true ? ["--fork-session"] : [])] : []),
+    // `--resume-session-at` cuts the copy: "only messages up to and including the assistant message
+    // with <message.id>". Nested inside the fork branch because a cut without a fork would truncate
+    // the conversation being CONTINUED rather than the copy being made.
+    ...(opts.resume !== undefined
+      ? [
+          "--resume",
+          opts.resume,
+          ...(opts.forkSession === true
+            ? ["--fork-session", ...(opts.resumeSessionAt !== undefined ? ["--resume-session-at", opts.resumeSessionAt] : [])]
+            : []),
+        ]
+      : []),
     ...(bridgeUrl !== undefined ? ["--mcp-config", mcpConfigJson(bridgeUrl)] : []),
     // Only when there is an approver to ask. With tools injected but no approver, the bridge exists to
     // SERVE those tools and the CLI keeps its own permission behaviour.

@@ -16,8 +16,8 @@ import { fakeRunner, okOutcome, promptOp, sessionStack, transcripts, errorOf } f
 async function seed(store: SessionStore, id: string, ...messages: ModelMessage[]): Promise<string> {
   const rec = store as unknown as MapSessionStore<ModelMessage>;
   const at = await rec.resolve({ ref: `${id}@0` });
-  rec.open({ id: `seed:${id}`, session: at.at });
-  rec.close(`seed:${id}`, { result: { value: { messages } } });
+  const ref = rec.append({ id: `seed:${id}`, session: at.at });
+  rec.finish(ref, { result: { value: { messages } } });
   return `${at.at.id}@${at.at.seq + 1}`;
 }
 

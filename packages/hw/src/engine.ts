@@ -80,7 +80,6 @@ import { SchemaValidator } from "@declarative-ai/validate";
 import { isPending, parseExpression, PENDING } from "./expr.js";
 import { lowerExpression } from "./lowerExpr.js";
 import type {
-  ConversationMode,
   ExecEnvironmentDecl,
   LoadedChild,
   LoadedState,
@@ -2405,9 +2404,19 @@ export class WorkflowEngine {
     // at load time (REFERENCES.md §7.1), so by here there is only ever one kind of prompt — which is
     // what let `registry.skills` and its half-built resolution path be deleted outright.
     const rendered = this.renderTemplate(op.user, instance, opInputs);
-    const transcript = await this.readTranscript(session.id);
-    const preamble = this.conversationPreamble(env.conversation?.mode ?? "full_history", transcript, env.conversation?.artifacts);
-    const prompt = preamble ? `${preamble}\n\n${rendered}` : rendered;
+    /**
+     * Mirrored for `{ conversation }` bindings (§7.5), which resolve synchronously and cannot await —
+     * and for nothing else. The prompt does NOT carry a rendering of the conversation any more.
+     *
+     * It used to, under `environment.conversation.mode`, and that mode was answering a question the
+     * layer below already answers better: `applySession` resumes a provider session, branches one
+     * server-side, or replays the turns as messages, choosing by the adapter's own capabilities. The
+     * preamble was a second copy of whichever of those had already happened — and because it travelled
+     * inside `op.user`, the session layer recorded it as the turn that was asked, so the NEXT preamble
+     * rendered it back. One measured run went 8.4k → 403k → 1.13M → 2.55M characters over four passes
+     * and died holding three passes of finished work.
+     */
+    await this.readTranscript(session.id);
 
     // Whether THIS call's tools stay raw is the answering executor's fact, not the op kind's. A prompt
     // op dispatches on its model prefix, and a `claude-cli/…` route is a delegated agent exactly as a
@@ -2431,7 +2440,7 @@ export class WorkflowEngine {
     const produced = op.output.kind === "blob" ? undefined : buildOutputSchema(producedSlots, instance.def);
     const resolvedOp: PromptOp<InlineFamily> = {
       ...op,
-      user: prompt,
+      user: rendered,
       output: { ...op.output, ...(produced !== undefined ? { schema: produced } : {}) },
     };
 
@@ -2968,29 +2977,6 @@ export class WorkflowEngine {
   private async refreshTranscript(at: string, ...aliases: string[]): Promise<void> {
     const turns = await this.readTranscript(at);
     for (const alias of aliases) this.transcripts.set(alias, turns);
-  }
-
-  private conversationPreamble(mode: ConversationMode, transcript: Turn[], artifactNames?: string[]): string {
-    switch (mode) {
-      case "fresh":
-        return "";
-      case "selected_artifacts": {
-        const wanted = new Set(artifactNames ?? []);
-        const parts = this.artifacts
-          .filter((a) => wanted.size === 0 || wanted.has(a.name))
-          .map((a) => `<artifact name="${a.name}">\n${a.content ?? ""}\n</artifact>`);
-        return parts.join("\n");
-      }
-      case "summary":
-      // v1: no summarizer wired — degrade to full history (documented in DESIGN §7).
-      // eslint-disable-next-line no-fallthrough
-      case "full_history": {
-        if (transcript.length === 0) return "";
-        // `content` is a string for engine-recorded turns; be defensive if a `withSession` writer stored parts.
-        const lines = transcript.map((m) => `${m.role}: ${typeof m.content === "string" ? m.content : JSON.stringify(m.content)}`);
-        return `<conversation-history>\n${lines.join("\n")}\n</conversation-history>`;
-      }
-    }
   }
 }
 

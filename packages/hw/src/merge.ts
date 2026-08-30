@@ -189,9 +189,6 @@ export function mergeOperationFields(base: OperationFields, over: OperationField
   const output = mergeSlotMap(base.output, over.output);
   if (output !== undefined) out.output = output;
 
-  if (over.conversation !== undefined) {
-    out.conversation = base.conversation ? { ...base.conversation, ...over.conversation } : over.conversation;
-  }
   if (over.permissions !== undefined) {
     const priorPerms = base.permissions;
     out.permissions = priorPerms

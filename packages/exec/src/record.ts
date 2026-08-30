@@ -109,10 +109,39 @@ export function isPositionTaken(result: unknown): boolean {
   return error !== null && typeof error === "object" && "positionTaken" in (error as object);
 }
 
-/** Where records are written and read. */
+/**
+ * The row {@link RecordStore.open} wrote, named by the key the store already enforces —
+ * `UNIQUE (task_id, run_id, record_id, attempt)`.
+ *
+ * Handed back rather than recomputed by the caller, because `attempt` is the half that makes the id
+ * a key and only the store knows which one it just took. Deterministic, so a replay reproduces it —
+ * which a database-assigned rowid is not (migration 8), and which is why this is a counted attempt
+ * and not one.
+ */
+export interface RecordRef {
+  id: string;
+  attempt: number;
+}
+
+/** A flush into a record that is still open — what a call has produced so far. */
+export interface RecordPartial {
+  value: unknown;
+  /** The provider handle, stamped as soon as the stream carries one: a crashed call with no handle
+   *  can be neither resumed nor resynced, and waiting for the settle is why it used to have none. */
+  providerSessionId?: string;
+}
+
+/**
+ * Where records are written and read — one row per call, across three moments of its life.
+ *
+ * `append` → `update`* → `finish`. The verbs are the lifecycle, and the split is not bookkeeping:
+ * the row has to exist BEFORE the call so the claim can refuse a taken position without spending
+ * anything, so a killed process leaves evidence rather than silence, and so a stream has somewhere
+ * to land.
+ */
 export interface RecordStore<R = ResolvedValue, M extends ExecMetrics = ExecMetrics> {
   /**
-   * Stamp a stub, claiming its position.
+   * Write the row and claim its position.
    *
    * Throws {@link PositionTaken} when the position is held. findmyprompt's `appendDraw` answers the
    * same violation by recomputing `MAX(index)` and RETRYING at the next one — correct there, because
@@ -120,9 +149,41 @@ export interface RecordStore<R = ResolvedValue, M extends ExecMetrics = ExecMetr
    * 14 means continuing a conversation that contains a turn this call never saw. Draws retry,
    * sessions FORK.
    */
-  open(stub: RecordStub): void | Promise<void>;
-  /** Fill in a stamped record — on failure as well as success. */
-  close(id: string, settled: Pick<StoredRecord<R, M>, "result" | "metrics" | "sessionOutcome">): void | Promise<void>;
+  append(stub: RecordStub): RecordRef | Promise<RecordRef>;
+  /**
+   * Flush what the call has produced so far into the open row.
+   *
+   * By REF, like the other two. It took a position at first, on the reasoning that a partial only ever
+   * exists for a placed call and `(session_id, seq)` is a primary key — true, and beside the point:
+   * a record's LINEAGE can change while it is still streaming. When the handle coming back says this
+   * call is not in the conversation we assumed, the record moves to a branch, and every flush after
+   * that would address a position that no longer holds it. A ref survives the move, because a
+   * record's identity does not travel with its lineage.
+   *
+   * Optional, like {@link RecordStore.bySession}: absent MEANS this store cannot hold a partial, which
+   * an in-memory one genuinely cannot — there is no crash for it to survive.
+   */
+  update?(ref: RecordRef, partial: RecordPartial): void | Promise<void>;
+  /**
+   * Fill in a stamped record — on failure as well as success.
+   *
+   * Takes the ref {@link RecordStore.open} handed back, not the stub's id. An id alone does not name
+   * a row: `RecordStub.id` is a content hash for an unplaced call, so two identical operations
+   * dispatched in one run share one, and settling by id has to guess between them. It guessed
+   * "newest open", which is right for a retry (the earlier attempt has settled, so one row is open)
+   * and wrong when both are still open — the first settle landed on the second call's row and the
+   * results came back swapped.
+   */
+  finish(ref: RecordRef, settled: Pick<StoredRecord<R, M>, "result" | "metrics" | "sessionOutcome">): void | Promise<void>;
+  /**
+   * Where a record sits NOW — which may not be where it was claimed.
+   *
+   * A store that corrects an append it was wrong about moves the record to a branch, and the caller
+   * that claimed the position is the one thing that has to be told: what it reports as the call's
+   * ending position is what everything downstream continues from. Optional, like the reads above —
+   * absent MEANS this store never moves a record, so the claimed position is still the answer.
+   */
+  positionOf?(ref: RecordRef): { id: string; seq: number } | undefined | Promise<{ id: string; seq: number } | undefined>;
   /** A session's records in order, up to (exclusive) `upTo`. */
   bySession?(session: string, upTo?: number): StoredRecord<R, M>[] | Promise<StoredRecord<R, M>[]>;
 }
@@ -182,20 +243,32 @@ export function withRecord<R = ExecServices, M extends ExecMetrics = ExecMetrics
       return wrapHandle(async (ctl) => {
         const startMs = (ctx.clock ?? { now: () => Date.now() }).now();
         const position = ctx.session?.at;
-        // A session record's identity is its POSITION, not its content. The content hash is right for
-        // memoization — two identical calls are one answer — and wrong here: the same prompt asked
-        // twice in one conversation is two turns, and keying them alike makes the second silently
-        // overwrite the first.
-        const id = position !== undefined ? `${position.id}:${position.seq}` : contentIdOf(op);
+        /**
+         * The content hash, whether or not this call is PLACED.
+         *
+         * It used to be `<sessionId>:<seq>` for a placed record, which spelled the position into the
+         * id — and migration 8 pointed out what that cost: "for a PLACED record `record_id` is
+         * literally `session_id:seq`, so those rows were carrying a rowid that duplicated the very
+         * pair the position table already keys on". The claim, the ordering and the conflict all live
+         * on `session_positions (session_id, seq)`; the id was never what detected anything.
+         *
+         * The old objection — that two identical prompts in one conversation would collide — is
+         * answered by `attempt`, which is the half of the natural key that exists for exactly this
+         * ("a content id repeats whenever the same operation is dispatched twice"). `append` returns
+         * both halves and `finish` settles on both, so a repeat is two rows rather than one overwrite.
+         */
+        const id = contentIdOf(op);
         const stub: RecordStub = {
           id,
           source: op,
           ...(position !== undefined ? { session: position } : {}),
           startMs,
         };
-        // Claim BEFORE the call.
+        // Claim BEFORE the call, and keep the ref it hands back — that, not the stub's id, is what
+        // names the row this call owns for the rest of its life.
+        let ref: RecordRef;
         try {
-          await records.open(stub);
+          ref = await records.append(stub);
         } catch (e) {
           if (!(e instanceof PositionTaken)) throw e;
           // Reported as a FAILURE rather than rethrown, because `wrapHandle` turns a throw into a
@@ -227,7 +300,16 @@ export function withRecord<R = ExecServices, M extends ExecMetrics = ExecMetrics
         // which every recorded call needs, as against the payload above, which only a persisting
         // caller does.
         const session = sessionOutcomeOf(result);
-        await records.close(id, { result: settled, metrics: result.metrics, ...(session !== undefined ? { sessionOutcome: session } : {}) });
+        await records.finish(ref, { result: settled, metrics: result.metrics, ...(session !== undefined ? { sessionOutcome: session } : {}) });
+        // WHERE IT LANDED, when that is not where it was claimed. A store settling this record may
+        // have found that the call did not run in the conversation the position belonged to — a remote
+        // that compacted itself, an adapter that branched, a different provider — and moved it onto a
+        // branch. The claimed position is then the wrong answer to "where does this conversation
+        // continue", and this is the only layer holding the ref needed to ask.
+        const landed = await records.positionOf?.(ref);
+        if (landed !== undefined && (landed.id !== position?.id || landed.seq !== position.seq)) {
+          return { ...result, metrics: { ...result.metrics, sessionRef: `${landed.id}@${landed.seq + 1}` } } as typeof result;
+        }
         return result;
       });
     },
@@ -237,36 +319,6 @@ export function withRecord<R = ExecServices, M extends ExecMetrics = ExecMetrics
 
 /** The ctx seam {@link withSessionPosition} consumes. */
 type PositionSeams = { sessions: SessionStore };
-
-/**
- * The DIVERGENCE half of {@link withSessionPosition}'s configuration — construction options, not ctx
- * fields.
- *
- * Both used to sit on `ExecServices` as `sessionReader` and `onDivergence`, read by exactly one
- * private function in this file and written by exactly the host that composes this wrapper. That is a
- * handoff between two adjacent layers travelling through a bundle meant to carry SERVICES — the
- * capabilities an executor at arbitrary depth needs and no wrapper can know about. A wrapper's own
- * dependency belongs in the wrapper's own options, where a reader can see what it needs without
- * grepping for who might set a field.
- */
-export interface DivergenceOptions {
-  /**
-   * Reads a conversation back FROM the provider, for re-syncing after divergence (DESIGN.md §1.6).
-   *
-   * Per-adapter and optional, because the capability genuinely is: Claude Code has
-   * `getSessionMessages()`, the Messages API has neither and needs neither, being stateless and
-   * therefore unable to diverge. Absent ⇒ a resync starts EMPTY, which the edge records rather than
-   * passing off as a conversation that happened to be empty.
-   */
-  readSession?: { read(providerSessionId: string): Promise<readonly unknown[]> };
-  /**
-   * Told when the remote moved underneath us, before anything is done about it.
-   *
-   * §11 says to log and then resync, in that order and both: the resync keeps the run going, and the
-   * log is what stops a silently-diverging provider looking like normal operation.
-   */
-  onDivergence?: (event: { session: string; resumed: string; reported: string; reason: string }) => void;
-}
 
 /**
  * Resolve the conversation a call runs in, and fork when its position turns out to be taken.
@@ -283,18 +335,18 @@ export interface DivergenceOptions {
  * `hw` deliberately does not.
  */
 export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics>(inner: Executor<R, M>): Executor<R & PositionSeams, M>;
-export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<PositionSeams> & DivergenceOptions = {}>(
+export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<PositionSeams> = {}>(
   config?: P,
 ): ExecutorWrapper<R, R & Omit<PositionSeams, keyof P>, M>;
-export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<PositionSeams> & DivergenceOptions = {}>(
+export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<PositionSeams> = {}>(
   config: P,
   inner: Executor<R, M>,
 ): Executor<R & Omit<PositionSeams, keyof P>, M>;
 export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics>(
-  configOrInner?: (Partial<PositionSeams> & DivergenceOptions) | Executor<R, M>,
+  configOrInner?: Partial<PositionSeams> | Executor<R, M>,
   maybeInner?: Executor<R, M>,
 ): ExecutorWrapper<R, R, M> | Executor<R, M> {
-  const config = (isExecutor(configOrInner) ? undefined : configOrInner) as (Partial<PositionSeams> & DivergenceOptions) | undefined;
+  const config = (isExecutor(configOrInner) ? undefined : configOrInner) as Partial<PositionSeams> | undefined;
   const inner = (isExecutor(configOrInner) ? configOrInner : maybeInner) as Executor<R, M> | undefined;
   const wrap = ((innerExec: Executor): Executor => ({
     // A session layer resumes state, so a `withMemoize` above must refuse to cache — and the per-op
@@ -324,7 +376,10 @@ export function withSessionPosition<R = ExecServices, M extends ExecMetrics = Ex
           const result = await ctl.started(innerExec.start(op, { ...ctx, session })).result;
           // The END position, and the EFFECTIVE one: a call is one record, and a call that had to fork
           // ended somewhere the caller has no other way to learn.
-          return { ...result, metrics: { ...result.metrics, sessionRef: `${session.at.id}@${session.at.seq + 1}` } };
+          // The position it was CLAIMED at — unless something below already said where it actually
+          // landed, which a store that corrects a mistaken append does.
+          const reported = (result.metrics as { sessionRef?: string } | undefined)?.sessionRef;
+          return { ...result, metrics: { ...result.metrics, sessionRef: reported ?? `${session.at.id}@${session.at.seq + 1}` } };
         };
         if (ctl.canceled()) return canceledFailure("canceled before the call started");
         const first = await attempt(resolved);
@@ -336,63 +391,13 @@ export function withSessionPosition<R = ExecServices, M extends ExecMetrics = Ex
           // no longer has to survive alongside the resolution just so a fork can name itself.
           const forked = await sessions.fork(resolved.id, resolved.seed);
           const second = await attempt(await sessions.resolve({ ref: forked, ...(resolved.seed !== undefined ? { seed: resolved.seed } : {}) }));
-          return await checkDivergence(sessions, resolved, second, config ?? {});
+          return second;
         }
-        return await checkDivergence(sessions, resolved, first, config ?? {});
+        return first;
       });
     },
   })) as unknown as ExecutorWrapper<R, R, M>;
   return curryOrApply(wrap, inner);
-}
-
-/**
- * Notice that the remote moved underneath us, and answer it with a `resync` (DESIGN.md §1.6).
- *
- * The check is cheap and exact: we RESUMED a handle, the call reports the handle it actually ended
- * in, and on an append those must agree. When they do not, the provider's conversation is no longer
- * the one our mirror describes — server-side compaction did it (Managed Agents does this on its own),
- * or somebody resumed the session outside JaiRA.
- *
- * VERIFY ON APPEND rather than trusting: a stale mirror is silent, and the next call would replay a
- * digest that no longer describes what the provider will send.
- *
- * Answering it is deliberately not "carry on". The id is a content commitment, and the same reasoning
- * that makes an unresolvable id an error applies here — so this LOGS, then starts a new conversation
- * with a `resync` edge whose contents are re-read from the provider. Where the adapter has no read
- * API, the new conversation starts EMPTY, and that emptiness is visible on the edge rather than being
- * mistaken for a conversation that happened to have nothing in it.
- *
- * A FORK is exempt: a new handle is exactly what a native fork returns, and calling that divergence
- * would resync on every branch.
- */
-async function checkDivergence(
-  sessions: SessionStore,
-  resolved: ResolvedSession,
-  result: ExecResult<ResolvedValue, ExecMetrics>,
-  options: DivergenceOptions,
-): Promise<ExecResult<ResolvedValue, ExecMetrics>> {
-  const resumed = resolved.providerSessionId;
-  const reported = sessionOutcomeOf(result)?.providerSessionId;
-  if (resolved.mode !== "append" || resumed === undefined || reported === undefined || reported === resumed) return result;
-
-  const reason = `session ${resolved.id} diverged: resumed provider session ${resumed}, but the call ran in ${reported}`;
-  options.onDivergence?.({ session: resolved.id, resumed, reported, reason });
-
-  if (sessions.resync === undefined) return result;
-  // Re-read from the provider when it offers a way to. `read` is per-adapter and optional — the
-  // Messages API has none and, being stateless, cannot diverge in the first place.
-  let contents: readonly unknown[] = [];
-  try {
-    contents = (await options.readSession?.read(reported)) ?? [];
-  } catch {
-    // A failed re-read is still a resync, just an empty one. Losing the conversation is bad; carrying
-    // on against a mirror we know is wrong is worse.
-    contents = [];
-  }
-  const resynced = await sessions.resync(resolved.id, contents as never);
-  // The outcome points at the RESYNCED conversation, so whatever continues from here continues from
-  // what the provider actually has rather than from what we thought it had.
-  return { ...result, metrics: { ...result.metrics, sessionRef: resynced } };
 }
 
 /** Forward a per-op capability lookup, if the inner executor has one. Recording changes nothing. */

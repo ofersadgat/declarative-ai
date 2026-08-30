@@ -158,6 +158,9 @@ export const DELEGATED_CAPS: RuntimeCapabilities = {
   // Stated rather than left to the default, now that resume and fork are separable: this transport has
   // BOTH, and `forkSession` is the primitive that makes the second one true.
   sessionFork: true,
+  // `--resume-session-at` / `resumeSessionAt`: a copy cut at a named message, so a branch behind the
+  // remote's tip is still one server-side operation rather than a full replay.
+  sessionForkAt: true,
   streaming: true,
   // The run can be STEERED while it runs — interrupted, redirected, given more input. True for this
   // transport because the SDK's `Query` carries the control requests; a caller reads it to decide
@@ -879,7 +882,23 @@ export class AgentExecutor extends PromptExecutor {
       ...(definition.providerOptions?.[this.providerOptionsKey()] !== undefined
         ? { providerOptions: definition.providerOptions[this.providerOptionsKey()]! }
         : {}),
-      ...(resume !== undefined ? { resume, ...(session?.mode === "fork" ? { forkSession: true } : {}) } : {}),
+      // FORK exactly when the handle we were given is the fork source, not the append target — the two
+      // travel on different fields (`ResolvedSession.forkFrom`), so this reads the difference rather
+      // than inferring it from a mode that an automatic branch does not set.
+      ...(resume !== undefined
+        ? {
+            resume,
+            ...(resume === session?.forkFrom?.handle
+              ? {
+                  forkSession: true,
+                  // WHERE to cut the copy, when the branch does not start at the remote's tip. The
+                  // CLI takes it as `--resume-session-at`; without it a fork copies the session as it
+                  // now stands, which for a branch cut behind that is turns it never had.
+                  ...(session.forkFrom.at !== undefined ? { resumeSessionAt: session.forkFrom.at } : {}),
+                }
+              : {}),
+          }
+        : {}),
       ...(replayed !== undefined ? { messages: replayed as never } : {}),
       /**
        * Route the agent's native tool-approval callback through our GATE (DESIGN §5.1, "Delegated

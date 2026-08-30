@@ -34,6 +34,8 @@ import {
   createModelRouter,
   executeLlmCall,
   emptyLlmMetrics, mergeLlmMetrics, entriesOfMessages, providerOf,
+  DEFAULT_MODELS,
+  ModelInfo,
   type CallDeps,
   type LlmCallResult,
   type LlmMetrics,
@@ -97,6 +99,40 @@ export interface PromptExecutorOptions extends LoweringOptions {
   router?: ModelRouter;
   /** The call seam; defaults to the real `executeLlmCall` pipeline. */
   runner?: CallRunner;
+  /**
+   * How big a conversation this model can hold, by id — defaults to the shipped catalog.
+   *
+   * Injected rather than looked up inline so a host with its own catalog (JaiRA loads rows into a
+   * table and lets a project add to them) answers for its own models, and so a test can state a small
+   * limit instead of building a 343-row catalog to reach one.
+   *
+   * `undefined` for a model means "not known", and an unknown limit never refuses a call.
+   */
+  contextLengthFor?: (model: string) => number | undefined;
+}
+
+/**
+ * Characters per token, as a rough divisor. Real tokenizers vary by model and by content — prose runs
+ * nearer 4, code and JSON nearer 3 — so this is an order-of-magnitude estimate, used only against the
+ * margin below.
+ */
+const CHARS_PER_TOKEN = 4;
+
+/**
+ * How far past a model's stated context a call must be before it is refused unsent.
+ *
+ * Above 1 on purpose. The estimate is crude, and refusing a call that would have worked is worse than
+ * the opaque provider error this replaces — so the guard fires only on the obviously impossible, and
+ * anything near the line is still sent for the provider to judge.
+ */
+const OVERFLOW_MARGIN = 1.25;
+
+/** The shipped catalog — 313 of its 343 rows state a context length. */
+const CATALOG = new ModelInfo(DEFAULT_MODELS);
+
+/** The catalog's answer for a model id; a host with its own rows overrides it. */
+function defaultContextLength(model: string): number | undefined {
+  return CATALOG.lookup(model as never)?.contextLength;
 }
 
 const CAPABILITIES: Capabilities = {
@@ -296,16 +332,47 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
     // rule: replay when the remote holds nothing for us (no native resume at all), or when it holds a
     // conversation we are not allowed to branch. `messages()` is a LAZY accessor and this is the only
     // path that pays for it — the cheap paths read zero messages.
+    /**
+     * A branch this adapter can make SERVER-SIDE: the parent handle goes on the wire and the provider
+     * copies the conversation itself, so nothing is replayed and nothing is re-sent.
+     *
+     * This is the free move the store used to make unreachable by withholding the handle on a fork.
+     * `forkFrom` is a distinct field precisely so only an adapter that declares it can branch acts on
+     * it — everything else falls through to replay below, which is what codex does.
+     */
+    // A cut BEHIND the remote's tip is a narrower ask than a plain copy, and a separate capability:
+    // an adapter that can only copy where the conversation now stands must replay instead, or the
+    // branch comes back holding turns it never had.
+    const cutting = session.forkFrom?.at !== undefined;
+    const forking =
+      this.capabilities.sessionResume && nativeFork && session.forkFrom !== undefined && (!cutting || this.capabilities.sessionForkAt === true);
     const replaying = !this.capabilities.sessionResume || (session.mode === "fork" && !nativeFork);
+    /**
+     * The second way a prefix has to go on the wire: this transport COULD resume, but there is no
+     * handle for this position.
+     *
+     * A handle names a conversation at the point it has reached, so the store withholds one for a
+     * position the conversation has moved past and for a branch that has written nothing of its own.
+     * Both are real conversations with real prefixes, and neither `replaying` nor the handle below
+     * would carry them — the call would reach the model with its prompt and no history at all,
+     * silently, which is the worst of the three ways to be wrong about a conversation.
+     *
+     * Reading `prior` is the expensive step, so it is paid for only when there is no handle, and only
+     * replaced when the conversation actually HAS a prefix: a genuinely new conversation keeps the
+     * cheap `prompt` shape it has always had.
+     */
+    const unhandled = !replaying && !forking && session.providerSessionId === undefined;
 
-    if (replaying) {
+    if (replaying || unhandled) {
       // Resolved from `id` through the store when the accessor is missing: non-enumerable properties
       // do not survive a spread or a structured clone, and `{ ...session, fork: true }` is a thing
       // people write. Losing the accessor must cost a store read, never correctness.
       const prior = await priorMessages(session);
-      const replayed: LlmCallDefinition = { ...definition, messages: [...prior, ...sent] };
-      delete (replayed as { prompt?: unknown }).prompt; // the SDK rejects both
-      definition = replayed;
+      if (replaying || prior.length > 0) {
+        const replayed: LlmCallDefinition = { ...definition, messages: [...prior, ...sent] };
+        delete (replayed as { prompt?: unknown }).prompt; // the SDK rejects both
+        definition = replayed;
+      }
     }
     // The handle is threaded ONLY where it is safe to: an append always, a fork solely when this
     // transport can branch server-side. A fork that carried its parent's handle would put two branches
@@ -315,10 +382,50 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
     // For a transport with no native resume this reduces to "append only", which is exactly the rule
     // the provider path had before the two were one method: `nativeFork` is false there, so the
     // disjunction collapses.
-    if (session.providerSessionId !== undefined && (session.mode !== "fork" || nativeFork)) {
+    if (forking) {
+      // The handle to COPY, not to append to. The adapter tells them apart by comparing what it was
+      // given against `session.forkFrom`, so "resume" and "fork from" never rest on one field.
+      definition = { ...definition, providerSessionId: session.forkFrom!.handle };
+    } else if (session.providerSessionId !== undefined && (session.mode !== "fork" || nativeFork)) {
       definition = { ...definition, providerSessionId: session.providerSessionId };
     }
     return { definition, sent };
+  }
+
+  /**
+   * Refuse a call whose conversation cannot fit the model, BEFORE spending it.
+   *
+   * The provider's own answer is `Prompt is too long` with nothing about which conversation, how far
+   * over, or what to do — and it arrives after the request has been built and sent. This says which
+   * model, what it holds, and roughly what was assembled, which is the difference between a run that
+   * reports a problem and one that reports a rejection.
+   *
+   * DELIBERATELY approximate, and deliberately generous. There is no tokenizer here, so this counts
+   * characters and divides — an estimate that runs low for code and JSON and high for prose. It is a
+   * guard against the obviously-impossible, not a budget: it refuses only past a margin over the
+   * stated limit, so a call anywhere near the line is still sent and the provider decides. Erring the
+   * other way would refuse calls that would have worked, which is worse than the error it replaces.
+   *
+   * An unknown model, or one whose row carries no `contextLength`, never refuses anything.
+   */
+  private contextOverflow(definition: LlmCallDefinition): string | undefined {
+    const model = definition.model;
+    if (typeof model !== "string") return undefined;
+    const limit = (this.options.contextLengthFor ?? defaultContextLength)(model);
+    if (limit === undefined) return undefined;
+    const text =
+      definition.messages !== undefined
+        ? JSON.stringify(definition.messages)
+        : typeof definition.prompt === "string"
+          ? definition.prompt
+          : JSON.stringify(definition.prompt ?? "");
+    const estimate = Math.round(text.length / CHARS_PER_TOKEN);
+    if (estimate <= limit * OVERFLOW_MARGIN) return undefined;
+    return (
+      `the conversation does not fit ${model}: about ${estimate.toLocaleString()} tokens assembled against a ` +
+      `${limit.toLocaleString()}-token context. It needs compacting, a shorter seed, or a model with more room — ` +
+      `sending it would spend the call to be told the same thing less usefully.`
+    );
   }
 
   /**
@@ -399,6 +506,9 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
     /** The request turns this call ADDS beyond the stream it started from — its half of the delta. */
     let sent: ModelMessage[];
     ({ definition, sent } = await this.applySession(definition, ctx));
+
+    const overflow = this.contextOverflow(definition);
+    if (overflow !== undefined) return refuse(overflow);
 
     const router = this.resolveRouter(ctx);
     // Only the DEFAULT provider path needs a router: a custom runner (a test fake, a recorded

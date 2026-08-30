@@ -113,7 +113,6 @@ export function specPlanningFiles(): Record<string, StateDef> {
           binding: ".children.human_review.output.decision",
         },
       },
-      environment: { conversation: { mode: "full_history" } },
       operation: {
         kind: "prompt",
         model: "critic",

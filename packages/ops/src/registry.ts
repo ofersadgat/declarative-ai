@@ -174,6 +174,18 @@ export interface RuntimeCapabilities extends HostCapabilities {
    */
   sessionFork?: boolean;
   /**
+   * Supports branching a conversation at an ARBITRARY point, not only from where it now stands.
+   *
+   * Claude Code takes `--resume-session-at <message id>` — "only messages up to and including the
+   * assistant message with <message.id>" — so a branch cut behind the remote's tip is still one
+   * server-side copy. Everything else copies the tip or nothing, and a branch behind it has to be
+   * replayed: copying would hand it turns it never had, which in the automatic-fork case is the very
+   * turn that took its position.
+   *
+   * Absent means NO. This is the narrower capability, and an adapter that has it says so.
+   */
+  sessionForkAt?: boolean;
+  /**
    * A RUNNING call can be steered — interrupted, redirected, given more input mid-turn.
    *
    * Separate from `streaming`, which is about watching, and from `interactive`, which is about being

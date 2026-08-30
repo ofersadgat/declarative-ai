@@ -46,11 +46,13 @@ const objectOp = () =>
 /** A resolved session with the non-enumerable half attached, exactly as a store hands one over. */
 /** Typed as the ctx slot is (`JsonValue`), since that is where it gets assigned; the executor casts
  *  it back to `ModelMessage` exactly as the production code does. */
-function session(over: { mode?: "append" | "fork"; providerSessionId?: string; messages?: ModelMessage[] }): ResolvedSession {
+function session(over: { mode?: "append" | "fork"; providerSessionId?: string; forkFrom?: { handle: string; at?: string }; messages?: ModelMessage[] }): ResolvedSession {
   return resolveSessionRef<ModelMessage>("conv:1", {
     mode: over.mode ?? "append",
     at: { id: "conv", seq: 1 },
     ...(over.providerSessionId !== undefined ? { providerSessionId: over.providerSessionId } : {}),
+    // The handle to COPY, which is a different request from the one above and travels separately.
+    ...(over.forkFrom !== undefined ? { forkFrom: over.forkFrom } : {}),
     messages: async () => over.messages ?? [{ role: "user", content: "earlier" }],
   }) as unknown as ResolvedSession;
 }
@@ -214,7 +216,7 @@ describe("one session implementation, two transports (the point of the split)", 
     const caps = { ...DELEGATED_CAPS, sessionFork: false };
     const forked = capturing();
     await new AgentExecutor({ query: forked.query, capabilities: caps }).start(op(), {
-      session: session({ mode: "fork", providerSessionId: "sess-abc" }),
+      session: session({ mode: "fork", forkFrom: { handle: "sess-abc" } }),
     }).result;
     expect(forked.seen()?.messages).toBeDefined();
 
@@ -228,9 +230,47 @@ describe("one session implementation, two transports (the point of the split)", 
 
   it("a native FORK carries the handle plus the branch flag", async () => {
     const { query, seen } = capturing();
-    await new AgentExecutor({ query }).start(op(), { session: session({ mode: "fork", providerSessionId: "sess-abc" }) }).result;
+    await new AgentExecutor({ query }).start(op(), { session: session({ mode: "fork", forkFrom: { handle: "sess-abc" } }) }).result;
     expect(seen()?.resume).toBe("sess-abc");
     expect(seen()?.forkSession).toBe(true);
+  });
+
+  /**
+   * A branch that does not start at the remote's tip is still ONE server-side copy.
+   *
+   * `--resume-session-at <message id>` — "only messages up to and including the assistant message
+   * with <message.id>". Without it, a fork copies the session as it now stands, which for a branch
+   * cut behind that is turns the branch never had: in the automatic-fork case, the very turn that
+   * took its position. The store names the cut because only it knows where the branch ends.
+   */
+  it("cuts the copy at a named message when the branch is behind the tip", async () => {
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query }).start(op(), {
+      session: session({ mode: "fork", forkFrom: { handle: "sess-abc", at: "msg-7" } }),
+    }).result;
+    expect(seen()?.resume).toBe("sess-abc");
+    expect(seen()?.forkSession).toBe(true);
+    expect(seen()?.resumeSessionAt).toBe("msg-7");
+  });
+
+  it("asks for no cut when the branch starts where the remote stands", async () => {
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query }).start(op(), { session: session({ mode: "fork", forkFrom: { handle: "sess-abc" } }) }).result;
+    expect(seen()?.forkSession).toBe(true);
+    expect(seen()?.resumeSessionAt).toBeUndefined();
+  });
+
+  /**
+   * The unsafe case, now unrepresentable rather than merely prevented.
+   *
+   * "Append to this handle" and "copy this handle" used to be one field plus a mode, so a fork that
+   * carried a handle meant to be appended to would have branched into the wrong remote. They are two
+   * fields now: a handle in `providerSessionId` is resumed and never forked, whatever the mode says.
+   */
+  it("does NOT branch off a handle offered as an append target", async () => {
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query }).start(op(), { session: session({ mode: "fork", providerSessionId: "sess-abc" }) }).result;
+    expect(seen()?.forkSession).toBeUndefined();
   });
 
   it("reports the handle the run ENDED in, so a fork's new id is not lost", async () => {

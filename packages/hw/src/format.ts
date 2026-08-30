@@ -226,8 +226,6 @@ export interface NamedParameterDecl extends ParameterDecl {
 
 // --- Authored operations (§7.1) ----------------------------------------------
 
-/** Conversation context modes (SPEC §4.7). */
-export type ConversationMode = "full_history" | "summary" | "fresh" | "selected_artifacts";
 
 /**
  * The EXECUTION-ENVIRONMENT fields of an operation: session, tools, conversation preamble, and the
@@ -280,13 +278,6 @@ export interface ExecEnvironmentDecl {
   fork?: boolean;
   /** Logical names of tools the operation may call mid-loop — resolved through `registry.tools`. */
   tools?: string[];
-  /** Conversation preamble injected into THIS call (distinct from a `{ conversation }` wire, which
-   *  reads a transcript as data, §7.5). */
-  conversation?: {
-    mode: ConversationMode;
-    /** For `selected_artifacts`: names of artifacts to inject. */
-    artifacts?: string[];
-  };
   /** Authored per-operation permission baseline (DESIGN §5.1, "the definition-authored baseline"). */
   permissions?: {
     profile?: PermissionProfile;

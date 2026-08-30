@@ -307,9 +307,19 @@ describe("createClaudeCodeFunction — delegated agent as a registered async fun
  */
 describe("native session resume and fork", () => {
   /** A resolved session as the layer above hands it over: only `id` enumerable, the rest attached. */
-  const session = (over: { mode?: "append" | "fork"; providerSessionId?: string }): ExecServices["session"] => {
+  /**
+   * A resolved session at position 3, with the prefix such a position implies.
+   *
+   * `messages` is part of what a resolved session IS — the accessor the store attaches so a caller can
+   * read the conversation without knowing where it lives. A fixture that claimed `seq: 3` and could
+   * not answer for its own prefix described a conversation that cannot exist, and only stayed
+   * plausible while no path asked; the one that asks now is a call with no handle, which has to put
+   * the prefix on the wire or reach the model with no history at all.
+   */
+  const session = (over: { mode?: "append" | "fork"; providerSessionId?: string; forkFrom?: { handle: string; at?: string }; prior?: unknown[] }): ExecServices["session"] => {
+    const { prior = [{ role: "user", content: "earlier" }], ...rest } = over;
     const s = { id: "ses_x@3" } as Record<string, unknown>;
-    for (const [k, v] of Object.entries({ mode: over.mode ?? "append", at: { id: "ses_x", seq: 3 }, ...over })) {
+    for (const [k, v] of Object.entries({ mode: rest.mode ?? "append", at: { id: "ses_x", seq: 3 }, messages: async () => prior, ...rest })) {
       Object.defineProperty(s, k, { value: v, enumerable: false });
     }
     return s as unknown as ExecServices["session"];
@@ -335,17 +345,29 @@ describe("native session resume and fork", () => {
   it("FORKS by handle when the layer above decided to branch", async () => {
     const { query, seen } = capturing();
     const fn = createClaudeCodeFunction({ query });
-    await fn.run(inputs(), { session: session({ mode: "fork", providerSessionId: "sess-abc" }) });
+    await fn.run(inputs(), { session: session({ mode: "fork", forkFrom: { handle: "sess-abc" } }) });
     expect(seen()?.resume).toBe("sess-abc");
     expect(seen()?.forkSession).toBe(true);
   });
 
-  it("starts FRESH when there is no handle to resume", async () => {
+  it("starts FRESH when there is no handle to resume, and REPLAYS the prefix it cannot resume into", async () => {
     const { query, seen } = capturing();
     const fn = createClaudeCodeFunction({ query });
     await fn.run(inputs(), { session: session({ mode: "append" }) });
     expect(seen()?.resume).toBeUndefined();
     expect(seen()?.forkSession).toBeUndefined();
+    // No handle for this position — a branch that has written nothing, or a position the conversation
+    // has moved past — so the turns go on the wire instead. Sending neither is how a call reaches the
+    // model with no history and nothing says so.
+    expect(seen()?.messages).toEqual([{ role: "user", content: "earlier" }, expect.anything()]);
+  });
+
+  it("keeps the cheap prompt shape for a conversation that genuinely has no prefix", async () => {
+    const { query, seen } = capturing();
+    const fn = createClaudeCodeFunction({ query });
+    await fn.run(inputs(), { session: session({ mode: "append", prior: [] }) });
+    expect(seen()?.resume).toBeUndefined();
+    expect(seen()?.messages).toBeUndefined();
   });
 
   it("reports the session the run ENDED in — a fork returns a NEW id", async () => {

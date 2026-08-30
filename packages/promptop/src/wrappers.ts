@@ -74,9 +74,6 @@ interface SessionOptions {
    * one and not for a durable one.
    */
   seedFor?: (op: PromptOp<InlineFamily>) => string;
-  /** Which adapter is about to serve the call, so the store hands back THAT provider's handle. The
-   *  same stream replayed against two providers has two unrelated handles and both are worth keeping. */
-  provider?: string;
 }
 
 /**
@@ -695,7 +692,6 @@ export function withSession<R = ExecServices, M extends ExecMetrics = ExecMetric
             ...(ref !== undefined ? { ref } : {}),
             ...(fork ? { fork: true } : {}),
             ...(config?.seedFor !== undefined ? { seed: config.seedFor(op) } : {}),
-            ...(config?.provider !== undefined ? { provider: config.provider } : {}),
           });
           return await ctl.started(positioned.start(sentOp, { ...ctx, session: resolved as never })).result;
         });

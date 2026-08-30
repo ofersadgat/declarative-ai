@@ -462,14 +462,6 @@ export interface SessionRequest {
    * every run, which degrades exactly the observability durable sessions exist for.
    */
   seed?: string;
-  /**
-   * The provider about to serve the call.
-   *
-   * A conversation is LOCKED to the provider it was used with, so asking for one under a different
-   * provider is a fork — enforced by resolution rather than by a rule anyone has to remember. The
-   * provider a conversation belongs to is read off its latest record, not stored separately.
-   */
-  provider?: string;
 }
 
 /**
@@ -485,6 +477,22 @@ export interface SessionRequest {
  * therefore be able to resolve messages from `id` alone and use the accessor only when it is there:
  * losing it must cost a store read, never correctness.
  */
+/**
+ * The remote a branch copies, and where to cut it.
+ *
+ * `at` is the provider's own id for the last message the branch inherits — Claude Code takes it as
+ * `--resume-session-at <message id>`, "only messages up to and including the assistant message with
+ * <message.id>". Absent means the branch point IS the remote's tip, so a plain copy reproduces it.
+ *
+ * Present-but-unusable is the case worth naming: an adapter that can copy a session but only from the
+ * tip must REPLAY when `at` is set, because copying would hand the branch turns it never had — in the
+ * automatic-fork case, the very turn that took its position.
+ */
+export interface ForkSource {
+  handle: string;
+  at?: string;
+}
+
 export interface ResolvedSession<Msg = JsonValue> extends SessionRef {
   /** Whether this call continues the conversation or branched off it. Decided BEFORE the call,
    *  because "is this a fork" and "how do I shape the request" are the same question — a fork must
@@ -493,8 +501,22 @@ export interface ResolvedSession<Msg = JsonValue> extends SessionRef {
   /** The record slot this call claims. `withRecord` stamps its stub here; the store's uniqueness on
    *  this pair is the reservation. */
   readonly at: { id: string; seq: number };
-  /** The provider handle to resume from, when the adapter can and the mode allows it. */
+  /** The provider handle to resume from — this conversation's own, at this exact position. Absent
+   *  when there is none to resume: a fresh branch, or a position the conversation has moved past. */
   readonly providerSessionId?: string;
+  /**
+   * The handle to branch FROM, when this call starts a branch of a conversation that has a remote.
+   *
+   * A separate field from {@link ResolvedSession.providerSessionId} on purpose: "append to this" and
+   * "copy this and append to the copy" are different requests that happen to name the same string, and
+   * one field for both made the difference a convention rather than a type. The store used to withhold
+   * the handle entirely on a fork, reasoning that inheriting it "would put two branches into one remote
+   * session" — true of a resume, and exactly backwards for a NATIVE fork, where the parent handle is
+   * the input and the provider mints a new id. Withholding it is what made native fork unreachable.
+   *
+   * Only an adapter that declares it can branch server-side may act on this; everything else replays.
+   */
+  readonly forkFrom?: ForkSource;
   /**
    * The stable discriminator this position was resolved UNDER — carried so a fork does not need the
    * original request back.
@@ -624,7 +646,7 @@ export const defaultMessagesOf = <Msg>(record: { result?: { value?: unknown } })
 export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
   /** Lineage only. A branch's own records live in `rows`; its prefix is its parent's. */
   private readonly branches = new Map<string, { parent?: string; cursor: number }>();
-  private readonly rows = new Map<string, Map<number, { id: string; result?: { value?: unknown }; externalId?: string }>>();
+  private readonly rows = new Map<string, Map<number, { id: string; attempt: number; result?: { value?: unknown }; externalId?: string }>>();
   private minted = 0;
 
   constructor(private readonly messagesOf: MessagesOf<Msg> = defaultMessagesOf) {}
@@ -643,13 +665,22 @@ export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
       mode = "fork";
     }
     // The provider handle this conversation currently sits on, read off its LATEST record — there is
-    // no handle map, because a conversation is locked to the provider it was used with. A FORK gets
-    // none: inheriting the parent's handle would put two branches into one remote session.
-    const handle = mode === "append" ? this.handleAt(id, seq) : undefined;
+    // no handle map, because a conversation is locked to the provider it was used with.
+    //
+    // AT THE HEAD ONLY. A handle names a conversation at the point it has reached, so offering one for
+    // an earlier position would offer a resume that continues from the remote's tip — a turn this
+    // caller never saw, in front of its prompt. A fork gets none for the same reason from the other
+    // direction: inheriting the parent's handle would put two branches into one remote session.
+    const handle = mode === "append" && seq === this.head(id) ? this.handleAt(id, seq) : undefined;
+    // Nothing of our own to resume, but an ancestor has a remote: that is a branch POINT, not an
+    // append target. Offered as `forkFrom` so only an adapter that can copy a session server-side
+    // acts on it — see `ResolvedSession.forkFrom`.
+    const forkFrom = handle === undefined ? this.ancestorHandle(id) : undefined;
     return resolveSessionRef<Msg>(join(id, seq), {
       mode,
       at: { id, seq },
       ...(handle !== undefined ? { providerSessionId: handle } : {}),
+      ...(forkFrom !== undefined ? { forkFrom } : {}),
       // Carried so a FORK does not need the original request back — see `ResolvedSession.seed`.
       ...(request.seed !== undefined ? { seed: request.seed } : {}),
       messages: async () => this.materialize(id, seq),
@@ -681,19 +712,66 @@ export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
 
   // --- The record half ----------------------------------------------------------
 
-  open(stub: { id: string; session?: { id: string; seq: number } }): void {
+  append(stub: { id: string; session?: { id: string; seq: number } }): { id: string; attempt: number } {
     const at = stub.session;
-    if (at === undefined) return; // a record outside any conversation is not this store's business
+    // The attempt is counted whether or not the record is PLACED, so an unplaced call still gets a
+    // ref that names it the way a placed one does.
+    const attempt = this.attemptOf(stub.id);
+    if (at === undefined) return { id: stub.id, attempt }; // a record outside any conversation is not this store's business
     const rows = this.rows.get(at.id) ?? new Map();
     if (rows.has(at.seq)) throw new PositionTaken(at.id, at.seq);
-    rows.set(at.seq, { id: stub.id });
+    rows.set(at.seq, { id: stub.id, attempt });
     this.rows.set(at.id, rows);
+    return { id: stub.id, attempt };
   }
 
-  close(id: string, settled: { result?: { value?: unknown }; sessionOutcome?: { messages?: readonly unknown[]; providerSessionId?: string } }): void {
+  /** How many rows already carry this id, plus one — the durable store's `attemptFor`, in memory. */
+  private attemptOf(id: string): number {
+    let n = 0;
+    for (const rows of this.rows.values()) for (const row of rows.values()) if (row.id === id) n += 1;
+    return n + 1;
+  }
+
+  /** Where a record sits now — see {@link RecordStore.positionOf}. */
+  positionOf(ref: { id: string; attempt: number }): { id: string; seq: number } | undefined {
+    for (const [id, rows] of this.rows.entries()) {
+      for (const [seq, row] of rows.entries()) if (row.id === ref.id && row.attempt === ref.attempt) return { id, seq };
+    }
+    return undefined;
+  }
+
+  /**
+   * Move a record onto a branch when the call reports a remote it was not given.
+   *
+   * `resolve` offers the handle a conversation sits on and ASSUMES the call appends to it. Whether
+   * that handle is usable is not a fact this store has — a remote that compacted itself, an adapter
+   * that branched, a different provider — so it assumes the ordinary case and lets what comes back
+   * settle it. A different handle means the call did not run in the conversation its record was
+   * claimed in, and the record belongs on a branch cut at that position: the trunk keeps meaning what
+   * every ref into it meant, and the branch carries the remote actually used.
+   */
+  private correctLineage(ref: { id: string; attempt: number }, reported: string | undefined): void {
+    if (reported === undefined) return;
+    const at = this.positionOf(ref);
+    if (at === undefined) return;
+    const expected = this.handleAt(at.id, at.seq);
+    if (expected === undefined || expected === reported) return;
+    const branch = this.branchFrom(at.id, at.seq, "diverged");
+    const rows = this.rows.get(at.id);
+    const row = rows?.get(at.seq);
+    if (rows === undefined || row === undefined) return;
+    rows.delete(at.seq);
+    const moved = this.rows.get(branch) ?? new Map();
+    moved.set(at.seq, row);
+    this.rows.set(branch, moved);
+  }
+
+  finish(ref: { id: string; attempt: number }, settled: { result?: { value?: unknown }; sessionOutcome?: { messages?: readonly unknown[]; providerSessionId?: string } }): void {
     for (const rows of this.rows.values()) {
       for (const row of rows.values()) {
-        if (row.id === id) {
+        // BOTH halves. Two identical operations in one run share an id, so matching on it alone
+        // settles whichever row is found first — see `RecordStore.close`.
+        if (row.id === ref.id && row.attempt === ref.attempt) {
           // An executor whose payload IS a conversation needs nothing further; one whose payload is
           // not — a delegated agent, a value-mode prompt core, a fake — reports its delta on the
           // session channel, and that is what the conversation is made of.
@@ -716,6 +794,7 @@ export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
           // the next call detectable as divergence rather than invisible.
           const handle = settled.sessionOutcome?.providerSessionId;
           if (handle !== undefined) row.externalId = handle;
+          this.correctLineage(ref, handle);
           return;
         }
       }
@@ -756,16 +835,65 @@ export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
   }
 
   /** The latest handle at or before a position, walking the lineage as materializing does. */
+  /**
+   * The handle THIS conversation sits on — its own records only, never its parent's.
+   *
+   * It used to walk the lineage the way materializing does, and that is right for MESSAGES and wrong
+   * for a handle: a branch inherits its parent's turns by reference, but not its remote. A branch that
+   * has written nothing has no provider session at all, and the parent's is the point it forked FROM,
+   * not somewhere to append. Walking up handed it back as a resume target, which is the "two branches
+   * into one remote session" the fork rule exists to prevent, reached by the back door.
+   */
   private handleAt(id: string, upTo: number): string | undefined {
-    let at: string | undefined = id;
-    let bound = upTo;
+    const rows = [...(this.rows.get(id) ?? new Map()).entries()].sort(([a], [b]) => b - a);
+    for (const [seq, row] of rows) if (seq < upTo && row.externalId !== undefined) return row.externalId;
+    return undefined;
+  }
+
+  /**
+   * The remote a branch could COPY — the nearest handle above it, and only when copying would
+   * reproduce this branch's prefix exactly.
+   *
+   * The provider primitive is "resume this session and fork it", which copies the remote AS IT NOW
+   * STANDS; there is no fork-at-a-position anywhere. So a branch whose cursor is behind its parent's
+   * head has no fork source at all: copying would hand it turns it never had — in the automatic-fork
+   * case, the very turn that took its position. Withheld here rather than checked downstream, because
+   * the tip is the store's fact and an executor holding a handle has no way to know it is stale.
+   */
+  private ancestorHandle(id: string): ForkSource | undefined {
+    let branch = this.branches.get(id);
+    let at = branch?.parent;
+    let bound = branch?.cursor ?? 0;
     while (at !== undefined) {
-      const rows = [...(this.rows.get(at) ?? new Map()).entries()].sort(([a], [b]) => b - a);
-      for (const [seq, row] of rows) if (seq < bound && row.externalId !== undefined) return row.externalId;
-      const branch: { parent?: string; cursor: number } | undefined = this.branches.get(at);
+      const found = this.handleAt(at, bound);
+      if (found !== undefined) {
+        // AT THE TIP, a plain copy reproduces this branch. Behind it, the copy has to be cut — and
+        // naming the cut is the store's job, since only it knows which message the branch ends at.
+        // A conversation whose entries carry no provider ids cannot be cut, so it offers no source
+        // and the caller replays: correct, and the only honest answer.
+        if (bound === this.head(at)) return { handle: found };
+        const cut = this.messageIdAt(at, bound);
+        return cut === undefined ? undefined : { handle: found, at: cut };
+      }
+      branch = this.branches.get(at);
       if (branch?.parent === undefined) return undefined;
       bound = branch.cursor;
       at = branch.parent;
+    }
+    return undefined;
+  }
+
+  /** The provider's own id for the last message before a position — where a copy would be cut. */
+  private messageIdAt(id: string, upTo: number): string | undefined {
+    const rows = [...(this.rows.get(id) ?? new Map()).entries()].sort(([a], [b]) => b - a);
+    for (const [seq, row] of rows) {
+      if (seq >= upTo) continue;
+      const entries = (row.result?.value as { entries?: Array<{ uuid?: unknown }> } | undefined)?.entries;
+      if (!Array.isArray(entries)) continue;
+      for (let i = entries.length - 1; i >= 0; i -= 1) {
+        const uuid = entries[i]?.uuid;
+        if (typeof uuid === "string") return uuid;
+      }
     }
     return undefined;
   }
@@ -789,8 +917,8 @@ export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
     // A distinct conversation, so the origin keeps meaning exactly what every ref into it meant.
     const derived = `${id}~${word}${++this.minted}`;
     this.branches.set(derived, { cursor: 0 });
-    const rows = new Map<number, { id: string; result?: { value?: unknown } }>();
-    rows.set(0, { id: `${derived}:0`, result: { value: { messages } } });
+    const rows = new Map<number, { id: string; attempt: number; result?: { value?: unknown } }>();
+    rows.set(0, { id: `${derived}:0`, attempt: 1, result: { value: { messages } } });
     this.rows.set(derived, rows);
     return join(derived, 1);
   }

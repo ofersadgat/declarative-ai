@@ -147,6 +147,9 @@ export function codexRefusal(opts: AgentQueryOptions): string | undefined {
       "Pass codex settings as `args` on the transport instead, where they reach argv verbatim"
     );
   }
+  if (opts.resumeSessionAt !== undefined) {
+    return "codex cannot cut a copy at a message — a branch behind the tip must be replayed, so the caller must pass `messages` instead of `resumeSessionAt`";
+  }
   if (opts.forkSession === true) {
     return "codex has no server-side fork — a fork must be replayed, so the caller must pass `messages` instead of `forkSession`";
   }

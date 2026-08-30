@@ -245,7 +245,14 @@ export function sdkOptions(opts: AgentQueryOptions, binaryPath: string | undefin
     //
     // `forkSession` is nested inside `resume` deliberately: it BRANCHES a conversation, so it means
     // nothing without one to branch, and the executor only ever sets the two together.
-    ...(opts.resume !== undefined ? { resume: opts.resume, ...(opts.forkSession === true ? { forkSession: true } : {}) } : {}),
+    ...(opts.resume !== undefined
+      ? {
+          resume: opts.resume,
+          ...(opts.forkSession === true
+            ? { forkSession: true, ...(opts.resumeSessionAt !== undefined ? { resumeSessionAt: opts.resumeSessionAt } : {}) }
+            : {}),
+        }
+      : {}),
   };
 }
 

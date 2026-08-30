@@ -309,7 +309,7 @@ function defaultOutput(): NamedParameter<InlineFamily> {
  * set and the permission baseline — so the loader hands each consumer only what it needs.
  */
 export function splitExecEnvironment(fields: OperationFields): { op: OperationFields; env: ExecEnvironmentDecl } {
-  const { session, fork, tools, conversation, permissions, ...op } = fields;
+  const { session, fork, tools, permissions, ...op } = fields;
   const env: ExecEnvironmentDecl = {};
   // `session` is tested against `undefined` rather than for truthiness because `null` is a REAL
   // declaration — "start fresh, whatever the chain said" — and dropping it here would silently
@@ -317,7 +317,6 @@ export function splitExecEnvironment(fields: OperationFields): { op: OperationFi
   if (session !== undefined) env.session = session;
   if (fork !== undefined) env.fork = fork;
   if (tools !== undefined) env.tools = tools;
-  if (conversation !== undefined) env.conversation = conversation;
   if (permissions !== undefined) env.permissions = permissions;
   return { op, env };
 }

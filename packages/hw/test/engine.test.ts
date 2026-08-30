@@ -119,6 +119,16 @@ function makeEngine(files: Record<string, StateDef>, rootId: string, script: Scr
   return { engine, fake, persistence };
 }
 
+/** The conversation a call resolved into — where "did these share a session" is now visible. */
+function sessionOf(call: FakeCall): { id: string; seq: number } {
+  return call.ctx.session!.at;
+}
+
+/** Occurrences of a literal in a prompt — how a preamble test tells "present" from "present twice". */
+function count(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
+
 /** Default happy-path script for the planning fixture; override per-model as needed. */
 function planningScript(overrides: Partial<Record<string, (call: FakeCall) => ExecResult<ResolvedValue, WorkflowMetrics>>> = {}): Script {
   return (call) => {
@@ -563,143 +573,30 @@ describe("timeout, cancellation, and unhandled child failures", () => {
   });
 });
 
-describe("conversation modes (SPEC §4.7)", () => {
-  it("full_history threads the prior exchange into the next agent prompt", async () => {
+describe("what a prompt carries", () => {
+  /**
+   * The prompt is the RENDERED TEMPLATE, and nothing else.
+   *
+   * `environment.conversation` used to prepend a rendering of the transcript here, chosen by a `mode`.
+   * The layer below already puts the conversation on the wire — `applySession` resumes the provider's
+   * session, branches one server-side, or replays the turns as messages, by the adapter's own
+   * capabilities — so the preamble was a second copy of whichever of those had happened. And because
+   * it travelled inside `op.user`, the session layer recorded it as the turn that was asked and the
+   * next preamble rendered it back: one measured run went 8.4k → 403k → 1.13M → 2.55M characters over
+   * four passes before a provider refused it.
+   *
+   * This is the negative half of that, and it is the half hw can see. The positive half — that the
+   * conversation still reaches the model — is asserted where the choice is made, in promptop's
+   * `applySession` tests and the agent adapters'.
+   */
+  it("sends the rendered template alone, however much conversation is behind it", async () => {
     const { engine, fake } = makeEngine(specPlanningFiles(), PLAN_ID, planningScript());
     await engine.run({ inputs: { issue: "the issue" } });
-    // critic runs with mode full_history: sees the two planner exchanges.
-    const criticPrompt = promptOf(fake.calls[2]!);
-    expect(criticPrompt).toContain("<conversation-history>");
-    expect(criticPrompt).toContain("Extract goals");
-  });
-
-  it("fresh mode gets no history preamble", async () => {
-    const files = specPlanningFiles();
-    files["feature/plan/critique"]!.environment = { conversation: { mode: "fresh" } };
-    const { engine, fake } = makeEngine(files, PLAN_ID, planningScript());
-    await engine.run({ inputs: { issue: "the issue" } });
-    expect(promptOf(fake.calls[2]!)).not.toContain("<conversation-history>");
-  });
-
-  it("a distinct environment.session isolates the transcript (full_history sees an empty per-session history)", async () => {
-    const files = specPlanningFiles();
-    // The planners run in the default session; move the critic to its own session — its full_history now
-    // reads an EMPTY transcript, so the planners' exchanges do NOT leak across the session boundary.
-    files["feature/plan/critique"]!.environment!.session = "isolated";
-    const { engine, fake } = makeEngine(files, PLAN_ID, planningScript());
-    await engine.run({ inputs: { issue: "the issue" } });
-    expect(promptOf(fake.calls[2]!)).not.toContain("<conversation-history>");
+    // Three states sharing one named session: by the third, two exchanges are on record.
+    expect(fake.calls).toHaveLength(3);
+    for (const call of fake.calls) expect(promptOf(call)).not.toContain("<conversation-history>");
+    // …and the third prompt is its own template, with nothing of the first two in it.
     expect(promptOf(fake.calls[2]!)).not.toContain("Extract goals");
-  });
-
-  /**
-   * A conversation is addressed by REF, so reading a sibling's means the ref flows as data: the
-   * parent wires `.children.goals.operation.output.session` in, and the consumer calls `messages()`
-   * on it. There is no name to look one up by — a session is a position, and the namespace that
-   * pretended otherwise could only ever address a conversation with no messages in it.
-   */
-  it("messages() wires a prior transcript in as DATA (§7.5)", async () => {
-    const files = specPlanningFiles();
-    files[PLAN_ID]!.children!.critique!.inputs!.planners = ".children.goals.operation.output.session";
-    const critique = files["feature/plan/critique"]!;
-    critique.inputs = { ...critique.inputs, planners: { kind: "json" } };
-    critique.environment = { conversation: { mode: "fresh" } };
-    critique.operation = {
-      kind: "prompt",
-      model: "critic",
-      // An operation's bound input slots render under `{{.inputs.*}}` — the one namespace a template
-      // sees, the operation's resolved inputs (state inputs plus the op's own bound inputs).
-      prompt: "Summarize this transcript: {{.inputs.history}}",
-      input: { history: { kind: "json", binding: "messages(.inputs.planners)" } },
-    };
-    const { engine, fake } = makeEngine(files, PLAN_ID, planningScript());
-    await engine.run({ inputs: { issue: "the issue" } });
-
-    const criticPrompt = promptOf(fake.calls[2]!);
-    // No preamble was prepended (mode `fresh`), so the rendered template IS the whole prompt...
-    expect(criticPrompt.startsWith("Summarize this transcript:")).toBe(true);
-    // ...and the transcript arrived inside it as a wired VALUE, not as an injected preamble.
-    expect(criticPrompt).toContain("Extract goals");
-  });
-
-  it("messages() composes with the array builtins to select one turn", async () => {
-    const files = specPlanningFiles();
-    files[PLAN_ID]!.children!.critique!.inputs!.planners = ".children.goals.operation.output.session";
-    const critique = files["feature/plan/critique"]!;
-    critique.inputs = { ...critique.inputs, planners: { kind: "json" } };
-    critique.environment = { conversation: { mode: "fresh" } };
-    critique.operation = {
-      kind: "prompt",
-      model: "critic",
-      prompt: "First turn was: {{.inputs.first}}",
-      input: { first: { kind: "json", binding: "at(messages(.inputs.planners), 0).content" } },
-    };
-    const { engine, fake } = makeEngine(files, PLAN_ID, planningScript());
-    await engine.run({ inputs: { issue: "the issue" } });
-
-    const criticPrompt = promptOf(fake.calls[2]!);
-    expect(criticPrompt).toContain("Extract goals"); // message 0 = the first planner prompt
-    expect(criticPrompt).not.toContain("Write the plan"); // and only that one
-  });
-
-  // The append ran BEFORE the success check and a failure carries no value, so the assistant turn was
-  // written as the literal string "null" — and under the default full_history mode every later state
-  // in that session then replayed `assistant: null` in its preamble.
-  it("a FAILED prompt op contributes NOTHING to the shared transcript", async () => {
-    const store = new MapSessionStore();
-    const { engine } = makeEngine(
-      specPlanningFiles(),
-      PLAN_ID,
-      () => ({ error: { classification: "permanent", reason: "model exploded" }, metrics: { durationMs: 1, costUsd: 0, costSource: "unknown" } }),
-      { extra: { sessions: store } },
-    );
-    const result = await engine.run({ inputs: { issue: "the issue" } });
-    expect(result.outcome).toBe("error");
-    expect(store.messages("planning@0")).toEqual([]);
-  });
-
-  it("records the transcript into the shared session store (unified with the withSession path)", async () => {
-    const store = new MapSessionStore();
-    const { engine } = makeEngine(specPlanningFiles(), PLAN_ID, planningScript(), { extra: { sessions: store } });
-    await engine.run({ inputs: { issue: "the issue" } });
-    // The built-in transcript lives in the SAME store a runtime's withSession reads — one source of truth.
-    const messages = store.messages("planning@99") as unknown as Array<{ role: string; content: string }>;
-    expect(messages?.length).toBeGreaterThan(0);
-    expect(messages!.some((m) => m.role === "assistant")).toBe(true);
-    expect(messages!.some((m) => m.role === "user" && m.content.includes("Extract goals"))).toBe(true);
-  });
-
-  /**
-   * A host builds its store against whatever version of the contract it last compiled against, so a
-   * method the contract has GAINED since is simply absent at run time — which is what `refAt` was on
-   * the day it arrived. The TypeError landed AFTER the call had run and settled, so a finished answer
-   * and the conversation holding it were thrown away by the bookkeeping that came after them.
-   *
-   * The published ref degrades to the unpositioned conversation id, which is a ref in its own right:
-   * a consumer wiring it in reads the same transcript, resolved one step later.
-   */
-  it("publishes from a store that cannot spell a position, rather than failing a call that already succeeded", async () => {
-    const store = new MapSessionStore();
-    // That store as an older host's — everything intact except the one method, shadowed away.
-    const older = Object.assign(Object.create(store), { refAt: undefined }) as unknown as MapSessionStore;
-    const files = specPlanningFiles();
-    files[PLAN_ID]!.children!.critique!.inputs!.planners = ".children.goals.operation.output.session";
-    const critique = files["feature/plan/critique"]!;
-    critique.inputs = { ...critique.inputs, planners: { kind: "json" } };
-    critique.environment = { conversation: { mode: "fresh" } };
-    critique.operation = {
-      kind: "prompt",
-      model: "critic",
-      prompt: "Summarize this transcript: {{.inputs.history}}",
-      input: { history: { kind: "json", binding: "messages(.inputs.planners)" } },
-    };
-    const { engine, fake } = makeEngine(files, PLAN_ID, planningScript(), { extra: { sessions: older } });
-
-    const result = await engine.run({ inputs: { issue: "the issue" } });
-
-    expect(result.outcome).toBe("success");
-    // …and the ref it published still named the conversation, so the consumer read the transcript.
-    expect(promptOf(fake.calls[2]!)).toContain("Extract goals");
   });
 });
 
@@ -1518,7 +1415,8 @@ describe("the conversation and the resource bundle are different keys", () => {
     });
     await engine.run({ inputs: {} });
     expect((fake.calls[1] as FakeCall).ctx.workspace?.root).toBe("/ws/shared");
-    expect(promptOf(fake.calls[1]!)).not.toContain("first call");
+    // ISOLATED: a different conversation entirely, which is what an undeclared session gets.
+    expect(sessionOf(fake.calls[1]!).id).not.toBe(sessionOf(fake.calls[0]!).id);
   });
 
   it("declaring a session names a NEW bundle, which is how a subtree isolates its workspace", async () => {
@@ -1539,7 +1437,8 @@ describe("the conversation and the resource bundle are different keys", () => {
     const { engine, fake } = makeEngine(undeclaredPair(), "root", () => ok({ r: "done" }));
     await engine.run({ inputs: {} });
     expect(promptOf(fake.calls[1]!)).not.toContain("<conversation-history>");
-    expect(promptOf(fake.calls[1]!)).not.toContain("first call");
+    // ISOLATED: a different conversation entirely, which is what an undeclared session gets.
+    expect(sessionOf(fake.calls[1]!).id).not.toBe(sessionOf(fake.calls[0]!).id);
   });
 
   it("...and naming a session is how an author asks for that threading back", async () => {
@@ -1547,7 +1446,10 @@ describe("the conversation and the resource bundle are different keys", () => {
     files["root"]!.environment = { session: "planning" };
     const { engine, fake } = makeEngine(files, "root", () => ok({ r: "done" }));
     await engine.run({ inputs: {} });
-    expect(promptOf(fake.calls[1]!)).toContain("first call");
+    // The THREADING, read off the resolved session rather than off the prompt: a shared
+    // conversation no longer shows up as the earlier prompt pasted into the later one.
+    expect(sessionOf(fake.calls[1]!).id).toBe(sessionOf(fake.calls[0]!).id);
+    expect(sessionOf(fake.calls[1]!).seq).toBe(sessionOf(fake.calls[0]!).seq + 1);
   });
 
   /**
@@ -1576,7 +1478,7 @@ describe("the conversation and the resource bundle are different keys", () => {
       reviewer: {
         inputs: { thread: { schema: {} } },
         outputs: { r: { schema: { type: "string" } } },
-        environment: { conversation: { mode: "full_history" }, session: consumerSession as never, ...extra.environment },
+        environment: { session: consumerSession as never, ...extra.environment },
         operation: { kind: "prompt", prompt: "second call", model: "reviewer" },
       },
     };
@@ -1587,7 +1489,10 @@ describe("the conversation and the resource bundle are different keys", () => {
     // the planner's stream purely because it was handed the position the planner ended at.
     const { engine, fake } = makeEngine(explicitPair({ expr: ".inputs.thread" }), "root", () => ok({ r: "done" }));
     await engine.run({ inputs: {} });
-    expect(promptOf(fake.calls[1]!)).toContain("first call");
+    // The THREADING, read off the resolved session rather than off the prompt: a shared
+    // conversation no longer shows up as the earlier prompt pasted into the later one.
+    expect(sessionOf(fake.calls[1]!).id).toBe(sessionOf(fake.calls[0]!).id);
+    expect(sessionOf(fake.calls[1]!).seq).toBe(sessionOf(fake.calls[0]!).seq + 1);
   });
 
   it("...and the same ref with `fork` branches instead of continuing", async () => {
@@ -1596,7 +1501,10 @@ describe("the conversation and the resource bundle are different keys", () => {
     await engine.run({ inputs: {} });
     // A fork still SEES the prefix — that is what makes it a branch of this conversation rather
     // than a fresh one. What it must not do is write back into the trunk.
-    expect(promptOf(fake.calls[1]!)).toContain("first call");
+    // A BRANCH: its own conversation id, carrying the trunk's prefix by lineage rather than by
+    // being pasted into the prompt. What it must not do is write back into the trunk.
+    expect(sessionOf(fake.calls[1]!).id).not.toBe(sessionOf(fake.calls[0]!).id);
+    expect(fake.calls[1]!.ctx.session!.mode).toBe("fork");
   });
 
   it("an expression that resolves to nothing FAILS, rather than quietly running in isolation", async () => {
@@ -1623,7 +1531,6 @@ describe("the conversation and the resource bundle are different keys", () => {
       },
       leaf2: {
         outputs: { r: { schema: { type: "string" } } },
-        environment: { conversation: { mode: "full_history" } },
         operation: { kind: "prompt", prompt: "second call", model: "reviewer" },
       },
     };

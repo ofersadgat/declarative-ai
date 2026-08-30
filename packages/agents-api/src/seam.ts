@@ -176,6 +176,15 @@ export interface AgentQueryOptions {
    */
   forkSession?: boolean;
   /**
+   * With `forkSession`: cut the copy at this message rather than at wherever the session now stands.
+   *
+   * `--resume-session-at <message id>` — "only messages up to and including the assistant message
+   * with <message.id>". What makes a branch behind the remote's tip one server-side copy instead of a
+   * full replay. An adapter without the flag must not accept this silently: copying the whole session
+   * for a branch that ends earlier is the bug the option exists to avoid.
+   */
+  resumeSessionAt?: string;
+  /**
    * The conversation to REPLAY into this call — the fallback for an adapter that appends natively but
    * cannot branch (SESSIONS.md §6, "Strategies").
    *
