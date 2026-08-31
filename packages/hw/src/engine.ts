@@ -1196,8 +1196,24 @@ export class WorkflowEngine {
 
     const childDef = this.config.bundle.states[decl.state];
     const childAbort = new AbortController();
+    /**
+     * Cancelling the parent cancels this child — and the wiring is UNHOOKED when the child ends.
+     *
+     * `{ once: true }` is not a cleanup. It unregisters when the listener FIRES, and on any run that
+     * is not cancelled it never fires, so the listener and the `childAbort` it closes over are held
+     * by the parent's signal for as long as the parent lives. One per child ENTRY, which for a
+     * sequence is one per member and for a loop is one per iteration: a state looping thirty times
+     * left thirty dead listeners on a signal that was never going to fire, and Node said so —
+     * `MaxListenersExceededWarning: 11 abort listeners added to [AbortSignal]` — at which point the
+     * warning is the only thing anyone sees, and it names a symptom rather than this line.
+     *
+     * The removal is hung off the child's own promise below rather than written into `run()`,
+     * because `run()` has two endings — its normal path and the `catch` that turns a crash into a
+     * failed child — and a cleanup that only covers one of them is the same bug with better odds.
+     */
+    const onParentAbort = (): void => childAbort.abort();
     if (instance.abort.signal.aborted) childAbort.abort();
-    else instance.abort.signal.addEventListener("abort", () => childAbort.abort(), { once: true });
+    else instance.abort.signal.addEventListener("abort", onParentAbort, { once: true });
 
     const record: ChildRecord = {
       instanceId: -1,
@@ -1289,6 +1305,13 @@ export class WorkflowEngine {
         instance.unhandledFailures.add(key);
       }
       instance.notify.signal();
+    });
+    // The child is over, however it ended: the parent's signal has nothing left to tell it. Safe
+    // because `childAbort` is only reached two ways — through this listener, and directly through
+    // `record.abort` for a supersede — and the second does not go through the parent at all. See
+    // {@link onParentAbort} for what holding it instead used to cost.
+    record.promise = record.promise.finally(() => {
+      instance.abort.signal.removeEventListener("abort", onParentAbort);
     });
     return "started";
   }
