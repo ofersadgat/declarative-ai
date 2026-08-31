@@ -140,9 +140,9 @@ describe("an optional input that nobody filled", () => {
 
 describe("a block names the MOUNT, not just the state", () => {
   it("carries the parent and the child key, so a reader is told WHERE it happened", async () => {
-    // `instanceId` is -1: nothing became an instance, which is the event. The mount is therefore the
-    // only address the block has — and one state definition is mounted under several keys in several
-    // parents, so the definition's id alone does not say which of them could not be entered.
+    // There is no `instanceId`: nothing became an instance, which is the event. The mount is
+    // therefore the only address the block has — and one state definition is mounted under several
+    // keys in several parents, so the definition's id alone does not say which could not be entered.
     const events: Array<Record<string, unknown>> = [];
     const registry = newRegistry();
     registry.functions.set(
@@ -155,8 +155,10 @@ describe("a block names the MOUNT, not just the state", () => {
       onEvent: (event: Record<string, unknown>) => events.push(event),
     } as never);
     await engine.run({ inputs: {} });
+    const root = events.find((e) => e["type"] === "instance.entered" && e["parentInstanceId"] === undefined);
     const blocked = events.find((e) => e["type"] === "instance.blocked");
-    expect(blocked).toMatchObject({ stateId: "root/b", childKey: "b", parentInstanceId: 1 });
+    expect(blocked).toMatchObject({ stateId: "root/b", childKey: "b", parentInstanceId: root!["instanceId"] });
+    expect(blocked).not.toHaveProperty("instanceId");
   });
 });
 

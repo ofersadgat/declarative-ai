@@ -90,6 +90,9 @@ export interface WorkflowExecutorOptions {
    */
   callCache?: CallCache;
   operations?: Executor<ExecServices, WorkflowMetrics>;
+  /** Mints instance ids — see {@link EngineConfig.newInstanceId}. Forwarded because the engine is
+   *  constructed inside this executor; a host or test that needs predictable ids supplies its own. */
+  newInstanceId?: () => string;
 }
 
 const CAPABILITIES: Capabilities = {
@@ -212,6 +215,7 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
       ...(this.options.callCache !== undefined ? { callCache: this.options.callCache } : {}),
       ...(this.options.operations !== undefined ? { operations: this.options.operations } : {}),
       ...(this.options.sessions !== undefined ? { sessions: this.options.sessions } : {}),
+      ...(this.options.newInstanceId !== undefined ? { newInstanceId: this.options.newInstanceId } : {}),
       services: ctx,
       clock: ctx.clock,
       onEvent: (event) => {

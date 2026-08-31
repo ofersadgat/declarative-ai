@@ -25,7 +25,7 @@ import { validateBundle } from "../src/validate.js";
 import type { OperationFields, StateDef } from "../src/format.js";
 
 const scope = (overrides: Partial<SessionScope> = {}): SessionScope => ({
-  instanceId: 7,
+  instanceId: "7",
   inheritedResourceKey: "enclosing",
   positionOf: () => undefined,
   ...overrides,
@@ -90,20 +90,20 @@ describe("resolution (§4)", () => {
 
   it("null starts a fresh stream and keeps the enclosing bundle", () => {
     const binding = resolveSession(null, false, scope());
-    expect(binding.id).toBe(freshSessionKey(7));
+    expect(binding.id).toBe(freshSessionKey("7"));
     expect(binding.resourceKey).toBe("enclosing");
   });
 
   it("absent agrees with null — it does NOT fall back to a shared default", () => {
     // The behaviour change: an implicit process-wide transcript is what drove unbounded context
     // growth, so an undeclared operation gets its own stream.
-    expect(resolveSession(undefined, false, scope()).id).toBe(freshSessionKey(7));
+    expect(resolveSession(undefined, false, scope()).id).toBe(freshSessionKey("7"));
     expect(resolveSession(undefined, false, scope()).id).not.toBe(RUN_RESOURCE_KEY);
   });
 
   it("gives two instances two different fresh streams", () => {
-    expect(resolveSession(null, false, scope({ instanceId: 1 })).id).not.toBe(
-      resolveSession(null, false, scope({ instanceId: 2 })).id,
+    expect(resolveSession(null, false, scope({ instanceId: "1" })).id).not.toBe(
+      resolveSession(null, false, scope({ instanceId: "2" })).id,
     );
   });
 

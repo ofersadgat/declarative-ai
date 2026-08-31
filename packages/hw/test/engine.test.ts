@@ -1121,7 +1121,7 @@ describe("a delegated agent runs in a CONVERSATION (SESSIONS.md §6)", () => {
     await engine.run({ inputs: {} });
     // An undeclared conversation is private to the instance, never an implicit shared transcript —
     // that is the growth the append-only model exists to stop.
-    expect(seen[0]!.session?.at.id).toMatch(/^#i\d+$/);
+    expect(seen[0]!.session?.at.id).toMatch(/^#i[0-9a-f-]+$/);
   });
 
   // The gate is the entry's own claim to HAVE a transcript. Minting conversations for pure helpers

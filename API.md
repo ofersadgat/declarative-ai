@@ -2501,6 +2501,11 @@ interface EngineConfig {
   registry: CapabilityRegistry;    // functions / skills / tools
   prompt?: Executor;               // what a PromptOp dispatches to; absent => a prompt state fails
   validator?: OutputValidator; persistence?: Persistence; services?: ExecServices; clock?: Clock;
+  // Mints one DURABLE instance id (a string) per instance entered — UUIDv7 over the engine clock by
+  // default. Injectable for the same reason `clock` is: a test asserting on event payloads needs
+  // predictable ids. Event payloads carry these ids; `instance.blocked` carries none, because
+  // nothing became an instance.
+  newInstanceId?: () => string;
   onEvent?: (event: EngineEvent) => void;
   // Tool-call permissions (DESIGN.md §5.1). `approve` collects a human decision on `ask`;
   // absent => a state's tools run UNGUARDED. `baseline` is the workflow-wide default; `process` is the

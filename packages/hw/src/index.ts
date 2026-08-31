@@ -16,6 +16,9 @@ export * from "./merge.js";
 // the conversation and the resource bundle the one string used to conflate. Exported because a host
 // wiring its own session store resolves the same declaration.
 export * from "./session.js";
+// Durable id minting — the UUIDv7 every instance is named by. Exported because a host that mints
+// ids in the same space (derived instance ids, later assigned session/task ids) must share the shape.
+export * from "./ids.js";
 // The `operation.*` expression namespace (SPEC.md §6.1) — a state's own call as an addressable
 // node, which is where engine metadata about it finally has somewhere to live.
 export * from "./operationNode.js";

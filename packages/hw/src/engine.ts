@@ -103,6 +103,7 @@ import {
 import type { OperationNode } from "./operationNode.js";
 import { isFannedOut } from "./fanout.js";
 import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, type Persistence } from "./ports.js";
+import { uuidv7 } from "./ids.js";
 
 /**
  * A round that cannot finish yet: a transition guard is waiting on a deferred call.
@@ -208,6 +209,15 @@ export interface EngineConfig {
    */
   sessions?: SessionStore;
   clock?: Clock;
+  /**
+   * Mints one instance id per instance entered — UUIDv7 over the engine clock by default.
+   *
+   * An instance id is DURABLE: minted once, never reused, and meaningless to parse — the id a
+   * journal event carries is the id a later load points at, which a per-walk counter could never
+   * be. Injectable for the same reason `clock` is: a test that asserts on event payloads needs
+   * ids it can predict.
+   */
+  newInstanceId?: () => string;
   onEvent?: (event: EngineEvent) => void;
   /** Tool-call permissions (DESIGN §5.1, "Permissions: two orthogonal axes"). `approve` collects a human decision on `ask`
    *  (the interactive gate); absent ⇒ a state's tools run UNGUARDED. `baseline` is the workflow-wide default
@@ -253,7 +263,7 @@ interface TerminationRecord {
 }
 
 interface ChildRecord {
-  instanceId: number;
+  instanceId: string;
   status: "running" | "done";
   outcome?: TerminationOutcome;
   outputs?: Record<string, ResolvedValue>;
@@ -274,7 +284,7 @@ interface ChildRecord {
 
 /** One state instance (SPEC §3.4) — results never leak across instances. */
 interface Instance {
-  id: number;
+  id: string;
   stateId: string;
   def: LoadedState;
   childKey?: string;
@@ -604,7 +614,7 @@ function resourceKeyFor(def: LoadedState, parent: Instance | undefined): string 
 export class WorkflowEngine {
   private readonly validator: SyncOutputValidator;
   private readonly clock: Clock;
-  private nextInstanceId = 1;
+  private readonly newInstanceId: () => string;
   /** A run-level configuration failure (e.g. a required `function` is not registered):
    *  aborts the whole run rather than looping as a state-level outcome a transition
    *  might keep re-entering. */
@@ -637,6 +647,9 @@ export class WorkflowEngine {
   constructor(private readonly config: EngineConfig) {
     this.validator = config.validator ?? new SchemaValidator();
     this.clock = config.clock ?? { now: () => Date.now() };
+    // Timestamped off `this.clock` rather than `Date.now()`, so an id's time half and the journal's
+    // timestamps cannot disagree about when one entry happened under a virtual clock.
+    this.newInstanceId = config.newInstanceId ?? (() => uuidv7(this.clock.now()));
     this.permissions = new PermissionLedger({
       // Falling back to the services seam for the same reason `resolveTools` does for the approver:
       // `createWorkflowExecutor` forwards the caller's compiled policy as `services.policy` and never
@@ -701,9 +714,13 @@ export class WorkflowEngine {
     abort: AbortController,
     childKey: string | undefined,
     parent: Instance | undefined,
+    // Minted by the CALLER rather than here, because the caller needs it first: `enterChild` stamps
+    // it on the child record before this promise is even constructed, which is what lets a child
+    // that CRASHES be terminated under the id it was entered under instead of a sentinel.
+    id: string = this.newInstanceId(),
   ): Promise<TerminationRecord> {
     const instance: Instance = {
-      id: this.nextInstanceId++,
+      id,
       stateId,
       def,
       childKey,
@@ -1216,7 +1233,10 @@ export class WorkflowEngine {
     else instance.abort.signal.addEventListener("abort", onParentAbort, { once: true });
 
     const record: ChildRecord = {
-      instanceId: -1,
+      // Minted at ENTRY, before the child's promise exists: the crash handler below emits
+      // `instance.terminated` from this record, and the id it names must be the id the child was
+      // entered under — a child that crashes before assigning anything still has a name.
+      instanceId: this.newInstanceId(),
       status: "running",
       abort: childAbort,
       promise: Promise.resolve(),
@@ -1231,7 +1251,6 @@ export class WorkflowEngine {
         // parent as an error termination it can branch on.
         this.emit({
           type: "instance.blocked",
-          instanceId: -1,
           stateId: decl.state,
           childKey: key,
           parentInstanceId: instance.id,
@@ -1239,7 +1258,7 @@ export class WorkflowEngine {
         });
         term = { outcome: "error", failure: { classification: "permanent", reason: resolved.error } };
       } else {
-        term = await this.runInstance(decl.state, childDef, resolved.values!, childAbort, key, instance);
+        term = await this.runInstance(decl.state, childDef, resolved.values!, childAbort, key, instance, record.instanceId);
         // Fan-out (§7.3, rule 2) is decided at BIND time: if this producer's blob output feeds two
         // consumers, drain it ONCE here, at the producer's completion, so both siblings read the bytes
         // rather than racing to read one stream. A single-consumer output is left a live stream to pipe.

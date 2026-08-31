@@ -67,17 +67,17 @@ export function isArtifactRef(v: unknown): v is ArtifactRef {
 export type OperationKind = "prompt" | "function";
 
 export type EngineEvent =
-  | { type: "instance.entered"; instanceId: number; stateId: string; childKey?: string; parentInstanceId?: number; inputs: Record<string, ResolvedValue> }
+  | { type: "instance.entered"; instanceId: string; stateId: string; childKey?: string; parentInstanceId?: string; inputs: Record<string, ResolvedValue> }
   /**
    * A child that could not be ENTERED, because its input wiring did not resolve.
    *
-   * `instanceId` is `-1` — nothing became an instance, which is the whole event. So the MOUNT is the
-   * only address it has: `stateId` names the state definition, and one definition is mounted under
+   * There is no `instanceId` — nothing became an instance, which is the whole event. So the MOUNT is
+   * the only address it has: `stateId` names the state definition, and one definition is mounted under
    * several keys in several parents (`explore` sits under all six phases of the feature workflow).
    * Without the parent and the key, a reader is told a block happened somewhere and not where.
    */
-  | { type: "instance.blocked"; instanceId: number; stateId: string; childKey?: string; parentInstanceId?: number; reason: string }
-  | { type: "operation.started"; instanceId: number; stateId: string; op: OperationKind }
+  | { type: "instance.blocked"; stateId: string; childKey?: string; parentInstanceId?: string; reason: string }
+  | { type: "operation.started"; instanceId: string; stateId: string; op: OperationKind }
   /**
    * `operationId` is the content hash of the op AS DISPATCHED (`hashOperation` over the value the
    * executor stack received) — which is exactly the id `withRecord` gives an UNPLACED record, so a
@@ -87,7 +87,7 @@ export type EngineEvent =
    * `operation.started` deliberately (it fires before input resolution, so the dispatched op — the
    * thing the hash is OF — does not exist yet), and on a `failed` that never reached dispatch.
    */
-  | { type: "operation.completed"; instanceId: number; stateId: string; op: OperationKind; operationId?: string; metrics?: WorkflowMetrics }
+  | { type: "operation.completed"; instanceId: string; stateId: string; op: OperationKind; operationId?: string; metrics?: WorkflowMetrics }
   /**
    * `metrics` is present exactly when the operation actually RAN — a post-dispatch failure, where
    * the call was made and the money was spent. A pre-dispatch failure (unresolvable inputs, no
@@ -101,7 +101,7 @@ export type EngineEvent =
    */
   | {
       type: "operation.failed";
-      instanceId: number;
+      instanceId: string;
       stateId: string;
       op: OperationKind;
       operationId?: string;
@@ -117,10 +117,10 @@ export type EngineEvent =
    * pair also gives a reader the DURATION of the wait, which is the number anybody asking "why did
    * this take a day" wants.
    */
-  | { type: "call.waiting"; instanceId: number; stateId: string; call: string; operationId: string }
+  | { type: "call.waiting"; instanceId: string; stateId: string; call: string; operationId: string }
   | {
       type: "call.settled";
-      instanceId: number;
+      instanceId: string;
       stateId: string;
       call: string;
       operationId: string;
@@ -128,9 +128,9 @@ export type EngineEvent =
       outcome: "value" | "error";
     }
   /** `index` counts every transition; `iteration` counts only the backward ones — the passes. */
-  | { type: "transition.taken"; instanceId: number; stateId: string; to: string; index: number; iteration: number }
-  | { type: "child.superseded"; instanceId: number; stateId: string; childKey: string }
-  | { type: "instance.terminated"; instanceId: number; stateId: string; outcome: TerminationOutcome; failure?: Failure };
+  | { type: "transition.taken"; instanceId: string; stateId: string; to: string; index: number; iteration: number }
+  | { type: "child.superseded"; instanceId: string; stateId: string; childKey: string }
+  | { type: "instance.terminated"; instanceId: string; stateId: string; outcome: TerminationOutcome; failure?: Failure };
 
 /**
  * Durable run recording (SPEC §10.2/§10.3). The engine calls `record` at every step;
@@ -153,11 +153,11 @@ export interface InstanceAddressStep {
 /**
  * Where an instance sits in the tree, root-first. The empty address IS the root.
  *
- * Deliberately neither the instance id nor the operation's content hash. Ids are minted
- * `nextInstanceId++` as the engine walks, so a second walk mints its own and the two agree only by
- * luck; the content hash collides whenever a loop dispatches the identical operation twice, which is
- * exactly why an operation record carries an attempt number. A position in the tree is stable across
- * runs of one pinned definition, which is the only comparison a replay ever makes.
+ * Deliberately neither the instance id nor the operation's content hash. Ids are minted fresh
+ * (UUIDv7) as the engine walks, so a second walk mints its own and the two never agree; the content
+ * hash collides whenever a loop dispatches the identical operation twice, which is exactly why an
+ * operation record carries an attempt number. A position in the tree is stable across runs of one
+ * pinned definition, which is the only comparison a replay ever makes.
  */
 export type InstanceAddress = readonly InstanceAddressStep[];
 

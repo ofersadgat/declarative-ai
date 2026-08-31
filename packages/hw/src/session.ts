@@ -226,7 +226,7 @@ export interface SessionBinding {
 /** What the caller knows about the instance a binding is being resolved for. */
 export interface SessionScope {
   /** Distinguishes one instance's fresh session from another's. */
-  instanceId: number;
+  instanceId: string;
   /** The enclosing instance's resource key — inherited when this operation declares none. */
   inheritedResourceKey: string;
   /**
@@ -273,7 +273,7 @@ export function resolveSession(declared: SessionDecl | undefined, fork: boolean,
 }
 
 /** The key a fresh, undeclared conversation gets. Unique per instance, and unauthorable. */
-export function freshSessionKey(instanceId: number): string {
+export function freshSessionKey(instanceId: string): string {
   return `${RESERVED_SESSION_PREFIX}i${instanceId}`;
 }
 
