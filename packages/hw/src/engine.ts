@@ -64,7 +64,8 @@ import {
   resolveCalls,
   scopedOperationId,
 } from "@declarative-ai/exec";
-import type { InstanceAddress, ReplaySource, WorkflowMetrics } from "./ports.js";
+import type { InstanceAddress, WorkflowMetrics } from "./ports.js";
+import type { LoadedInstance } from "./load.js";
 import {
   createToolGate,
   PermissionLedger,
@@ -145,19 +146,14 @@ function tryScopedId(hash: string | undefined, scope: OperationScope): string | 
   return hash === undefined ? undefined : scopedOperationId(hash, scope);
 }
 
-export type CallResult = { value: ResolvedValue } | { error: string; failure?: Failure };
-
-/**
- * A content-addressed store of call results, keyed by `hashOperation` of the RESOLVED operation.
- *
- * Sync on purpose: it is read during binding resolution, which cannot suspend (`renderTemplate`
- * resolves inside a `String.replace` callback). A host wanting a remote cache warms it between runs
- * rather than awaiting inside one.
- */
-export interface CallCache {
-  get(key: string): CallResult | undefined;
-  set(key: string, value: CallResult): void;
+/** A recorded `sessionRef` (`<session>@<seq>`) back as the published node a loaded op carries. */
+function publishedOfRef(ref: string | undefined): PublishedSession | undefined {
+  if (ref === undefined) return undefined;
+  const at = ref.lastIndexOf("@");
+  return publishedSession(ref, at > 0 ? ref.slice(0, at) : ref);
 }
+
+export type CallResult = { value: ResolvedValue } | { error: string; failure?: Failure };
 
 export interface EngineConfig {
   bundle: WorkflowBundle;
@@ -181,28 +177,23 @@ export interface EngineConfig {
    */
   operations?: Executor<ExecServices, WorkflowMetrics>;
   /**
-   * Where the results of CALLS are remembered (EXPRESSIONS.md §3).
+   * What was already paid for, by SCOPED id — the durable half of call answering (Identity and
+   * Resume §04).
    *
-   * The question a memo has to answer is "would someone else making the identical call reuse this
-   * answer?" — so the key is content-addressed: `hashOperation` over the RESOLVED op, which embeds
-   * its argument values, is exactly "this callee with these arguments". An in-run `Map` is the
-   * default and answers it only within one run; a host that wants an identical call to be reused
-   * across runs, tasks or processes supplies a durable one.
+   * A repeat is answered by identity: a guard re-evaluated on round three computes the same scoped
+   * id as its first round (same instance, same site, same content), and this seam is where a LOADED
+   * run finds the answer its stopped predecessor recorded. The engine keeps its own in-run map
+   * beside it, so within one run a repeat costs nothing whether or not a host supplies this.
+   *
+   * Sync on purpose: it is read during binding resolution, which cannot suspend (`renderTemplate`
+   * resolves inside a `String.replace` callback). Only COMPLETED calls should be answered — a
+   * failed record is a retry, not an answer.
    */
-  callCache?: CallCache;
+  answers?: (scopedId: string) => CallResult | undefined;
   /** SYNC by requirement: slot validation runs mid-walk (`validateSlotValue`) and cannot suspend;
    *  hw schemas are inline documents, so a sync validator is the inline family's truth. */
   validator?: SyncOutputValidator;
   persistence?: Persistence;
-  /**
-   * What a stopped run already answered — supplying it makes this run a RESUME (see
-   * {@link ReplaySource}).
-   *
-   * There is no second entry point and no separate "start here": the run begins at the root as it
-   * always does, and every operation this source can answer is taken rather than dispatched. The
-   * frontier is wherever the answers stop.
-   */
-  replay?: ReplaySource;
   /** Forwarded to runtimes/functions (rate limiter, meter, ...) as their `services`. `validator`/session
    *  store are supplied by the engine. */
   services?: ExecServices;
@@ -709,6 +700,49 @@ export class WorkflowEngine {
     };
   }
 
+  /**
+   * Continue a STOPPED run from its description — loading, not replaying (Identity and Resume §04).
+   *
+   * The description is the journal joined to the record store: the log carries the tree, the inputs
+   * and the transitions; the records carry the outputs. The machine is CONSTRUCTED from it — every
+   * instance keeps its recorded id, every terminated child becomes the record its parent reads, and
+   * the evaluation loop is re-entered exactly where the instance's own fields say it stands. Only
+   * the active leaves dispatch again: an instance whose operation never honestly settled re-issues
+   * it, and because the id and the site are the recorded ones, the scoped record id recomputes
+   * identically and the store REOPENS the cut record rather than inserting a second ask.
+   *
+   * What this is not: a re-walk. Nothing already answered is journaled again (only the live spine
+   * re-states its `instance.entered`, so the continuing run's journal can stand on its own), no
+   * guard already paid for pays again (`EngineConfig.answers` serves repeats by scoped identity),
+   * and the tree keeps the very ids the conversation records point at.
+   */
+  async loadRun(loaded: LoadedInstance, options: WorkflowRunOptions = { inputs: {} }): Promise<WorkflowRunResult> {
+    const start = this.clock.now();
+    const abort = new AbortController();
+    if (options.abortSignal) {
+      if (options.abortSignal.aborted) abort.abort();
+      else options.abortSignal.addEventListener("abort", () => abort.abort(), { once: true });
+    }
+    this.rootAbort = abort;
+    const rootDef = this.config.bundle.states[loaded.stateId];
+    let record: TerminationRecord;
+    if (!rootDef) {
+      record = { outcome: "error", failure: { classification: "permanent", reason: `loaded root state '${loaded.stateId}' missing from bundle` } };
+    } else {
+      record = await this.resumeInstance(loaded, rootDef, abort, undefined);
+    }
+    if (this.fatal) {
+      record = { outcome: "error", failure: this.fatal };
+    }
+    return {
+      outcome: record.outcome,
+      outputs: record.outputs,
+      failure: record.failure,
+      artifacts: this.artifacts,
+      metrics: { childLlmCalls: this.childLlmCalls, childCost: this.childCost, durationMs: this.clock.now() - start },
+    };
+  }
+
   // --- events ---------------------------------------------------------------
 
   private emit(event: EngineEvent): void {
@@ -825,12 +859,248 @@ export class WorkflowEngine {
     }
   }
 
-  private async evaluationLoop(instance: Instance): Promise<TerminationRecord> {
+  // --- loading (Identity and Resume §04) ------------------------------------
+
+  /**
+   * One loaded instance as a live `Instance` — the construction `loadRun` is made of.
+   *
+   * Everything the evaluation loop reads is on the instance, which is what makes loading possible
+   * at all: reconstruct the fields and re-enter the loop. The recorded id, sites and entry counts
+   * are kept verbatim, because they are what the record ids and addresses were computed from.
+   */
+  private buildLoadedInstance(loaded: LoadedInstance, def: LoadedState, abort: AbortController, parent: Instance | undefined): Instance {
+    const sites = new Map<string, number>((loaded.sites ?? []).map(([key, seq]) => [key, seq]));
+    let nextSite = Math.max(1, loaded.nextSite ?? 1);
+    for (const seq of sites.values()) nextSite = Math.max(nextSite, seq + 1);
+    const entries = new Map<string, number>();
+    for (const child of loaded.children ?? []) {
+      if (child.childKey === undefined) continue;
+      entries.set(child.childKey, Math.max(entries.get(child.childKey) ?? 0, (child.occurrence ?? 0) + 1));
+    }
+    // `run.cursor` reports the child most recently ENTERED, and the description's children are in
+    // entry order — so the last one IS it. Without this a loaded loop reads `run.cursor` as nothing
+    // and a guard written against it never fires again.
+    const entered = (loaded.children ?? []).at(-1)?.childKey;
+    const instance: Instance = {
+      id: loaded.id,
+      stateId: loaded.stateId,
+      def,
+      childKey: loaded.childKey,
+      parent,
+      inputs: loaded.inputs,
+      outputs: {},
+      resourceKey: resourceKeyFor(def, parent),
+      address:
+        parent === undefined || loaded.childKey === undefined
+          ? []
+          : [...parent.address, { childKey: loaded.childKey, occurrence: loaded.occurrence ?? 0 }],
+      entries,
+      sites,
+      nextSite,
+      index: loaded.index ?? 0,
+      iteration: loaded.iteration ?? 0,
+      opRun: false,
+      children: undefined as unknown as Map<string, ChildRecord>,
+      passes: [],
+      cursor: loaded.cursor ?? 0,
+      justFinished: [...(loaded.unanswered ?? [])],
+      unhandledFailures: new Set(),
+      abort,
+      timedOut: false,
+      notify: new Notifier(),
+      deferredKeys: new Set(),
+    };
+    instance.children = new Map();
+    instance.passes.push(instance.children);
+    if (entered !== undefined) instance.entered = entered;
+    // The COMPLETED operation, fed through exactly the path a live settle takes — the node, then
+    // `acceptOpOutputs` — so a loaded state is indistinguishable downstream from one that ran. Spend
+    // is deliberately NOT rolled up: the recorded metrics belong to the run that paid them.
+    if (loaded.operation !== undefined && def.operation) {
+      instance.opRun = true;
+      instance.operation = operationNodeOf(
+        "success",
+        loaded.operation.metrics,
+        loaded.operation.model ?? modelOfOp(def.operation),
+        publishedOfRef(loaded.operation.sessionRef),
+        loaded.operation.value,
+      );
+      const failure = this.acceptOpOutputs(instance, def.operation.kind === "prompt" ? "prompt" : "function", loaded.operation.value, def.operation.output.kind);
+      // A recorded value failing this state's own contract should be unreachable — the definition
+      // is pinned — which is exactly why it must be loud rather than smoothed into a re-dispatch.
+      // Aborting too, as the other fatal site does: a load standing on a corrupt record must not
+      // keep dispatching the states downstream of it.
+      if (failure !== undefined) {
+        this.fatal ??= { classification: "permanent", reason: `loaded operation of '${loaded.stateId}' no longer satisfies its outputs: ${failure.reason}` };
+        this.rootAbort?.abort();
+      }
+    }
+    return instance;
+  }
+
+  /**
+   * A terminated instance of the stopped run, as the child record its parent reads.
+   *
+   * Outputs are RECOMPUTED, not loaded: a state's declared outputs are a pure function of its
+   * recorded operation value, its children and the pinned definition, and `finish` resolves them
+   * the same way it did the first time. Nothing is journaled — this is history, not work.
+   */
+  private loadTerminated(loaded: LoadedInstance, def: LoadedState, abort: AbortController, parent: Instance | undefined): ChildRecord {
+    const instance = this.buildLoadedInstance(loaded, def, abort, parent);
+    for (const child of loaded.children ?? []) {
+      if (child.childKey === undefined) continue;
+      const childDef = this.config.bundle.states[child.stateId];
+      if (!childDef) continue;
+      // A live child under a terminated parent cannot exist — termination cancels the subtree — so
+      // whatever the description says, it is read as history here.
+      instance.children.set(child.childKey, this.loadTerminated(child, childDef, abort, instance));
+    }
+    const term: TerminationRecord =
+      loaded.outcome === "success"
+        ? this.finish(instance, "success")
+        : { outcome: loaded.outcome ?? "error", ...(loaded.failure !== undefined ? { failure: loaded.failure } : {}) };
+    return {
+      instanceId: loaded.id,
+      status: "done",
+      outcome: term.outcome,
+      ...(term.outputs !== undefined ? { outputs: term.outputs } : {}),
+      ...(term.failure ?? loaded.failure ? { failure: term.failure ?? loaded.failure } : {}),
+      ...(instance.operation !== undefined ? { operation: instance.operation } : {}),
+      abort: new AbortController(),
+      promise: Promise.resolve(),
+    };
+  }
+
+  /**
+   * Continue one LIVE instance — `runInstance`'s loaded twin.
+   *
+   * Its `instance.entered` is re-stated in the continuing journal (with the SAME id), so this run's
+   * own log can stand alone; nothing terminated is journaled again. The loop is entered with an
+   * evaluation owed exactly when the stopped run owed one: the operation had completed (or the
+   * state has none) and no sync child holds the cursor — "guards run on load", which is what
+   * re-parks a state on the deferred question it was waiting for.
+   */
+  private async resumeInstance(loaded: LoadedInstance, def: LoadedState, abort: AbortController, parent: Instance | undefined): Promise<TerminationRecord> {
+    const instance = this.buildLoadedInstance(loaded, def, abort, parent);
+    this.emit({
+      type: "instance.entered",
+      instanceId: instance.id,
+      stateId: instance.stateId,
+      childKey: instance.childKey,
+      parentInstanceId: parent?.id,
+      inputs: shallowRedactArtifacts(instance.inputs),
+    });
+    this.resolveInputBindings(instance);
+
+    for (const child of loaded.children ?? []) {
+      const key = child.childKey;
+      if (key === undefined) continue;
+      const childDef = this.config.bundle.states[child.stateId];
+      if (!child.live) {
+        if (!childDef) continue;
+        instance.children.set(key, this.loadTerminated(child, childDef, abort, instance));
+        continue;
+      }
+      // A live child continues exactly the way `enterChild` starts one: its own abort wired to the
+      // parent's, its record stamped before its promise exists, its crash a failure and never a stall.
+      const childAbort = new AbortController();
+      const onParentAbort = (): void => childAbort.abort();
+      if (instance.abort.signal.aborted) childAbort.abort();
+      else instance.abort.signal.addEventListener("abort", onParentAbort, { once: true });
+      const record: ChildRecord = { instanceId: child.id, status: "running", abort: childAbort, promise: Promise.resolve() };
+      const run = async (): Promise<void> => {
+        let term: TerminationRecord;
+        if (!childDef) {
+          term = { outcome: "error", failure: { classification: "permanent", reason: `unknown state '${child.stateId}'` } };
+        } else {
+          term = await this.resumeInstance(child, childDef, childAbort, instance);
+          term = await this.materializeFanOut(instance, key, term);
+        }
+        record.status = "done";
+        record.outcome = term.outcome;
+        record.outputs = term.outputs;
+        record.failure = term.failure;
+        record.operation = term.operation;
+        if (instance.children.get(key) === record) {
+          if (!instance.justFinished.includes(key)) instance.justFinished.push(key);
+          if (term.outcome === "error" || term.outcome === "timeout") instance.unhandledFailures.add(key);
+        }
+        instance.notify.signal();
+      };
+      instance.children.set(key, record);
+      record.promise = run().catch((e: unknown) => {
+        const failure: Failure = {
+          classification: "permanent",
+          reason: `child '${key}' crashed: ${e instanceof Error ? e.message : String(e)}`,
+        };
+        record.status = "done";
+        record.outcome = "error";
+        record.failure = failure;
+        try {
+          this.emit({ type: "instance.terminated", instanceId: record.instanceId, stateId: child.stateId, outcome: "error", failure });
+        } catch {
+          // Nothing left to report it with.
+        }
+        if (instance.children.get(key) === record) {
+          if (!instance.justFinished.includes(key)) instance.justFinished.push(key);
+          instance.unhandledFailures.add(key);
+        }
+        instance.notify.signal();
+      });
+      void record.promise.finally(() => {
+        instance.abort.signal.removeEventListener("abort", onParentAbort);
+      });
+      // The cursor holds for a running SYNC child, exactly as it did when the child first entered.
+      // `instance.entered` is NOT set here: `buildLoadedInstance` already read it off the last child
+      // in entry order, which stays right when a terminated child entered after an async live one.
+      const decl = instance.def.children?.[key];
+      if (decl !== undefined && decl.async !== true) instance.heldFor = key;
+    }
+    // A finished child no round ever answered still owes an unhandled-failure mark when it ended badly.
+    for (const key of instance.justFinished) {
+      const rec = instance.children.get(key);
+      if (rec !== undefined && (rec.outcome === "error" || rec.outcome === "timeout")) instance.unhandledFailures.add(key);
+    }
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (def.limits?.timeout !== undefined) {
+      timer = setTimeout(() => {
+        instance.timedOut = true;
+        instance.abort.abort();
+        instance.notify.signal();
+      }, def.limits.timeout * 1000);
+    }
+
+    const initialEvaluation = (instance.opRun || def.operation === undefined) && instance.heldFor === undefined;
+    try {
+      const loopRecord = await this.evaluationLoop(instance, initialEvaluation);
+      const record: TerminationRecord =
+        instance.operation !== undefined ? { ...loopRecord, operation: instance.operation } : loopRecord;
+      this.emit({
+        type: "instance.terminated",
+        instanceId: instance.id,
+        stateId: instance.stateId,
+        outcome: record.outcome,
+        failure: record.failure,
+      });
+      return record;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      await this.cancelRunningChildren(instance);
+      await this.cancelDeferredCalls(instance);
+    }
+  }
+
+  private async evaluationLoop(instance: Instance, initialEvaluation = false): Promise<TerminationRecord> {
     const def = instance.def;
     // SPEC §3.3: transitions are evaluated when an operation completes or a child
     // terminates — not on bare entry (the first operation runs first) and not when an
     // async child merely starts. One final evaluation runs before success-termination.
-    let evaluationDue = false;
+    //
+    // A LOADED instance may start with an evaluation owed: its operation already completed, or its
+    // guards were mid-question when the run stopped — "guards run on load" (Identity and Resume
+    // §04), which is what re-parks a state on the deferred call it was waiting for.
+    let evaluationDue = initialEvaluation;
     for (;;) {
       if (instance.timedOut) return this.finish(instance, "timeout");
       if (instance.abort.signal.aborted) return this.finish(instance, "canceled");
@@ -1511,7 +1781,7 @@ export class WorkflowEngine {
       operationResult: (op) => {
         const key = hashOperation(op);
         // The deferred half FIRST, and it is a different half on purpose — see `deferredResults`.
-        const hit = this.deferredResults.get(key) ?? this.callCache.get(key);
+        const hit = this.deferredResults.get(key) ?? this.answerFor(instance, key);
         // A MISS IS THE DEMAND. Resolution asked for a call's result and there is none, so this is
         // where the engine learns which calls the expression it is resolving actually needs — and
         // learning it HERE rather than by walking the tree up front is what makes the demand
@@ -1744,58 +2014,6 @@ export class WorkflowEngine {
   // --- operations -----------------------------------------------------------
 
   /**
-   * Take a recorded answer for this state's operation instead of making the call.
-   *
-   * `undefined` means there is no answer for this address and the operation must run — which is how
-   * a {@link ReplaySource} expresses the frontier. A returned object means the operation is settled,
-   * with `failure` set if the recorded value does not satisfy what the state declares.
-   *
-   * The result is fed through exactly the path a dispatched one takes — the operation node, then
-   * `acceptOpOutputs`, then the completion event — so a replayed state is indistinguishable
-   * downstream from one that ran. Anything less and `finish()` would be resolving this state's
-   * outputs against a scope half-filled.
-   *
-   * Two things are deliberately NOT carried across:
-   *
-   *  - **Spend.** The recorded metrics belong to the run that paid them. Rolling them into
-   *    `childCost` here would bill a resumed run for calls it did not make, and every roll-up over a
-   *    task would then double-count. `operation.cost` is absent on a replayed state for the same
-   *    reason — no money moved.
-   *  - **The transcript refresh.** A dispatched prompt op re-reads its conversation so a
-   *    `{ conversation }` binding sees what the call just added. Nothing was added here, and the
-   *    turns the original call appended are already in the store.
-   */
-  private replayOperation(
-    instance: Instance,
-    op: Operation<InlineFamily>,
-    kind: OperationKind,
-  ): { failure?: Failure } | undefined {
-    const recorded = this.config.replay?.operationAt(instance.address);
-    if (recorded === undefined) return undefined;
-    const session =
-      recorded.session === undefined ? undefined : publishedSession(recorded.session.position, recorded.session.conversation);
-    // `model` from the record first: a route may have resolved a bare id to something the op's own
-    // config never names, and the recorded answer came from whatever actually served it.
-    instance.operation = operationNodeOf("success", undefined, recorded.model ?? modelOfOp(op), session, recorded.value);
-    const failure = this.acceptOpOutputs(instance, kind, recorded.value, op.output.kind);
-    // A recorded value that fails this state's own output contract is a real failure and travels as
-    // one. It should be unreachable — the definition is pinned, so the shape that satisfied it once
-    // satisfies it now — which is exactly why it must be loud if it ever happens rather than being
-    // smoothed over into a re-dispatch.
-    if (failure) return { failure };
-    this.emit({
-      type: "operation.completed",
-      instanceId: instance.id,
-      stateId: instance.stateId,
-      op: kind,
-      ...(recorded.operationId !== undefined ? { operationId: recorded.operationId } : {}),
-      // No `metrics`, and the omission is the honest report: metrics mean "this run measured this",
-      // and this run did not run it. See the header.
-    });
-    return {};
-  }
-
-  /**
    * Run the state's operation (§7.4): resolve its bindings against the run context, then dispatch
    * the RESOLVED op by kind — a `PromptOp` to `registry.prompt` (the llm leaf runner), a
    * `FunctionOp` to `registry.functions`. Sub-workflows, composite units, and delegated agent
@@ -1822,17 +2040,6 @@ export class WorkflowEngine {
       });
       return failure;
     };
-
-    // REPLAY, before anything is resolved and long before anything is dispatched (§ResumeSource).
-    //
-    // Ahead of `runEmbeddedOps` deliberately: a call embedded in this operation's bindings exists to
-    // produce an argument, and an operation whose answer is already known needs no arguments. Running
-    // them anyway would re-execute the one class of thing this whole path exists to avoid.
-    //
-    // (An embedded call is not addressable — it has no state and no identity in the run record, by
-    // design — so replaying one is `callCache`'s job, keyed by content hash, and not this seam's.)
-    const replayed = this.replayOperation(instance, op, kind);
-    if (replayed !== undefined) return replayed.failure === undefined ? undefined : fail(replayed.failure);
 
     // Resolve every BOUND input; FREE slots are filled by name from the state's own inputs (the
     // model's §3.8 rule). Bound values win, because a binding is what the author wrote on THIS
@@ -1942,28 +2149,37 @@ export class WorkflowEngine {
    * What deferred calls RETURNED, held apart from the call memo — and dropped when a transition acts
    * on them.
    *
-   * An event is not a memo. `callCache` answers "what does this callee compute for these arguments",
-   * which is stable for the life of a run and may be backed by something durable; "did the user drag
-   * this card" is stable for exactly as long as nobody has acted on the answer. Putting one in the
-   * other made a state that moved on a drag re-enter its target on every following round — the guard
-   * kept reading the same `true` — and would have replayed a person's decision into a resumed run.
+   * An event is not a memo. A call answer says "this is what this callee computes for these
+   * arguments", which is stable for the life of a run and may be backed by something durable; "did
+   * the user drag this card" is stable for exactly as long as nobody has acted on the answer.
+   * Putting one in the other made a state that moved on a drag re-enter its target on every
+   * following round — the guard kept reading the same `true` — and would have replayed a person's
+   * decision into a resumed run.
    */
   private readonly deferredResults = new Map<string, CallResult>();
 
-  /** The cache backing {@link EngineConfig.callCache} when the host supplies none. */
-  private readonly ownCallCache = new Map<string, CallResult>();
-  private get callCache(): CallCache {
-    return this.config.callCache ?? { get: (k: string) => this.ownCallCache.get(k), set: (k: string, v: CallResult) => void this.ownCallCache.set(k, v) };
+  /**
+   * Answers to embedded operations, keyed by SCOPED id — this run's own half of what
+   * {@link EngineConfig.answers} holds durably (Identity and Resume §04, "a repeat is answered by
+   * identity").
+   *
+   * A call site's key is the resolved op's content hash, so a guard re-evaluated over many rounds
+   * asks at the same site with the same content and computes the same scoped id — one execution,
+   * however many rounds. The scope is what a LOADED run leans on: its instances keep their recorded
+   * ids and sites, so the same id recomputes there and the host's `answers` seam serves what the
+   * stopped run already paid for.
+   */
+  private readonly ownAnswers = new Map<string, CallResult>();
+
+  /** The answer this instance's site already has for this content — in-run first, then the host's. */
+  private answerFor(instance: Instance, key: string): CallResult | undefined {
+    const sid = scopedOperationId(key, this.callSiteScope(instance, key));
+    return this.ownAnswers.get(sid) ?? this.config.answers?.(sid);
   }
 
-  /**
-   * Results of embedded operations, keyed by the RESOLVED op's content hash.
-   *
-   * The hash is `hashOperation`, which is the same identity `withMemoize` keys on — and because a
-   * resolved op embeds its argument values, it IS "this callee with these arguments". So a call
-   * appearing in a guard costs one execution however many rounds the guard is evaluated over, and two
-   * syntactically different expressions that compute the same thing share one result.
-   */
+  private rememberAnswer(instance: Instance, key: string, outcome: CallResult): void {
+    this.ownAnswers.set(scopedOperationId(key, this.callSiteScope(instance, key)), outcome);
+  }
 
   /**
    * Run every operation embedded in these bindings, innermost first, recording each result.
@@ -1999,11 +2215,11 @@ export class WorkflowEngine {
         if ("error" in resolved) return { classification: "permanent", reason: resolved.error };
 
         const key = hashOperation(resolved.op);
-        if (this.callCache.get(key) !== undefined) continue;
+        if (this.answerFor(instance, key) !== undefined) continue;
         const outcome = await this.runEmbeddedOp(instance, resolved.op, undefined, key);
         // PENDING is a scheduling state, not an answer — nothing to remember, and nothing a durable
         // cache could serialize.
-        if (outcome !== PENDING) this.callCache.set(key, outcome);
+        if (outcome !== PENDING) this.rememberAnswer(instance, key, outcome);
       }
     }
     return undefined;
@@ -2082,7 +2298,7 @@ export class WorkflowEngine {
         const results = await Promise.all([...fresh].map(async ([key, op]) => [key, await this.startCall(instance, op)] as const));
         // A DEFERRED call answers PENDING here — it has been started, not finished — and there is
         // nothing to remember about a scheduling state.
-        for (const [key, outcome] of results) if (outcome !== PENDING) this.callCache.set(key, outcome);
+        for (const [key, outcome] of results) if (outcome !== PENDING) this.rememberAnswer(instance, key, outcome);
       }
     }
     return undefined;
@@ -2218,11 +2434,11 @@ export class WorkflowEngine {
         for (const element of source.value) {
           const bound = bindElement(higher.op, element as unknown as JsonValue, acc);
           const key = hashOperation(bound);
-          let outcome = this.callCache.get(key);
+          let outcome = this.answerFor(instance, key);
           if (outcome === undefined) {
             const run = await this.runEmbeddedOp(instance, bound, undefined, key);
             if (run === PENDING) return { classification: "permanent", reason: "'reduce' step did not resolve" };
-            this.callCache.set(key, run);
+            this.rememberAnswer(instance, key, run);
             outcome = run;
           }
           // A failed step stops the fold — there is no accumulator to carry forward. The failure
@@ -2240,12 +2456,12 @@ export class WorkflowEngine {
       for (const element of source.value) {
         const bound = bindElement(higher.op, element as unknown as JsonValue);
         const key = hashOperation(bound);
-        if (this.callCache.get(key) === undefined) pending.set(key, bound);
+        if (this.answerFor(instance, key) === undefined) pending.set(key, bound);
       }
       const results = await Promise.all(
         [...pending].map(async ([key, bound]) => [key, await this.runEmbeddedOp(instance, bound, undefined, key)] as const),
       );
-      for (const [key, outcome] of results) if (outcome !== PENDING) this.callCache.set(key, outcome);
+      for (const [key, outcome] of results) if (outcome !== PENDING) this.rememberAnswer(instance, key, outcome);
     }
     return undefined;
   }

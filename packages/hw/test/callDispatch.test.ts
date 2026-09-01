@@ -13,7 +13,7 @@ import { loadBundle } from "../src/loader.js";
 import { validateBundle } from "../src/validate.js";
 import { FakePromptExecutor, newRegistry, ok, promptTail } from "./fakes.js";
 import type { Vfs } from "../src/reference.js";
-import type { WorkflowMetrics } from "../src/ports.js";
+import { InMemoryPersistence, type WorkflowMetrics } from "../src/ports.js";
 
 const ROOT = "/p/.jaira";
 const WF = `${ROOT}/workflows`;
@@ -664,38 +664,59 @@ describe("a call inside a guard", () => {
 });
 
 /**
- * The memo answers "would someone else making the identical call reuse this answer?" — so the KEY is
- * content-addressed (`hashOperation` of the resolved op IS "this callee with these arguments"), and
- * the STORE is the host's to supply. An in-run `Map` answers it only within one run.
+ * A call answer is keyed by SCOPED identity — the resolved op's content hash folded with its
+ * dispatch site — and the durable STORE is the host's to supply (`EngineConfig.answers`). Within
+ * one run the engine remembers its own answers; across runs the key only recomputes where the
+ * instance ids survive, which is a LOADED run and never a fresh one — a fresh run mints new ids,
+ * so nothing it computes can collide with history.
  */
-describe("the call memo is content-addressed and injectable", () => {
+describe("the call memo is scoped and injectable", () => {
   const def = {
     inputs: { issue: { kind: "text", schema: { type: "string" } } },
     outputs: { loud: { schema: { type: "string" }, binding: { expr: "shout(.inputs.issue)" } } },
     operation: { kind: "function", function: "noop" },
   };
 
-  it("reuses a result across separate runs when the host supplies the cache", async () => {
-    const store = new Map<string, { value?: unknown; error?: string }>();
-    const cache = { get: (k: string) => store.get(k) as never, set: (k: string, v: never) => void store.set(k, v) };
+  it("a loaded run takes the recorded answer instead of re-making the call", async () => {
     const calls = { n: 0 };
-
-    for (let i = 0; i < 2; i++) {
-      const engine = new WorkflowEngine({
-        bundle: bundleFor(def),
-        registry: registryWithShout(calls),
-        validator: new SchemaValidator(),
-        callCache: cache,
-      });
-      const result = await engine.run({ inputs: { issue: "same" } });
-      expect(result.outputs?.loud).toBe("SAME");
-    }
-    // Two runs, one execution — which is the whole point.
+    const asked = new Set<string>();
+    const persistence = new InMemoryPersistence();
+    const first = new WorkflowEngine({
+      bundle: bundleFor(def),
+      registry: registryWithShout(calls),
+      validator: new SchemaValidator(),
+      persistence,
+      // A miss here is how the engine asks the host — capturing the key is how this test learns
+      // the identity the stopped run's answer will be asked under.
+      answers: (sid) => {
+        asked.add(sid);
+        return undefined;
+      },
+    });
+    const before = await first.run({ inputs: { issue: "same" } });
+    expect(before.outputs?.loud).toBe("SAME");
     expect(calls.n).toBe(1);
-    expect(store.size).toBe(1);
+    expect(asked.size).toBe(1);
+    const [sid] = [...asked];
+    const entered = persistence.events.find(({ event }) => event.type === "instance.entered")?.event;
+    const rootId = entered !== undefined && entered.type === "instance.entered" ? entered.instanceId : "";
+
+    // A new engine — a new process, for all it knows — but the loaded instance keeps its
+    // recorded id, so the call recomputes the same scoped id and the answers seam serves it.
+    const second = new WorkflowEngine({
+      bundle: bundleFor(def),
+      registry: registryWithShout(calls),
+      validator: new SchemaValidator(),
+      answers: (k) => (k === sid ? { value: "SAME" } : undefined),
+    });
+    const after = await second.loadRun({ id: rootId, stateId: "plan", inputs: { issue: "same" }, live: true });
+    expect(after.outcome).toBe("success");
+    expect(after.outputs?.loud).toBe("SAME");
+    // Still ONE execution — the loaded run answered the repeat by identity.
+    expect(calls.n).toBe(1);
   });
 
-  it("does NOT reuse across runs without one, which is why the seam exists", async () => {
+  it("does NOT reuse across fresh runs, whose ids are new by construction", async () => {
     const calls = { n: 0 };
     for (let i = 0; i < 2; i++) {
       const engine = new WorkflowEngine({ bundle: bundleFor(def), registry: registryWithShout(calls), validator: new SchemaValidator() });

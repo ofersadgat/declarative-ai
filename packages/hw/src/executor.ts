@@ -27,11 +27,12 @@ import {
   type SessionStore,
 } from "@declarative-ai/exec";
 import { syncOnly } from "@declarative-ai/exec";
-import { WorkflowEngine, type CallCache } from "./engine.js";
+import { WorkflowEngine, type CallResult } from "./engine.js";
 import type { WorkflowBundle } from "./format.js";
+import type { LoadedInstance } from "./load.js";
 import { isByteStream, materialize, MaterializeError } from "./materialize.js";
 import { snapshotHash } from "./loader.js";
-import type { Persistence, ReplaySource, WorkflowMetrics } from "./ports.js";
+import type { Persistence, WorkflowMetrics } from "./ports.js";
 import { emptyWorkflowMetrics, mergeWorkflowMetrics } from "./ports.js";
 import { validateBundle } from "./validate.js";
 
@@ -49,6 +50,9 @@ import { validateBundle } from "./validate.js";
  */
 export type HierarchicalWorkflowDefinition = WorkflowBundle;
 
+/** What one execution IS: a fresh start from an op, or the continuation of a loaded description. */
+type WorkflowWork = { kind: "start"; op: Operation<InlineFamily> } | { kind: "load"; loaded: LoadedInstance };
+
 
 export interface WorkflowExecutorOptions {
   /** The authored bundle this executor runs. */
@@ -62,12 +66,10 @@ export interface WorkflowExecutorOptions {
   prompt?: Executor<ExecServices, WorkflowMetrics>;
   persistence?: Persistence;
   /**
-   * What a stopped run already answered — supplying it makes this a RESUME (see {@link ReplaySource}).
-   *
-   * Forwarded for the same reason `persistence` and `callCache` are: the engine is constructed
-   * inside this executor, so without this the seam exists and nothing outside hw can reach it.
+   * What was already paid for, by scoped id — `EngineConfig.answers`. A LOADED run's guards find
+   * the answers their stopped predecessor recorded here instead of paying again.
    */
-  replay?: ReplaySource;
+  answers?: (scopedId: string) => CallResult | undefined;
   /**
    * The conversation store this run's transcripts live in.
    *
@@ -78,17 +80,11 @@ export interface WorkflowExecutorOptions {
    */
   sessions?: SessionStore;
   /**
-   * Where the results of CALLS are remembered (EXPRESSIONS.md §3), and what they dispatch through.
-   *
-   * Both default to something that works and neither is durable: an in-run `Map`, and direct registry
-   * invocation. A host supplies these to get what the defaults cannot — an identical call reused
-   * across runs, tasks and processes, and the wrapper stack (retry, rate limiting, budget, a
-   * content-addressed memo) around a call.
-   *
-   * Forwarded here because the engine is constructed INSIDE this executor: without it the seams exist
-   * and nothing outside hw can reach them.
+   * What CALLS dispatch through (EXPRESSIONS.md §3). Defaults to direct registry invocation; a host
+   * supplies one to get the wrapper stack — retry, rate limiting, budget, a content-addressed memo.
+   * Forwarded here because the engine is constructed INSIDE this executor: without it the seam
+   * exists and nothing outside hw can reach it.
    */
-  callCache?: CallCache;
   operations?: Executor<ExecServices, WorkflowMetrics>;
   /** Mints instance ids — see {@link EngineConfig.newInstanceId}. Forwarded because the engine is
    *  constructed inside this executor; a host or test that needs predictable ids supplies its own. */
@@ -129,9 +125,22 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
   constructor(private readonly options: WorkflowExecutorOptions) {}
 
   start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue, WorkflowMetrics> {
+    return this.begin({ kind: "start", op }, ctx);
+  }
+
+  /**
+   * Continue a STOPPED run from its loaded description — loading, not replaying (Identity and
+   * Resume §04). The description comes from the host's journal joined to its record store; see
+   * {@link LoadedInstance}. Same handle contract as {@link start}.
+   */
+  load(loaded: LoadedInstance, ctx: ExecServices): ExecHandle<ResolvedValue, WorkflowMetrics> {
+    return this.begin({ kind: "load", loaded }, ctx);
+  }
+
+  private begin(work: WorkflowWork, ctx: ExecServices): ExecHandle<ResolvedValue, WorkflowMetrics> {
     const events = new EventQueue();
     const abort = new AbortController();
-    const result = this.execute(op, ctx, events, abort).finally(() => events.close());
+    const result = this.execute(work, ctx, events, abort).finally(() => events.close());
     return {
       events: events.iterate(),
       result,
@@ -143,7 +152,7 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
   }
 
   private async execute(
-    op: Operation<InlineFamily>,
+    work: WorkflowWork,
     ctx: ExecServices,
     events: EventQueue,
     abort: AbortController,
@@ -155,17 +164,23 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
     });
 
     // --- Inputs -----------------------------------------------------------
-    const resolved = resolveLiteralInputs(op);
-    if ("error" in resolved) return fail("permanent", resolved.error);
-    // A blob INPUT that arrived as a live stream must be drained BEFORE the op is hashed for a memo key
-    // (§7.3, rule 1): `hashOperation` cannot hash a stream and throws, by design, exactly so this drain
-    // happens first. The drain upgrades the op's binding IN PLACE, so the op the outer `withMemoize`
-    // hashes carries bytes — and re-running the same (already-drained) op is idempotent. Only runtime
-    // inputs are ever streams; an authored document is JSON, so the snapshot hash never sees one.
-    try {
-      await materializeOpInputs(op, resolved.values, ctx.abortSignal);
-    } catch (e) {
-      return fail("permanent", e instanceof MaterializeError ? e.message : `input materialization failed: ${(e as Error).message}`);
+    // A LOADED run's inputs were resolved and journaled by the run it continues; only a start has
+    // an op whose literals need reading and whose streams need draining.
+    let startInputs: Record<string, ResolvedValue> = {};
+    if (work.kind === "start") {
+      const resolved = resolveLiteralInputs(work.op);
+      if ("error" in resolved) return fail("permanent", resolved.error);
+      // A blob INPUT that arrived as a live stream must be drained BEFORE the op is hashed for a memo key
+      // (§7.3, rule 1): `hashOperation` cannot hash a stream and throws, by design, exactly so this drain
+      // happens first. The drain upgrades the op's binding IN PLACE, so the op the outer `withMemoize`
+      // hashes carries bytes — and re-running the same (already-drained) op is idempotent. Only runtime
+      // inputs are ever streams; an authored document is JSON, so the snapshot hash never sees one.
+      try {
+        await materializeOpInputs(work.op, resolved.values, ctx.abortSignal);
+      } catch (e) {
+        return fail("permanent", e instanceof MaterializeError ? e.message : `input materialization failed: ${(e as Error).message}`);
+      }
+      startInputs = resolved.values;
     }
 
     // --- Definition intake ------------------------------------------------
@@ -209,10 +224,9 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
       // than treated as a pass.
       validator: ctx.validator ? syncOnly(ctx.validator) : undefined,
       persistence: this.options.persistence,
-      ...(this.options.replay !== undefined ? { replay: this.options.replay } : {}),
-      // The two CALL seams (EXPRESSIONS.md §3), forwarded so a host can reach them: the engine is
+      // The CALL seams (EXPRESSIONS.md §3), forwarded so a host can reach them: the engine is
       // constructed in here, so without this they exist and nothing can supply them.
-      ...(this.options.callCache !== undefined ? { callCache: this.options.callCache } : {}),
+      ...(this.options.answers !== undefined ? { answers: this.options.answers } : {}),
       ...(this.options.operations !== undefined ? { operations: this.options.operations } : {}),
       ...(this.options.sessions !== undefined ? { sessions: this.options.sessions } : {}),
       ...(this.options.newInstanceId !== undefined ? { newInstanceId: this.options.newInstanceId } : {}),
@@ -235,7 +249,10 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
 
     let result;
     try {
-      result = await engine.run({ inputs: resolved.values, abortSignal: abort.signal });
+      result =
+        work.kind === "start"
+          ? await engine.run({ inputs: startInputs, abortSignal: abort.signal })
+          : await engine.loadRun(work.loaded, { inputs: {}, abortSignal: abort.signal });
     } catch (e) {
       // A crashed engine may already have run children that SPENT MONEY, so the spend accumulated up to
       // the crash is reported rather than zeroed — `costUsd: 0` here would silently forgive real charges.
@@ -287,8 +304,9 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
       return { metrics, error: { classification: "permanent", reason: e instanceof MaterializeError ? e.message : `output materialization failed: ${(e as Error).message}` } };
     }
 
-    // The op-level output contract (in addition to per-state validation the engine did).
-    const outputSchema = op.output.schema;
+    // The op-level output contract (in addition to per-state validation the engine did). A LOADED
+    // run has no op — it continues a run whose contract was the original start's.
+    const outputSchema = work.kind === "start" ? work.op.output.schema : undefined;
     if (outputSchema && ctx.validator) {
       const res = await ctx.validator.validateValue(outputSchema, (outputs ?? null) as JsonValue);
       if (!res.ok) {
