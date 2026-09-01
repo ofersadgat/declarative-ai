@@ -57,8 +57,16 @@ export interface RecordStub {
    * once per resolution instead of copied onto every row.
    */
   source: Operation<InlineFamily>;
-  /** The conversation this call appends to, when it runs in one. */
-  session?: { id: string; seq: number };
+  /**
+   * The conversation this call appends to, when it runs in one — the seat, and the provider handle
+   * the call was HANDED to resume. Part of the ask (Identity and Resume §03): "append at seq 14 of
+   * conversation X, resuming handle H" is what the call was asked to do, exactly as its inputs are,
+   * so a store files it inside the request rather than in a table beside it. The handle here is
+   * what we PASSED; what the call reports back is a different value and travels on the outcome.
+   */
+  session?: { id: string; seq: number; providerSessionId?: string };
+  /** The dispatch site the request is made from — the other half of the ask's context. */
+  scope?: OperationScope;
   startMs: number;
 }
 
@@ -77,6 +85,12 @@ export interface RecordStub {
 export interface SessionOutcome {
   /** The provider's own session id as of this run. A CHANGE from what we resumed is divergence. */
   providerSessionId?: string;
+  /**
+   * Who owns that handle. A bare handle is meaningless — the same string on two providers names two
+   * different conversations — so the handle never travels without the name of the party that minted
+   * it, and a store keeping "the conversation's current handle" keeps the pair.
+   */
+  provider?: string;
   /** What the run added, for an executor whose payload is not already a conversation. */
   messages?: readonly unknown[];
 }
@@ -284,7 +298,19 @@ export function withRecord<R = ExecServices, M extends ExecMetrics = ExecMetrics
         const stub: RecordStub = {
           id,
           source: op,
-          ...(position !== undefined ? { session: position } : {}),
+          // The seat AND the handle the call was handed to resume — the whole session half of the
+          // ask, so the store can file it inside the request (Identity and Resume §03). The handle
+          // reported BACK travels separately, on the outcome; the difference between the two is the
+          // entire basis of divergence detection.
+          ...(position !== undefined
+            ? {
+                session: {
+                  ...position,
+                  ...(ctx.session?.providerSessionId !== undefined ? { providerSessionId: ctx.session.providerSessionId } : {}),
+                },
+              }
+            : {}),
+          ...(ctx.scope !== undefined ? { scope: ctx.scope } : {}),
           startMs,
         };
         // Claim BEFORE the call, and keep the ref it hands back — that, not the stub's id, is what

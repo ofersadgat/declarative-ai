@@ -645,7 +645,7 @@ async function priorMessages(session: ResolvedSession<ModelMessage>): Promise<Mo
 function sessionOutcomeOfCall(
   ctx: ExecServices,
   output: LlmOutput | undefined,
-): { session?: { providerSessionId?: string } } {
+): { session?: { providerSessionId?: string; provider?: string } } {
   if (output === undefined) return {};
   const { providerSessionId } = output;
   // NO MESSAGES. A prompt call's payload IS the conversation — its `entries` carry the reasoning and
@@ -659,8 +659,10 @@ function sessionOutcomeOfCall(
   void ctx;
   if (providerSessionId === undefined) return {};
   // A handle is the one thing a caller cannot recover by any other means — minted remotely, never in
-  // the projected value — so it is reported whether or not a local position was ever resolved.
-  return { session: { providerSessionId } };
+  // the projected value — so it is reported whether or not a local position was ever resolved. WITH
+  // its provider: a bare handle is meaningless, and the store keeping "the conversation's current
+  // handle" must keep the pair (Identity and Resume §03).
+  return { session: { providerSessionId, provider: providerOf(output.model) } };
 }
 
 /** Convenience factory mirroring the class constructor — the BARE core (no wrappers). Compose the
