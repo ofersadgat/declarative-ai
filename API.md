@@ -1171,6 +1171,8 @@ interface ExecServices {
   sessionReader?: { read(id: string): Promise<readonly unknown[]> };  // provider read, for resync
   onDivergence?: (e: { session: string; resumed: string; reported: string; reason: string }) => void;
   workspace?: Workspace;              // { root, treeHash? } — a Session-owned resource
+  scope?: OperationScope;             // the dispatch site: { instanceId, sequence } — folds into the record id
+  onDispatch?: (d: { id: string }) => void; // fired by withRecord AFTER the row is inserted, BEFORE the call
   timeoutMs?: number;                 // per-call wall-clock budget
   maxCostUsd?: number;                // per-call cost ceiling
   abortSignal?: AbortSignal;          // cancellation for the operation in flight
@@ -2482,7 +2484,7 @@ The ports (apps implement these). Source: `ports.ts`.
 | --- | --- |
 | `Persistence` | `record(event: EngineEvent, atMs: number): void` — the durable run-record sink (SPEC §10.2). |
 | `InMemoryPersistence` | the bundled buffering implementation (embedding & tests); exposes `events`. |
-| `EngineEvent` | the run-record event union: `instance.entered`, `instance.blocked`, `operation.started`, `operation.completed`, `operation.failed`, `transition.taken`, `child.superseded`, `instance.terminated`. |
+| `EngineEvent` | the run-record event union: `instance.entered`, `instance.blocked`, `operation.started`, `operation.dispatched` (the record for a call exists — emitted from the record layer's callback after the row is inserted and before the provider call; carries the scoped `operationId`), `operation.completed`, `operation.failed`, `call.waiting`, `call.settled`, `transition.taken`, `child.superseded`, `instance.terminated`. Settled events' `operationId` is the SCOPED id (`scopedOperationId(hashOperation(op), scope)`), the same key `withRecord` files the record under. |
 | `OperationKind` | `"prompt" \| "function"` — the two operation types (the event `op` field). |
 | `ArtifactRef` / `isArtifactRef` | `{ artifact: true; name; format?; content?; path? }` — an artifact value flowing through workflow inputs/outputs. |
 

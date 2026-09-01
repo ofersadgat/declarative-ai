@@ -33,10 +33,12 @@ import type {
   SessionRequest,
   SessionStore,
 } from "./contract.js";
+import type { OperationScope } from "./contract.js";
 import { PositionTaken, isOk } from "./contract.js";
 import { canceledFailure, wrapHandle } from "./handles.js";
 import { curryOrApply, isExecutor } from "./wrappers.js";
 import { hashOperation } from "./memo.js";
+import { canonicalize, sha256Hex } from "@declarative-ai/ops";
 
 export { PositionTaken };
 
@@ -110,17 +112,16 @@ export function isPositionTaken(result: unknown): boolean {
 }
 
 /**
- * The row {@link RecordStore.open} wrote, named by the key the store already enforces —
- * `UNIQUE (task_id, run_id, record_id, attempt)`.
+ * The row {@link RecordStore.append} wrote, named by its id — which IS a key now.
  *
- * Handed back rather than recomputed by the caller, because `attempt` is the half that makes the id
- * a key and only the store knows which one it just took. Deterministic, so a replay reproduces it —
- * which a database-assigned rowid is not (migration 8), and which is why this is a counted attempt
- * and not one.
+ * There used to be an `attempt` half, because the id was a bare content hash and a loop dispatching
+ * the identical operation twice collided. The id is the hash of the SCOPED request today (see
+ * {@link scopedOperationId}): the dispatch site inside it never repeats, so the id alone names the
+ * row, and both layers can compute it independently — no key ever has to be handed across a
+ * boundary to be agreed on.
  */
 export interface RecordRef {
   id: string;
-  attempt: number;
 }
 
 /** A flush into a record that is still open — what a call has produced so far. */
@@ -167,12 +168,10 @@ export interface RecordStore<R = ResolvedValue, M extends ExecMetrics = ExecMetr
   /**
    * Fill in a stamped record — on failure as well as success.
    *
-   * Takes the ref {@link RecordStore.open} handed back, not the stub's id. An id alone does not name
-   * a row: `RecordStub.id` is a content hash for an unplaced call, so two identical operations
-   * dispatched in one run share one, and settling by id has to guess between them. It guessed
-   * "newest open", which is right for a retry (the earlier attempt has settled, so one row is open)
-   * and wrong when both are still open — the first settle landed on the second call's row and the
-   * results came back swapped.
+   * Takes the ref {@link RecordStore.append} handed back. The id names exactly one row now (the
+   * scope inside it never repeats), so the "which of two identical open rows" guessing the old
+   * attempt-keyed settle had to do cannot recur — but the ref stays the interface, because it is
+   * the store's acknowledgement that THIS row was written, not the caller's recomputation of it.
    */
   finish(ref: RecordRef, settled: Pick<StoredRecord<R, M>, "result" | "metrics" | "sessionOutcome">): void | Promise<void>;
   /**
@@ -189,20 +188,45 @@ export interface RecordStore<R = ResolvedValue, M extends ExecMetrics = ExecMetr
 }
 
 /**
- * The content id an unplaced record is keyed by — {@link hashOperation}, made TOTAL.
+ * The identity of one ask made at one place — the record id.
+ *
+ * A content hash alone repeats whenever the same operation is dispatched twice; the scope inside
+ * this fold never does, because a dispatch site `(instanceId, sequence)` belongs to exactly one
+ * instance and instances are named once. Derived from unique parts IS unique, which is what lets
+ * the id be a primary key with no `attempt` beside it.
+ *
+ * A FOLD over the op's hash rather than a hash of an op-with-scope-inside, deliberately: the op's
+ * own hash is a SHARED identity — the memo key, the call cache key, "would someone else making this
+ * identical call reuse the answer?" — and it must keep answering that question unscoped. The two
+ * identities share the content half and differ by the scope, and this function is the only place
+ * that relationship is written down.
+ */
+export function scopedOperationId(operationHash: string, scope: OperationScope): string {
+  return sha256Hex(canonicalize({ operationHash, instanceId: scope.instanceId, sequence: scope.sequence }));
+}
+
+/**
+ * The id a record is keyed by — {@link hashOperation} folded with the dispatch site, made TOTAL.
  *
  * `hashOperation` deliberately throws on an op carrying a LIVE byte stream (a single-consumer blob
  * kept un-materialized for piping, DESIGN §10.1): such an op has no stable content identity, and a
  * memo must refuse it. A RECORD must not — recording is unconditional, and a throw here would fail
- * the very call it was meant to witness. An unhashable op gets a unique process-local id instead:
- * it names this record and claims nothing about content, which is exactly true of a stream.
+ * the very call it was meant to witness. An unhashable op with a scope is still uniquely named BY
+ * the scope, which is the honest identity of a stream: this ask, made here.
+ *
+ * A dispatch with NO scope gets a process-local ordinal as its site. Uniqueness is the invariant
+ * the whole schema leans on — the id is a primary key, and two identical prompts appended to one
+ * conversation used to be exactly the collision `attempt` papered over — and a caller that supplies
+ * no scope is a caller that never re-computes the id either, so nothing is lost by the ordinal
+ * being local. Every real dispatcher (the engine, a chat host) supplies its own.
  */
-let unhashable = 0;
-function contentIdOf(op: Operation<InlineFamily>): string {
+let localSite = 0;
+function contentIdOf(op: Operation<InlineFamily>, scope: OperationScope | undefined): string {
+  const at = scope ?? { instanceId: "local", sequence: ++localSite };
   try {
-    return hashOperation(op);
+    return scopedOperationId(hashOperation(op), at);
   } catch {
-    return `unhashable:${++unhashable}`;
+    return scopedOperationId("unhashable", at);
   }
 }
 
@@ -244,20 +268,19 @@ export function withRecord<R = ExecServices, M extends ExecMetrics = ExecMetrics
         const startMs = (ctx.clock ?? { now: () => Date.now() }).now();
         const position = ctx.session?.at;
         /**
-         * The content hash, whether or not this call is PLACED.
+         * The SCOPED hash, whether or not this call is PLACED.
          *
          * It used to be `<sessionId>:<seq>` for a placed record, which spelled the position into the
          * id — and migration 8 pointed out what that cost: "for a PLACED record `record_id` is
          * literally `session_id:seq`, so those rows were carrying a rowid that duplicated the very
          * pair the position table already keys on". The claim, the ordering and the conflict all live
-         * on `session_positions (session_id, seq)`; the id was never what detected anything.
+         * on the position table; the id was never what detected anything.
          *
-         * The old objection — that two identical prompts in one conversation would collide — is
-         * answered by `attempt`, which is the half of the natural key that exists for exactly this
-         * ("a content id repeats whenever the same operation is dispatched twice"). `append` returns
-         * both halves and `finish` settles on both, so a repeat is two rows rather than one overwrite.
+         * The old objection — that two identical prompts dispatched twice would collide — used to be
+         * answered by `attempt`. It is answered by the SCOPE now: the dispatch site inside the fold
+         * never repeats, so the id alone is the key. See {@link scopedOperationId}.
          */
-        const id = contentIdOf(op);
+        const id = contentIdOf(op, ctx.scope);
         const stub: RecordStub = {
           id,
           source: op,
@@ -280,6 +303,13 @@ export function withRecord<R = ExecServices, M extends ExecMetrics = ExecMetrics
             metrics: { durationMs: 0 },
           } as never;
         }
+        // THE DISPATCH SEAM, in its load-bearing order: insert the row (above), invoke the callback,
+        // make the provider call (below). A journal written from here can never name a row that does
+        // not exist, and a crash between the insert and the call leaves an open row for the recovery
+        // sweep rather than an event pointing at nothing. Fired at THIS layer — the innermost, past
+        // every wrapper that could still change the op — so completeness does not depend on how the
+        // executor stack happens to be composed.
+        ctx.onDispatch?.({ id: ref.id });
         // ASK for the payload. This is the point of the flag: the recorder is the layer that needs
         // what the executor would otherwise project away inside the call, and the only layer that
         // knows a record is about to be written. Requesting it per call beats an executor built in a

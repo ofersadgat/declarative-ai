@@ -56,11 +56,13 @@ import {
   type Tool,
   type Workspace,
   type Clock,
+  type OperationScope,
   MapSessionStore,
   createOperationExecutor,
   hashOperation,
   isOk,
   resolveCalls,
+  scopedOperationId,
 } from "@declarative-ai/exec";
 import type { InstanceAddress, ReplaySource, WorkflowMetrics } from "./ports.js";
 import {
@@ -136,6 +138,11 @@ function tryHashOperation(op: Operation<InlineFamily>): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** The scoped id an event stamps — {@link scopedOperationId} over a hash that may be absent. */
+function tryScopedId(hash: string | undefined, scope: OperationScope): string | undefined {
+  return hash === undefined ? undefined : scopedOperationId(hash, scope);
 }
 
 export type CallResult = { value: ResolvedValue } | { error: string; failure?: Failure };
@@ -325,6 +332,19 @@ interface Instance {
    * two iterations of one child are two addresses.
    */
   entries: Map<string, number>;
+  /**
+   * The CALL SITES this instance has dispatched from, by content key — the sequence half of an
+   * operation's scope (`ExecServices.scope`).
+   *
+   * Sequence 0 is reserved for the state's own operation; every call site gets a number of its own
+   * on first sight. Keyed by the call's content hash so a re-evaluation at one site — a guard's
+   * third round asking the same question — carries the same scope and therefore the same record id,
+   * while a different ask never shares one. Per instance, so a loop's next iteration (a new
+   * instance) shares nothing.
+   */
+  sites: Map<string, number>;
+  /** The next call-site sequence number — 1-based, 0 being the state's own operation. */
+  nextSite: number;
   /**
    * Transitions this instance has taken — EVERY one, forward jumps and the exit included.
    *
@@ -735,6 +755,8 @@ export class WorkflowEngine {
       // therefore no step, so the run itself is the empty address.
       address: addressOf(parent, childKey),
       entries: new Map(),
+      sites: new Map(),
+      nextSite: 1,
       index: 0,
       iteration: 0,
       opRun: false,
@@ -1978,7 +2000,7 @@ export class WorkflowEngine {
 
         const key = hashOperation(resolved.op);
         if (this.callCache.get(key) !== undefined) continue;
-        const outcome = await this.runEmbeddedOp(instance, resolved.op);
+        const outcome = await this.runEmbeddedOp(instance, resolved.op, undefined, key);
         // PENDING is a scheduling state, not an answer — nothing to remember, and nothing a durable
         // cache could serialize.
         if (outcome !== PENDING) this.callCache.set(key, outcome);
@@ -2074,17 +2096,22 @@ export class WorkflowEngine {
    * input binding and as a state's whole operation.
    */
   private async startCall(instance: Instance, op: Operation<InlineFamily>): Promise<Resolved> {
-    if (!this.isDeferred(op)) return this.runEmbeddedOp(instance, op);
     const key = hashOperation(op);
+    if (!this.isDeferred(op)) return this.runEmbeddedOp(instance, op, undefined, key);
     const already = this.deferredCalls.get(key);
     if (already !== undefined) return PENDING;
 
     const callName = op.kind === "function" ? op.functionRef : "prompt";
     let cancel: () => Promise<void> = async () => {};
     const settled = (async () => {
-      const outcome = await this.runEmbeddedOp(instance, op, (handle) => {
-        cancel = () => handle.cancel();
-      });
+      const outcome = await this.runEmbeddedOp(
+        instance,
+        op,
+        (handle) => {
+          cancel = () => handle.cancel();
+        },
+        key,
+      );
       this.deferredCalls.delete(key);
       if (outcome !== PENDING) this.deferredResults.set(key, outcome);
       this.emit({
@@ -2193,7 +2220,7 @@ export class WorkflowEngine {
           const key = hashOperation(bound);
           let outcome = this.callCache.get(key);
           if (outcome === undefined) {
-            const run = await this.runEmbeddedOp(instance, bound);
+            const run = await this.runEmbeddedOp(instance, bound, undefined, key);
             if (run === PENDING) return { classification: "permanent", reason: "'reduce' step did not resolve" };
             this.callCache.set(key, run);
             outcome = run;
@@ -2216,7 +2243,7 @@ export class WorkflowEngine {
         if (this.callCache.get(key) === undefined) pending.set(key, bound);
       }
       const results = await Promise.all(
-        [...pending].map(async ([key, bound]) => [key, await this.runEmbeddedOp(instance, bound)] as const),
+        [...pending].map(async ([key, bound]) => [key, await this.runEmbeddedOp(instance, bound, undefined, key)] as const),
       );
       for (const [key, outcome] of results) if (outcome !== PENDING) this.callCache.set(key, outcome);
     }
@@ -2234,6 +2261,8 @@ export class WorkflowEngine {
     instance: Instance,
     op: Operation<InlineFamily>,
     onHandle?: (handle: { cancel: () => Promise<void> }) => void,
+    /** The caller's content key for this call — what makes a re-evaluation share its site. */
+    siteKey?: string,
   ): Promise<Resolved> {
     const env = instance.def.environment ?? {};
     const resourceKey = instance.resourceKey;
@@ -2271,11 +2300,14 @@ export class WorkflowEngine {
     const toolsOrFailure = this.resolveTools(env, resourceKey, delegates);
     if ("failure" in toolsOrFailure) return { error: toolsOrFailure.failure.reason };
     const rendered = op.kind === "prompt" ? { ...op, user: this.renderTemplate(op.user, instance, literal.values) } : op;
+    // A call gets a site of its own — sequence 0 is the state's operation, and a call written into a
+    // binding or a guard is a different place in the instance, so the two never share an identity.
+    const scope = this.callSiteScope(instance, siteKey);
     let outcome;
     try {
       const handle = this.operations.start(
         rendered,
-        await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, undefined, toolsOrFailure.gate),
+        await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, undefined, toolsOrFailure.gate, scope, op.kind),
       );
       onHandle?.(handle);
       outcome = await handle.result;
@@ -2347,19 +2379,20 @@ export class WorkflowEngine {
     const toolsOrFailure = this.resolveTools(env, resourceKey, delegates);
     if ("failure" in toolsOrFailure) return fail(toolsOrFailure.failure);
 
-    const services = await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, session, toolsOrFailure.gate);
+    const scope = this.stateOpScope(instance);
+    const services = await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, session, toolsOrFailure.gate, scope, "function");
     // Errors are DATA (§4.2): the impl RESOLVES value-or-failure, so a 429 raised inside a registered
     // function keeps its classification instead of being reconstructed from `err.name` — which is what
     // made every non-`AbortError` permanently failed, retry machinery and all.
     //
     // `bindInputs` writes the resolved inputs onto the op first: the executor reads them off the op
     // and has no view of the instance they were resolved against.
-    // Hashed HERE, over exactly the value the executor stack receives, because that is the id an
-    // unplaced record gets (`withRecord`: no position ⇒ `hashOperation(op)`) — the join the
-    // settled events carry. Undefined when the op cannot be hashed (a live stream input, which
-    // `hashOperation` refuses by design): such a call's record has no content id either.
+    // Hashed HERE, over exactly the value the executor stack receives, and folded with the same
+    // scope the record layer was handed — so the settled events and the record share a key
+    // (`scopedOperationId`), each side computing it independently. Undefined when the op cannot be
+    // hashed (a live stream input, which `hashOperation` refuses by design).
     const dispatched = bindInputs(this.operationFor(instance, op), opInputs);
-    const operationId = tryHashOperation(dispatched);
+    const operationId = tryScopedId(tryHashOperation(dispatched), scope);
     const outcome = await this.operations.start(dispatched, services).result;
     // An impl that reports what it cost (a delegated agent bills inside its own loop) rolls up here,
     // exactly as a prompt op's outcome does — otherwise the spend of the most expensive thing in the
@@ -2394,7 +2427,14 @@ export class WorkflowEngine {
       undefined,
       isOk(outcome) ? outcome.value : undefined,
     );
-    if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
+    if (instance.abort.signal.aborted || instance.timedOut) {
+      // The CUT is visible now. This used to return with no event at all, so a stopped call's
+      // journal ended at `operation.started` and a run parked on a person read exactly like one
+      // that hung. The call settled — the executor classifies a cut as `interrupted` and keeps the
+      // partial — so the journal says so, and the loop top still owns what happens to the instance.
+      this.emitAbortedSettle(instance, "function", operationId, outcome, metrics);
+      return undefined; // loop top handles
+    }
     if (!isOk(outcome)) return fail(outcome.error, operationId, metrics);
     // The op's declared output KIND decides how its value is read — a `blob` output IS the value
     // (bytes), any other kind is a record of named outputs. Omitting it here left the blob branch
@@ -2490,7 +2530,8 @@ export class WorkflowEngine {
     // cancellation — are `ExecServices` fields now, which is why that type could be deleted outright.
     // The gate rides along exactly as it does on the function path: inert for a composed transport,
     // and the ONLY carrier of authored modes and the session profile for a delegated one.
-    const services = await this.servicesFor(session.resourceKey, instance, tools, session, toolsOrFailure.gate);
+    const scope = this.stateOpScope(instance);
+    const services = await this.servicesFor(session.resourceKey, instance, tools, session, toolsOrFailure.gate, scope, "prompt");
     // An authored `limits.timeout` reaches the call as CANCELLATION. It used to be published as
     // `services.timeoutMs`, which only an executor that knew to read it honoured — and which the llm
     // layer turned straight back into `AbortSignal.timeout(...)` anyway. Folding it into the signal
@@ -2499,8 +2540,9 @@ export class WorkflowEngine {
       const bound = AbortSignal.timeout(instance.def.limits.timeout * 1000);
       services.abortSignal = services.abortSignal ? AbortSignal.any([services.abortSignal, bound]) : bound;
     }
-    // Hashed over the op the executor stack receives — the settled events' join to its record.
-    const operationId = tryHashOperation(resolvedOp);
+    // Hashed over the op the executor stack receives and folded with the dispatch scope — the
+    // settled events' join to its record, computed by each side independently.
+    const operationId = tryScopedId(tryHashOperation(resolvedOp), scope);
     let outcome;
     try {
       outcome = await promptExecutor.start(resolvedOp, services).result;
@@ -2522,7 +2564,12 @@ export class WorkflowEngine {
       published,
       isOk(outcome) ? outcome.value : undefined,
     );
-    if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
+    if (instance.abort.signal.aborted || instance.timedOut) {
+      // Same as the function path: the cut settles in the journal instead of vanishing after
+      // `operation.started`, and the loop top still owns the instance's fate.
+      this.emitAbortedSettle(instance, "prompt", operationId, outcome, outcome.metrics);
+      return undefined; // loop top handles
+    }
 
     // A FAILED call contributes nothing to the transcript. It ran before this check and a failure
     // carries no `value`, so the assistant turn was the literal string "null" — and under the default
@@ -2681,6 +2728,71 @@ export class WorkflowEngine {
   }
 
   /** The services one operation runs with: its resource bundle's workspace, its tools, its cancellation. */
+  /**
+   * The settle event for a call that was running when the run was cut — emitted only when the call
+   * HONESTLY settled.
+   *
+   * A completed answer that raced the abort is still a completion, and an `interrupted` failure is
+   * the transport saying the turn was cut with its partial kept — both are facts worth a journal
+   * line, where the old path ended every cut call's trail at `operation.started`. A `canceled`
+   * failure is different: it is the abort's own unwinding reported back, nothing about the call
+   * settled, and staying silent keeps the "started and never settled" signature the frontier reads.
+   */
+  private emitAbortedSettle(
+    instance: Instance,
+    op: OperationKind,
+    operationId: string | undefined,
+    outcome: { value?: unknown; error?: Failure },
+    metrics: WorkflowMetrics | undefined,
+  ): void {
+    if (isOk(outcome as never)) {
+      this.emit({
+        type: "operation.completed",
+        instanceId: instance.id,
+        stateId: instance.stateId,
+        op,
+        ...(operationId !== undefined ? { operationId } : {}),
+        ...(metrics !== undefined ? { metrics } : {}),
+      });
+      return;
+    }
+    const failure = (outcome as { error: Failure }).error;
+    if (failure.classification !== "interrupted") return;
+    this.emit({
+      type: "operation.failed",
+      instanceId: instance.id,
+      stateId: instance.stateId,
+      op,
+      ...(operationId !== undefined ? { operationId } : {}),
+      failure,
+      ...(metrics !== undefined ? { metrics } : {}),
+    });
+  }
+
+  /** The scope of the state's own operation — site 0, by definition (one op per state, SPEC §7.1). */
+  private stateOpScope(instance: Instance): OperationScope {
+    return { instanceId: instance.id, sequence: 0 };
+  }
+
+  /**
+   * The scope of a CALL made from inside this instance — a guard, an embedded op, a deferred wait.
+   *
+   * Keyed by the call's content hash, assigned on first sight: a re-evaluation at one site (a
+   * guard's third round asking the same question) reuses its number and therefore its record
+   * identity, while a different ask never shares one. An unkeyable call (a live stream input, which
+   * `hashOperation` refuses) gets a fresh anonymous site — it names this dispatch and claims nothing
+   * about content, which is exactly true of a stream.
+   */
+  private callSiteScope(instance: Instance, siteKey: string | undefined): OperationScope {
+    if (siteKey === undefined) return { instanceId: instance.id, sequence: instance.nextSite++ };
+    let sequence = instance.sites.get(siteKey);
+    if (sequence === undefined) {
+      sequence = instance.nextSite++;
+      instance.sites.set(siteKey, sequence);
+    }
+    return { instanceId: instance.id, sequence };
+  }
+
   private async servicesFor(
     resourceKey: string,
     instance: Instance,
@@ -2688,9 +2800,31 @@ export class WorkflowEngine {
     session?: SessionBinding,
     /** The delegated permission gate, when this call has one — see {@link resolveTools}. */
     gate?: ToolGate,
+    /** The dispatch site this call is made from — with `opKind`, arms the record layer's seam. */
+    scope?: OperationScope,
+    opKind?: OperationKind,
   ): Promise<ExecServices> {
     const services = this.childServices();
     if (gate !== undefined) services.gate = gate;
+    // The dispatch scope and its callback — set or CLEARED unconditionally, because `childServices`
+    // copies the host-provided bundle, and for a sub-workflow that bundle IS the parent dispatch's
+    // ctx: an inherited scope would stamp the parent's site onto every nested call.
+    if (scope !== undefined && opKind !== undefined) {
+      services.scope = scope;
+      // hw's half of the dispatch seam: the record layer fires this AFTER the row is inserted and
+      // BEFORE the provider call, so this event never names a row that was not written.
+      services.onDispatch = (dispatch): void =>
+        this.emit({
+          type: "operation.dispatched",
+          instanceId: instance.id,
+          stateId: instance.stateId,
+          op: opKind,
+          operationId: dispatch.id,
+        });
+    } else {
+      delete services.scope;
+      delete services.onDispatch;
+    }
     // RESOLVED HERE, not stated as a request for a layer below to resolve.
     //
     // The engine used to publish `ctx.sessionRequest` — which conversation, and whether to branch —

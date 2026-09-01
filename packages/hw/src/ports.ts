@@ -79,13 +79,23 @@ export type EngineEvent =
   | { type: "instance.blocked"; stateId: string; childKey?: string; parentInstanceId?: string; reason: string }
   | { type: "operation.started"; instanceId: string; stateId: string; op: OperationKind }
   /**
-   * `operationId` is the content hash of the op AS DISPATCHED (`hashOperation` over the value the
-   * executor stack received) — which is exactly the id `withRecord` gives an UNPLACED record, so a
-   * journal row and its operation record share a key at last. A PLACED call's record is keyed by
-   * its session position instead, and its join was always `metrics.sessionRef`; the hash is
-   * stamped regardless, so every settled operation event names the call it settled. Absent on
-   * `operation.started` deliberately (it fires before input resolution, so the dispatched op — the
-   * thing the hash is OF — does not exist yet), and on a `failed` that never reached dispatch.
+   * The record for this call EXISTS — emitted from the record layer's own callback, at the moment
+   * the row is written and its position claimed, before the provider call is made. That order is
+   * the invariant: this event can never name a row that was not written, and a crash between the
+   * insert and the call leaves an open row for the recovery sweep rather than an event pointing at
+   * nothing. Not emitted when the position claim is refused — no row exists, and the typed
+   * `positionTaken` failure already carries the fork signal.
+   */
+  | { type: "operation.dispatched"; instanceId: string; stateId: string; op: OperationKind; operationId: string }
+  /**
+   * `operationId` is the SCOPED id — the op's content hash folded with the dispatch site
+   * `(instanceId, sequence)`, exactly the id `withRecord` keys the record by (`scopedOperationId`),
+   * so a journal row and its operation record share a key that cannot collide: the site never
+   * repeats, a loop's next iteration is a new instance, and a guard's third round computes the same
+   * id as its first. Both layers compute it independently from the same parts; no id is ever handed
+   * across a boundary to be agreed on. Absent on `operation.started` deliberately (it fires before
+   * input resolution, so the dispatched op — the thing the hash is OF — does not exist yet), and on
+   * a `failed` that never reached dispatch.
    */
   | { type: "operation.completed"; instanceId: string; stateId: string; op: OperationKind; operationId?: string; metrics?: WorkflowMetrics }
   /**

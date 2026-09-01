@@ -156,14 +156,14 @@ describe("AgentExecutor — a delegated agent answering a PROMPT op", () => {
     expect(decision).toEqual({ allow: false, reason: "denied by permission policy" });
   });
 
-  it("classifies an abort as canceled rather than as a permanent failure", async () => {
+  it("classifies an abort as interrupted rather than as a permanent failure", async () => {
     const aborted = AbortSignal.abort();
     const query: AgentQuery = async function* () {
       throw new Error("stopped");
     };
     const result = await new AgentExecutor({ query }).start(op(), { abortSignal: aborted }).result;
     expect(isOk(result)).toBe(false);
-    expect(!isOk(result) && result.error.classification).toBe("canceled");
+    expect(!isOk(result) && result.error.classification).toBe("interrupted");
   });
 
   it("surfaces a run-fatal agent error as data, never as a throw", async () => {
@@ -773,7 +773,11 @@ describe("the control channel", () => {
       },
     });
     const result = await new AgentExecutor({ query }).start(op(), {}).result;
-    expect(isOk(result)).toBe(true);
+    // A cut turn SETTLES AS INTERRUPTED now — the classification that promises there is something
+    // to continue — and the partial travels as the value beside the error rather than as a success
+    // pretending the turn finished.
+    expect(isOk(result)).toBe(false);
+    expect(!isOk(result) && result.error.classification).toBe("interrupted");
     // The op's OUTPUT VALUE directly — projection is the default, so there is no payload to
     // reach through unless a caller asked for one.
     expect(result.value).toBe("1\n2\n3");

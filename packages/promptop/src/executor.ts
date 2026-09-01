@@ -584,11 +584,28 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
     // reference to an array that already exists.
     const reported = sessionOutcomeOfCall(ctx, output);
 
+    // The turn was CUT, not completed. A steered `interrupt()` ends the call "successfully" with
+    // `finishReason: "aborted"`, and settling that as an ordinary answer is how half a turn used to
+    // read as a whole one — the record said `completed` about a call that never got to finish. The
+    // signal exists right here at the transport and used to be erased on this line; carried as the
+    // `interrupted` classification instead, the record can keep the partial AND say what it is.
+    if (isOk(call) && output?.finishReason === "aborted") {
+      return {
+        error: { classification: "interrupted" as const, reason: "the turn was interrupted before it completed" },
+        ...(value !== undefined ? { value } : {}),
+        metrics,
+        ...reported,
+        ...record,
+      };
+    }
     if (isOk(call)) return { value: value as ResolvedValue, metrics, ...reported, ...record };
 
-    // A cancel that raced the call re-classifies the provider's failure without discarding it.
+    // A cancel that raced the call re-classifies the provider's failure without discarding it — as
+    // INTERRUPTED, not canceled: the call was RUNNING when it was cut, so its turns may already
+    // exist remotely, which is exactly the promise `interrupted` makes and `canceled` does not.
+    // A cancel that never reached dispatch still lands `canceled`, on the paths that never get here.
     const canceled = wasCanceled() || ctx.abortSignal?.aborted === true;
-    const error = canceled ? { ...call.error, classification: "canceled" as const } : call.error;
+    const error = canceled ? { ...call.error, classification: "interrupted" as const } : call.error;
     // Reported on failure TOO: turns the provider appended before it failed exist remotely whether or
     // not we kept them, and not recording them is divergence on the very next call.
     return { error, ...(value !== undefined ? { value } : {}), metrics, ...reported, ...record };

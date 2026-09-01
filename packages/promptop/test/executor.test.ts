@@ -101,7 +101,7 @@ describe("core — loud failure on unconsumed wrapper fields", () => {
 });
 
 describe("core — cancel", () => {
-  it("cancel() aborts the in-flight call and the outcome resolves with classification 'canceled'", async () => {
+  it("cancel() aborts the in-flight call and the outcome resolves with classification 'interrupted'", async () => {
     let seen: AbortSignal | undefined;
     const runner = async (_def: unknown, env: { abortSignal?: AbortSignal }): Promise<ReturnType<typeof okOutcome>> => {
       seen = env.abortSignal;
@@ -113,15 +113,15 @@ describe("core — cancel", () => {
     void handle.cancel();
     const out = await handle.result;
     expect(seen?.aborted).toBe(true);
-    expect(errorOf(out)?.classification).toBe("canceled");
+    expect(errorOf(out)?.classification).toBe("interrupted");
   });
 
-  it("a pre-aborted ctx.abortSignal maps the failure to 'canceled'", async () => {
+  it("a pre-aborted ctx.abortSignal maps the failure to 'interrupted'", async () => {
     const controller = new AbortController();
     controller.abort();
     const { runner } = fakeRunner([okOutcome({ error: { classification: "network-retriable", reason: "stopped" } })]);
     const out = await createPromptExecutor({ runner }).start(promptOp(), { abortSignal: controller.signal }).result;
-    expect(errorOf(out)?.classification).toBe("canceled");
+    expect(errorOf(out)?.classification).toBe("interrupted");
   });
 });
 

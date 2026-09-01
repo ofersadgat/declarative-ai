@@ -283,9 +283,9 @@ describe("createClaudeCodeFunction — delegated agent as a registered async fun
     };
     setTimeout(() => controller.abort(), 10);
     const { error } = await runOrError(createClaudeCodeFunction({ query }), inputs(), { abortSignal: controller.signal });
-    // An abort is `canceled`, not a failure of the unit — classified HERE now, as data (§4.2),
-    // rather than reconstructed from `err.name` by the caller.
-    expect(error?.classification).toBe("canceled");
+    // An abort that cut a RUNNING call is `interrupted` — the classification that promises there is
+    // something to continue — classified as data (§4.2) rather than reconstructed from `err.name`.
+    expect(error?.classification).toBe("interrupted");
   });
 
   it("is invocable as a plain FunctionOp through a typed def application", () => {

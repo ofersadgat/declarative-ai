@@ -413,8 +413,45 @@ export interface ExecServices {
    * as returning something it did not return. A side channel adds information without touching a type.
    */
   returnRecord?: boolean;
+  /**
+   * Where in the caller's structure this request is being made from — the DISPATCH SITE.
+   *
+   * `instanceId` names the machine instance making the ask (durable, minted once); `sequence` names
+   * the site WITHIN it the request is written at — the state's own operation is site 0, and every
+   * call site gets a number of its own. The site, not the evaluation: a guard re-evaluated on round
+   * three carries the same scope as its first round, so the two asks share one identity, while a
+   * loop's second iteration is a new instance and shares nothing.
+   *
+   * The scope is what makes a record id collision-free — see {@link scopedOperationId}. It rides the
+   * ctx bundle rather than the op, because the op's content hash is a SHARED identity (the memo's
+   * "would someone else making this identical call reuse the answer?") and folding a scope into it
+   * would make every repeat a miss. Two identities, two carriers.
+   */
+  scope?: OperationScope;
+  /**
+   * Fired by the record layer the moment this call's record EXISTS — after the row is inserted and
+   * its position claimed, before the provider call is made.
+   *
+   * The order is the invariant: a journal writing an event from this callback can never name a row
+   * that was not written, and a crash between the insert and the call leaves an open row for the
+   * recovery sweep rather than an event pointing at nothing. Not fired when the position claim is
+   * refused — no row exists, and the typed `positionTaken` failure already carries that signal.
+   *
+   * On the ctx bundle for the same reason {@link ExecServices.returnRecord} is: it must reach the
+   * innermost layer past every wrapper that could still change the op, and unknown ctx fields
+   * survive each wrapper's `{ ...ctx }` spread for free.
+   */
+  onDispatch?: (dispatch: { id: string }) => void;
   /** Cancellation for the operation in flight. */
   abortSignal?: AbortSignal;
+}
+
+/** The dispatch site a request is made from — see {@link ExecServices.scope}. */
+export interface OperationScope {
+  /** The machine instance making the ask. Durable — minted once, never reused. */
+  instanceId: string;
+  /** The site within the instance the request is written at. 0 is the state's own operation. */
+  sequence: number;
 }
 
 // --- Sessions -----------------------------------------------------------------
@@ -646,7 +683,7 @@ export const defaultMessagesOf = <Msg>(record: { result?: { value?: unknown } })
 export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
   /** Lineage only. A branch's own records live in `rows`; its prefix is its parent's. */
   private readonly branches = new Map<string, { parent?: string; cursor: number }>();
-  private readonly rows = new Map<string, Map<number, { id: string; attempt: number; result?: { value?: unknown }; externalId?: string }>>();
+  private readonly rows = new Map<string, Map<number, { id: string; result?: { value?: unknown }; externalId?: string }>>();
   private minted = 0;
 
   constructor(private readonly messagesOf: MessagesOf<Msg> = defaultMessagesOf) {}
@@ -712,30 +749,24 @@ export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
 
   // --- The record half ----------------------------------------------------------
 
-  append(stub: { id: string; session?: { id: string; seq: number } }): { id: string; attempt: number } {
+  append(stub: { id: string; session?: { id: string; seq: number } }): { id: string } {
     const at = stub.session;
-    // The attempt is counted whether or not the record is PLACED, so an unplaced call still gets a
-    // ref that names it the way a placed one does.
-    const attempt = this.attemptOf(stub.id);
-    if (at === undefined) return { id: stub.id, attempt }; // a record outside any conversation is not this store's business
+    if (at === undefined) return { id: stub.id }; // a record outside any conversation is not this store's business
     const rows = this.rows.get(at.id) ?? new Map();
-    if (rows.has(at.seq)) throw new PositionTaken(at.id, at.seq);
-    rows.set(at.seq, { id: stub.id, attempt });
+    const holder = rows.get(at.seq);
+    // The seat refusal is about a COMPETING claim. The same id re-claiming its own seat is not one —
+    // it is a re-dispatch continuing into its own record (an interrupted call being resumed), and
+    // the row it finds is the row it left.
+    if (holder !== undefined && holder.id !== stub.id) throw new PositionTaken(at.id, at.seq);
+    if (holder === undefined) rows.set(at.seq, { id: stub.id });
     this.rows.set(at.id, rows);
-    return { id: stub.id, attempt };
-  }
-
-  /** How many rows already carry this id, plus one — the durable store's `attemptFor`, in memory. */
-  private attemptOf(id: string): number {
-    let n = 0;
-    for (const rows of this.rows.values()) for (const row of rows.values()) if (row.id === id) n += 1;
-    return n + 1;
+    return { id: stub.id };
   }
 
   /** Where a record sits now — see {@link RecordStore.positionOf}. */
-  positionOf(ref: { id: string; attempt: number }): { id: string; seq: number } | undefined {
+  positionOf(ref: { id: string }): { id: string; seq: number } | undefined {
     for (const [id, rows] of this.rows.entries()) {
-      for (const [seq, row] of rows.entries()) if (row.id === ref.id && row.attempt === ref.attempt) return { id, seq };
+      for (const [seq, row] of rows.entries()) if (row.id === ref.id) return { id, seq };
     }
     return undefined;
   }
@@ -750,7 +781,7 @@ export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
    * claimed in, and the record belongs on a branch cut at that position: the trunk keeps meaning what
    * every ref into it meant, and the branch carries the remote actually used.
    */
-  private correctLineage(ref: { id: string; attempt: number }, reported: string | undefined): void {
+  private correctLineage(ref: { id: string }, reported: string | undefined): void {
     if (reported === undefined) return;
     const at = this.positionOf(ref);
     if (at === undefined) return;
@@ -766,12 +797,12 @@ export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
     this.rows.set(branch, moved);
   }
 
-  finish(ref: { id: string; attempt: number }, settled: { result?: { value?: unknown }; sessionOutcome?: { messages?: readonly unknown[]; providerSessionId?: string } }): void {
+  finish(ref: { id: string }, settled: { result?: { value?: unknown }; sessionOutcome?: { messages?: readonly unknown[]; providerSessionId?: string } }): void {
     for (const rows of this.rows.values()) {
       for (const row of rows.values()) {
-        // BOTH halves. Two identical operations in one run share an id, so matching on it alone
-        // settles whichever row is found first — see `RecordStore.close`.
-        if (row.id === ref.id && row.attempt === ref.attempt) {
+        // The id alone: a scoped id names exactly one dispatch, which is what retired the attempt
+        // half this match used to need.
+        if (row.id === ref.id) {
           // An executor whose payload IS a conversation needs nothing further; one whose payload is
           // not — a delegated agent, a value-mode prompt core, a fake — reports its delta on the
           // session channel, and that is what the conversation is made of.
@@ -917,8 +948,8 @@ export class MapSessionStore<Msg = JsonValue> implements SessionStore<Msg> {
     // A distinct conversation, so the origin keeps meaning exactly what every ref into it meant.
     const derived = `${id}~${word}${++this.minted}`;
     this.branches.set(derived, { cursor: 0 });
-    const rows = new Map<number, { id: string; attempt: number; result?: { value?: unknown } }>();
-    rows.set(0, { id: `${derived}:0`, attempt: 1, result: { value: { messages } } });
+    const rows = new Map<number, { id: string; result?: { value?: unknown } }>();
+    rows.set(0, { id: `${derived}:0`, result: { value: { messages } } });
     this.rows.set(derived, rows);
     return join(derived, 1);
   }
