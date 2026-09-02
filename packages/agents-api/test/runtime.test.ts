@@ -316,7 +316,7 @@ describe("native session resume and fork", () => {
    * plausible while no path asked; the one that asks now is a call with no handle, which has to put
    * the prefix on the wire or reach the model with no history at all.
    */
-  const session = (over: { mode?: "append" | "fork"; providerSessionId?: string; forkFrom?: { handle: string; at?: string }; prior?: unknown[] }): ExecServices["session"] => {
+  const session = (over: { mode?: "append" | "fork"; providerSessionId?: string; forkFrom?: { handle: string; provider: string; at?: string }; prior?: unknown[] }): ExecServices["session"] => {
     const { prior = [{ role: "user", content: "earlier" }], ...rest } = over;
     const s = { id: "ses_x@3" } as Record<string, unknown>;
     for (const [k, v] of Object.entries({ mode: rest.mode ?? "append", at: { id: "ses_x", seq: 3 }, messages: async () => prior, ...rest })) {
@@ -345,7 +345,7 @@ describe("native session resume and fork", () => {
   it("FORKS by handle when the layer above decided to branch", async () => {
     const { query, seen } = capturing();
     const fn = createClaudeCodeFunction({ query });
-    await fn.run(inputs(), { session: session({ mode: "fork", forkFrom: { handle: "sess-abc" } }) });
+    await fn.run(inputs(), { session: session({ mode: "fork", forkFrom: { handle: "sess-abc", provider: "agent" } }) });
     expect(seen()?.resume).toBe("sess-abc");
     expect(seen()?.forkSession).toBe(true);
   });

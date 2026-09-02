@@ -344,8 +344,9 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
     // an adapter that can only copy where the conversation now stands must replay instead, or the
     // branch comes back holding turns it never had.
     const cutting = session.forkFrom?.at !== undefined;
+    const forkMatchesProvider = session.forkFrom?.provider === providerOf(definition.model);
     const forking =
-      this.capabilities.sessionResume && nativeFork && session.forkFrom !== undefined && (!cutting || this.capabilities.sessionForkAt === true);
+      this.capabilities.sessionResume && nativeFork && session.forkFrom !== undefined && forkMatchesProvider && (!cutting || this.capabilities.sessionForkAt === true);
     const replaying = !this.capabilities.sessionResume || (session.mode === "fork" && !nativeFork);
     /**
      * The second way a prefix has to go on the wire: this transport COULD resume, but there is no
@@ -361,7 +362,14 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
      * replaced when the conversation actually HAS a prefix: a genuinely new conversation keeps the
      * cheap `prompt` shape it has always had.
      */
-    const unhandled = !replaying && !forking && session.providerSessionId === undefined;
+    // A handle owned by a DIFFERENT provider is no handle at all (SESSIONS.md: a session is locked
+    // to the provider it was used with). A re-routed state — a model routing change, a workflow
+    // edit — would otherwise thread the previous provider's opaque id into a transport that either
+    // errors on it or silently resumes something else. Foreign ⇒ the prefix goes on the wire
+    // instead, exactly as a position with no handle does. Compared by route prefix, the same
+    // spelling the settle stores (`providerOf(output.model)`).
+    const foreign = session.provider !== undefined && session.provider !== providerOf(definition.model);
+    const unhandled = !replaying && !forking && (session.providerSessionId === undefined || foreign);
 
     if (replaying || unhandled) {
       // Resolved from `id` through the store when the accessor is missing: non-enumerable properties
@@ -386,7 +394,7 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
       // The handle to COPY, not to append to. The adapter tells them apart by comparing what it was
       // given against `session.forkFrom`, so "resume" and "fork from" never rest on one field.
       definition = { ...definition, providerSessionId: session.forkFrom!.handle };
-    } else if (session.providerSessionId !== undefined && (session.mode !== "fork" || nativeFork)) {
+    } else if (session.providerSessionId !== undefined && !foreign && (session.mode !== "fork" || nativeFork)) {
       definition = { ...definition, providerSessionId: session.providerSessionId };
     }
     return { definition, sent };

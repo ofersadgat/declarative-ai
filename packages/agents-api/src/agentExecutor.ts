@@ -110,6 +110,8 @@ type WithEventSink = { [EVENT_SINK]?: AgentChannel };
 /** Everything ONE agent turn produced, accumulated off its stream. */
 interface AgentTurn {
   result: AgentResult;
+  /** The provider-native model reported when the agent initialized its turn. */
+  model?: string;
   /**
    * The OUTPUT text the assistant turns carried, accumulated.
    *
@@ -277,6 +279,16 @@ export const CLAUDE_MUTATING_BUILTINS: readonly string[] = [
  * route it is. What actually answers the call is whatever the agent binary is configured to use.
  */
 export const AGENT_DEFAULT_MODEL = "agent/default";
+
+/**
+ * What a settled call records when the agent never said which model answered.
+ *
+ * The honest name for "we asked for the binary's own default and it did not tell us what that was".
+ * It is deliberately not `default`, which is a REQUEST and reads as an answer once persisted, and
+ * deliberately not a guess at the binary's configuration, which this package cannot see. A reader —
+ * a person, a price table, a session's provider half — can tell an unknown from a claim.
+ */
+export const UNREPORTED_MODEL = "unreported";
 
 export interface AgentExecutorOptions extends PromptExecutorOptions {
   /** The agent-query seam. Default: {@link sdkAgentQuery} (lazily loads `@anthropic-ai/claude-agent-sdk`). */
@@ -606,6 +618,11 @@ export class AgentExecutor extends PromptExecutor {
         // exhausted its turn cap or its budget ceiling — a PARTIAL answer — as a clean finish, which is
         // how a truncated review reads as a complete one.
         finishReason: result.finishReason ?? "unknown",
+        // The route says WHICH transport ran; the agent says which of that transport's models
+        // actually answered its default. Keep both facts together on the persisted result. EITHER
+        // report is taken: `claude` announces the model in its init event while the turn runs, codex
+        // names it with the session it configured and carries it on the terminal message.
+        model: this.resolvedModel(definition, turn.model ?? result.model),
         // The agent's own log, verbatim. It used to be one synthesized assistant turn carrying the
         // final text, under a comment claiming a delegated agent hands back nothing else. It does hand
         // it back — every turn, on the same wire — and we were discarding it.
@@ -988,6 +1005,10 @@ export class AgentExecutor extends PromptExecutor {
             // Forwarded OPAQUELY. `exec` must not learn this agent's vocabulary, and a host that wants
             // to render a compaction boundary must not be stopped because we had no neutral name for it.
             if (msg.event !== undefined) {
+              const event = msg.event as { type?: unknown; subtype?: unknown; model?: unknown };
+              if (event.type === "system" && event.subtype === "init" && typeof event.model === "string" && event.model.length > 0) {
+                turn.model = event.model;
+              }
               events?.push({ type: "provider_event", payload: msg.event });
               // …and RECORDED, pinned to its place among the turns. The live view already showed it;
               // a replay that shows less than the person watching saw is a record telling a smaller
@@ -1084,10 +1105,31 @@ export class AgentExecutor extends PromptExecutor {
    */
   protected agentModel(definition: LlmCallDefinition): string | undefined {
     const id = definition.model;
-    if (typeof id !== "string" || id === AGENT_DEFAULT_MODEL) return undefined;
+    if (typeof id !== "string" || id === AGENT_DEFAULT_MODEL || id.endsWith("/default")) return undefined;
     const slash = id.indexOf("/");
     const native = slash > 0 ? id.slice(slash + 1) : id;
     return native.length > 0 ? native : undefined;
+  }
+
+  /**
+   * The model to RECORD — the route this call took, and the model that actually answered it.
+   *
+   * A settled call must never carry the `default` placeholder. `default` is a request ("use whatever
+   * you normally use"), and a persisted model id is read back as a fact about what ran: a cost
+   * roll-up prices it, a session pairs its handle with the provider half of it, and a person reading
+   * the record is entitled to know which model wrote the words. Every one of those is answered wrong
+   * by a placeholder, and wrong in a way nothing downstream can detect.
+   *
+   * The agent reports the answer itself — `claude` in its init event, codex with its configured
+   * session — so this is a substitution, never a guess. When it reports NOTHING, the placeholder is
+   * still not written: see {@link UNREPORTED_MODEL}.
+   */
+  private resolvedModel(definition: LlmCallDefinition, reported: string | undefined): string {
+    const slash = definition.model.indexOf("/");
+    const route = slash > 0 ? definition.model.slice(0, slash) : undefined;
+    const named = slash > 0 ? definition.model.slice(slash + 1) : definition.model;
+    const model = reported ?? (named === "default" || named === "" ? UNREPORTED_MODEL : named);
+    return route === undefined ? model : `${route}/${model}`;
   }
 
   /**

@@ -131,8 +131,7 @@ const GUARD_FAILED: unique symbol = Symbol("ai-exec/hw transition guard failed")
  * durable. `PENDING` is deliberately not here — it is a scheduling state, not an answer.
  */
 /** {@link hashOperation}, total: undefined for an op that has no stable content identity (a live
- *  stream input) rather than the throw a memo wants. The events stamped from this simply omit the
- *  id, matching the record layer's own fallback for the same op. */
+ *  stream input) rather than the throw a memo wants. */
 function tryHashOperation(op: Operation<InlineFamily>): string | undefined {
   try {
     return hashOperation(op);
@@ -141,9 +140,12 @@ function tryHashOperation(op: Operation<InlineFamily>): string | undefined {
   }
 }
 
-/** The scoped id an event stamps — {@link scopedOperationId} over a hash that may be absent. */
-function tryScopedId(hash: string | undefined, scope: OperationScope): string | undefined {
-  return hash === undefined ? undefined : scopedOperationId(hash, scope);
+/** The scoped id an event stamps — {@link scopedOperationId} over a hash that may be absent. An
+ *  unhashable op folds the same `"unhashable"` sentinel the record layer's own fallback uses, so
+ *  the event and the record row agree on the id even when the content has no identity: the scope
+ *  is unique, and the join must survive a stream input. */
+function tryScopedId(hash: string | undefined, scope: OperationScope): string {
+  return scopedOperationId(hash ?? "unhashable", scope);
 }
 
 /** A recorded `sessionRef` (`<session>@<seq>`) back as the published node a loaded op carries. */
@@ -729,6 +731,11 @@ export class WorkflowEngine {
     if (!rootDef) {
       record = { outcome: "error", failure: { classification: "permanent", reason: `loaded root state '${loaded.stateId}' missing from bundle` } };
     } else {
+      // Seed the transcript mirror before any output recomputes: `{ conversation }` bindings resolve
+      // synchronously from it, and only the live prompt path writes it — a loaded state whose op
+      // already completed never dispatches, so without this its `finish` (terminated history and the
+      // live spine alike) would report a recorded success's conversation as not available.
+      await this.seedTranscripts(loaded);
       record = await this.resumeInstance(loaded, rootDef, abort, undefined);
     }
     if (this.fatal) {
@@ -942,10 +949,13 @@ export class WorkflowEngine {
    * A terminated instance of the stopped run, as the child record its parent reads.
    *
    * Outputs are RECOMPUTED, not loaded: a state's declared outputs are a pure function of its
-   * recorded operation value, its children and the pinned definition, and `finish` resolves them
-   * the same way it did the first time. Nothing is journaled — this is history, not work.
+   * recorded operation value, its children and the pinned definition, and the SAME path that
+   * resolved them the first time — `finishSuccess`, so a call embedded in an output binding is
+   * answered from its own record by scoped identity rather than resolving PENDING (only a site
+   * with no record pays again, the cost the loaded-sites contract already names). Nothing is
+   * journaled — this is history, not work.
    */
-  private loadTerminated(loaded: LoadedInstance, def: LoadedState, abort: AbortController, parent: Instance | undefined): ChildRecord {
+  private async loadTerminated(loaded: LoadedInstance, def: LoadedState, abort: AbortController, parent: Instance | undefined): Promise<ChildRecord> {
     const instance = this.buildLoadedInstance(loaded, def, abort, parent);
     for (const child of loaded.children ?? []) {
       if (child.childKey === undefined) continue;
@@ -953,11 +963,11 @@ export class WorkflowEngine {
       if (!childDef) continue;
       // A live child under a terminated parent cannot exist — termination cancels the subtree — so
       // whatever the description says, it is read as history here.
-      instance.children.set(child.childKey, this.loadTerminated(child, childDef, abort, instance));
+      instance.children.set(child.childKey, await this.loadTerminated(child, childDef, abort, instance));
     }
     const term: TerminationRecord =
       loaded.outcome === "success"
-        ? this.finish(instance, "success")
+        ? await this.finishSuccess(instance)
         : { outcome: loaded.outcome ?? "error", ...(loaded.failure !== undefined ? { failure: loaded.failure } : {}) };
     return {
       instanceId: loaded.id,
@@ -998,7 +1008,7 @@ export class WorkflowEngine {
       const childDef = this.config.bundle.states[child.stateId];
       if (!child.live) {
         if (!childDef) continue;
-        instance.children.set(key, this.loadTerminated(child, childDef, abort, instance));
+        instance.children.set(key, await this.loadTerminated(child, childDef, abort, instance));
         continue;
       }
       // A live child continues exactly the way `enterChild` starts one: its own abort wired to the
@@ -2383,6 +2393,12 @@ export class WorkflowEngine {
   private consumeDeferred(instance: Instance): void {
     for (const key of instance.deferredKeys) {
       this.deferredResults.delete(key);
+      // The SITE goes with the result. A site is reused so a re-evaluation finds the same record —
+      // but a consumed wait's record is settled history, and a fresh wait re-dispatching under the
+      // same scoped id is an identical ask a durable store rightly refuses ("already settled"). Asked
+      // again after being answered IS a different ask; the fresh site is what makes that true in the
+      // identity, not just in the prose above.
+      instance.sites.delete(key);
       const inFlight = this.deferredCalls.get(key);
       // Not awaited: cancellation settles the call, and its settle handler tidies up after itself.
       // Blocking a transition on the teardown of a question nobody is answering would be the wait all
@@ -2605,8 +2621,8 @@ export class WorkflowEngine {
     // and has no view of the instance they were resolved against.
     // Hashed HERE, over exactly the value the executor stack receives, and folded with the same
     // scope the record layer was handed — so the settled events and the record share a key
-    // (`scopedOperationId`), each side computing it independently. Undefined when the op cannot be
-    // hashed (a live stream input, which `hashOperation` refuses by design).
+    // (`scopedOperationId`), each side computing it independently. An unhashable op (a live stream
+    // input, which `hashOperation` refuses by design) folds the record layer's own sentinel instead.
     const dispatched = bindInputs(this.operationFor(instance, op), opInputs);
     const operationId = tryScopedId(tryHashOperation(dispatched), scope);
     const outcome = await this.operations.start(dispatched, services).result;
@@ -3369,6 +3385,19 @@ export class WorkflowEngine {
   private async refreshTranscript(at: string, ...aliases: string[]): Promise<void> {
     const turns = await this.readTranscript(at);
     for (const alias of aliases) this.transcripts.set(alias, turns);
+  }
+
+  /**
+   * Mirror every conversation a loaded tree's completed operations touched (Identity and Resume
+   * §04). The mirror is otherwise written only when a prompt op RUNS — and a loaded op does not —
+   * under the same spellings the live refresh uses: the position the call ended at, and the
+   * conversation unpositioned. Pre-order over children in entry order, so the newest position
+   * wins the unpositioned alias, exactly as last-write-wins does live.
+   */
+  private async seedTranscripts(loaded: LoadedInstance): Promise<void> {
+    const published = publishedOfRef(loaded.operation?.sessionRef);
+    if (published !== undefined) await this.refreshTranscript(published.id, published.end.id);
+    for (const child of loaded.children ?? []) await this.seedTranscripts(child);
   }
 }
 

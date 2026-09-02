@@ -298,6 +298,17 @@ export interface AgentResult {
    * resume.
    */
   sessionId?: string;
+  /**
+   * The provider-native model that ANSWERED — `gpt-5-codex`, `claude-opus-4-5`.
+   *
+   * Reported on the terminal message for a transport whose model arrives with its session rather
+   * than in an init event (codex names it on `session_configured`); the `claude` adapters report the
+   * same fact through `system`/`init` while the turn is still running, and either route ends in the
+   * same place. What it is FOR is the settle: a call asked to use "your own default" must not record
+   * the placeholder it was asked with, because a persisted model id is read back as a fact about
+   * what ran — see `AgentExecutor.resolvedModel`.
+   */
+  model?: string;
 }
 
 /**

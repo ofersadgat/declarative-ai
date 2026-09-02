@@ -186,6 +186,18 @@ describe("readCodexEvent — tolerant of both dialects the shipping binary carri
     expect(run).toEqual({ sessionId: "s9", text: "hello" });
   });
 
+  it("keeps the MODEL the session was configured with, in either dialect", () => {
+    // Codex names its model with the session rather than in an init event. It is read for the
+    // settle: a call that asked for the binary's own default must record the model that answered,
+    // never the word `default`.
+    expect(readCodexEvent({ msg: { type: "session_configured", session_id: "s9", model: "gpt-5-codex" } }, {}).model).toBe(
+      "gpt-5-codex",
+    );
+    expect(readCodexEvent({ type: "thread.started", thread_id: "t1", model: "gpt-5-codex" }, {}).model).toBe("gpt-5-codex");
+    // Absent is absent — an older binary that names none leaves it unknown rather than guessed.
+    expect(readCodexEvent({ msg: { type: "session_configured", session_id: "s9" } }, {}).model).toBeUndefined();
+  });
+
   it("surfaces a failed turn as an error, however the message is nested", () => {
     expect(readCodexEvent({ type: "turn.failed", error: { message: "rate limited" } }, {}).error).toBe("rate limited");
     expect(readCodexEvent({ type: "error", message: "bad auth" }, {}).error).toBe("bad auth");

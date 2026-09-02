@@ -317,6 +317,8 @@ function renderTurn(message: JsonValue): string {
 export interface CodexRun {
   text?: string;
   sessionId?: string;
+  /** The model codex named when it configured the session — see {@link AgentResult.model}. */
+  model?: string;
   error?: string;
 }
 
@@ -336,7 +338,14 @@ export function readCodexEvent(event: Record<string, unknown>, run: CodexRun): C
       case "agent_message":
         return { ...run, text: stringOf(bag, "message", "text") ?? run.text };
       case "session_configured":
-        return { ...run, sessionId: stringOf(bag, "session_id", "sessionId") ?? run.sessionId };
+        // The MODEL comes with the session here, where the `claude` adapters announce it in an init
+        // event. Read tolerantly — absent it simply stays unknown — because what it feeds is the
+        // settle's refusal to record a `default` placeholder as the model that ran.
+        return {
+          ...run,
+          sessionId: stringOf(bag, "session_id", "sessionId") ?? run.sessionId,
+          model: stringOf(bag, "model") ?? run.model,
+        };
       case "error":
         return { ...run, error: stringOf(bag, "message", "error") ?? "codex reported an error" };
       default:
@@ -345,7 +354,11 @@ export function readCodexEvent(event: Record<string, unknown>, run: CodexRun): C
   }
   switch (event["type"]) {
     case "thread.started":
-      return { ...run, sessionId: stringOf(event, "thread_id", "threadId", "session_id") ?? run.sessionId };
+      return {
+        ...run,
+        sessionId: stringOf(event, "thread_id", "threadId", "session_id") ?? run.sessionId,
+        model: stringOf(event, "model") ?? run.model,
+      };
     case "item.completed": {
       const item = event["item"];
       if (item === null || typeof item !== "object" || Array.isArray(item)) return run;
@@ -491,6 +504,7 @@ export function createCodexAgentQuery(config: CodexAgentOptions = {}): AgentQuer
         text: run.text,
         ...(structured !== undefined ? { structured } : {}),
         ...(run.sessionId !== undefined ? { sessionId: run.sessionId } : {}),
+        ...(run.model !== undefined ? { model: run.model } : {}),
       };
       yield { type: "result", result };
     } finally {

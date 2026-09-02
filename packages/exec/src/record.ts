@@ -101,6 +101,27 @@ export function sessionOutcomeOf(result: unknown): SessionOutcome | undefined {
   return session !== null && typeof session === "object" ? (session as SessionOutcome) : undefined;
 }
 
+/**
+ * The reported outcome with its handle OWNED — `provider` filled from the op's callee when the
+ * executor named none.
+ *
+ * A handle never travels without the party that minted it (Identity and Resume §03), and a store
+ * keeping the pair has to refuse half of one: the same string on two providers names two different
+ * conversations, so a handle it cannot attribute is one nothing may resume against. That rule read
+ * against a PROMPT op is already satisfied — `providerOf(output.model)` names it — but a delegated
+ * agent arrives as a FUNCTION op through `runtimeFunction`, where the reporter is an ordinary
+ * callback with no model and no obligation to know this contract. Dropping its handle would silently
+ * end session resume for every such agent, which is precisely what it reports the handle FOR.
+ *
+ * The callee is the honest owner there: the conversation belongs to the registered function that
+ * ran it, and two different functions naming one handle is exactly the confusion the pair prevents.
+ */
+function ownedOutcome(session: SessionOutcome | undefined, op: Operation<InlineFamily>): SessionOutcome | undefined {
+  if (session?.providerSessionId === undefined || session.provider !== undefined) return session;
+  const callee = op.kind === "function" ? op.functionRef : undefined;
+  return callee === undefined ? session : { ...session, provider: callee };
+}
+
 /** A record as stored: the stub, plus the answer once there is one. */
 export interface StoredRecord<R = ResolvedValue, M extends ExecMetrics = ExecMetrics> extends RecordStub {
   result?: { value: R } | { error: Failure; value?: R };
@@ -354,8 +375,10 @@ export function withRecord<R = ExecServices, M extends ExecMetrics = ExecMetrics
           : { error: result.error, ...(recorded !== undefined ? { value: recorded } : {}) };
         // The session outcome rides along when the executor reported one — the handle and the delta,
         // which every recorded call needs, as against the payload above, which only a persisting
-        // caller does.
-        const session = sessionOutcomeOf(result);
+        // caller does. OWNED before it is stored: a handle whose provider is unnamed cannot be
+        // resumed against, and a store that drops such a pair would take a delegated agent's whole
+        // conversation with it — see {@link ownedOutcome}.
+        const session = ownedOutcome(sessionOutcomeOf(result), op);
         await records.finish(ref, { result: settled, metrics: result.metrics, ...(session !== undefined ? { sessionOutcome: session } : {}) });
         // WHERE IT LANDED, when that is not where it was claimed. A store settling this record may
         // have found that the call did not run in the conversation the position belonged to — a remote

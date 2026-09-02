@@ -16,14 +16,14 @@ import { isOk, sessionOutcomeOf, promptOp, resolveSessionRef, type ExecEvent, ty
 import type { LlmOutput, ModelMessage } from "@declarative-ai/llm";
 import { PromptExecutor } from "@declarative-ai/promptop";
 import { createToolGate, PermissionLedger, type Approver, type PermissionBaseline, type PermissionMode, type SmartApprover } from "@declarative-ai/permissions";
-import { AgentApiExecutor, AgentExecutor, DELEGATED_CAPS } from "../src/index.js";
+import { AgentApiExecutor, AgentExecutor, DELEGATED_CAPS, UNREPORTED_MODEL } from "../src/index.js";
 import type { AgentQuery, AgentQueryOptions } from "../src/index.js";
 
 const op = (user = "do it", config: Record<string, unknown> = {}) =>
   promptOp({ user, config: config as never, output: { name: "answer", schema: { type: "string" } } });
 
 /** A query that records what it was handed and answers with a fixed result. */
-function capturing(result: { text?: string; costUsd?: number; sessionId?: string; structured?: unknown } = {}) {
+function capturing(result: { text?: string; costUsd?: number; sessionId?: string; structured?: unknown; model?: string } = {}) {
   let seen: AgentQueryOptions | undefined;
   const query: AgentQuery = async function* (opts) {
     seen = opts;
@@ -46,7 +46,7 @@ const objectOp = () =>
 /** A resolved session with the non-enumerable half attached, exactly as a store hands one over. */
 /** Typed as the ctx slot is (`JsonValue`), since that is where it gets assigned; the executor casts
  *  it back to `ModelMessage` exactly as the production code does. */
-function session(over: { mode?: "append" | "fork"; providerSessionId?: string; forkFrom?: { handle: string; at?: string }; messages?: ModelMessage[] }): ResolvedSession {
+function session(over: { mode?: "append" | "fork"; providerSessionId?: string; forkFrom?: { handle: string; provider: string; at?: string }; messages?: ModelMessage[] }): ResolvedSession {
   return resolveSessionRef<ModelMessage>("conv:1", {
     mode: over.mode ?? "append",
     at: { id: "conv", seq: 1 },
@@ -216,7 +216,7 @@ describe("one session implementation, two transports (the point of the split)", 
     const caps = { ...DELEGATED_CAPS, sessionFork: false };
     const forked = capturing();
     await new AgentExecutor({ query: forked.query, capabilities: caps }).start(op(), {
-      session: session({ mode: "fork", forkFrom: { handle: "sess-abc" } }),
+      session: session({ mode: "fork", forkFrom: { handle: "sess-abc", provider: "agent" } }),
     }).result;
     expect(forked.seen()?.messages).toBeDefined();
 
@@ -230,9 +230,18 @@ describe("one session implementation, two transports (the point of the split)", 
 
   it("a native FORK carries the handle plus the branch flag", async () => {
     const { query, seen } = capturing();
-    await new AgentExecutor({ query }).start(op(), { session: session({ mode: "fork", forkFrom: { handle: "sess-abc" } }) }).result;
+    await new AgentExecutor({ query }).start(op(), { session: session({ mode: "fork", forkFrom: { handle: "sess-abc", provider: "agent" } }) }).result;
     expect(seen()?.resume).toBe("sess-abc");
     expect(seen()?.forkSession).toBe(true);
+  });
+  it("replays a fork whose handle belongs to another provider", async () => {
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query }).start(op(), {
+      session: session({ mode: "fork", forkFrom: { handle: "foreign", provider: "codex-cli" } }),
+    }).result;
+    expect(seen()?.forkSession).toBeUndefined();
+    expect(seen()?.resume).toBeUndefined();
+    expect(seen()?.messages).toBeDefined();
   });
 
   /**
@@ -246,7 +255,7 @@ describe("one session implementation, two transports (the point of the split)", 
   it("cuts the copy at a named message when the branch is behind the tip", async () => {
     const { query, seen } = capturing();
     await new AgentExecutor({ query }).start(op(), {
-      session: session({ mode: "fork", forkFrom: { handle: "sess-abc", at: "msg-7" } }),
+      session: session({ mode: "fork", forkFrom: { handle: "sess-abc", provider: "agent", at: "msg-7" } }),
     }).result;
     expect(seen()?.resume).toBe("sess-abc");
     expect(seen()?.forkSession).toBe(true);
@@ -255,7 +264,7 @@ describe("one session implementation, two transports (the point of the split)", 
 
   it("asks for no cut when the branch starts where the remote stands", async () => {
     const { query, seen } = capturing();
-    await new AgentExecutor({ query }).start(op(), { session: session({ mode: "fork", forkFrom: { handle: "sess-abc" } }) }).result;
+    await new AgentExecutor({ query }).start(op(), { session: session({ mode: "fork", forkFrom: { handle: "sess-abc", provider: "agent" } }) }).result;
     expect(seen()?.forkSession).toBe(true);
     expect(seen()?.resumeSessionAt).toBeUndefined();
   });
@@ -337,10 +346,10 @@ describe("lossless output — what the agent produced reaches the caller", () =>
 
   /**
    * The full `LlmOutput`, ASKED FOR on the record channel — which is what a session persists.
+   * the class typechecked as returning a projection while returning a payload. Asking per call leaves
    *
    * This used to construct the executor with `record: true` and read the payload off the execution
    * VALUE. That mode swapped `Out`, and `AgentExecutor` drops `PromptExecutor`'s `Out` parameter, so
-   * the class typechecked as returning a projection while returning a payload. Asking per call leaves
    * the value alone and puts the payload beside it, where no type has to lie.
    */
   const payloadOf = async (query: AgentQuery, ctx: ExecServices = {}) =>
@@ -348,6 +357,13 @@ describe("lossless output — what the agent produced reaches the caller", () =>
 
   it("reports the agent's OWN finish reason, so a truncated run does not read as a clean one", async () => {
     expect((await payloadOf(fullTurn)).finishReason).toBe("length");
+  });
+
+  it("reports the model the agent actually selected for a default route", async () => {
+    const record = await payloadOf(fullTurn);
+    expect(record.finishReason).toBe("length");
+
+    expect(record.model).toBe("agent/claude-opus-4-7");
   });
 
   it("falls back to `unknown` rather than to a fabricated `stop` when the transport said nothing", async () => {
@@ -899,6 +915,50 @@ describe("the model reaches the transport", () => {
     const { query, seen } = capturing();
     await new AgentExecutor({ query }).start(op(), {}).result;
     expect(seen()?.model).toBeUndefined();
+  });
+
+  it("asks for nothing for a ROUTE'S placeholder too, not only this class's own", async () => {
+    // A host that routes by name spells the placeholder with its route in front — `claude-cli/default`
+    // — so the session it produces stays bound to that route. It means the same thing as the bare
+    // one and must reach the binary the same way: as no `--model` at all.
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query }).start(op("do it", { model: "claude-cli/default" }), {}).result;
+    expect(seen()?.model).toBeUndefined();
+  });
+});
+
+/**
+ * What a SETTLED call says the model was.
+ *
+ * `default` is a request, not an answer. Persisted, it is read back as a fact about what ran — by a
+ * price table, by the provider half of a session's remote identity, by a person reading the record —
+ * and every one of those readings is wrong. So the placeholder goes in and never comes out: the
+ * model the agent reports replaces it, and where nothing was reported the record says so in a word
+ * that cannot be mistaken for a model.
+ */
+describe("the model a settled call records", () => {
+  const recordOf = async (query: AgentQuery, config?: Record<string, unknown>) =>
+    (await new AgentExecutor({ query }).start(op("do it", config), { returnRecord: true }).result as { record?: LlmOutput })
+      .record!;
+
+  it("takes the model an adapter reports on its terminal message, not just the init event", async () => {
+    // Codex names its model with the session it configured rather than in an init event, and carries
+    // it on the result. Either route ends in the same recorded fact.
+    const { query } = capturing({ model: "gpt-5-codex" });
+    expect((await recordOf(query, { model: "codex/default" })).model).toBe("codex/gpt-5-codex");
+  });
+
+  it("never records the placeholder, even when the agent reported no model at all", async () => {
+    const { query } = capturing();
+    const record = await recordOf(query, { model: "generic-cli/default" });
+    expect(record.model).not.toContain("default");
+    expect(record.model).toBe(`generic-cli/${UNREPORTED_MODEL}`);
+  });
+
+  it("leaves a model the caller NAMED exactly as it was asked for", async () => {
+    // Nothing to resolve: the call said which model, and no report overrides an explicit ask.
+    const { query } = capturing();
+    expect((await recordOf(query, { model: "claude-cli/sonnet" })).model).toBe("claude-cli/sonnet");
   });
 });
 
