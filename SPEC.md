@@ -194,7 +194,10 @@ every descendant.
 
 If an operation fails unrecoverably, or a child terminates with `error` or
 `timeout` and no transition handles it, the state terminates with
-`terminate.error` instead of continuing.
+`terminate.error` instead of continuing. Only a *taken* transition handles it: a
+rule whose guard is still waiting on a deferred call has answered nothing, so the
+failure ends the state and the wait is withdrawn with it rather than holding the
+failed child open for a person to move past.
 
 Transition order matters: child-completion conditions should be declared before
 child-entry conditions, so that the evaluation that runs after a child

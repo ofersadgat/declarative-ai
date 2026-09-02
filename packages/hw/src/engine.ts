@@ -894,7 +894,7 @@ export class WorkflowEngine {
       def,
       childKey: loaded.childKey,
       parent,
-      inputs: loaded.inputs,
+      inputs: this.rehydrateArtifacts(loaded.inputs),
       outputs: {},
       resourceKey: resourceKeyFor(def, parent),
       address:
@@ -1150,6 +1150,19 @@ export class WorkflowEngine {
         if (step === "terminated-canceled") return this.finish(instance, "canceled");
         if (step === "terminated-timeout") return this.finish(instance, "timeout");
         if (step === "waiting") {
+          // A failure no rule has answered is not held open by a rule that is still asking. The wait
+          // belongs to a transition that would MOVE the run on, and only a TAKEN transition handles a
+          // child's failure (SPEC §3.3). Letting the wait park the round showed a run as "waiting on
+          // you" over a child that had already failed — and answering it walked the run forward past
+          // the failure, with that child's outputs missing from everything downstream. The failure
+          // wins here, and the offer is withdrawn with the state.
+          if (instance.unhandledFailures.size > 0) {
+            const key = [...instance.unhandledFailures][0]!;
+            return this.finish(instance, "error", {
+              classification: "permanent",
+              reason: unhandledChildReason(key, instance.children.get(key)),
+            });
+          }
           // A guard asked for something and has not been answered. Nothing later in the list may run
           // ahead of that answer, so the round ends here and resumes — from the top of the same list,
           // with the same children still eligible — when the call settles or a child completes.
@@ -3272,6 +3285,40 @@ export class WorkflowEngine {
       }
     }
     return term;
+  }
+
+  /**
+   * Put the CONTENT back on the artifact refs a loaded instance's inputs carry.
+   *
+   * A description's inputs come from the journal, and the journal elides artifact content on
+   * purpose (`shallowRedactArtifacts` — a document in every `instance.entered` row is a journal
+   * nobody can read). That is the right trade for a record and the wrong one for a run: a loaded
+   * live state whose parent wired it a document then runs with `{artifact: true, name}` and nothing
+   * behind it. Seen on a resumed review gate — the component was handed a reference to the very
+   * document it exists to show, and drew the reference.
+   *
+   * The content is not lost. The history under a loaded parent is rebuilt through the same
+   * termination path a live child takes, and a blob output re-registers its artifact here with the
+   * content the record holds — so by the time a live sibling is built, the name resolves. This is
+   * the same lookup `scope.artifact(name)` makes for the resolver, applied to the one place a
+   * value arrives without going through it. A ref whose name nothing registered is left as it was:
+   * the input then says truthfully what the journal said.
+   */
+  private rehydrateArtifacts(inputs: Record<string, ResolvedValue>): Record<string, ResolvedValue> {
+    let changed = false;
+    const out: Record<string, ResolvedValue> = {};
+    for (const [name, value] of Object.entries(inputs)) {
+      if (isArtifactRef(value) && value.content === undefined) {
+        const registered = this.artifacts.find((a) => a.name === value.name);
+        if (registered !== undefined) {
+          out[name] = registered as unknown as ResolvedValue;
+          changed = true;
+          continue;
+        }
+      }
+      out[name] = value;
+    }
+    return changed ? out : inputs;
   }
 
   /** Register inline artifact CONTENT as a session artifact and return the ref that stands for it. */

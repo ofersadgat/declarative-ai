@@ -112,6 +112,16 @@ function harness(def: unknown) {
     ),
   );
 
+  /** A child that ends badly — a classified failure travels as DATA (§4.2), which is the shape a
+   *  real failing child has, and the case a wait must not hold open (see the last describe). */
+  registry.functions.set(
+    "fail",
+    hostFunction<ExecServices, WorkflowMetrics>(
+      async () => ({ error: { classification: "permanent" as const, reason: "risky failed" } }),
+      { interactive: false, readOnly: true, memoizable: false },
+    ),
+  );
+
   const leaf = { operation: { kind: "function", function: "noop" } };
   const bundle = loadBundle(
     {
@@ -119,6 +129,7 @@ function harness(def: unknown) {
       "moved.json": leaf,
       "slow.json": { operation: { kind: "function", function: "sleep" } },
       "dawdling.json": { operation: { kind: "function", function: "dawdle" } },
+      "failing.json": { operation: { kind: "function", function: "fail" } },
     },
     "plan",
     { functions: registry.functions },
@@ -459,5 +470,51 @@ describe("a wait is only started for a rule the round can reach", () => {
     });
     expect((await engine.run({ inputs: { severity: 5 } })).outcome).toBe("success");
     expect(waiters).toHaveLength(0);
+  });
+});
+
+/**
+ * A wait does not hold a FAILURE open.
+ *
+ * The rule on a child mount is "when this child ends, and somebody drags the card, move on". The child
+ * ending in error is the case the rule never meant: only a TAKEN transition handles a failure (SPEC
+ * §3.3), and a guard still asking has taken nothing. Seen live: a phase failed on its way out, the
+ * root parked on the drag its rule was waiting for, the board showed the run as waiting on a person
+ * over a state that was already dead — and the drag, when it came, walked the run into the next
+ * phase with the failed one's outputs missing everywhere downstream.
+ */
+describe("a wait does not hold a child's failure open", () => {
+  it("fails the state when the child the waiting rule guards terminated with error", async () => {
+    const { engine, waiters } = harness({
+      children: {
+        risky: { state: "failing", transitions: [{ to: "moved", when: "await_event('task_drag')" }] },
+        moved: { state: "moved" },
+      },
+      sequence: ["risky"],
+    });
+    const result = await engine.run({ inputs: {} });
+    expect(result.outcome).toBe("error");
+    expect(result.failure?.reason).toContain("child 'risky' terminated with error and no transition handled it");
+    expect(result.failure?.reason).toContain("risky failed");
+    // The offer was withdrawn with the state: a request left on somebody's screen for a run that has
+    // ended is the thing this exists to prevent.
+    expect(waiters).toHaveLength(1);
+    expect(waiters[0]!.canceled).toBe(true);
+  });
+
+  it("still waits, and still moves, when the child it guards succeeded", async () => {
+    const { engine, waiters, persistence } = harness({
+      children: {
+        first: { state: "moved", transitions: [{ to: "moved", when: "await_event('task_drag')" }] },
+        moved: { state: "moved" },
+      },
+      sequence: ["first"],
+    });
+    const run = engine.run({ inputs: {} });
+    await settled();
+    expect(waiters).toHaveLength(1);
+    waiters[0]!.settle(true as ResolvedValue);
+    expect((await run).outcome).toBe("success");
+    expect(takenTo(persistence)).toEqual(["moved"]);
   });
 });

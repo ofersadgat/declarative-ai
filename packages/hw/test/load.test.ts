@@ -316,3 +316,71 @@ describe("what a loaded operation reports", () => {
     expect(result.dispatched).toEqual([]);
   });
 });
+
+/**
+ * A loaded instance's inputs come from the journal, which elides artifact content on purpose. The
+ * content is not gone — the history rebuilt under the parent re-registers every blob output — so a
+ * live state wired a document by its parent has to get the document back, not the reference. Seen
+ * on a resumed review gate, which drew `{artifact: true, name}` where the document should have been.
+ */
+describe("a loaded input that is an artifact ref gets its content back", () => {
+  it("rehydrates from the artifact the rebuilt history registered", async () => {
+    let received: Record<string, unknown> | undefined;
+    const registry = newRegistry();
+    registry.functions.set(
+      "consume",
+      hostFunction(async (inputs: Record<string, unknown>) => {
+        received = inputs;
+        return ok({}) as ExecResult<ResolvedValue, WorkflowMetrics>;
+      }, HOST),
+    );
+    const files: Record<string, StateDef> = {
+      plan: {
+        children: { a: { state: "a" }, b: { state: "b", inputs: { docs: ".children.a.output.doc" } } },
+        sequence: ["a", "b"],
+      },
+      a: {
+        outputs: { doc: { kind: "blob", binding: ".operation.output.doc" } },
+        operation: { kind: "function", function: "consume", output: { doc: { schema: { type: "string", contentMediaType: "text/markdown" } } } },
+      },
+      b: {
+        inputs: { docs: { kind: "blob", schema: { type: "string", contentMediaType: "text/markdown" } } },
+        operation: { kind: "function", function: "consume" },
+      },
+    };
+    const engine = new WorkflowEngine({
+      bundle: loadBundle(files, "plan"),
+      registry,
+      validator: new SchemaValidator(),
+      persistence: new InMemoryPersistence(),
+    });
+    const result = await engine.loadRun({
+      id: "i-plan",
+      stateId: "plan",
+      inputs: {},
+      live: true,
+      cursor: 1,
+      children: [
+        {
+          id: "i-a",
+          stateId: "a",
+          childKey: "a",
+          inputs: {},
+          live: false,
+          outcome: "success",
+          operation: { value: { doc: "# hello, body" } },
+        },
+        {
+          id: "i-b",
+          stateId: "b",
+          childKey: "b",
+          // Exactly as the journal wrote it: the reference, content elided.
+          inputs: { docs: { artifact: true, name: "a#i-a.doc", format: "text/markdown" } as unknown as ResolvedValue },
+          live: true,
+        },
+      ],
+    });
+    expect(result.outcome).toBe("success");
+    expect(received?.["docs"]).toMatchObject({ artifact: true, name: "a#i-a.doc", content: "# hello, body" });
+  });
+});
