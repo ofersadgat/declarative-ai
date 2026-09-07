@@ -105,39 +105,28 @@ function mergeSlotMap(
 const KIND_SPECIFIC = ["args", "prompt", "system", "function"] as const;
 
 /**
- * Refuse `sessionId`, which used to be a synonym for `session`.
+ * Refuse the two spellings that are no longer fields: `sessionId`, and a top-level `fork`.
  *
- * A refusal rather than a silent drop, because `sessionId` is NOT in `OPERATION_OWN_FIELDS`: an
- * unrecognized field is passed through to the LLM call configuration, so ignoring it would ship the
- * author's session declaration to the model as a call parameter and start a fresh conversation
- * without saying so.
+ * A refusal rather than a silent drop. An unrecognized field is passed through to the LLM call
+ * configuration, so ignoring `sessionId` would ship the author's session declaration to the model as
+ * a call parameter and start a fresh conversation without saying so; ignoring `fork` would drop a
+ * branch the author asked for and append to a shared thread instead. Both failures look like success.
  */
 export function refuseSynonyms<T extends OperationFields>(fields: T): T {
-  if ((fields as { sessionId?: unknown }).sessionId === undefined) return fields;
-  throw new Error("operation declares 'sessionId'; the field is called 'session'");
-}
-
-type SessionDeclValue = OperationFields["session"];
-
-/**
- * Two session declarations are the same if they name the same stream.
- *
- * Refs compare by id and expressions by source text. Comparing expressions textually is exact in the
- * direction that matters: two DIFFERENT spellings of the same position compare unequal, which costs
- * a spurious variant id, while two identical spellings can only mean the same thing.
- */
-function sameSession(a: SessionDeclValue, b: SessionDeclValue): boolean {
-  if (a === b) return true;
-  const keyOf = (v: SessionDeclValue): string | undefined =>
-    v !== null && typeof v === "object" ? ("id" in v ? v.id : `expr:${v.expr}`) : undefined;
-  const [left, right] = [keyOf(a), keyOf(b)];
-  return left !== undefined && left === right;
-}
-
-function describeSession(value: SessionDeclValue): string {
-  if (value === null) return "null";
-  if (typeof value !== "object") return String(value);
-  return "id" in value ? value.id : `{expr: ${value.expr}}`;
+  if ((fields as { sessionId?: unknown }).sessionId !== undefined) {
+    throw new Error("operation declares 'sessionId'; the field is called 'session'");
+  }
+  if ((fields as { fork?: unknown }).fork !== undefined) {
+    // `fork` was a sibling of `session`, and being a sibling is what made it wrong: it inherited
+    // down the environment chain on its own, so a root that wrote `fork: true` branched every
+    // descendant's conversation whatever each of them had declared. It belongs to the session it
+    // is about (DESIGN.md §1.6), which also makes the whole declaration replace as one value.
+    throw new Error(
+      "operation declares 'fork' beside 'session'; fork is a property OF the session — write "
+      + '{"session": {"name": "…", "fork": true}} (or {"join": …, "fork": true})',
+    );
+  }
+  return fields;
 }
 
 /** Merge `over` onto `base`, field by field. `over` is the NEARER layer and wins. */
@@ -233,7 +222,7 @@ export function mergeOperationChain(layers: ReadonlyArray<OperationFields | unde
 }
 
 /** The fields `LoadedState.environment` keeps — the execution environment, split off after merging. */
-export const EXEC_ENVIRONMENT_FIELDS = ["session", "fork", "tools", "conversation", "permissions"] as const;
+export const EXEC_ENVIRONMENT_FIELDS = ["session", "tools", "conversation", "permissions"] as const;
 
 /**
  * A stable identity for one merged environment, so the loader can tell whether a state mounted under

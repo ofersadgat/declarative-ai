@@ -21,6 +21,7 @@ import { withRecord, withSessionPosition } from "@declarative-ai/exec";
 import { isPermissionDenied, type Approver } from "@declarative-ai/permissions";
 import { WorkflowEngine, type EngineConfig } from "../src/engine.js";
 import { loadBundle } from "../src/loader.js";
+import { sessionKeyOf } from "../src/session.js";
 import { InMemoryPersistence, isArtifactRef, type ArtifactRef } from "../src/ports.js";
 import type { EnvironmentDecl, StateDef } from "../src/format.js";
 import {
@@ -1108,11 +1109,13 @@ describe("a delegated agent runs in a CONVERSATION (SESSIONS.md §6)", () => {
     // A RESOLVED position, not a request. The engine looks the conversation up in `servicesFor` now,
     // immediately before dispatch, so what reaches an executor is the provider handle and the
     // append/fork decision it actually consumes — never a request it has no use for.
-    // `at.id` is the CONVERSATION; `id` is that conversation AT a position (`review@0`).
-    expect(seen[0]!.session?.at.id).toBe("review");
+    // `at.id` is the CONVERSATION; `id` is that conversation AT a position. The conversation is the
+    // (name, scope) PAIR — `review` as the state that WROTE it means it — so the bare word is not a
+    // key anything else in the run can collide with (DESIGN.md §1.6).
+    expect(seen[0]!.session?.at.id).toBe(sessionKeyOf("review", "/"));
     // Stable across replays, so a re-run lands on the conversation it landed on before. Carried on the
     // resolution so a fork can name itself without the request being kept alive alongside it.
-    expect(seen[0]!.session?.seed).toBe("s:review");
+    expect(seen[0]!.session?.seed).toBe(`s:${sessionKeyOf("review", "/")}`);
   });
 
   it("mints a per-instance conversation when the state declares none", async () => {
@@ -1147,13 +1150,17 @@ describe("a delegated agent runs in a CONVERSATION (SESSIONS.md §6)", () => {
     expect(seen[0]!.session?.id).toBeTypeOf("string");
   });
 
-  it("puts two states that name one conversation into one conversation", async () => {
+  const twoAgents = (session: JsonValue): Record<string, StateDef> => ({
+    root: { inputs: {}, outputs: {}, children: { first: {}, second: {} }, sequence: ["first", "second"] },
+    "root/first": { inputs: {}, outputs: { r: { schema: { type: "string" } } }, operation: { kind: "function", function: "agent", session: session as never } },
+    "root/second": { inputs: {}, outputs: { r: { schema: { type: "string" } } }, operation: { kind: "function", function: "agent", session: session as never } },
+  });
+
+  it("puts two states that name one SCOPE into one conversation", async () => {
     const { entry, seen } = capturingAgent({ sessionResume: true });
-    const files: Record<string, StateDef> = {
-      root: { inputs: {}, outputs: {}, children: { first: {}, second: {} }, sequence: ["first", "second"] },
-      "root/first": { inputs: {}, outputs: { r: { schema: { type: "string" } } }, operation: { kind: "function", function: "agent", session: "review" } },
-      "root/second": { inputs: {}, outputs: { r: { schema: { type: "string" } } }, operation: { kind: "function", function: "agent", session: "review" } },
-    };
+    // `in: "parent"` is what makes this one name: both states write `review`, and both scope it to
+    // the composite above them, so the two declarations are the same declaration.
+    const files = twoAgents({ name: "review", in: "parent" });
     const { engine } = makeEngine(files, "root", () => ok({}), { functions: { agent: entry }, sessionDispatcher: true });
     await engine.run({ inputs: {} });
     expect(seen).toHaveLength(2);
@@ -1161,6 +1168,22 @@ describe("a delegated agent runs in a CONVERSATION (SESSIONS.md §6)", () => {
     // continues the thread rather than starting beside it.
     expect(seen[1]!.session?.at.id).toBe(seen[0]!.session?.at.id);
     expect(seen[1]!.session!.at.seq).toBeGreaterThan(seen[0]!.session!.at.seq);
+  });
+
+  /**
+   * The behaviour change scoped names exist for.
+   *
+   * Two siblings each writing `review` used to be one run-global word and therefore one transcript —
+   * and one worktree, and one `"session"` approval scope. They are two WRITERS now, so they are two
+   * scopes, and sharing has to be asked for. Nothing about the spelling `"review"` used to say which
+   * of the two an author was getting.
+   */
+  it("...and keeps two states that each write the same WORD apart", async () => {
+    const { entry, seen } = capturingAgent({ sessionResume: true });
+    const { engine } = makeEngine(twoAgents("review"), "root", () => ok({}), { functions: { agent: entry }, sessionDispatcher: true });
+    await engine.run({ inputs: {} });
+    expect(seen).toHaveLength(2);
+    expect(seen[1]!.session?.at.id).not.toBe(seen[0]!.session?.at.id);
   });
 });
 
@@ -1178,7 +1201,7 @@ describe("per-session workspace overlay (DESIGN §5.1, \"Sessions: the run-scope
     const { engine, fake } = makeEngine(files("sess-x"), "s", () => ok({ r: "done" }), {
       extra: {
         services: { workspace: { root: "/default" } },
-        workspaceFor: (id) => (id === "sess-x" ? { root: "/ws/x" } : undefined),
+        workspaceFor: (id) => (id === sessionKeyOf("sess-x", "/") ? { root: "/ws/x" } : undefined),
       },
     });
     await engine.run({ inputs: {} });
@@ -1239,7 +1262,8 @@ describe("operation.* resolves during a run", () => {
     // with the slot this call occupies — and `end` beside it, the same conversation with no position.
     // Two ids and nothing else: everything a RESOLVED session carries is non-enumerable by
     // construction, and neither of these is parsed by anything outside the store.
-    expect(result.outputs?.read).toEqual({ id: "planning@1", end: { id: "planning" } });
+    const planning = sessionKeyOf("planning", "/");
+    expect(result.outputs?.read).toEqual({ id: `${planning}@1`, end: { id: planning } });
   });
 
   /**
@@ -1249,6 +1273,10 @@ describe("operation.* resolves during a run", () => {
    */
   const continuing = (wired: string, between = false): Record<string, StateDef> => ({
     root: {
+      // Declared HERE rather than on each child: two children each writing `thread` would be two
+      // writers and therefore two conversations, which is the whole point of a scoped name. Naming
+      // it once for the subtree is what an author writes when they mean one thread.
+      environment: { session: "thread" },
       children: {
         first: { state: "first" },
         ...(between ? { interloper: { state: "interloper" } } : {}),
@@ -1257,12 +1285,10 @@ describe("operation.* resolves during a run", () => {
       sequence: ["first", ...(between ? ["interloper"] : []), "second"],
     },
     first: {
-      environment: { session: "thread" },
       outputs: { r: { schema: { type: "string" } } },
       operation: { kind: "prompt", prompt: "one", model: "m" },
     },
     interloper: {
-      environment: { session: "thread" },
       outputs: { r: { schema: { type: "string" } } },
       operation: { kind: "prompt", prompt: "two", model: "m" },
     },
@@ -1301,8 +1327,10 @@ describe("operation.* resolves during a run", () => {
     // The two are orthogonal: `.end` says WHERE (the moving end), `fork` says what to do there. A
     // deliberate divergence from the head cannot be inferred from stream state, which is why the flag
     // survives at the consumption site.
+    // `fork` rides ON the session it is about, so it cannot arrive from a layer that knows nothing
+    // about which conversation this call joins.
     const files = continuing(".children.first.operation.output.session.end");
-    files["second"]!.environment = { ...files["second"]!.environment, fork: true } as never;
+    files["second"]!.environment = { session: { expr: ".inputs.thread", fork: true } } as never;
     const { engine, fake } = makeEngine(files, "root", () => ok({ r: "done" }));
     await engine.run({ inputs: {} });
     expect(fake.calls[1]!.ctx.session?.mode).toBe("fork");
@@ -1401,7 +1429,7 @@ describe("the conversation and the resource bundle are different keys", () => {
     // Inherited, not minted per state — otherwise every undeclared operation would ask for its own
     // worktree, which §5.1 rules out — a fork branches the conversation, not the filesystem.
     const { engine, fake } = makeEngine(twoStates(), "root", () => ok({ r: "done" }), {
-      extra: { workspaceFor: (key) => (key === "shared" ? { root: "/ws/shared" } : undefined) },
+      extra: { workspaceFor: (key) => (key === sessionKeyOf("shared", "/") ? { root: "/ws/shared" } : undefined) },
     });
     await engine.run({ inputs: {} });
     expect(fake.calls).toHaveLength(2);
@@ -1411,7 +1439,7 @@ describe("the conversation and the resource bundle are different keys", () => {
   it("`session: null` starts a fresh CONVERSATION but keeps the enclosing workspace", async () => {
     // The split stated as one test: the author opted out of the transcript, not the worktree.
     const { engine, fake } = makeEngine(twoStates(null), "root", () => ok({ r: "done" }), {
-      extra: { workspaceFor: (key) => (key === "shared" ? { root: "/ws/shared" } : undefined) },
+      extra: { workspaceFor: (key) => (key === sessionKeyOf("shared", "/") ? { root: "/ws/shared" } : undefined) },
     });
     await engine.run({ inputs: {} });
     expect((fake.calls[1] as FakeCall).ctx.workspace?.root).toBe("/ws/shared");
@@ -1423,7 +1451,8 @@ describe("the conversation and the resource bundle are different keys", () => {
     const { engine, fake } = makeEngine(twoStates("other"), "root", () => ok({ r: "done" }), {
       extra: {
         services: { workspace: { root: "/run" } },
-        workspaceFor: (key) => (key === "other" ? { root: "/ws/other" } : { root: "/ws/shared" }),
+        // `other` is written on `leaf2`, which this run reaches at the child key `second`.
+        workspaceFor: (key) => (key === sessionKeyOf("other", "second") ? { root: "/ws/other" } : { root: "/ws/shared" }),
       },
     });
     await engine.run({ inputs: {} });
@@ -1496,7 +1525,7 @@ describe("the conversation and the resource bundle are different keys", () => {
   });
 
   it("...and the same ref with `fork` branches instead of continuing", async () => {
-    const files = explicitPair({ expr: ".inputs.thread" }, { environment: { fork: true } });
+    const files = explicitPair({ expr: ".inputs.thread", fork: true });
     const { engine, fake } = makeEngine(files, "root", () => ok({ r: "done" }));
     await engine.run({ inputs: {} });
     // A fork still SEES the prefix — that is what makes it a branch of this conversation rather

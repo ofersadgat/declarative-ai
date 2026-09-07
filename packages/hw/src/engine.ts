@@ -99,9 +99,11 @@ import {
   publishedSession,
   resolveSession,
   sessionFromExpr,
+  sessionKeyOf,
+  type NormalizedSession,
   type PublishedSession,
   type SessionBinding,
-  type SessionDecl,
+  type SessionExpr,
 } from "./session.js";
 import type { OperationNode } from "./operationNode.js";
 import { isFannedOut } from "./fanout.js";
@@ -615,12 +617,67 @@ function addressOf(parent: Instance | undefined, childKey: string | undefined): 
   return [...parent.address, { childKey, occurrence }];
 }
 
-function resourceKeyFor(def: LoadedState, parent: Instance | undefined): string {
-  // `scopeSession` rather than `environment.session`: the latter exists only on a state that declares
-  // an operation, and declaring a session on a composite ROOT is the ordinary way to give a whole
-  // subtree one bundle.
+/**
+ * The nearest ENCLOSING instance of one state, by the id it loads under (DESIGN.md §1.6).
+ *
+ * The seam a session scope resolves through, and the reason a loop needs no rule of its own: a scope
+ * above the loop finds one instance on every pass, so the worktree and the permission ledger survive
+ * the iterations, while a scope inside it finds a new instance each time. "Nearest" is what makes a
+ * self-mounting subtree work — the enclosing frame, like a stack.
+ *
+ * Starts at `from` rather than at its parent, because a state may scope a name to ITSELF (which is
+ * what a bare name does) and its own instance is then the anchor.
+ */
+function enclosingInstance(from: Instance | undefined, stateId: string): Instance | undefined {
+  for (let at = from; at !== undefined; at = at.parent) {
+    if (at.def.id === stateId) return at;
+  }
+  return undefined;
+}
+
+/**
+ * How an anchoring instance is NAMED inside a session key — its address, as a path.
+ *
+ * Not the instance id, which would satisfy the semantics and fail everything else. `resourceKey`
+ * reaches the host through `workspaceFor` (`EngineConfig`), so it has to be two things a UUIDv7 is
+ * not: legible enough for a host to recognize which bundle it is being asked about, and the same in
+ * two runs of one pinned definition — an id is minted fresh per run, so a worktree keyed on one
+ * would be a different worktree every time the workflow ran.
+ *
+ * An address is both, and it keeps the property the anchor exists for: an occurrence counts entries
+ * under one key, so a loop's second pass through a scope is a different address, while a scope ABOVE
+ * the loop has the same address on every pass. The root is `/`, and each step reads `key` or
+ * `key:occurrence` — the occurrence is elided at 0 so the common case stays short.
+ */
+function addressPath(address: InstanceAddress): string {
+  if (address.length === 0) return "/";
+  return address.map((step) => (step.occurrence === 0 ? step.childKey : `${step.childKey}:${step.occurrence}`)).join("/");
+}
+
+/**
+ * The resource bundle a new instance runs in: workspace, permission ledger, `"session"` approval scope.
+ *
+ * Keyed on the `(name, scope)` PAIR a declaration resolved to, never on the bare name — two subtrees
+ * that each wrote `"main"` meaning different things must not share a worktree. `scopeSession` rather
+ * than `environment.session` because the latter exists only on a state that declares an operation,
+ * and declaring a session on a composite ROOT is the ordinary way to give a whole subtree one bundle.
+ *
+ * A ref (`{ id }`) and `null` both fall through to the inherited key on purpose: a ref arrived through
+ * data flow from an operation that may live anywhere, and `null` asks for a fresh CONVERSATION, not a
+ * fresh workspace (DESIGN.md §5.1 — "forks share a worktree").
+ */
+function resourceKeyFor(def: LoadedState, parent: Instance | undefined, selfAddress: InstanceAddress): string {
   const declared = def.scopeSession;
-  if (typeof declared === "string" && declared !== "") return declared;
+  if (declared !== null && declared !== undefined && "name" in declared) {
+    // `selfAddress` rather than a walk for the commonest case by far — a bare name, which scopes to
+    // the state that wrote it. The instance does not exist yet at the point this is called, so its
+    // own address is passed in; every other scope is an ANCESTOR and is found by walking.
+    const anchor = declared.in === def.id ? selfAddress : enclosingInstance(parent, declared.in)?.address;
+    // Falling back to the declared scope is unreachable for a loaded document — the loader checks
+    // that `in` names an ancestor — and degrades to a run-global key rather than to a private one,
+    // because silently isolating a conversation is the failure this whole module exists to prevent.
+    return sessionKeyOf(declared.name, anchor === undefined ? declared.in : addressPath(anchor));
+  }
   return parent?.resourceKey ?? RUN_RESOURCE_KEY;
 }
 
@@ -780,6 +837,9 @@ export class WorkflowEngine {
     // that CRASHES be terminated under the id it was entered under instead of a sentinel.
     id: string = this.newInstanceId(),
   ): Promise<TerminationRecord> {
+    // Taken ONCE, before the literal: `addressOf` mutates the parent's entry tally, so asking for it
+    // twice would count this entry twice and hand the second reader a different occurrence.
+    const address = addressOf(parent, childKey);
     const instance: Instance = {
       id,
       stateId,
@@ -790,11 +850,11 @@ export class WorkflowEngine {
       outputs: {},
       // Resolved once, on entry, from the parent's bundle and this state's own declaration — so a
       // subtree that declares nothing shares its enclosing bundle rather than minting one per state.
-      resourceKey: resourceKeyFor(def, parent),
+      resourceKey: resourceKeyFor(def, parent, address),
       // Taken on the way in, for the reason the field documents: an occurrence is a count of entries
       // and there is nothing left to count once the entry is over. A root has no child key and
       // therefore no step, so the run itself is the empty address.
-      address: addressOf(parent, childKey),
+      address,
       entries: new Map(),
       sites: new Map(),
       nextSite: 1,
@@ -888,6 +948,12 @@ export class WorkflowEngine {
     // entry order — so the last one IS it. Without this a loaded loop reads `run.cursor` as nothing
     // and a guard written against it never fires again.
     const entered = (loaded.children ?? []).at(-1)?.childKey;
+    // Rebuilt from the record rather than counted, because a loaded run is not being walked: the
+    // occurrence was decided when the entry originally happened and is stored, not re-derivable.
+    const loadedAddress: InstanceAddress =
+      parent === undefined || loaded.childKey === undefined
+        ? []
+        : [...parent.address, { childKey: loaded.childKey, occurrence: loaded.occurrence ?? 0 }];
     const instance: Instance = {
       id: loaded.id,
       stateId: loaded.stateId,
@@ -896,11 +962,8 @@ export class WorkflowEngine {
       parent,
       inputs: this.rehydrateArtifacts(loaded.inputs),
       outputs: {},
-      resourceKey: resourceKeyFor(def, parent),
-      address:
-        parent === undefined || loaded.childKey === undefined
-          ? []
-          : [...parent.address, { childKey: loaded.childKey, occurrence: loaded.occurrence ?? 0 }],
+      resourceKey: resourceKeyFor(def, parent, loadedAddress),
+      address: loadedAddress,
       entries,
       sites,
       nextSite,
@@ -3124,27 +3187,39 @@ export class WorkflowEngine {
    */
   private sessionFor(instance: Instance): SessionBinding | { error: string } {
     const env = instance.def.environment ?? {};
-    let declared = env.session as SessionDecl | undefined;
+    // NORMALIZED by the loader (`normalizeSession`), so a name arriving here already carries the
+    // scope of the state that WROTE it — including one an ancestor's `environment` supplied, which
+    // is the case the origin-time normalization exists for: after the merge a root's declaration and
+    // a leaf's are the same value, and only the loader could still tell them apart.
+    let declared = env.session as NormalizedSession | undefined;
     // The `{ expr }` spelling is the only one evaluated rather than read, and it has to be, because
     // a ref is a RUN-TIME value: `children.plan.operation.output.session` does not exist until
     // `plan` has run, so a static field could never carry one. Evaluated against THIS instance, so
     // a re-entered or looped state re-reads the position its own attempt should continue from.
     if (isSessionExpr(declared)) {
-      const { expr } = declared;
+      const written = declared as SessionExpr;
+      const { expr } = written;
       const resolved = resolveRef(this.exprRef(expr), this.scopeFor(instance));
       // PENDING means the producing operation is still in flight. That is a wiring mistake rather
       // than something to wait on here: the consumer's own dataflow join is what parks on a running
       // producer, and by the time an operation is being dispatched its inputs have settled.
       if (isPending(resolved)) return { error: `session expression '${expr}' reads an operation that has not finished` };
       if (isResolveError(resolved)) return { error: `session expression '${expr}': ${resolved.error}` };
-      const outcome = sessionFromExpr(expr, resolved.value);
+      const outcome = sessionFromExpr(written, resolved.value);
       if ("error" in outcome) return outcome;
       declared = outcome.session;
     }
-    return resolveSession(declared, env.fork === true, {
+    return resolveSession(declared, {
       instanceId: instance.id,
       inheritedResourceKey: instance.resourceKey,
       positionOf: () => undefined,
+      // The scope seam: a name is qualified by a state, and the state resolves to the nearest
+      // ENCLOSING INSTANCE of it. Starting at `instance` rather than its parent because the
+      // commonest scope by far is the writer itself, which for a bare name is this very state.
+      anchorOf: (stateId) => {
+        const anchor = enclosingInstance(instance, stateId);
+        return anchor === undefined ? undefined : addressPath(anchor.address);
+      },
     });
   }
 

@@ -24,7 +24,18 @@ import { WorkflowEngine } from "../src/engine.js";
 import type { StateDef } from "../src/format.js";
 import { loadBundle } from "../src/loader.js";
 import { InMemoryPersistence } from "../src/ports.js";
+import { sessionKeyOf } from "../src/session.js";
 import { FakePromptExecutor, newRegistry, ok, promptOf, toolNamesOf, type FakeCall, type Script } from "./fakes.js";
+
+/**
+ * The key `"chat"` resolves to when `root` writes it.
+ *
+ * A name is qualified by the scope it was WRITTEN in (DESIGN.md §1.6), so the stream these fixtures
+ * share is `chat` as `root` means it — not a run-global word that anything spelling `chat` would join.
+ * The scope is spelled as the anchoring instance's ADDRESS, so the run root is `/` and a name written
+ * on the child mounted at `r` anchors at `r`.
+ */
+const CHAT = sessionKeyOf("chat", "/");
 
 /**
  * The session stack as a host composes it: resolve the position, claim it, record what ran. Without
@@ -112,7 +123,7 @@ describe("a conversation, asserted verbatim", () => {
     const { engine, sessions } = makeEngine(files, "root", counting());
     await engine.run({ inputs: { who: "world" } });
 
-    expect((sessions.messages("chat") as Array<{ role: string; content: string }>).map((t) => [t.role, t.content])).toEqual([
+    expect((sessions.messages(CHAT) as Array<{ role: string; content: string }>).map((t) => [t.role, t.content])).toEqual([
       ["user", "Hello, world."],
       ["assistant", '{"r":"A1"}'],
       ["user", "And again for world."],
@@ -332,23 +343,31 @@ describe("which conversation a call joins", () => {
    */
   it("an inherited session name joins the stream", async () => {
     expect(await secondPromptUnder({})).toBe("Second.");
-    expect(await secondSessionUnder({})).toBe("chat@1");
+    // `chat` was written on `root`, so both children resolve to the same (name, scope) key and the
+    // second call lands at position 1 in it.
+    expect(await secondSessionUnder({})).toBe(`${CHAT}@1`);
   });
 
   it("a session name of its own isolates it", async () => {
-    expect(await secondSessionUnder({ session: "other" })).toBe("other@0");
+    // Written on `reader`, so it is `reader`'s name — a different scope, and therefore a different
+    // stream, even if it had been spelled `chat`.
+    expect(await secondSessionUnder({ session: "other" })).toBe(`${sessionKeyOf("other", "r")}@0`);
+    // Even spelled `chat`, it is a DIFFERENT stream: same word, a different scope.
+    expect(await secondSessionUnder({ session: "chat" })).toBe(`${sessionKeyOf("chat", "r")}@0`);
   });
 
   it("a null session starts a fresh stream, beating the inherited name", async () => {
-    expect(await secondSessionUnder({ session: null })).not.toMatch(/^chat@/);
+    expect(await secondSessionUnder({ session: null })).not.toMatch(new RegExp(`^${CHAT}@`));
   });
 
   it("a fork branches rather than continuing, and still reads the prefix", async () => {
-    const { engine, fake, sessions } = makeEngine(pair({ fork: true }), "root", () => ok({ r: "A" }));
+    // `fork` rides ON the session now, so it can no longer arrive from a different layer than the
+    // name it is about.
+    const { engine, fake, sessions } = makeEngine(pair({ session: { join: "parent", fork: true } }), "root", () => ok({ r: "A" }));
     expect((await engine.run({ inputs: {} })).outcome).toBe("success");
     const at = fake.calls[1]!.ctx.session!;
     expect(at.mode).toBe("fork");
-    expect(at.at.id).not.toBe("chat");
+    expect(at.at.id).not.toBe(CHAT);
     // A branch is its parent's records up to the cursor — the prefix is readable, it is simply not
     // pasted into the prompt.
     expect(await sessions.messages(sessions.refAt(at.at))).toEqual([{ role: "user", content: "First." }, { role: "assistant", content: '{"r":"A"}' }]);
@@ -387,7 +406,7 @@ describe("which conversation a call joins", () => {
     expect(promptOf(fake.calls[1]!)).toBe("Second.");
     // The TRANSCRIPT is where the absence shows: the failed call left no turn between the other two.
     expect(promptOf(fake.calls[2]!)).toBe("Third.");
-    expect((sessions.messages("chat") as Array<{ content: string }>).map((t) => t.content)).toEqual([
+    expect((sessions.messages(CHAT) as Array<{ content: string }>).map((t) => t.content)).toEqual([
       "First.",
       '{"r":"A"}',
       "Third.",

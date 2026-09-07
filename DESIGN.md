@@ -147,6 +147,21 @@ never by splitting a string. A workflow publishes both after a call — the posi
 `.end` beside it (SPEC §6.1) — because which one a later state wires in *is* the choice between
 continuing a thread and branching off it.
 
+A declaration's **name is qualified by a scope**, and the scope is decided at the place that WRITES
+the name — `"review"` is sugar for `{name: "review", in: <that state>}`, redirectable with
+`in: "parent" | "global" | <ancestor id>`. A bare name used to be run-global, which made a loop's
+second pass rejoin the first's conversation and two subtrees that both said `"main"` share one
+transcript and one worktree. Scoping at the writer is what lets a reader learn what a name means
+without visiting a use site; `{join: "parent" | "nearest" | "global" | <ancestor id>}` is the other
+half, for a state that wants an ancestor's conversation without knowing its name, and its value is a
+choice about how much structural change should break that assumption. Canonicalization happens
+BEFORE the environment merge, which is the whole mechanism: afterwards a root's declaration and a
+leaf's are the same value, so only the loader can still tell them apart — and it is why a root can
+still set one session for a whole subtree. A scope resolves to an INSTANCE, addressed by its path,
+so `fork`/retry/loop stability (§5.1) falls out rather than being configured. `fork` is a property
+of the session rather than a field beside it, since as a sibling it inherited on its own and a root
+writing `fork: true` branched every descendant's conversation. SPEC §7.1b is the grammar.
+
 Resolution is a **reservation**, not an observation. `withSessionPosition` claims the next position before
 the call goes out, so two writers racing the same conversation collide instead of both reading one head;
 the loser FORKS. That is the whole of the repair-versus-retry rule, derived rather than configured: a
@@ -898,15 +913,19 @@ thing — the same lever as sharing a conversation, generalized from "transcript
 they cannot once a session ref is a POSITION (§1.6) — a position moves on every call, so a
 `"session"`-scoped approval keyed on it would cover exactly one operation and every fork would silently ask
 for its own worktree. So the conversation follows the *resolved* ref, while the bundle keys on **what was
-DECLARED**, inherited from the enclosing instance when an operation declares nothing. A fork, compaction,
+DECLARED** — which since scoped names is the `(name, scope)` PAIR and never the bare word, so two
+subtrees that each wrote `"main"` meaning different things do not share a worktree — inherited from
+the enclosing instance when an operation declares nothing. A fork, compaction,
 resync, retry or loop iteration never changes what was declared, so the worktree and the permission ledger
 survive all of them. It is also the answer to "states get replayed and looped — how do you tell iterations
 apart?": you don't have to, since the key was never derived from the iteration.
 
 - A session is strictly more than a transcript: the conversation is one facet of it.
-- **Sharing is explicit, isolation is the default**: an operation's `session` names an id; the same id
-  means a shared bundle, and absent means it inherits its parent's bundle while getting its OWN
-  conversation. There is no implicit run-wide default conversation.
+- **Sharing is explicit, isolation is the default**: an operation's `session` names a `(name, scope)`
+  pair; the same pair means a shared bundle, and absent means it inherits its parent's bundle while
+  getting its OWN conversation. There is no implicit run-wide default conversation. Two siblings each
+  writing one word are two writers and therefore two pairs — sharing is asked for with
+  `{name, in: "parent"}`, which is the same explicitness rule applied to the name itself.
 - **The workspace is session-owned, not runtime-owned**, and not always shared. It is default-shared
   within a subtree — a review agent reading what a coding agent wrote is the point — and overridable to
   isolate (a parallel fan-out into worktrees). Two different runtimes sharing one workspace is common

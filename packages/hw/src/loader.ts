@@ -42,6 +42,7 @@ import {
 import { ExprError, parseExpression, selfPathOf, type Argument, type Expr } from "./expr.js";
 import { bindArguments, bindTransitionContext, EXPRESSION_REFS, lowerExpression, parametersFor, positionalNames, type LowerOptions } from "./lowerExpr.js";
 import { environmentIdentity, mergeOperationFields, resolutionEnvironment } from "./merge.js";
+import { normalizeSession, type NormalizedSession, type SessionAncestor, type SessionWriter } from "./session.js";
 import { resolveStateRef, StateRefError, type StateRefOptions } from "./ref.js";
 import { expandReferences } from "./expand.js";
 import { isDataFile, isRuntimeReference, MODULE_EXTENSIONS, parseReferencedFile, REGISTRY_ROOT, resolveReference, selectProperty, type Vfs } from "./reference.js";
@@ -309,13 +310,13 @@ function defaultOutput(): NamedParameter<InlineFamily> {
  * set and the permission baseline — so the loader hands each consumer only what it needs.
  */
 export function splitExecEnvironment(fields: OperationFields): { op: OperationFields; env: ExecEnvironmentDecl } {
-  const { session, fork, tools, permissions, ...op } = fields;
+  const { session, tools, permissions, ...op } = fields;
   const env: ExecEnvironmentDecl = {};
   // `session` is tested against `undefined` rather than for truthiness because `null` is a REAL
   // declaration — "start fresh, whatever the chain said" — and dropping it here would silently
-  // restore the inherited session the author was opting out of.
+  // restore the inherited session the author was opting out of. `fork` used to be split out beside
+  // it and is now a property OF it, so the two can no longer arrive from different layers.
   if (session !== undefined) env.session = session;
-  if (fork !== undefined) env.fork = fork;
   if (tools !== undefined) env.tools = tools;
   if (permissions !== undefined) env.permissions = permissions;
   return { op, env };
@@ -761,6 +762,82 @@ function outputSlotFor(output: Record<string, ParameterDecl> | undefined, stateI
 }
 
 /**
+ * Canonicalize every session declaration a state WRITES, at the place it was written (§1.6).
+ *
+ * This is the pass that makes scoped names work, and it has to run before the environment merge for
+ * one reason: the merge is a nearest-wins overwrite, so afterwards a root's `session: "planning"`
+ * and a leaf's are the same string, and lexical scoping needs to tell them apart. Normalizing at the
+ * origin stamps the scope on while the origin is still known, and everything downstream — the merge,
+ * the variant identity, the engine — then handles one already-scoped value.
+ *
+ * Three declaration sites belong to one state, and all three are its own writing:
+ *
+ *  - `environment.session` — the default for its SUBTREE;
+ *  - `operation.session` — the session its own call joins;
+ *  - `children.<key>.environment.session` — a layer it applies to one child (§7.1a). Written by THIS
+ *    state, so it scopes here: `in: "parent"` inside a mount environment means this state's parent.
+ *
+ * What a state DECLARED, for a descendant's `join`, is its operation's declaration where it has one
+ * and its subtree default otherwise — "the session this state's own call runs in, as it wrote it".
+ * A state that only INHERITED one is not a writer, which is what makes `join: "parent"` able to fail
+ * where `join: "nearest"` succeeds.
+ */
+function normalizeStateSessions(
+  def: StateDef,
+  writer: SessionWriter,
+  ancestry: readonly SessionAncestor[],
+): { def: StateDef; declared?: NormalizedSession; error?: { path: string; message: string } } {
+  let error: { path: string; message: string } | undefined;
+  const at = (path: string, value: unknown): NormalizedSession | undefined => {
+    const outcome = normalizeSession(value as never, writer, ancestry);
+    if ("error" in outcome) {
+      // FIRST complaint only, and reported against the state rather than thrown: one unusable
+      // session must not hide every other authoring error in the document.
+      error ??= { path, message: outcome.error };
+      return undefined;
+    }
+    return outcome.session;
+  };
+
+  let out = def;
+  const replace = (patch: Partial<StateDef>): void => {
+    out = { ...out, ...patch };
+  };
+
+  let envSession: NormalizedSession | undefined;
+  if (def.environment !== undefined && "session" in def.environment) {
+    envSession = at("environment.session", def.environment.session);
+    replace({ environment: { ...def.environment, session: envSession } });
+  }
+  let opSession: NormalizedSession | undefined;
+  let wroteOp = false;
+  if (def.operation !== undefined && "session" in def.operation) {
+    wroteOp = true;
+    opSession = at("operation.session", def.operation.session);
+    replace({ operation: { ...out.operation, session: opSession } as StateDef["operation"] });
+  }
+
+  const children = out.children;
+  if (children !== undefined) {
+    let rewritten: Record<string, ChildDecl> | undefined;
+    for (const [key, child] of Object.entries(children)) {
+      if (child.environment === undefined || !("session" in child.environment)) continue;
+      const session = at(`children.${key}.environment.session`, child.environment.session);
+      rewritten ??= { ...children };
+      rewritten[key] = { ...child, environment: { ...child.environment, session } };
+    }
+    if (rewritten !== undefined) replace({ children: rewritten });
+  }
+
+  const declared = wroteOp ? opSession : envSession;
+  return {
+    def: out,
+    ...(declared !== undefined ? { declared } : {}),
+    ...(error !== undefined ? { error } : {}),
+  };
+}
+
+/**
  * Desugar one authored state file into its loaded form.
  *
  * `inherited` is the merged `environment` of every ancestor on the path that reached this state
@@ -893,7 +970,10 @@ export function desugarState(
     // declares `environment.session` — the ordinary way to give a whole subtree one session — would
     // otherwise carry no trace of it, and the engine would key its children's resource bundle on the
     // run instead of on the name the author wrote (DESIGN.md §1.6).
-    ...("session" in environment ? { scopeSession: environment.session } : {}),
+    // Cast, because `ExecEnvironmentDecl.session` is the AUTHORED union and this is the normalized
+    // one: `normalizeStateSessions` ran over every writer on this path before the merge, so what the
+    // chain holds here has its scope resolved and its `join` already taken (`session.ts`).
+    ...("session" in environment ? { scopeSession: environment.session as NormalizedSession } : {}),
     ...(spreads.length > 0 ? { outputSpreads: spreads } : {}),
     ...(Object.keys(slotMeta).length > 0 ? { slotMeta } : {}),
   };
@@ -1166,11 +1246,11 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
   // Transitive closure from the root, carrying each path's accumulated environment.
   const states: Record<string, LoadedState> = {};
   const sourceOf = new Map<string, string>();
-  const queue: Array<{ id: string; variant: string; inherited: OperationFields }> = [
-    { id: rootId, variant: rootId, inherited: {} },
+  const queue: Array<{ id: string; variant: string; inherited: OperationFields; ancestry: readonly SessionAncestor[] }> = [
+    { id: rootId, variant: rootId, inherited: {}, ancestry: [] },
   ];
   while (queue.length > 0) {
-    const { id, variant, inherited } = queue.shift()!;
+    const { id, variant, inherited, ancestry } = queue.shift()!;
     if (states[variant]) continue;
     const def = rawById.get(id);
     if (!def) {
@@ -1350,8 +1430,14 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
       resolveName: (name) => resolveValueName(name, id, searchPath, lower),
       ...(options.userFunctions !== undefined ? { userFunctions: options.userFunctions } : {}),
     };
-    const loaded = desugarState(id, expanded, inherited, refs, childrenByParent.get(id), lower);
+    // Session declarations are canonicalized HERE, before the merge and before desugaring, because
+    // this is the last point at which "who wrote this" is still known (§1.6). The ancestry carries
+    // each ancestor's VARIANT id, so a scope resolves to the state as this path reaches it — which
+    // is what makes two mounts of one subtree scope their names apart instead of colliding.
+    const scoped = normalizeStateSessions(expanded, { id: variant, source: id }, ancestry);
+    const loaded = desugarState(id, scoped.def, inherited, refs, childrenByParent.get(id), lower);
     loaded.id = variant;
+    if (scoped.error !== undefined) loaded.sessionError = scoped.error;
     // Fan-out is a static property of the wiring (§7.3, rule 2): with every consumer of every producer
     // desugared to a base ref, the loader can tally them once here rather than the engine discovering a
     // second reader at run time.
@@ -1363,7 +1449,14 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
     // document, like every other pass: expansion runs first precisely so nothing downstream has to
     // know references exist, and reading the raw one here meant a transcluded `environment` reached
     // this state and not its children.
-    const forChildren = resolutionEnvironment(inherited, expanded.environment);
+    const forChildren = resolutionEnvironment(inherited, scoped.def.environment);
+    // What a descendant's `join` searches: this state, plus everything above it. Carried rather than
+    // recomputed because "did this state WRITE a session" is knowable only where its own document is
+    // in hand — after the merge every state appears to have one.
+    const childAncestry: readonly SessionAncestor[] = [
+      ...ancestry,
+      { id: variant, source: id, ...(scoped.declared !== undefined ? { declared: scoped.declared } : {}) },
+    ];
     // From the LOADED children, so inferred ones (§6) are walked exactly like declared ones and
     // their references are already resolved to canonical ids. Each child's `state` is then rewritten
     // to the variant THIS mount reaches, so a parent always points at the child it actually runs.
@@ -1378,7 +1471,7 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
       const childEnvironment = child.environment !== undefined ? resolutionEnvironment(forChildren, child.environment) : forChildren;
       const childVariant = variantFor(childSource, environmentIdentity(childEnvironment));
       child.state = childVariant;
-      queue.push({ id: childSource, variant: childVariant, inherited: childEnvironment });
+      queue.push({ id: childSource, variant: childVariant, inherited: childEnvironment, ancestry: childAncestry });
     }
   }
   // Spreads resolve against the loaded closure, so they run once the walk is done. Fan-out is

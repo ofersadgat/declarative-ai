@@ -1204,14 +1204,16 @@ Everything about *how* an operation runs — as opposed to what it is — is wri
 alongside the rest, because each of these is a per-CALL decision:
 
 ```text
-session       The conversation this call joins (DESIGN.md §1.6). A NAME shares an
-              append-only stream by declaration; {"expr": …} names an exact position
-              computed at run time, normally from `operation.output.session` — or its
-              `.end`, the same conversation with no position, which continues the thread
-              rather than branching from a point (§6.1); `null` starts a fresh one, and
-              absent means this state gets its own. The DECLARED name separately keys the
+session       The conversation this call joins (DESIGN.md §1.6, and §7.1b below for the
+              full grammar). A NAME shares an append-only stream by declaration, and is
+              qualified by the SCOPE it was written in; {"join": …} takes an ancestor's
+              declaration without naming it; {"expr": …} names an exact position computed
+              at run time, normally from `operation.output.session` — or its `.end`, the
+              same conversation with no position, which continues the thread rather than
+              branching from a point (§6.1); `null` starts a fresh one, and absent means
+              this state gets its own. The DECLARED (name, scope) pair separately keys the
               state's workspace and permissions, which are inherited when nothing is
-              declared.
+              declared. `fork` is a property OF the session, not a field beside it.
 tools         Logical names of tools the operation may call mid-loop, resolved through
               registry.tools. A composed prompt operation runs them in a bounded loop; a
               delegated agent is handed the allow-list.
@@ -1220,6 +1222,76 @@ conversation  { "mode": "full_history" | "summary" | "fresh" | "selected_artifac
 permissions   The authored per-operation permission baseline: `profile`, `default`, per-tool modes
               (§7.4).
 ```
+
+#### 7.1b The scope of a session name
+
+A name used to live in one flat, run-global namespace: `"review"` written anywhere reached
+everywhere, and nothing in the spelling said so. That is wrong in three ways at once — a loop's
+second pass rejoined the first pass's conversation, a subtree mounted twice collapsed onto one
+transcript *and* one worktree, and two independently authored subtrees that both said `"main"`
+merged silently.
+
+So a name is qualified by a **scope**, and **the scope is decided at the place that writes the
+name**, never at the places that use it. That is the property worth protecting: a reader learns what
+a name means from one place, without visiting a single use site.
+
+```text
+"review"                              { name: "review", in: <the state that wrote it> }
+{ "name": "review", "in": "parent" }  the name lives in the enclosing composite
+{ "name": "review", "in": "batch" }   ...in the nearest enclosing `batch`
+{ "name": "review", "in": "global" }  ...at the run root
+{ "join": "nearest" }                 take the nearest ancestor's declaration, whatever it is called
+{ "id": … } | { "expr": … }           an absolute position, and one computed per instance
+null                                  a fresh, private conversation
+```
+
+Every form but `null` also takes `"fork": true` — always branch, rather than appending when the
+position is still the head.
+
+**`in` qualifies a name; `join` takes someone else's.** `in` answers *"when I write `review`, which
+other `review`s do I mean?"* — it never selects a session by itself. A declaration that produces no
+name produces a session nothing can refer to, which is what `null` already says, so `{ "in": … }`
+with no `name` is a load error. `join` is the other half, for a state that wants in without knowing
+what the conversation is called, and its value chooses **how much structural change should break
+the assumption**:
+
+| `join` | asserts | breaks when |
+| --- | --- | --- |
+| `"parent"` | my immediate parent declares one | a wrapper composite is inserted between us |
+| `<state id>` | that specific ancestor declares one | that state is renamed or stops declaring |
+| `"global"` | the run root declares one | the root stops declaring |
+| `"nearest"` | *someone* above declares one | nothing above declares at all |
+
+`"parent"` failing where `"nearest"` would silently retarget is the point of having both: `nearest`
+survives the refactor by joining a *different* transcript, and nothing says so.
+
+Three rules make the whole thing total:
+
+- **A declaration is canonicalized where it is WRITTEN**, before the environment merge. This is what
+  lets a root set one session for its whole subtree (§7.1a) while a leaf writing the same word gets
+  its own: after the merge the two are the same value, and only the loader still knows who wrote it.
+  It also means there is no lookup anywhere — no use site resolves anything, so no inserted layer can
+  change what a name already means.
+- **`join` is resolved at load time**, to the concrete `{ name, in }` it names. It never reaches a
+  run. "Declares" means *wrote*, never *inherited* — a state that only inherited a session is not a
+  writer, which is what lets `join: "parent"` fail where `join: "nearest"` succeeds.
+- **A scope resolves to an INSTANCE**, addressed by its path in the tree. This is why loops need no
+  rule of their own: a scope above the loop is one instance on every pass, so the worktree and the
+  permission ledger survive the iterations (DESIGN §5.1), and one inside it is a new instance each
+  time, because that is what was asked for. A retry is the same story — a retried state is a new
+  instance, its ancestor is not.
+
+Two consequences read as surprises exactly once, and both are the inverse of what the flat namespace
+did silently. **Two siblings that each write `"review"` do not share** — two writers, two scopes; they
+share by naming a common one, `{ "name": "review", "in": "parent" }`. And **a bare name on a leaf is
+private**, since a leaf's scope is itself; it is `null` with a label on it.
+
+`"document"` is reserved and refused. It was specified as "the file this declaration was written
+in", and there is no such unit here: a state *is* a file (§3.1 infers children from the directory
+listing), so a document's root is the writer itself and the keyword would mean nothing that an
+absent `in` does not. The unit it was reaching for — the root of a mounted subtree, the nearest
+ancestor reached by a cross-namespace reference — is real and computable, and is left unnamed rather
+than given a word that means something else.
 
 #### 7.1a Inheritance
 

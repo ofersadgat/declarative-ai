@@ -26,6 +26,7 @@ import type {
 import type { PermissionMode, PermissionProfile, ScopeDecl } from "@declarative-ai/permissions";
 import { BUILTINS } from "./builtins.js";
 import { OPERATION_ENGINE_OUTPUT, OPERATION_METADATA_FIELDS } from "./operationNode.js";
+import type { NormalizedSession, SessionDecl } from "./session.js";
 
 // The op vocabulary is hw's format vocabulary — re-exported so authors and consumers import
 // one set of names.
@@ -239,43 +240,47 @@ export interface NamedParameterDecl extends ParameterDecl {
  */
 export interface ExecEnvironmentDecl {
   /**
-   * The conversation this operation runs under (DESIGN.md §1.6). Three spellings:
+   * The conversation this operation runs under (DESIGN.md §1.6). Five spellings:
    *
-   *  - a **name** — same name across states ⇒ one shared stream, and the name is also the
-   *    resource-bundle key (workspace, permissions);
+   *  - a **name** — `"review"`, sugar for `{ name: "review" }`. A name is qualified by the SCOPE it
+   *    was written in, so two states share a stream by writing one name in one scope, and the
+   *    `(name, scope)` pair is also the resource-bundle key (workspace, permissions);
+   *  - `{ name, in }` — the same, with the scope redirected. `in` is `"parent"`, `"global"`, or an
+   *    ancestor's state id, and it says WHERE the name lives, never which session to take;
+   *  - `{ join }` — take the declaration an ancestor WROTE, whatever it is called: `"parent"`
+   *    (asserting the immediate parent wrote one), `"nearest"` (any writer above), `"global"` (the
+   *    run root), or an ancestor's state id. Resolved at load time, so it never reaches a run;
    *  - a **session ref** (`{ id }`) — an exact position to continue or branch from. Opaque: nothing
-   *    outside the session store parses it. Normally reached through the fourth spelling rather than
-   *    written literally, since a ref is a run-time value;
+   *    outside the session store parses it. Normally reached through the expression spelling rather
+   *    than written literally, since a ref is a run-time value;
    *  - an **expression** (`{ expr }`, e.g. `{"expr": ".children.plan.operation.output.session"}`) —
    *    the same thing computed per instance. This is the one form EVALUATED rather than read, and
    *    the only practical way to name an exact position, because `operation.output.session` does
    *    not exist until that operation has run;
    *  - **`null`** — start a fresh stream, overriding whatever the environment chain supplied.
    *
+   * Every form but `null` takes `fork` (DESIGN.md §1.6): always branch, rather than appending when
+   * the position is still the head. It lives ON the session rather than beside it because it is a
+   * statement about the session this call joins — as a sibling field it inherited down the
+   * environment chain independently, so a root writing `fork: true` branched every descendant's
+   * conversation, whatever each of them had declared. Absent and `false` mean the SAME thing, since
+   * the stricter reading ("append, or fail") would be an exclusivity claim on the position, and
+   * holding that claim is state the prompt executor must not carry. `true` stays useful because
+   * deliberate divergence (fan three variants out of one point) cannot be inferred from stream state.
+   *
    * ABSENT no longer means a shared default. An undeclared operation gets its own stream, because
    * an implicit process-wide transcript is the thing that drives unbounded context growth; the
-   * run's shared WORKSPACE is unaffected, being a separate concern (see {@link fork}'s neighbours
-   * in `session.ts`). `""` is an error, never "fresh" — a template interpolating a bad reference
-   * would otherwise silently produce an isolated conversation that looks like it worked.
+   * run's shared WORKSPACE is unaffected, being a separate concern. `""` is an error, never "fresh"
+   * — a template interpolating a bad reference would otherwise silently produce an isolated
+   * conversation that looks like it worked, and `{ in: … }` with no name is refused for the same
+   * reason: it names a session nothing else can reach, which is what `null` already says.
    *
    * ONE spelling. `sessionId` used to be accepted as a synonym so an `LlmConfiguration`-shaped
    * block could paste in unchanged; it is refused now, because a second name for a field costs an
    * equality check at parse, a normalization that has to run before the merge, and a rule about
    * which one wins — all to save an author one rename.
    */
-  session?: string | null | { id: string } | { expr: string };
-
-  /**
-   * Always branch, rather than appending when the position is still the head (DESIGN.md §1.6).
-   *
-   * Declared where a session is CONSUMED, not carried on the value produced: a position marker
-   * should not encode an intent about how a later caller will use it. Absent and `false` mean the
-   * SAME thing — append if the position is still the head, fork automatically if it is not — because
-   * the stricter reading ("append, or fail") would be an exclusivity claim on the position, and
-   * holding that claim is state the prompt executor must not carry. `true` stays useful because
-   * deliberate divergence (fan three variants out of one point) cannot be inferred from stream state.
-   */
-  fork?: boolean;
+  session?: SessionDecl;
   /** Logical names of tools the operation may call mid-loop — resolved through `registry.tools`. */
   tools?: string[];
   /** Authored per-operation permission baseline (DESIGN §5.1, "the definition-authored baseline"). */
@@ -699,8 +704,12 @@ export interface LoadedState
    * — on the name the author actually wrote (DESIGN.md §1.6).
    *
    * Present-but-`null` is meaningful: it is an explicit "start fresh", not an absent declaration.
+   *
+   * NORMALIZED (`session.ts`): the scope a name is qualified by is already resolved to a concrete
+   * state id, so the resource key a subtree gets is the `(name, scope)` pair the author wrote and
+   * not the bare word, which two unrelated subtrees could each have written meaning different things.
    */
-  scopeSession?: string | null | { id: string } | { expr: string };
+  scopeSession?: NormalizedSession;
   children?: Record<string, LoadedChild>;
   /**
    * Why this state's `operation` could not be built — an incomplete merge (§5), reported by the
@@ -708,6 +717,22 @@ export interface LoadedState
    * A state carrying this always has NO `operation`; the engine refuses to run it.
    */
   operationError?: string;
+  /**
+   * Why this state's `session` could not be resolved — an `in` or a `join` that names no ancestor,
+   * or a `join` whose target declares nothing (DESIGN.md §1.6).
+   *
+   * Separate from `operationError` because it is a different question answered in a different pass:
+   * the operation merge asks "did the author say enough to build a call", while this asks "does the
+   * scope this name was written in exist". A composite that declares only `environment.session` has
+   * no operation to carry an error on, and its session still has to be reportable. Carried rather
+   * than thrown for the same reason as its neighbour — one unusable session must not hide the rest
+   * of a document's authoring errors.
+   *
+   * Carries the PATH as well as the message because a state has several places to write a session —
+   * its own operation, its subtree defaults, and a layer it applies to one child — and naming the
+   * line the author wrote is the whole value of reporting it at the origin instead of downstream.
+   */
+  sessionError?: { path: string; message: string };
   /** Unexpanded `prefix*` outputs, pending the child's slots — expanded by `loadBundle` (§3.4). */
   outputSpreads?: OutputSpread[];
   /** Always present when the state has children: the authored order, or declaration order (§6). */

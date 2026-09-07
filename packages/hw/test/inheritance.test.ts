@@ -50,7 +50,9 @@ describe("environment inheritance (§5)", () => {
 
   it("puts the merged execution environment on the loaded state, not the op", () => {
     const state = loadBundle(files(), "root").states["root/mid/leaf"]!;
-    expect(state.environment).toEqual({ session: "review", tools: ["bash"] });
+    // The session arrives NORMALIZED: `"review"` written on `root` carries the scope it was written
+    // in, which is what stops the same word elsewhere in the tree from meaning this conversation.
+    expect(state.environment).toEqual({ session: { name: "review", in: "root" }, tools: ["bash"] });
   });
 
   it("lets the nearest layer win, own operation over own environment over ancestors", () => {
@@ -61,7 +63,10 @@ describe("environment inheritance (§5)", () => {
     });
     const op = opOf(defs);
     expect(op.config).toEqual({ model: "anthropic/claude-sonnet-5", temperature: 0.1 });
-    expect(loadBundle(defs, "root").states["root/mid/leaf"]!.environment!.session).toBe("leaf-session");
+    expect(loadBundle(defs, "root").states["root/mid/leaf"]!.environment!.session).toEqual({
+      name: "leaf-session",
+      in: "root/mid/leaf",
+    });
   });
 
   it("does NOT give an operation to a state that declares none", () => {
@@ -245,7 +250,9 @@ describe("environment inheritance (§5)", () => {
     const mounted = bundle.states["root"]!.children!.fast!.state;
     // The mount changed the model; everything else the parent supplied came through untouched.
     expect((bundle.states[mounted]!.operation as PromptOp<never>).config).toEqual({ model: "m2" });
-    expect(bundle.states[mounted]!.environment?.session).toBe("review");
+    // Still the ROOT's scope after the mount: a declaration is scoped where it was written, so
+    // inheriting it does not re-scope it onto each state it reaches.
+    expect(bundle.states[mounted]!.environment?.session).toEqual({ name: "review", in: "root" });
   });
 
   it("collapses back to ONE entry when two mounts declare the same thing", () => {

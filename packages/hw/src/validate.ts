@@ -219,6 +219,12 @@ function validateState(
   const sessionComplaint = validateSessionDecl(def.environment?.session);
   if (sessionComplaint !== undefined) err("operation.session", sessionComplaint);
 
+  // A `session` whose SCOPE could not be resolved — an `in` or a `join` naming no ancestor, or a
+  // `join` whose target declares nothing (DESIGN.md §1.6). Answered by the loader rather than here
+  // because it is a question about the TREE, and only the walk knows which state wrote what; carried
+  // to this pass so it is reported beside every other authoring error instead of aborting the load.
+  if (def.sessionError !== undefined) err(def.sessionError.path, def.sessionError.message);
+
   // --- sequence ---------------------------------------------------------------
   const sequence = def.sequence ?? [];
   const seen = new Set<string>();
