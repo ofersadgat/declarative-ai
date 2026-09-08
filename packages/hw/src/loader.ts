@@ -381,7 +381,13 @@ export function desugarOperation(
   }
   const input: Record<string, Parameter<InlineFamily>> = {};
   for (const [name, p] of Object.entries(decl.input ?? {})) {
-    input[name] = desugarParameter(p, `operation.input.${name}`, stateId).param;
+    // `lower` threaded, as at every other desugar site. An operation's own input may be a CALL —
+    // `renderTemplate(.inputs.template, .inputs.values)` feeding a `{{.inputs.turn}}` prompt — and
+    // without it the expression lowers against an empty option bag: no `resolveOperation`, no
+    // `resolveName`, no `userFunctions`. Built-ins resolve either way, which is what kept the hole
+    // invisible; a workflow's own `.ts` function named here failed the load with "is not a known
+    // operation" about a function that is approved, resolved and registered.
+    input[name] = desugarParameter(p, `operation.input.${name}`, stateId, undefined, lower).param;
   }
 
   // The op's output: the operation's OWN `output` map when it has one, and otherwise — for a state

@@ -171,11 +171,23 @@ describe("calls", () => {
     expect(callOf("$/lib/ops.review(a)").op).toBe("$/lib/ops.review");
   });
 
-  it("refuses a rooted path that is not called", () => {
-    // Reading DATA uses the leading-dot runtime form; a file path is only ever an operation.
-    expect(() => parseExpression("$JAIRA/prompts/customPrompt")).toThrow(/only meaningful called/);
-    // `1 / 2` used to be a stray separator, because `/` could only be one. It is division now — see
-    // the arithmetic block. What decides is whether a NAME sits to the left of the slash.
+  it("reads a rooted path that is not called as a document", () => {
+    // An uncalled reference is a DOCUMENT, exactly as a single-segment bare name is: both are
+    // `ident`, both lower through `resolveName`, and what comes back may be the file's text, its
+    // value, or an operation (the higher-order value of §3.1). This used to throw "only meaningful
+    // called", which held only because a `/`-path had nowhere to live in the AST — `reference` is a
+    // local string in `member()` and the `(` branch was its one consumer.
+    expect(parseExpression("$JAIRA/prompts/customPrompt")).toMatchObject({
+      type: "ident",
+      name: "$JAIRA/prompts/customPrompt",
+    });
+    // Which is what lets a template be an ARGUMENT rather than only a callee.
+    expect(parseExpression("renderTemplate($/prompts/turns/revise.md, { n: 1 })")).toMatchObject({
+      type: "apply",
+      op: "renderTemplate",
+      args: [{ type: "ident", name: "$/prompts/turns/revise.md" }, { type: "object" }],
+    });
+    // `1 / 2` is division: no `$` root to the left of the slash.
     expect(parseExpression("1 / 2")).toMatchObject({ type: "apply", op: "div" });
   });
 
@@ -314,13 +326,24 @@ describe("arithmetic", () => {
    * `/` is both the reference separator and division, and what decides is whether a NAME sits to its
    * left. A bare dotted path is a document; everything else is a value.
    */
-  it("divides where the left side cannot be a reference", () => {
+  it("divides unless a `$` root opened the path", () => {
     expect(ev(".total / 2", { total: 9 })).toBe(4.5);
     expect(ev("len(.xs) / 2", { xs: [1, 2, 3, 4] })).toBe(2);
     expect(ev("6 / 3", {})).toBe(2);
-    // …and stays a reference where it can be.
+    // A `$` ROOT is what makes a slash a path separator, so a rooted callee still parses whole…
     expect(parseExpression("$/functions/classify(.x)")).toMatchObject({ type: "apply", op: "$/functions/classify" });
-    expect(parseExpression("lib/review(.x)")).toMatchObject({ type: "apply", op: "lib/review" });
+    expect(parseExpression("$JAIRA/lib/review(.x)")).toMatchObject({ type: "apply", op: "$JAIRA/lib/review" });
+    // …while two bare names divide, which is what the old "is there a NAME to the left" rule cost.
+    // The searched multi-segment spelling (`lib/review`) is gone with it; a SINGLE-segment bare name
+    // is untouched and is still a callee, a document, and what `map(xs, classify)` passes.
+    // Parse shape only: a bare name is a DOCUMENT, so the interpreter refuses to evaluate one —
+    // resolving it is the lowered form's job. What matters here is that the `/` is division.
+    expect(parseExpression("lib / review")).toMatchObject({
+      type: "apply",
+      op: "div",
+      args: [{ type: "ident", name: "lib" }, { type: "ident", name: "review" }],
+    });
+    expect(parseExpression("classify(.x)")).toMatchObject({ type: "apply", op: "classify" });
   });
 
   it("aggregates over a list", () => {

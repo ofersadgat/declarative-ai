@@ -418,12 +418,15 @@ class Parser {
     // A callee may be a full REFERENCE — `$JAIRA/prompts/review(…)`, `$/functions/classify(…)` — so
     // once a `/` appears the accumulated name is built as reference TEXT rather than as member access.
     //
-    // `/` is now BOTH that separator and division, and what decides is whether there is a NAME to its
-    // left. A bare dotted path is a document, and dividing documents means nothing; anything else —
-    // a leading-dot data read, a call's result, a literal, a parenthesised expression — cannot be part
-    // of a reference, so a `/` after one is arithmetic and this loop hands it back to
-    // `multiplicative`. The cost is that two bare names cannot be divided: `foo / bar` is the
-    // reference `foo/bar`. That is the right way round, since a bare name is never a number.
+    // `/` is BOTH that separator and division, and a **`$` ROOT** is what decides. A multi-segment
+    // reference must open with one — `$/functions/eq`, `$JAIRA/prompts/review`, `$BASE/lib/x` — so
+    // every other `/` is arithmetic and goes back to `multiplicative`.
+    //
+    // This used to be decided by "is there a NAME to the left", which made `foo / bar` the reference
+    // `foo/bar` and cost the language division of two bare names. A `$` root gives that back and
+    // costs nothing real: a rooted spelling names exactly one place, and the searched multi-segment
+    // form (`feature/plan`, `lib/x`) had no users. A SINGLE-segment bare name is unaffected — it is
+    // still a document, still a callee, and still what `map(xs, classify)` passes.
     let reference: string | undefined;
     for (;;) {
       if (this.atPunct(".")) {
@@ -442,6 +445,8 @@ class Parser {
       if (this.atPunct("/")) {
         const base = reference ?? pathOf(e)?.join(".");
         if (base === undefined) return e; // division — see the note above
+        // …and division again unless a `$` root opened it. Only a rooted name may grow a `/` segment.
+        if (reference === undefined && !base.startsWith("$")) return e;
         this.next();
         const t = this.next();
         if (t.kind !== "ident") throw new ExprError("expected a path segment after '/'", t.pos);
@@ -473,9 +478,18 @@ class Parser {
         continue;
       }
       if (reference !== undefined) {
-        // A rooted path is a reference to an OPERATION, and the only thing this language does with
-        // one is call it — reading data uses the leading-dot runtime form, not a file path.
-        throw new ExprError(`'${reference}' is an operation reference; it is only meaningful called`, this.peek().pos);
+        // An UNCALLED reference is a document, exactly as a single-segment bare name is: `ident`
+        // lowers through `resolveName`, and what comes back "may be an operation (the higher-order
+        // value of §3.1) or an ordinary value". So `renderTemplate($/prompts/turns/revise.md, {…})`
+        // passes the file's TEXT and `map(xs, $/functions/classify)` passes the operation, and which
+        // one happens is decided where it already is — `bindingForDocument` on the resolved file,
+        // and the callee's own parameter declaring `kind: "function"` or not (§3.5).
+        //
+        // This used to throw "is an operation reference; it is only meaningful called", which was
+        // true only because a `/`-path had nowhere to live in the AST: `reference` is a local string,
+        // and the `(` branch above was its one consumer. A bare name reached `resolveName` and a
+        // rooted one could not, so the two spellings of "a document" disagreed.
+        return { type: "ident", name: reference };
       }
       return e;
     }

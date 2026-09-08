@@ -1204,7 +1204,8 @@ export class WorkflowEngine {
         // Whatever the cursor was waiting on has resolved by the time an evaluation round runs; if
         // no transition handles it, the cursor is free to walk on from where it stopped.
         instance.heldFor = undefined;
-        const step = this.takeTransition(instance, eligible);
+        const step = await this.takeTransition(instance, eligible);
+        if (typeof step === "object") return this.finish(instance, "error", step.failure);
         // A rule that cannot be evaluated ends the state. Carrying on would let the next rule answer
         // a question this one was supposed to decide.
         if (step === "guard-failed") return this.finish(instance, "error", guardFailureOf(instance));
@@ -1281,7 +1282,8 @@ export class WorkflowEngine {
       const held = instance.heldFor !== undefined;
       const nextKey = held ? undefined : sequence.slice(instance.cursor).find((k) => !instance.children.has(k));
       if (nextKey !== undefined) {
-        const entered = this.enterChild(instance, nextKey);
+        const entered = await this.enterChild(instance, nextKey);
+        if (typeof entered === "object") return this.finish(instance, "error", entered.failure);
         if (entered === "parked") {
           // Dataflow join (SPEC §10.4): wait for a resolution, or deadlock → error.
           if (await this.waitForAnyChild(instance)) {
@@ -1314,7 +1316,8 @@ export class WorkflowEngine {
         evaluationDue = true;
         continue;
       }
-      const final = this.takeTransition(instance, this.finishedInRunOrder(instance));
+      const final = await this.takeTransition(instance, this.finishedInRunOrder(instance));
+      if (typeof final === "object") return this.finish(instance, "error", final.failure);
       if (final === "guard-failed") return this.finish(instance, "error", guardFailureOf(instance));
       if (final === "waiting") {
         // The state has nothing left to run and would terminate — except that a guard is waiting on
@@ -1357,11 +1360,24 @@ export class WorkflowEngine {
   }
 
   /** Evaluate transitions once; take the first match (SPEC §3.3 step 3–4). */
-  private takeTransition(
+  private async takeTransition(
     instance: Instance,
     /** The children this round answers for — snapshotted before the round awaited anything. */
     eligible: readonly string[],
-  ): "none" | "entered" | "parked" | "waiting" | "guard-failed" | "terminated-success" | "terminated-error" | "terminated-canceled" | "terminated-timeout" {
+  ): Promise<
+    | "none"
+    | "entered"
+    | "parked"
+    | "waiting"
+    | "guard-failed"
+    | "terminated-success"
+    | "terminated-error"
+    | "terminated-canceled"
+    | "terminated-timeout"
+    /** A call in this rule's wiring failed. THIS state's failure: it could not evaluate an argument,
+     *  so the call it was making never happened. */
+    | { failure: Failure }
+  > {
     const taken = this.firstMatchingTransition(instance, eligible);
     // WAITING is not an answer, so the round consumes nothing: the children this round was to answer
     // for are still owed an answer, and they get it from the round that runs when the call settles.
@@ -1387,6 +1403,12 @@ export class WorkflowEngine {
     // The rule's own wiring, resolved in the world its GUARD read — before the pass opens and
     // before the reset (see `resolveTransitionInputs`), and before ANY of this is spent or
     // journalled. A rule waiting on a value has not fired, so nothing here may act as though it had.
+    // A transition's overrides are wiring too, and they resolve HERE rather than in `enterChild`, so
+    // their calls are run here as well — same rule, same frame, same failure owner.
+    if (taken.inputRefs !== undefined) {
+      const handedFailure = await this.runEmbeddedOps(instance, {}, Object.values(taken.inputRefs));
+      if (handedFailure !== undefined) return { failure: handedFailure };
+    }
     const handed = this.resolveTransitionInputs(instance, taken.inputRefs);
     if (handed === PENDING) {
       if (!this.hasRunningChildren(instance)) consumeEligibility();
@@ -1415,7 +1437,8 @@ export class WorkflowEngine {
       instance.children = new Map(instance.children);
       instance.passes.push(instance.children);
     }
-    const entered = this.enterChild(instance, taken.to, handed);
+    const entered = await this.enterChild(instance, taken.to, handed);
+    if (typeof entered === "object") return entered;
     if (entered === "parked") {
       instance.index--; // the entry did not actually happen
       if (isPass) {
@@ -1548,13 +1571,18 @@ export class WorkflowEngine {
     return order.filter((key) => eligible.has(key));
   }
 
+
   /**
    * Enter a child, however control got here — the sequence cursor or a transition.
    *
    * A SYNC child holds the cursor until it resolves (SPEC §10.4); an `async` one does not, which is
    * the entire difference between the two and the only place the flag is read.
    */
-  private enterChild(instance: Instance, key: string, overrides?: Record<string, ResolvedValue>): "started" | "parked" {
+  private async enterChild(
+    instance: Instance,
+    key: string,
+    overrides?: Record<string, ResolvedValue>,
+  ): Promise<"started" | "parked" | { failure: Failure }> {
     const decl = instance.def.children?.[key];
     if (!decl) throw new Error(`${instance.stateId}: transition/sequence names undeclared child '${key}'`);
 
@@ -1576,9 +1604,19 @@ export class WorkflowEngine {
       }
     }
 
+    // A mount's wiring may CALL — `renderTemplate($/prompts/turns/revise.md, {…})` — and a call is
+    // the engine's to run, never resolution's. Run them here, AFTER the reset so they read the same
+    // world `resolveChildInputs` will, and before it so the answers are already remembered when it
+    // asks. Without this the binding lowered correctly, resolution asked for an answer nobody had
+    // computed, and the child parked forever — reported as `parked on unresolvable inputs (dataflow
+    // deadlock)`, which names neither the call nor the reason.
+    //
+    const wiringFailure = await this.runEmbeddedOps(instance, {}, Object.values(decl.inputs ?? {}));
+    if (wiringFailure !== undefined) return { failure: wiringFailure };
+
     // The transition's own wiring, over the mount's, per NAME. Only a TAKEN transition supplies
     // any: the sequence cursor reaches a child by walking, which says nothing about why.
-    const resolved = this.resolveChildInputs(instance, decl, overrides);
+    const resolved = this.resolveChildInputs(instance, key, decl, overrides);
     if (resolved === PENDING) return "parked";
 
     instance.entered = key;
@@ -1625,8 +1663,18 @@ export class WorkflowEngine {
       if (!childDef) {
         term = { outcome: "error", failure: { classification: "permanent", reason: `unknown state '${decl.state}'` } };
       } else if ("error" in resolved && typeof resolved.error === "string") {
-        // Input validation failure blocks the state (SPEC §3.3/§4.1); surfaced to the
-        // parent as an error termination it can branch on.
+        // A WIRING failure — the caller could not produce an argument, so the callee never happened.
+        //
+        // The blame is the CALLER's and the message says so (`resolveChildInputs` writes it), but the
+        // refusal is still surfaced through this seam rather than short-circuiting the state, because
+        // a rule on the mount is allowed to take responsibility for it: an entry that cannot be made
+        // is something a parent may handle and carry on from. Short-circuiting here would delete that
+        // — and it is tested. Nothing becomes an INSTANCE either way, which is why `instance.blocked`
+        // names the mount (parent + child key) and carries no instance id.
+        //
+        // One seam for both kinds. A required input nothing filled and a CALL that could not produce
+        // a value are the same fault at different depths, and routing them differently is what made
+        // one of them bypass every rule that could have handled it.
         this.emit({
           type: "instance.blocked",
           stateId: decl.state,
@@ -1997,6 +2045,9 @@ export class WorkflowEngine {
 
   private resolveChildInputs(
     instance: Instance,
+    /** The mount being wired — the address a failure is reported against, since the fault is the
+     *  CALLER's and one state definition is mounted under several keys in several parents. */
+    childKey: string,
     decl: LoadedChild,
     /**
      * A taken transition's own wiring, ALREADY RESOLVED, which wins per NAME.
@@ -2021,14 +2072,14 @@ export class WorkflowEngine {
       if (v === undefined && wire !== undefined) {
         const r = resolveRef(wire, scope);
         if (isPending(r)) return PENDING;
-        if (isResolveError(r)) return { error: `${decl.state}: input '${name}': ${r.error}` };
+        if (isResolveError(r)) return { error: `${instance.stateId}: wiring child '${childKey}', input '${name}': ${r.error}` };
         v = r.value;
       }
       if (v === undefined) v = meta?.default;
       if (v === undefined) {
         // A bound input resolves after entry (`resolveInputBindings`); an optional input may stay unset.
         if (slot.binding !== undefined || meta?.optional === true) continue;
-        return { error: `${decl.state}: required input '${name}' missing` };
+        return { error: `${instance.stateId}: wiring child '${childKey}': required input '${name}' missing` };
       }
       const err = this.validateSlotValue(name, slot, v, decl.state);
       if (err) return { error: err };

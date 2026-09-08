@@ -176,8 +176,13 @@ export function isBindingDecl(value: unknown): boolean {
  * How a RESOLVED document reads in binding position — the one definition of that dispatch.
  *
  * Two callers reach it from opposite directions and must agree: expansion, splicing a path written
- * as a whole binding, and lowering, resolving a bare name inside an expression. `"binding": "lib/x"`
- * and `"binding": "id(lib/x)"` have to see the same `lib/x`, so the rule lives in one place.
+ * as a whole binding, and lowering, resolving a reference inside an expression. `"binding": "lib/x"`
+ * and `"binding": "id($BASE/lib/x)"` have to see the same document, so the rule lives in one place.
+ *
+ * ⚠️ The two spellings differ, and only in the expression: a MULTI-SEGMENT reference there must open
+ * with a `$` root, because every other `/` is division. Expansion has no such constraint — a whole
+ * binding either is a path or is not, with nothing to disambiguate it against. That is why the pair
+ * above reads `lib/x` on one side and `$BASE/lib/x` on the other; one document, two routes.
  *
  * `fromDataFile` is what separates a `.md`'s TEXT from a JSON string: both are strings in hand, and
  * only the file type says whether the author wrote prose or a binding.
