@@ -27,7 +27,7 @@ interface RunOutcome {
   metrics: { childLlmCalls: number; childCost: number };
   /** Which states actually DISPATCHED, in order — the assertion that matters. */
   dispatched: string[];
-  /** Every `instance.entered` id, in order — the live spine re-states its entry; history never does. */
+  /** Every `instance.entered` id, in order — only a state this run entered for the FIRST time; nothing loaded is. */
   entered: string[];
 }
 
@@ -144,9 +144,10 @@ describe("a loaded run", () => {
     // exactly as dispatched ones would — a state's outputs are a pure function of its recorded
     // operation value and the pinned definition, recomputed rather than stored.
     expect(result.outputs).toEqual({ first: "recorded a", second: "recorded b" });
-    // Only the live spine re-states its entry; the terminated leaves are history, journaled once by
-    // the run that did the work and never again.
-    expect(result.entered).toEqual(["i-root"]);
+    // Nothing entered either. Every instance here was loaded, and a loaded instance's entry is the
+    // one already in the journal the description came from — a resume that re-stated its live spine
+    // wrote a fresh "entered" per live state into that same journal on every reload of a waiting task.
+    expect(result.entered).toEqual([]);
     // Spend belongs to the run that paid it. A dispatched `tally` reports cost through `ok()`;
     // rolling recorded metrics in here would bill this run for calls it did not make.
     expect(result.metrics.childCost).toBe(0);
@@ -166,6 +167,10 @@ describe("a loaded run", () => {
     });
     expect(result.dispatched).toEqual(["b"]);
     expect(result.outputs).toEqual({ first: "recorded a", second: "from b" });
+    // `b` is genuinely NEW — the stopped run never reached it — so it is entered under a freshly
+    // minted id and that entry is journaled; the loaded root's is not.
+    expect(result.entered).toHaveLength(1);
+    expect(result.entered[0]).not.toBe("i-root");
   });
 
   it("dispatches an active leaf again when its call never settled", async () => {
@@ -186,8 +191,9 @@ describe("a loaded run", () => {
     expect(result.dispatched).toEqual(["b"]);
     expect(result.outcome).toBe("success");
     expect(result.outputs).toEqual({ first: "recorded a", second: "from b" });
-    // The live spine — and only the live spine — re-enters under its recorded ids.
-    expect(result.entered).toEqual(["i-root", "i-b"]);
+    // Re-entered under its recorded ids and journaled as nothing: both were entered by the run that
+    // stopped, and the dispatch is the only new fact.
+    expect(result.entered).toEqual([]);
   });
 
   it("holds a loop's iterations apart by occurrence, though their operations are identical", async () => {

@@ -770,8 +770,12 @@ export class WorkflowEngine {
    * it, and because the id and the site are the recorded ones, the scoped record id recomputes
    * identically and the store REOPENS the cut record rather than inserting a second ask.
    *
-   * What this is not: a re-walk. Nothing already answered is journaled again (only the live spine
-   * re-states its `instance.entered`, so the continuing run's journal can stand on its own), no
+   * What this is not: a re-walk. Nothing already journaled is journaled again — a loaded instance's
+   * `instance.entered` is already in the journal the description was read from, so the continuing
+   * run adds only what it newly enters and newly dispatches. (The live spine USED to re-state its
+   * entry so a resume's own journal could stand alone, from when a resume was a separate run with a
+   * separate journal; once a task became one journal, every reload of a waiting task appended
+   * another "entered" per live instance to a log that already held it.) No
    * guard already paid for pays again (`EngineConfig.answers` serves repeats by scoped identity),
    * and the tree keeps the very ids the conversation records point at.
    */
@@ -1047,22 +1051,16 @@ export class WorkflowEngine {
   /**
    * Continue one LIVE instance — `runInstance`'s loaded twin.
    *
-   * Its `instance.entered` is re-stated in the continuing journal (with the SAME id), so this run's
-   * own log can stand alone; nothing terminated is journaled again. The loop is entered with an
+   * Nothing is journaled here: the instance keeps its recorded id and its `instance.entered` is the
+   * one the description was built from, so emitting it again would be a second entry for a state
+   * entered once (see `loadRun`). What the continuation DOES journal is what it newly does — a
+   * cut operation dispatched again, a child entered for the first time. The loop is entered with an
    * evaluation owed exactly when the stopped run owed one: the operation had completed (or the
    * state has none) and no sync child holds the cursor — "guards run on load", which is what
    * re-parks a state on the deferred question it was waiting for.
    */
   private async resumeInstance(loaded: LoadedInstance, def: LoadedState, abort: AbortController, parent: Instance | undefined): Promise<TerminationRecord> {
     const instance = this.buildLoadedInstance(loaded, def, abort, parent);
-    this.emit({
-      type: "instance.entered",
-      instanceId: instance.id,
-      stateId: instance.stateId,
-      childKey: instance.childKey,
-      parentInstanceId: parent?.id,
-      inputs: shallowRedactArtifacts(instance.inputs),
-    });
     this.resolveInputBindings(instance);
 
     for (const child of loaded.children ?? []) {
