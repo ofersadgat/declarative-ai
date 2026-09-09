@@ -30,6 +30,7 @@ import { validateSessionDecl } from "./session.js";
 import { operationNodeSchema } from "./operationNode.js";
 import { ANY_SCHEMA, inferExpression, inferRef, isBooleanSchema, isUniversalSchema, type ExprScope } from "./inferExpr.js";
 import {
+  EACH_NAMESPACE,
   GUARD_NAMESPACES,
   REF_NAMESPACES,
   RESOLVER_REFS,
@@ -171,6 +172,9 @@ function validateState(
     // surfacing it against the child state after the merge has moved it.
     const childSessionComplaint = validateSessionDecl(child.environment?.session);
     if (childSessionComplaint !== undefined) err(`children.${key}.environment.session`, childSessionComplaint);
+    // A mount that FANS OUT (§6.2): its `each` wires must carry an array of what the child declares,
+    // and every wire on it may read `.each` — the axes are what that namespace is typed from.
+    const axes = child.each !== undefined && child.each.length > 0 ? child.each : undefined;
     for (const [inputName, binding] of Object.entries(child.inputs ?? {})) {
       const path = `children.${key}.inputs.${inputName}`;
       const consumer = childDef?.inputs?.[inputName];
@@ -179,9 +183,12 @@ function validateState(
         continue;
       }
       const consumerMeta = childDef?.slotMeta?.[`inputs.${inputName}`];
+      // An `each` wire feeds the child ONE element per entry, so the wire itself must produce a list
+      // of them: the consumer, for the check, is array-of-what-the-child-declares.
+      const wanted: JsonSchema | undefined = axes?.includes(inputName) ? { type: "array", items: (consumer?.schema ?? {}) as JsonValue } : consumer?.schema;
       // Asked AT THE MOUNT: a wire into `key` resolves when `key` is entered, so a sibling that runs
       // after it is not proven for this binding even though it is for the state's own outputs.
-      checkBinding(binding, consumer?.schema, path, id, def, bundle, scope, reachable.enteredAt(key), errors, isOptOut(consumerMeta));
+      checkBinding(binding, wanted, path, id, def, bundle, scope, reachable.enteredAt(key), errors, isOptOut(consumerMeta), axes);
     }
     // Required child inputs must be wired (or defaulted/optional).
     if (childDef) {
@@ -599,7 +606,9 @@ function hooksFor(
       const child = def.children?.[ref];
       if (!child) return undefined;
       const childState = bundle.states[child.state];
-      const schema = childState ? outputsObjectSchema(childState, bundle, seen ?? EMPTY_STATE_SET) : undefined;
+      const own = childState ? outputsObjectSchema(childState, bundle, seen ?? EMPTY_STATE_SET) : undefined;
+      // A mount that FANS OUT (§6.2) is read back elementwise: every output an array, in element order.
+      const schema = own !== undefined && child.each !== undefined && child.each.length > 0 ? elementwise(own) : own;
       return {
         kind: "function",
         functionRef: ref,
@@ -763,7 +772,13 @@ function checkBinding(
   reachable: Reachability,
   errors: ValidationIssue[],
   optOut = false,
+  /**
+   * The `each` axes of the mount this wire is on, when it fans out (§6.2) — the one place `.each` may
+   * be read, and what it is typed from. Absent everywhere else, where a `.each` read is refused.
+   */
+  eachAxes?: readonly string[],
 ): void {
+  const bindingScope: ExprScope = eachAxes === undefined ? scope : { ...scope, [EACH_NAMESPACE]: eachSchema(eachAxes) };
   // Reference and reachability checks run over the WHOLE binding, once, before the type check.
   //
   // They used to live inside the expression branch of `resolverSchema`, which made them depend on
@@ -773,6 +788,15 @@ function checkBinding(
   // ARGUMENTS live — they are on the ref, not on the callee's own `input`.
   for (const reference of referencePathsOf(binding)) {
     const root = reference[0]!;
+    if (root === EACH_NAMESPACE) {
+      // Readable only where there IS an element: the wiring of a mount that fans out. Anywhere else
+      // — an output, a guard, an ordinary mount's wire — it would resolve to nothing at run time,
+      // and "nothing" is the answer that gets bound silently.
+      if (eachAxes === undefined) {
+        errors.push({ stateId, path, message: `'.each' is only readable in the wiring of a child mount that fans out (an input marked each: true)` });
+      }
+      continue;
+    }
     if (!NAMESPACES.has(root)) {
       errors.push({ stateId, path, message: `expression uses unknown reference root '${root}' (expected one of: ${[...NAMESPACES].join(", ")})` });
       continue;
@@ -789,11 +813,22 @@ function checkBinding(
       });
     }
   }
-  checkSpreads(binding, path, stateId, typeOf(stateId, def, bundle, scope, reachable, errors, optOut), errors);
-  const issues = checkBindingGeneric(binding, consumerSchema, hooksFor(stateId, def, bundle, scope, reachable, errors, optOut), path, {
+  checkSpreads(binding, path, stateId, typeOf(stateId, def, bundle, bindingScope, reachable, errors, optOut), errors);
+  const issues = checkBindingGeneric(binding, consumerSchema, hooksFor(stateId, def, bundle, bindingScope, reachable, errors, optOut), path, {
     optOut,
   });
   for (const issue of issues) errors.push({ stateId, path: issue.path, message: issue.message });
+}
+
+/**
+ * What `.each` is typed as on a mount with these axes (§6.2): the element's number, and its position
+ * along each `each` wire by that wire's input name — so `.each.axis.flows` on a mount whose only axis
+ * is `component` is a reference to nothing, reported as one.
+ */
+function eachSchema(axes: readonly string[]): JsonSchema {
+  const axis: Record<string, JsonValue> = {};
+  for (const name of axes) axis[name] = { type: "integer" } as JsonValue;
+  return { type: "object", properties: { index: { type: "integer" } as JsonValue, axis: { type: "object", properties: axis } as JsonValue } };
 }
 
 /**
@@ -960,6 +995,12 @@ function resolverSchema(
     // same edge as wiring it, so it carries the same proof obligation.
     for (const reference of referencePathsOf(asRef)) {
       const root = reference[0]!;
+      // `.each` is in the scope exactly when this expression is a fanned-out mount's wire (§6.2) —
+      // the scope is what says where it may be read, so a read anywhere else is refused here.
+      if (root === EACH_NAMESPACE) {
+        if (!(EACH_NAMESPACE in scope)) err(`'.each' is only readable in the wiring of a child mount that fans out (an input marked each: true)`);
+        continue;
+      }
       if (!NAMESPACES.has(root)) {
         err(`expression uses unknown reference root '${root}' (expected one of: ${[...NAMESPACES].join(", ")})`);
         continue;
@@ -1296,7 +1337,11 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle, seen: ReadonlySet
   const outcomeSchema: JsonValue = { type: "string", enum: [...TERMINATE_OUTCOMES] };
   for (const [key, child] of Object.entries(def.children ?? {})) {
     const childState = bundle.states[child.state];
-    const outputs = childState ? (outputsObjectSchema(childState, bundle, seen) ?? ANY_SCHEMA) : ANY_SCHEMA;
+    const own = childState ? (outputsObjectSchema(childState, bundle, seen) ?? ANY_SCHEMA) : ANY_SCHEMA;
+    // A mount that FANS OUT (§6.2) reads back every output as an ARRAY in element order — what the
+    // engine's one record per key holds — so a consumer typed against the child's own declaration
+    // would be typed against a single element it will never be handed.
+    const outputs = child.each !== undefined && child.each.length > 0 ? elementwise(own) : own;
     // A child's own operation node, typed by ITS operation's kind — so
     // `children.plan.operation.output.session` is checked against what `plan` actually runs, and
     // pointing it at a `ui` gate is a load-time error rather than a runtime undefined.
@@ -1347,6 +1392,15 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle, seen: ReadonlySet
     },
     limits: { type: "object", properties: { max_iterations: { type: "integer" } as JsonValue, timeout: { type: "integer" } as JsonValue } },
   };
+}
+
+/** An outputs object with every property lifted to an array of itself — a fanned-out child's view. */
+function elementwise(outputs: JsonSchema): JsonSchema {
+  const properties = (outputs as { properties?: Record<string, JsonValue> }).properties;
+  if (properties === undefined) return outputs;
+  const lifted: Record<string, JsonValue> = {};
+  for (const [name, schema] of Object.entries(properties)) lifted[name] = { type: "array", items: schema } as JsonValue;
+  return { ...outputs, properties: lifted } as JsonSchema;
 }
 
 function describeSchema(s: JsonSchema): string {

@@ -50,6 +50,12 @@ export interface LoadedInstance {
   childKey?: string;
   /** Which entry under `(parent, childKey)` this was — the address's occurrence half. Default 0. */
   occurrence?: number;
+  /**
+   * Which ELEMENT of a fanned-out mount this was (`InstanceAddressStep.element`). The elements of one
+   * entry share an `occurrence` and are told apart here; a loaded fan-out is rebuilt from them as one
+   * child record, exactly as the live engine keeps one record per key.
+   */
+  element?: number;
   inputs: Record<string, ResolvedValue>;
   /** Transitions taken / backward passes, as `transition.taken` recorded them. */
   index?: number;

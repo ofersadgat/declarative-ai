@@ -67,7 +67,23 @@ export function isArtifactRef(v: unknown): v is ArtifactRef {
 export type OperationKind = "prompt" | "function";
 
 export type EngineEvent =
-  | { type: "instance.entered"; instanceId: string; stateId: string; childKey?: string; parentInstanceId?: string; inputs: Record<string, ResolvedValue> }
+  | {
+      type: "instance.entered";
+      instanceId: string;
+      stateId: string;
+      childKey?: string;
+      parentInstanceId?: string;
+      /**
+       * Which ELEMENT this instance is, when the mount fans out (`each: true` on one of its wires):
+       * the row-major position across every `each` axis, 0-based. Absent for an ordinary entry.
+       *
+       * Carried on the event because a reader of the journal cannot otherwise tell a fan-out's third
+       * element from a loop's third pass — both are the third entry under one key in one parent — and
+       * the two mean opposite things: a pass SUPERSEDES the one before it, an element sits beside it.
+       */
+      element?: number;
+      inputs: Record<string, ResolvedValue>;
+    }
   /**
    * A child that could not be ENTERED, because its input wiring did not resolve.
    *
@@ -158,6 +174,12 @@ export interface InstanceAddressStep {
   childKey: string;
   /** 0-based, in entry order — a loop's second iteration is occurrence 1. */
   occurrence: number;
+  /**
+   * The element position under a mount that FANS OUT — one entry of the mount is one occurrence, and
+   * its elements share that occurrence and differ here. Absent for an ordinary entry, and absent is
+   * not 0: an ordinary child and the first element of a fan-out are different addresses.
+   */
+  element?: number;
 }
 
 /**

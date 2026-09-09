@@ -64,7 +64,7 @@ import {
   resolveCalls,
   scopedOperationId,
 } from "@declarative-ai/exec";
-import type { InstanceAddress, WorkflowMetrics } from "./ports.js";
+import type { InstanceAddress, InstanceAddressStep, WorkflowMetrics } from "./ports.js";
 import type { LoadedInstance } from "./load.js";
 import {
   createToolGate,
@@ -262,6 +262,118 @@ interface TerminationRecord {
   failure?: Failure;
   /** What the state's operation reported, carried up so a parent can read it (SPEC.md §6.1). */
   operation?: OperationNode;
+}
+
+/** What `.each` reads while ONE element of a fan-out is being wired (WORKFLOWS.md §6.2). */
+interface EachContext {
+  /** The element's number: its row-major position across every `each` axis, 0-based. */
+  index: number;
+  /** The element's position along each `each` wire, by the input that wire feeds. */
+  axis: Record<string, number>;
+}
+
+/**
+ * One element of a fan-out, before it runs: FRESH, with its inputs already resolved, or LOADED from a
+ * stopped run's description — history to read back, or a live instance to continue.
+ */
+type FanOutElement =
+  | { inputs: Record<string, ResolvedValue>; loaded?: undefined }
+  | { inputs?: undefined; loaded: LoadedInstance };
+
+/**
+ * A stopped run's children, regrouped so a fan-out's elements arrive together.
+ *
+ * A description lists instances in entry order, one per INSTANCE — which for a fanned-out mount is
+ * one per element, all under the same key and the same occurrence. The engine keeps one record per
+ * key, so the elements are gathered back into the entry they were, and a re-entered fan-out (a loop
+ * around it) is a new occurrence and therefore a new group.
+ */
+type LoadedChildGroup =
+  | { key: string; single: LoadedInstance; elements?: undefined }
+  | { key: string; single?: undefined; elements: LoadedInstance[] };
+
+function groupLoadedChildren(children: readonly LoadedInstance[] | undefined): LoadedChildGroup[] {
+  const out: LoadedChildGroup[] = [];
+  for (const child of children ?? []) {
+    if (child.childKey === undefined) continue;
+    if (child.element === undefined) {
+      out.push({ key: child.childKey, single: child });
+      continue;
+    }
+    const last = out[out.length - 1];
+    if (
+      last !== undefined &&
+      last.elements !== undefined &&
+      last.key === child.childKey &&
+      (last.elements[0]?.occurrence ?? 0) === (child.occurrence ?? 0)
+    ) {
+      last.elements.push(child);
+    } else {
+      out.push({ key: child.childKey, elements: [child] });
+    }
+  }
+  return out;
+}
+
+/**
+ * Every coordinate tuple of a cartesian product, in row-major order: the FIRST axis is the outer
+ * loop, so `.each.index` counts the way the wires were declared. An empty axis empties the product.
+ */
+function tuplesOf(axes: readonly (readonly unknown[])[]): number[][] {
+  const count = axes.reduce((n, axis) => n * axis.length, 1);
+  const out: number[][] = [];
+  for (let k = 0; k < count; k++) {
+    const coords: number[] = new Array<number>(axes.length);
+    let rest = k;
+    for (let a = axes.length - 1; a >= 0; a--) {
+      const length = axes[a]!.length;
+      coords[a] = rest % length;
+      rest = Math.floor(rest / length);
+    }
+    out.push(coords);
+  }
+  return out;
+}
+
+/**
+ * A fan-out's termination from its elements': every output an ARRAY in element order, and the first
+ * element that ended badly naming the whole — with WHICH element, since "child 'component' failed"
+ * is nothing anyone can act on when there were seven of them.
+ */
+function combineElements(key: string, childDef: LoadedState | undefined, terms: readonly TerminationRecord[]): TerminationRecord {
+  const bad = terms.findIndex((term) => term.outcome !== "success");
+  if (bad >= 0) {
+    const term = terms[bad]!;
+    const reason = term.failure?.reason ?? `ended with ${term.outcome}`;
+    return {
+      outcome: term.outcome,
+      failure: { ...(term.failure ?? { classification: "permanent" }), reason: `child '${key}' element ${bad}: ${reason}` },
+    };
+  }
+  // Every output the child DECLARES is present, as an array, even where no element produced it (an
+  // optional output nobody filled) — and above all when there were NO elements: `[]` is the value a
+  // fan-out over nothing has, and a consumer reading it should find an empty list, not a hole.
+  const names = new Set(Object.keys(childDef?.outputs ?? {}));
+  for (const term of terms) for (const name of Object.keys(term.outputs ?? {})) names.add(name);
+  const outputs: Record<string, ResolvedValue> = {};
+  for (const name of names) outputs[name] = terms.map((term) => term.outputs?.[name] ?? null) as ResolvedValue;
+  return { outcome: "success", outputs };
+}
+
+/** A settled child record as the termination it recorded — the shape an element's run returns. */
+function termOf(record: ChildRecord): TerminationRecord {
+  return {
+    outcome: record.outcome ?? "error",
+    ...(record.outputs !== undefined ? { outputs: record.outputs } : {}),
+    ...(record.failure !== undefined ? { failure: record.failure } : {}),
+    ...(record.operation !== undefined ? { operation: record.operation } : {}),
+  };
+}
+
+function describeValue(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "an array";
+  return typeof value === "object" ? "an object" : `a ${typeof value}`;
 }
 
 interface ChildRecord {
@@ -651,7 +763,14 @@ function enclosingInstance(from: Instance | undefined, stateId: string): Instanc
  */
 function addressPath(address: InstanceAddress): string {
   if (address.length === 0) return "/";
-  return address.map((step) => (step.occurrence === 0 ? step.childKey : `${step.childKey}:${step.occurrence}`)).join("/");
+  return address
+    .map((step) => {
+      const entry = step.occurrence === 0 ? step.childKey : `${step.childKey}:${step.occurrence}`;
+      // An element of a fan-out (§6.2) is `key[i]`: the elements of one entry share the occurrence
+      // and differ here, so a session scoped to the fanned-out state gets one bundle per element.
+      return step.element === undefined ? entry : `${entry}[${step.element}]`;
+    })
+    .join("/");
 }
 
 /**
@@ -840,10 +959,16 @@ export class WorkflowEngine {
     // it on the child record before this promise is even constructed, which is what lets a child
     // that CRASHES be terminated under the id it was entered under instead of a sentinel.
     id: string = this.newInstanceId(),
+    /**
+     * The address step this instance is entered under, when the CALLER already took it — an element
+     * of a fan-out (§6.2), whose occurrence was counted once for the whole entry rather than once per
+     * element. Absent for an ordinary entry, which counts its own.
+     */
+    step?: InstanceAddressStep,
   ): Promise<TerminationRecord> {
     // Taken ONCE, before the literal: `addressOf` mutates the parent's entry tally, so asking for it
     // twice would count this entry twice and hand the second reader a different occurrence.
-    const address = addressOf(parent, childKey);
+    const address = step === undefined ? addressOf(parent, childKey) : [...(parent?.address ?? []), step];
     const instance: Instance = {
       id,
       stateId,
@@ -886,6 +1011,7 @@ export class WorkflowEngine {
       stateId,
       childKey,
       parentInstanceId: parent?.id,
+      ...(step?.element !== undefined ? { element: step.element } : {}),
       inputs: shallowRedactArtifacts(inputs),
     });
 
@@ -1024,13 +1150,18 @@ export class WorkflowEngine {
    */
   private async loadTerminated(loaded: LoadedInstance, def: LoadedState, abort: AbortController, parent: Instance | undefined): Promise<ChildRecord> {
     const instance = this.buildLoadedInstance(loaded, def, abort, parent);
-    for (const child of loaded.children ?? []) {
-      if (child.childKey === undefined) continue;
+    for (const group of groupLoadedChildren(loaded.children)) {
+      if (group.elements !== undefined) {
+        const decl = instance.def.children?.[group.key];
+        if (decl !== undefined) instance.children.set(group.key, await this.loadTerminatedFanOut(instance, group.key, decl, group.elements, abort));
+        continue;
+      }
+      const child = group.single;
       const childDef = this.config.bundle.states[child.stateId];
       if (!childDef) continue;
       // A live child under a terminated parent cannot exist — termination cancels the subtree — so
       // whatever the description says, it is read as history here.
-      instance.children.set(child.childKey, await this.loadTerminated(child, childDef, abort, instance));
+      instance.children.set(group.key, await this.loadTerminated(child, childDef, abort, instance));
     }
     const term: TerminationRecord =
       loaded.outcome === "success"
@@ -1063,9 +1194,14 @@ export class WorkflowEngine {
     const instance = this.buildLoadedInstance(loaded, def, abort, parent);
     this.resolveInputBindings(instance);
 
-    for (const child of loaded.children ?? []) {
-      const key = child.childKey;
-      if (key === undefined) continue;
+    for (const group of groupLoadedChildren(loaded.children)) {
+      const key = group.key;
+      // A fan-out's elements come back together, under the one record the engine keeps per key.
+      if (group.elements !== undefined) {
+        await this.resumeFanOut(instance, key, group.elements, abort);
+        continue;
+      }
+      const child = group.single;
       const childDef = this.config.bundle.states[child.stateId];
       if (!child.live) {
         if (!childDef) continue;
@@ -1602,6 +1738,10 @@ export class WorkflowEngine {
       }
     }
 
+    // A mount that FANS OUT (§6.2) is entered once per element, under one record — its own path,
+    // after the reset both share, because "resolve, then enter" happens N times there.
+    if (decl.each !== undefined && decl.each.length > 0) return this.enterFanOut(instance, key, decl, overrides);
+
     // A mount's wiring may CALL — `renderTemplate($/prompts/turns/revise.md, {…})` — and a call is
     // the engine's to run, never resolution's. Run them here, AFTER the reset so they read the same
     // world `resolveChildInputs` will, and before it so the answers are already remembered when it
@@ -1759,6 +1899,295 @@ export class WorkflowEngine {
     return "started";
   }
 
+  // --- fan-out: one child, entered once per element (WORKFLOWS.md §6.2) -----
+
+  /**
+   * Enter a mount that FANS OUT: one instance per element of the cartesian product of its `each`
+   * wires, gathered under ONE child record — so `children.<key>` reads a fan-out exactly as it reads
+   * any child, one record per key, with each output an array in element order.
+   *
+   * Everything is RESOLVED before anything is ENTERED. The other wires are read once per element
+   * with `.each` in scope, and any of them can park on a running sibling exactly as a single mount's
+   * can; the honest answer is then the same "parked" a single mount gives, with nothing entered —
+   * not two elements running and a third that never starts. Resolving up front is what makes that
+   * answer available.
+   */
+  private async enterFanOut(
+    instance: Instance,
+    key: string,
+    decl: LoadedChild,
+    overrides?: Record<string, ResolvedValue>,
+  ): Promise<"started" | "parked" | { failure: Failure }> {
+    const resolved = await this.resolveFanOut(instance, key, decl, overrides);
+    if (resolved === "parked") return "parked";
+    if ("failure" in resolved) return { failure: resolved.failure };
+    if ("blocked" in resolved) return this.blockMount(instance, key, decl, resolved.blocked);
+
+    instance.entered = key;
+    if (decl.async !== true) instance.heldFor = key;
+    const prior = instance.children.get(key);
+    if (prior?.status === "running") prior.abort.abort();
+    // ONE occurrence for the whole entry: the elements share it and differ by `element`, which is what
+    // keeps a loop around a fan-out and a fan-out inside a loop from reading as the same thing.
+    const occurrence = instance.entries.get(key) ?? 0;
+    instance.entries.set(key, occurrence + 1);
+    instance.children.set(key, this.runFanOut(instance, key, decl, occurrence, resolved.elements));
+    return "started";
+  }
+
+  /**
+   * A fan-out's elements, each with its inputs resolved — the axes first, then every other wire once
+   * per element with `.each` in scope.
+   *
+   * A transition's override of an `each` input is the whole ARRAY: a rule that restates an axis
+   * restates all of it, there being no element yet for it to restate one of. Its override of any
+   * other input applies to every element, per name, as it would to a single mount.
+   */
+  private async resolveFanOut(
+    instance: Instance,
+    key: string,
+    decl: LoadedChild,
+    overrides?: Record<string, ResolvedValue>,
+  ): Promise<"parked" | { failure: Failure } | { blocked: string } | { elements: FanOutElement[] }> {
+    const axisNames = decl.each ?? [];
+    const wires = decl.inputs ?? {};
+    const axisWires = axisNames.map((name) => wires[name]).filter((wire): wire is Ref<InlineFamily> => wire !== undefined);
+    const axisFailure = await this.runEmbeddedOps(instance, {}, axisWires);
+    if (axisFailure !== undefined) return { failure: axisFailure };
+
+    const scope = this.scopeFor(instance);
+    const axes: JsonValue[][] = [];
+    for (const name of axisNames) {
+      let value: unknown = overrides?.[name];
+      if (value === undefined) {
+        const wire = wires[name];
+        if (wire === undefined) return { blocked: `${instance.stateId}: wiring child '${key}': input '${name}' is marked each but has no wire` };
+        const r = resolveRef(wire, scope);
+        if (isPending(r)) return "parked";
+        if (isResolveError(r)) return { blocked: `${instance.stateId}: wiring child '${key}', input '${name}': ${r.error}` };
+        value = r.value;
+      }
+      if (!Array.isArray(value)) {
+        return {
+          blocked: `${instance.stateId}: wiring child '${key}': input '${name}' is marked each, so it must be an array, and it resolved to ${describeValue(value)}`,
+        };
+      }
+      axes.push(value as JsonValue[]);
+    }
+
+    const otherWires = Object.entries(wires)
+      .filter(([name]) => !axisNames.includes(name))
+      .map(([, wire]) => wire);
+    const otherOverrides = Object.fromEntries(Object.entries(overrides ?? {}).filter(([name]) => !axisNames.includes(name)));
+    const elements: FanOutElement[] = [];
+    for (const [index, coords] of tuplesOf(axes).entries()) {
+      const each: EachContext = { index, axis: Object.fromEntries(axisNames.map((name, a) => [name, coords[a]!])) };
+      const wiringFailure = await this.runEmbeddedOps(instance, {}, otherWires, each);
+      if (wiringFailure !== undefined) return { failure: wiringFailure };
+      const bound = Object.fromEntries(axisNames.map((name, a) => [name, axes[a]![coords[a]!] as ResolvedValue]));
+      const resolved = this.resolveChildInputs(instance, key, decl, { ...bound, ...otherOverrides }, each);
+      if (resolved === PENDING) return "parked";
+      if ("error" in resolved && typeof resolved.error === "string") return { blocked: resolved.error };
+      elements.push({ inputs: resolved.values! });
+    }
+    return { elements };
+  }
+
+  /**
+   * Run a fan-out's elements under one child record — fresh elements dispatched, loaded ones
+   * continued or read back — and settle the record with their outputs gathered.
+   *
+   * Sequential unless the mount is `async`, which is the one flag that already means "do not wait":
+   * concurrency between the elements is the same thing as concurrency between this child and the
+   * spine, so a second flag would be a second way to say it. In sequence, the first element that
+   * ends badly ends the fan-out and the rest are never entered — which is what lets a rule on the
+   * mount send the run back before every element has spent its work on a doomed batch.
+   */
+  private runFanOut(instance: Instance, key: string, decl: LoadedChild, occurrence: number, elements: readonly FanOutElement[]): ChildRecord {
+    const childDef = this.config.bundle.states[decl.state];
+    const recordAbort = new AbortController();
+    const onParentAbort = (): void => recordAbort.abort();
+    if (instance.abort.signal.aborted) recordAbort.abort();
+    else instance.abort.signal.addEventListener("abort", onParentAbort, { once: true });
+    const record: ChildRecord = { instanceId: this.newInstanceId(), status: "running", abort: recordAbort, promise: Promise.resolve() };
+
+    const runElement = async (index: number, element: FanOutElement): Promise<TerminationRecord> => {
+      if (!childDef) return { outcome: "error", failure: { classification: "permanent", reason: `unknown state '${decl.state}'` } };
+      const elementAbort = new AbortController();
+      const onRecordAbort = (): void => elementAbort.abort();
+      if (recordAbort.signal.aborted) elementAbort.abort();
+      else recordAbort.signal.addEventListener("abort", onRecordAbort, { once: true });
+      try {
+        let term: TerminationRecord;
+        if (element.loaded !== undefined) {
+          term = element.loaded.live
+            ? await this.resumeInstance(element.loaded, childDef, elementAbort, instance)
+            : termOf(await this.loadTerminated(element.loaded, childDef, elementAbort, instance));
+        } else {
+          term = await this.runInstance(decl.state, childDef, element.inputs, elementAbort, key, instance, this.newInstanceId(), {
+            childKey: key,
+            occurrence,
+            element: index,
+          });
+        }
+        return await this.materializeElement(instance, key, index, term);
+      } finally {
+        recordAbort.signal.removeEventListener("abort", onRecordAbort);
+      }
+    };
+
+    const run = async (): Promise<void> => {
+      const terms: TerminationRecord[] = [];
+      if (decl.async === true) {
+        terms.push(...(await Promise.all(elements.map((element, index) => runElement(index, element)))));
+      } else {
+        for (const [index, element] of elements.entries()) {
+          const term = await runElement(index, element);
+          terms.push(term);
+          if (term.outcome !== "success") break;
+        }
+      }
+      const term = combineElements(key, childDef, terms);
+      record.status = "done";
+      record.outcome = term.outcome;
+      record.outputs = term.outputs;
+      record.failure = term.failure;
+      if (instance.children.get(key) === record) {
+        if (!instance.justFinished.includes(key)) instance.justFinished.push(key);
+        if (term.outcome === "error" || term.outcome === "timeout") instance.unhandledFailures.add(key);
+      }
+      instance.notify.signal();
+    };
+    // A throw is a failed child, never a stall — the same rule `enterChild` states, for the same
+    // reason. No `instance.terminated` is emitted for the fan-out itself: nothing was entered under
+    // the record's id, and every element that WAS entered has already reported its own end.
+    record.promise = run().catch((e: unknown) => {
+      record.status = "done";
+      record.outcome = "error";
+      record.failure = { classification: "permanent", reason: `child '${key}' crashed: ${e instanceof Error ? e.message : String(e)}` };
+      if (instance.children.get(key) === record) {
+        if (!instance.justFinished.includes(key)) instance.justFinished.push(key);
+        instance.unhandledFailures.add(key);
+      }
+      instance.notify.signal();
+    });
+    record.promise = record.promise.finally(() => {
+      instance.abort.signal.removeEventListener("abort", onParentAbort);
+    });
+    return record;
+  }
+
+  /**
+   * An element's byte-stream outputs, drained. The fan-out's output is an ARRAY holding this value,
+   * and an array of streams can be piped by nobody — the single-consumer stream §7.4 keeps live for
+   * a lone child has no meaning once the value sits beside its siblings.
+   */
+  private async materializeElement(instance: Instance, key: string, index: number, term: TerminationRecord): Promise<TerminationRecord> {
+    if (term.outcome !== "success" || term.outputs === undefined) return term;
+    for (const [name, value] of Object.entries(term.outputs)) {
+      if (!isByteStream(value)) continue;
+      const label = `state '${instance.stateId}' child '${key}' element ${index} output '${name}'`;
+      try {
+        term.outputs[name] = await materialize(value, instance.abort.signal, label);
+      } catch (e) {
+        const reason = e instanceof MaterializeError ? e.message : `${label}: ${(e as Error).message}`;
+        return { outcome: "error", failure: { classification: "permanent", reason } };
+      }
+    }
+    return term;
+  }
+
+  /**
+   * Refuse a mount whose wiring cannot be made — through the seam a single mount's refusal takes
+   * (`instance.blocked`, then a failed record a rule on the mount may answer), so a fan-out that
+   * cannot be wired is handled by exactly the rules that handle any other entry that cannot be.
+   */
+  private blockMount(instance: Instance, key: string, decl: LoadedChild, reason: string): "started" {
+    this.emit({ type: "instance.blocked", stateId: decl.state, childKey: key, parentInstanceId: instance.id, reason });
+    instance.entered = key;
+    if (decl.async !== true) instance.heldFor = key;
+    const prior = instance.children.get(key);
+    if (prior?.status === "running") prior.abort.abort();
+    const record: ChildRecord = {
+      instanceId: this.newInstanceId(),
+      status: "done",
+      outcome: "error",
+      failure: { classification: "permanent", reason },
+      abort: new AbortController(),
+      promise: Promise.resolve(),
+    };
+    instance.children.set(key, record);
+    if (!instance.justFinished.includes(key)) instance.justFinished.push(key);
+    instance.unhandledFailures.add(key);
+    instance.notify.signal();
+    return "started";
+  }
+
+  /**
+   * A stopped run's fan-out, continued: the elements it recorded — history read back, a live one
+   * resumed — and the elements it never reached, entered fresh.
+   *
+   * How many there SHOULD be is re-read from the axes, which resolve against the loaded siblings
+   * exactly as they did the first time. Where that read cannot be made — an axis reading a sibling
+   * that is itself still live — the recorded elements are taken as the whole. A fan-out every element
+   * of which has terminated is HISTORY, built without touching `justFinished`: a completion the
+   * parent answered before the stop must not be answered again on load, or the mount's rules fire a
+   * second time for the same batch (`unanswered` seeds the round it still owes, as for any child).
+   */
+  private async resumeFanOut(instance: Instance, key: string, loaded: readonly LoadedInstance[], abort: AbortController): Promise<void> {
+    const decl = instance.def.children?.[key];
+    if (decl === undefined || this.config.bundle.states[decl.state] === undefined) return;
+    const occurrence = loaded[0]?.occurrence ?? 0;
+    const byElement = new Map<number, LoadedInstance>(loaded.map((element) => [element.element ?? 0, element]));
+    const anyLive = loaded.some((element) => element.live);
+    const resolved = anyLive || byElement.size === 0 ? await this.resolveFanOut(instance, key, decl) : undefined;
+    const fresh = resolved !== undefined && typeof resolved === "object" && "elements" in resolved ? resolved.elements : undefined;
+    const count = fresh !== undefined ? fresh.length : Math.max(-1, ...byElement.keys()) + 1;
+
+    const elements: FanOutElement[] = [];
+    for (let index = 0; index < count; index++) {
+      const element = byElement.get(index);
+      if (element !== undefined) elements.push({ loaded: element });
+      else if (fresh?.[index] !== undefined) elements.push({ inputs: fresh[index]!.inputs! });
+      // An element neither recorded nor resolvable now: the batch cannot be rebuilt as it was, and
+      // the key is left absent so the spine re-enters the mount and resolves it afresh.
+      else return;
+    }
+    if (!anyLive && elements.every((element) => element.loaded !== undefined)) {
+      instance.children.set(key, await this.loadTerminatedFanOut(instance, key, decl, loaded, abort));
+      return;
+    }
+    if (decl.async !== true) instance.heldFor = key;
+    instance.children.set(key, this.runFanOut(instance, key, decl, occurrence, elements));
+  }
+
+  /** A terminated fan-out of a stopped run, as the one record its parent reads — history, not work. */
+  private async loadTerminatedFanOut(
+    instance: Instance,
+    key: string,
+    decl: LoadedChild,
+    loaded: readonly LoadedInstance[],
+    abort: AbortController,
+  ): Promise<ChildRecord> {
+    const childDef = this.config.bundle.states[decl.state];
+    const terms: TerminationRecord[] = [];
+    if (childDef !== undefined) {
+      for (const element of [...loaded].sort((a, b) => (a.element ?? 0) - (b.element ?? 0))) {
+        terms.push(termOf(await this.loadTerminated(element, childDef, abort, instance)));
+      }
+    }
+    const term = combineElements(key, childDef, terms);
+    return {
+      instanceId: this.newInstanceId(),
+      status: "done",
+      outcome: term.outcome,
+      ...(term.outputs !== undefined ? { outputs: term.outputs } : {}),
+      ...(term.failure !== undefined ? { failure: term.failure } : {}),
+      abort: new AbortController(),
+      promise: Promise.resolve(),
+    };
+  }
+
   /**
    * Wait for anything this instance is waiting ON — a child completing, or a deferred call settling.
    *
@@ -1872,7 +2301,7 @@ export class WorkflowEngine {
 
   // --- expression context / resolution scope --------------------------------
 
-  private exprContext(instance: Instance): Record<string, unknown> {
+  private exprContext(instance: Instance, each?: EachContext): Record<string, unknown> {
     const children: Record<string, unknown> = {};
     for (const key of Object.keys(instance.def.children ?? {})) {
       children[key] = passesOf(instance, key);
@@ -1901,13 +2330,17 @@ export class WorkflowEngine {
       },
       limits: { ...(instance.def.limits ?? {}) },
       artifacts,
+      // In scope ONLY while one element of a fan-out is being wired (§6.2): `.each.index` and
+      // `.each.axis.<input>`. Absent everywhere else, so a read outside that wiring resolves to
+      // nothing — and the validator has already refused it there.
+      ...(each !== undefined ? { each } : {}),
     };
   }
 
   /** The run-scoped view binding resolution needs (§7.4) — this instance's data addresses. */
-  private scopeFor(instance: Instance, demand?: CallDemand): ResolutionScope {
+  private scopeFor(instance: Instance, demand?: CallDemand, each?: EachContext): ResolutionScope {
     return {
-      exprContext: this.exprContext(instance),
+      exprContext: this.exprContext(instance, each),
       // A lowered CALL reads its result here, exactly as a child read reads `childOutputs`:
       // resolution never runs anything, and `undefined` (not yet run) parks the consumer.
       operationResult: (op) => {
@@ -2055,10 +2488,12 @@ export class WorkflowEngine {
      * is entering. See `TransitionDecl.inputs` and the call site in `takeTransition`.
      */
     overrides?: Record<string, ResolvedValue>,
+    /** The element being wired, when the mount fans out — what `.each` reads (§6.2). */
+    each?: EachContext,
   ): typeof PENDING | { values?: Record<string, ResolvedValue>; error?: string } {
     const childDef = this.config.bundle.states[decl.state];
     if (!childDef) return { error: `unknown state '${decl.state}'` };
-    const scope = this.scopeFor(instance);
+    const scope = this.scopeFor(instance, undefined, each);
     const values: Record<string, ResolvedValue> = {};
     for (const [name, slot] of Object.entries(childDef.inputs ?? {})) {
       const meta = childDef.slotMeta?.[`inputs.${name}`];
@@ -2331,15 +2766,17 @@ export class WorkflowEngine {
     input: Record<string, Parameter<InlineFamily>>,
     /** A spread's operand is an argument like any other, and may itself be a call (`f(...g())`). */
     spread: readonly Ref<InlineFamily>[] = [],
+    /** The element being wired, when these are a fanned-out mount's wires (§6.2). */
+    each?: EachContext,
   ): Promise<Failure | undefined> {
     for (const binding of [...Object.values(input).map((p) => p.binding), ...spread]) {
       if (!binding) continue;
       // HIGHER-ORDER first (§3.5): one application per element, and how many there are is not known
       // until the array resolves — so this cannot be a static walk like `embeddedOpsOf` is.
-      const higherFailure = await this.runHigherOrder(instance, binding);
+      const higherFailure = await this.runHigherOrder(instance, binding, each);
       if (higherFailure !== undefined) return higherFailure;
       for (const { op, parameters } of embeddedOpsOf(binding)) {
-        const scope = this.scopeFor(instance);
+        const scope = this.scopeFor(instance, undefined, each);
         // ONE definition of a call's identity, shared with resolution (`resolveEmbedded`): the op
         // with its arguments bound in. Two copies of that rule would hash differently and the memo
         // would never hit.
@@ -2554,11 +2991,11 @@ export class WorkflowEngine {
    * changed — and an element's FAILURE is recorded as a result like any other, because a failure is
    * data (§5) and the consuming slot decides what it means.
    */
-  private async runHigherOrder(instance: Instance, binding: Ref<InlineFamily>): Promise<Failure | undefined> {
+  private async runHigherOrder(instance: Instance, binding: Ref<InlineFamily>, each?: EachContext): Promise<Failure | undefined> {
     for (const node of higherOrderEdgesOf(binding)) {
       const higher = higherOrderOf(node);
       if (higher === undefined) continue;
-      const source = resolveRef(higher.value, this.scopeFor(instance));
+      const source = resolveRef(higher.value, this.scopeFor(instance, undefined, each));
       if (isPending(source)) return { classification: "permanent", reason: `'${higher.name}' waits on a child that has not resolved` };
       if (isResolveError(source)) return { classification: "permanent", reason: `'${higher.name}': ${source.error}` };
       if (!Array.isArray(source.value)) return { classification: "permanent", reason: `'${higher.name}' expects an array` };

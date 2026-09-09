@@ -132,7 +132,17 @@ export function desugarBinding(
   // operation. §3.1's first tier: the operation itself, as a value, with nothing applied to it.
   if (isOperationDecl(binding)) return { op: desugarOperation(binding as OperationFields, stateId, undefined, lower) };
 
-  if ("expr" in binding) return desugarExpression(binding.expr, where, stateId, lower);
+  if ("expr" in binding) {
+    // `each` is a property of a MOUNT — "enter this child once per element" — and only the children
+    // loop below knows it is lowering a mount's wire, so it strips the flag before reaching here. A
+    // flag that arrives is one written somewhere nothing can fan out: an output, an operation
+    // argument, a transition override. Refused rather than ignored, because a silently dropped `each`
+    // would hand the child the whole array as one value and report success.
+    if (binding.each === true) {
+      throw new WorkflowLoadError(`${where}: 'each' is only legal on a child mount's inputs (children.<key>.inputs.<name>)`, stateId);
+    }
+    return desugarExpression(binding.expr, where, stateId, lower);
+  }
   throw new WorkflowLoadError(`${where}: unrecognized binding form ${JSON.stringify(binding)}`, stateId);
 }
 
@@ -234,6 +244,14 @@ function desugarRuntimeReference(reference: string, where: string, stateId: stri
       // still a load-time error and not a silent undefined.
       if (rest.length === 0) bad("must name something on the operation, as '.operation.output.<name>'");
       return desugarBinding({ expr: `.operation.${rest.join(".")}` }, where, stateId);
+    }
+    case "each": {
+      // The element position of a fanned-out mount (§6.2) — `.each.index`, `.each.axis.<input>`.
+      // Lowered as an expression, exactly as `.run.iteration` is: a `context` read of the `each`
+      // root, which the engine puts in scope only while it wires one element. WHERE it may be read is
+      // the validator's rule, not this desugaring's.
+      if (rest.length === 0) bad("must name what it reads, as '.each.index' or '.each.axis.<input>'");
+      return desugarBinding({ expr: reference }, where, stateId);
     }
     default:
       return bad(
@@ -922,8 +940,18 @@ export function desugarState(
     children = {};
     for (const [key, child] of Object.entries(def.children)) {
       const wired: Record<string, Ref<InlineFamily>> = {};
+      // The wires marked `each: true`, in declaration order — the fan-out's axes, outer first (§6.2).
+      // The flag is a fact about the mount and is taken off the binding here, so the wire itself
+      // lowers to the same producer edge any other wire does: the resolver never sees `each`.
+      const each: string[] = [];
       for (const [inputName, binding] of Object.entries(child.inputs ?? {})) {
-        wired[inputName] = desugarBinding(binding, `children.${key}.inputs.${inputName}`, id, undefined, lower);
+        const where = `children.${key}.inputs.${inputName}`;
+        if (typeof binding === "object" && binding !== null && "expr" in binding && binding.each === true) {
+          each.push(inputName);
+          wired[inputName] = desugarBinding({ expr: binding.expr }, where, id, undefined, lower);
+          continue;
+        }
+        wired[inputName] = desugarBinding(binding, where, id, undefined, lower);
       }
       children[key] = {
         // A child that declares no `state` is the one its KEY names (REFERENCES.md §7.3), so the
@@ -931,6 +959,7 @@ export function desugarState(
         // (§6) only by the wiring it adds.
         state: resolveChildRef(child.state ?? `./${key}`, id, key, refs),
         ...(child.inputs ? { inputs: wired } : {}),
+        ...(each.length > 0 ? { each } : {}),
         ...(child.async !== undefined ? { async: child.async } : {}),
         // Carried, never merged here: this layer belongs to the CHILD's chain, and folding it into
         // the parent's own environment would apply it to the parent's operation too (§5).

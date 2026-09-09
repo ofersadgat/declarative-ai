@@ -149,7 +149,20 @@ export type BindingDecl =
    *  (EXPRESSIONS.md §1) — parsed once, at load, never carried as a source string. The bare
    *  string above says the same thing; this spelling is emphasis, for a value a reader would
    *  otherwise have to squint at to see is computed. */
-  | { expr: string };
+  | {
+      expr: string;
+      /**
+       * FAN OUT over this wire (WORKFLOWS.md §6.2): the bound value must be an array, and the child is
+       * entered once per element with this input holding the element. Legal ONLY on a child mount's
+       * `inputs` — anywhere else there is nothing to enter per element, and the loader refuses it.
+       *
+       * Several wires on one mount marked `each` form a cartesian product, the first declared being
+       * the outer axis; the other wires of the mount may read `.each.index` (the row-major position)
+       * and `.each.axis.<input>` (the position along one wire). Zero elements enters nothing, and the
+       * child's outputs then read as empty arrays.
+       */
+      each?: boolean;
+    };
 
 /** Every key that tags an authored binding form — the base `Ref` cases plus the sugar. */
 const BINDING_TAGS: readonly string[] = ["text", "json", "result", "refs", "op", "expr"];
@@ -782,6 +795,15 @@ export interface LoadedChild {
   state: string;
   /** Desugared wiring into the child's declared inputs. */
   inputs?: Record<string, Ref<InlineFamily>>;
+  /**
+   * The inputs whose wires were marked `each: true`, in declaration order — the fan-out AXES, outer
+   * first. Absent or empty means an ordinary mount: entered once, its outputs its own.
+   *
+   * Kept as a list beside `inputs` rather than as a flag on each `Ref` because a `Ref` is the closed
+   * producer vocabulary the resolver reads, and "enter once per element" is not something a producer
+   * edge means — it is a property of the MOUNT, which is what the engine consults when it enters one.
+   */
+  each?: string[];
   async?: boolean;
   /** The per-mount defaults this child was declared with, carried through so the closure walk can
    *  fold them into the chain (and so a lint surface can see why a state loaded as two variants). */
@@ -830,6 +852,13 @@ export interface WorkflowBundle {
  */
 export const REF_NAMESPACES = ["inputs", "outputs", "operation", "children", "artifacts"] as const;
 export const GUARD_NAMESPACES = ["run", "limits"] as const;
+/**
+ * The one namespace readable ONLY in the wiring of a mount that fans out (`each: true`, §6.2):
+ * `.each.index` is the element's row-major position and `.each.axis.<input>` its position along one
+ * `each` wire. Neither a reference namespace nor a guard one — it exists for exactly the bindings
+ * that are evaluated once per element, and the validator refuses it everywhere else.
+ */
+export const EACH_NAMESPACE = "each" as const;
 export const CONTEXT_NAMESPACES = [...REF_NAMESPACES, ...GUARD_NAMESPACES] as const;
 
 /**

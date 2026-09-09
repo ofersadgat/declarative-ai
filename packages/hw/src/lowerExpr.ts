@@ -177,7 +177,7 @@ export interface LowerOptions {
 }
 
 /** The runtime namespaces, for the one diagnostic that has to survive the dot becoming required. */
-const RUNTIME_ROOTS: ReadonlySet<string> = new Set(["inputs", "outputs", "children", "artifacts", "conversations", "run", "limits"]);
+const RUNTIME_ROOTS: ReadonlySet<string> = new Set(["inputs", "outputs", "children", "artifacts", "conversations", "run", "limits", "each"]);
 
 /**
  * Lower a bare name to what it names, or fail saying so.
