@@ -35,6 +35,18 @@ export interface McpBridge {
   /** The `--mcp-config` URL the agent connects to. Carries the run's secret in its path — treat it as a
    *  credential, not as an address: anything that learns it can drive every tool this bridge serves. */
   url: string;
+  /**
+   * Settles once the agent has COMPLETED its handshake with this bridge — it has listed the tools, so
+   * the approval tool is in the set the CLI resolves `--permission-prompt-tool` against.
+   *
+   * Why this exists: the CLI never waits for an `--mcp-config` server. It starts the model turn at
+   * once and resolves the permission tool LAZILY, at the first permission decision, from whatever
+   * servers have finished connecting by then. A bridge still mid-handshake at that moment is `MCP
+   * tool mcp__dai__approve … not found` and a dead run — a race the adapter closes by holding the
+   * prompt back until this settles (see `createCliAgentQuery`). Optional so a fake bridge need not
+   * model it: absent ⇒ the prompt goes in at spawn, as it always did.
+   */
+  ready?: Promise<void>;
   close(): Promise<void>;
 }
 
@@ -113,9 +125,19 @@ export const defaultStartMcpBridge: StartMcpBridge = async (spec) => {
   const http = await import("node:http");
 
   const descriptors = toolDescriptors(spec);
+  // `ready` is the agent's `tools/list` — the last step of its handshake, and the one that puts the
+  // approval tool where `--permission-prompt-tool` looks. Also released on close, so a waiter is never
+  // left holding a bridge that has gone.
+  let markReady: () => void = () => undefined;
+  const ready = new Promise<void>((resolve) => {
+    markReady = resolve;
+  });
   const buildServer = (): SdkServer => {
     const server = new serverModule.Server({ name: "declarative-ai", version: "0.1.0" }, { capabilities: { tools: {} } });
-    server.setRequestHandler(typesModule.ListToolsRequestSchema, () => ({ tools: descriptors }));
+    server.setRequestHandler(typesModule.ListToolsRequestSchema, () => {
+      markReady();
+      return { tools: descriptors };
+    });
     server.setRequestHandler(typesModule.CallToolRequestSchema, (request) =>
       handleToolCall(spec, request.params.name, request.params.arguments),
     );
@@ -162,8 +184,10 @@ export const defaultStartMcpBridge: StartMcpBridge = async (spec) => {
 
   return {
     url: `http://127.0.0.1:${address.port}${bridgePath(token)}`,
+    ready,
     close: () =>
       new Promise<void>((resolve) => {
+        markReady();
         listener.close(() => resolve());
         // Any keep-alive connection the agent left open would hold the process otherwise.
         listener.closeAllConnections?.();

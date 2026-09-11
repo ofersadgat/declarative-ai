@@ -26,6 +26,7 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./mcpBridgeWorker": "./dist/mcpBridgeWorker.js",
     "./package.json": "./package.json"
   },
   "main": "./dist/index.js",

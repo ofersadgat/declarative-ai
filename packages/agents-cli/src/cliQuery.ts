@@ -61,7 +61,20 @@ export interface CliAgentOptions {
   binaryDeps?: BinaryDeps;
   /** Where a binary-resolution warning goes. Default: `console.warn`. */
   warn?: (message: string) => void;
+  /**
+   * How long a run holds its prompt back waiting for the bridge's handshake (`McpBridge.ready`)
+   * before sending it anyway. Default {@link BRIDGE_READY_TIMEOUT_MS}. Only a bridge that reports
+   * readiness is waited for at all.
+   */
+  bridgeReadyTimeoutMs?: number;
 }
+
+/**
+ * The default bound on the prompt's wait for the bridge handshake. A host loop measured at 1–3.7 s
+ * per handshake under load fits several times over; a bridge that has not answered in this long is
+ * not going to, and the run proceeds to the race it would have run anyway.
+ */
+export const BRIDGE_READY_TIMEOUT_MS = 15_000;
 
 /**
  * The failure text for a process that could not be LAUNCHED, or `undefined` when it launched fine.
@@ -81,10 +94,16 @@ export function launchError(child: Pick<AgentProcess, "launchFailure">, command:
  *
  * Seen live: fourteen launches through the same code, one of which died at startup with
  * `MCP tool mcp__dai__approve (passed via --permission-prompt-tool) not found` — the CLI had loaded
- * every other MCP server it knew and simply never connected to the loopback bridge stood up 54 ms
- * after the previous run's was torn down. Nothing about the workflow, the prompt or the account was
- * wrong, and the next launch worked. Classifying that as `permanent` is what let a retry step do
- * nothing and let the engine record a dead draft as the model's answer.
+ * every other MCP server it knew and reported the loopback bridge missing. Nothing about the
+ * workflow, the prompt or the account was wrong, and the next launch worked. Classifying that as
+ * `permanent` is what let a retry step do nothing and let the engine record a dead draft as the
+ * model's answer.
+ *
+ * What it actually was (measured later, against claude 2.1.142): a RACE, not a failed connection. The
+ * CLI never waits for an `--mcp-config` server, and it resolves the permission tool lazily at the
+ * first permission decision — the bridge was still mid-handshake when the model's first tool call
+ * arrived. The adapter now holds the prompt until the handshake is done (`McpBridge.ready`), which
+ * is why this code should be rare; it stays classified transient for the bound that wait has.
  */
 export const BRIDGE_UNREACHABLE = "bridge_unreachable";
 
@@ -376,14 +395,22 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
         command = resolved.path;
         if (resolved.warning !== undefined) (config.warn ?? ((m: string) => console.warn(m)))(resolved.warning);
       }
+      // The prompt as the stream's first message — still the channel with no length limit (see
+      // {@link cliArgv}), in the shape a stream-json session reads.
+      const promptLine = `${JSON.stringify({ type: "user", message: { role: "user", content: opts.prompt ?? "" }, parent_tool_use_id: null })}
+`;
+      // WHEN it goes in is the fix for a race that killed real runs. The CLI does not wait for an
+      // `--mcp-config` server: it starts the model turn as soon as it has input, and it resolves
+      // `--permission-prompt-tool` lazily — at the first permission decision, from whichever servers
+      // have finished their handshake by then. It DOES connect its servers before reading any input
+      // (measured: connected 2.4 s before the prompt was written). So a bridge that can say when its
+      // handshake is done gets the prompt AFTER that, and the first decision finds the tool; a bridge
+      // that cannot (a fake) gets it at spawn, as before.
+      const gate = bridge?.ready;
       const c = spawn([command, ...cliArgv(opts, config, bridge?.url)], {
         cwd: opts.cwd,
         ...(opts.env !== undefined ? { env: opts.env } : {}),
-        // The prompt as the stream's first message — still the channel with no length limit (see
-        // {@link cliArgv}), now in the shape a stream-json session reads. The CLI emits NOTHING until
-        // it has input, so this goes in immediately rather than after any handshake.
-        stdin: `${JSON.stringify({ type: "user", message: { role: "user", content: opts.prompt ?? "" }, parent_tool_use_id: null })}
-`,
+        ...(gate === undefined ? { stdin: promptLine } : {}),
         // Held open, because closing it is what ENDS the session — see `endInput` below.
         keepInputOpen: true,
       });
@@ -393,6 +420,27 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
       onAbort = (): void => c.kill();
       if (opts.abortSignal?.aborted) c.kill();
       else opts.abortSignal?.addEventListener("abort", onAbort, { once: true });
+
+      if (gate !== undefined) {
+        if (c.write === undefined) {
+          yield { type: "other", error: "the process seam offers no input channel, so the prompt cannot follow the bridge handshake" };
+          return;
+        }
+        // BOUNDED. A handshake that never comes — a CLI that lists no tools, a bridge that died — must
+        // not hold the run; past the bound the prompt goes in and the run is back to racing, which is
+        // the previous behaviour and not worse. Also released by the process ending, since a dead
+        // child reads nothing.
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const bound = new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, config.bridgeReadyTimeoutMs ?? BRIDGE_READY_TIMEOUT_MS);
+        });
+        try {
+          await Promise.race([gate, c.exit, bound]);
+        } finally {
+          clearTimeout(timer);
+        }
+        c.write(promptLine);
+      }
 
       let sawResult = false;
       for await (const line of c.lines) {
