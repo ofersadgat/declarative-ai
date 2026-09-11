@@ -1384,7 +1384,7 @@ describe("operation.* resolves during a run", () => {
     files["root"]!.outputs!["read"]!.optional = true;
     // The guard reads the FAILED child's node. It can only fire if the node was recorded despite the
     // call failing — and `terminate.success` keeps the transition from re-firing forever.
-    files["root"]!.transitions = [{ to: "terminate.success", when: ".children.call.operation.cost === 0.05" }];
+    files["root"]!.transitions = [{ to: "terminate.success", when: ".children.call.outcome === 'error' && .children.call.operation.cost === 0.05" }];
     const { engine } = makeEngine(files, "root", () => ({
       error: { classification: "permanent" as const, reason: "model exploded" },
       metrics: { durationMs: 1, costUsd: 0.05, costSource: "unknown" as const },

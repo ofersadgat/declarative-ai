@@ -8,9 +8,14 @@
  *
  * The two details that are copied deliberately and must not be "tidied":
  *
- *  - **stderr is IGNORED, not piped.** An unread pipe fills at ~64 KB and the child then blocks
- *    forever on write, so stdout stops and `exit` never settles. A CLI's diagnostics are not our
- *    channel — the exit code and its terminal message are.
+ *  - **stderr is piped and ALWAYS drained, into a bounded tail.** An unread pipe fills at ~64 KB
+ *    and the child then blocks forever on write, so stdout stops and `exit` never settles — which is
+ *    why it used to be `"ignore"`d outright. But a CLI that dies before its first stdout line says
+ *    why on stderr and nowhere else: a run recorded as `agent CLI exited with code 1` had
+ *    `Error: MCP tool mcp__dai__approve (passed via --permission-prompt-tool) not found` sitting
+ *    in the pipe nobody read. So the pipe is consumed unconditionally (the deadlock does not care
+ *    whether anybody is listening) and the last {@link STDERR_TAIL} characters are kept for the
+ *    exit message. The data listener is attached synchronously at spawn, before anything awaits.
  *  - **an `error` listener is attached.** A `ChildProcess` `'error'` event with no listener THROWS,
  *    which would take the host process down — and ENOENT on a missing binary is the likeliest
  *    first-run outcome. Capture it and let it surface through the exit code instead.
@@ -35,6 +40,15 @@ export interface AgentProcess {
    */
   launchFailure?: () => Error | undefined;
   /**
+   * The last {@link STDERR_TAIL} characters the agent wrote to stderr — read after `exit` settles.
+   *
+   * What a CLI that died before its first stdout line has to say for itself. The exit code alone
+   * names nothing: `exited with code 1` covers a missing permission tool, an unreachable MCP bridge,
+   * a bad flag and an auth failure alike, and every one of them is spelled out on stderr. Optional so
+   * a fake process need not model it: absent ⇒ the exit code is the whole story.
+   */
+  stderrTail?: () => string | undefined;
+  /**
    * Write one more line to the agent's stdin, after it has started.
    *
    * The whole basis of STEERING. A `-p` subprocess is handed its prompt once and its stdin is closed,
@@ -56,6 +70,35 @@ export interface AgentProcess {
    * claude 2.1.246: closing stdin exits 0.
    */
   endInput?: () => void;
+}
+
+/** How much of the agent's stderr is kept for its exit message — the LAST characters, since the
+ *  line that names the death is the last one written, and a chatty CLI's warnings come before it. */
+export const STDERR_TAIL = 4096;
+
+/**
+ * A bounded tail of a text stream: feed it every chunk, read the last {@link STDERR_TAIL} characters.
+ *
+ * Shared with hosts that supply their own {@link SpawnProcess} (JaiRA's job-tracking spawn drains
+ * stderr into its own store and needs the same tail for the same message), so the two copies of the
+ * seam keep one definition of "what the process said".
+ */
+export function stderrTail(limit = STDERR_TAIL): { push(chunk: string): void; read(): string | undefined } {
+  let kept = "";
+  return {
+    push(chunk) {
+      kept = (kept + chunk).slice(-limit);
+    },
+    read() {
+      const text = kept.trim();
+      return text.length > 0 ? text : undefined;
+    },
+  };
+}
+
+/** The exit message for a run that ended with a nonzero code: the code, and what stderr said. */
+export function exitMessage(what: string, code: number, tail: string | undefined): string {
+  return tail === undefined ? `${what} exited with code ${code}` : `${what} exited with code ${code}: ${tail}`;
 }
 
 /** How a process is launched. `stdin` is the second way to hand an agent its instruction. */
@@ -181,10 +224,16 @@ export async function defaultSpawn(): Promise<SpawnProcess> {
       // "inherit", but stating it explicitly invites a later `{...opts.env}` that hands the child an
       // EMPTY environment and strips its PATH and credentials.
       ...(opts.env !== undefined ? { env: opts.env } : {}),
-      stdio: [opts.stdin === undefined && opts.keepInputOpen !== true ? "ignore" : "pipe", "pipe", "ignore"],
+      stdio: [opts.stdin === undefined && opts.keepInputOpen !== true ? "ignore" : "pipe", "pipe", "pipe"],
       windowsHide: true,
     });
     const lines = readline.createInterface({ input: child.stdout!, crlfDelay: Infinity });
+    // THE DRAIN, attached before anything can await the process — see the module comment. Consuming
+    // the bytes is the requirement; keeping the tail is the point.
+    const tail = stderrTail();
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => tail.push(chunk));
+    child.stderr?.on("error", () => undefined);
 
     let spawnError: Error | undefined;
     child.on("error", (e: Error) => {
@@ -206,6 +255,7 @@ export async function defaultSpawn(): Promise<SpawnProcess> {
       lines,
       kill: () => void child.kill(),
       launchFailure: () => spawnError,
+      stderrTail: () => tail.read(),
       ...(child.stdin !== null
         ? {
             write: (line: string): void => void child.stdin?.write(line),

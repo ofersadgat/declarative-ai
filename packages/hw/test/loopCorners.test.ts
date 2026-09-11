@@ -187,9 +187,9 @@ describe("history when a pass does not complete cleanly", () => {
         label: "Root",
         limits: { max_iterations: 1 },
         children: {
-          // The PARENT handles the failure: a taken transition on the child's mount is what stops an
-          // errored child taking the state down with it, and the cursor cannot do that by walking.
-          work: { state: "root/work", transitions: [{ to: "check" }] },
+          // The PARENT handles the failure: a taken rule on the child's mount that NAMES its outcome is what
+          // stops an errored child taking the state down with it (SPEC §3.3); the cursor cannot do that by walking.
+          work: { state: "root/work", transitions: [{ to: "check", when: ".children.work.outcome === 'error'" }, { to: "check" }] },
           check: {
             state: "root/check",
             inputs: { last: { expr: ".children.work[-1].outcome" } },

@@ -194,10 +194,17 @@ every descendant.
 
 If an operation fails unrecoverably, or a child terminates with `error` or
 `timeout` and no transition handles it, the state terminates with
-`terminate.error` instead of continuing. Only a *taken* transition handles it: a
-rule whose guard is still waiting on a deferred call has answered nothing, so the
-failure ends the state and the wait is withdrawn with it rather than holding the
-failed child open for a person to move past.
+`terminate.error` instead of continuing. Only a *taken* transition handles it, and
+only a rule whose guard **names the failed child's outcome** —
+`.children.<key>.outcome` — can be taken while that failure stands. Every other
+rule is not consulted in that round, whatever its condition would have said: a
+guard that happens to hold over a dead child (`isEmpty(.children.draft.output.questions)`
+is true of a child that wrote nothing) is not a decision about the failure, and an
+unconditional rule names nothing. A rule whose guard is still waiting on a
+deferred call has answered nothing either, so the failure ends the state and the
+wait is withdrawn with it rather than holding the failed child open for a person
+to move past. When several children have failed since the last round, the taken
+rule must name each of them.
 
 Transition order matters: child-completion conditions should be declared before
 child-entry conditions, so that the evaluation that runs after a child

@@ -656,6 +656,17 @@ export interface LoadedTransition extends TransitionDecl {
    * failed to parse must not read as unconditional.
    */
   whenError?: string;
+  /**
+   * The children whose OUTCOME this guard reads — `.children.<key>.outcome` — by key.
+   *
+   * What makes a rule an explicit answer to a child's failure (SPEC §3.3). A child that terminated
+   * with `error` or `timeout` is handled only by a taken transition that names its outcome; a rule
+   * whose condition merely happens to hold — `isEmpty(.children.draft.output.questions)` is true of
+   * a child that produced nothing at all — is not consulted while that failure stands. Computed at
+   * load from the guard's references, so the engine's check is a set lookup. Absent or empty ⇒ the
+   * guard names no outcome, and the rule sits out any round with a failure to answer.
+   */
+  handles?: readonly string[];
 }
 
 export interface LimitsDecl {

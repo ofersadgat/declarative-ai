@@ -215,7 +215,7 @@ describe("a call that throws", () => {
     root: {
       label: "Root",
       children: {
-        work: { state: "root/work", ...(handled ? { transitions: [{ to: "after" }] } : {}) },
+        work: { state: "root/work", ...(handled ? { transitions: [{ to: "after", when: ".children.work.outcome === 'error'" }, { to: "after" }] } : {}) },
         after: { state: "root/after" },
       },
     },
@@ -290,7 +290,7 @@ describe("a failure inside a loop", () => {
       label: "Root",
       limits: { max_iterations: 1 },
       children: {
-        work: { state: "root/work", transitions: [{ to: "judge" }] },
+        work: { state: "root/work", transitions: [{ to: "judge", when: ".children.work.outcome === 'error'" }, { to: "judge" }] },
         judge: {
           state: "root/judge",
           inputs: { last: { expr: ".children.work[-1].outcome" }, count: { expr: ".children.work.length" } },
@@ -375,7 +375,7 @@ describe("a required input a rule cannot fill", () => {
       children: {
         // No mount wiring for `prior`: the rule is the only thing that can fill it. (With a mount
         // value it would fall back, which is the override rule working and not what this is about.)
-        work: { state: "root/work", ...(handled ? { transitions: [{ to: "judge" }] } : {}) },
+        work: { state: "root/work", ...(handled ? { transitions: [{ to: "judge", when: ".children.work.outcome === 'error'" }, { to: "judge" }] } : {}) },
         judge: {
           state: "root/judge",
           transitions: [

@@ -39,7 +39,7 @@ import type { AgentQuery, AgentQueryOptions, AgentRun, AgentStreamMessage, Binar
 import { claudeOptionsRefusal, DEFAULT_SETTING_SOURCES, defaultBinaryDeps, readAgentMessage, resolveAgentBinary } from "@declarative-ai/agents-api";
 import { defaultStartMcpBridge, type McpBridge, type StartMcpBridge } from "./mcpBridge.js";
 import { mcpConfigJson, PERMISSION_PROMPT_TOOL } from "./mcpProtocol.js";
-import { defaultSpawn, type AgentProcess, type SpawnProcess } from "./process.js";
+import { defaultSpawn, exitMessage, type AgentProcess, type SpawnProcess } from "./process.js";
 
 /** One line of the agent's stdout, already parsed. */
 export type CliMessage = Record<string, unknown>;
@@ -73,6 +73,34 @@ export interface CliAgentOptions {
 export function launchError(child: Pick<AgentProcess, "launchFailure">, command: string): string | undefined {
   const failure = child.launchFailure?.();
   return failure === undefined ? undefined : `the agent binary '${command}' could not be launched: ${failure.message}`;
+}
+
+/**
+ * The failure code for a run whose agent could not reach THIS package's bridge — a code of our own,
+ * beside the SDK's vocabulary, and one `RETRIABLE_AGENT_ERROR_CODES` names as transient.
+ *
+ * Seen live: fourteen launches through the same code, one of which died at startup with
+ * `MCP tool mcp__dai__approve (passed via --permission-prompt-tool) not found` — the CLI had loaded
+ * every other MCP server it knew and simply never connected to the loopback bridge stood up 54 ms
+ * after the previous run's was torn down. Nothing about the workflow, the prompt or the account was
+ * wrong, and the next launch worked. Classifying that as `permanent` is what let a retry step do
+ * nothing and let the engine record a dead draft as the model's answer.
+ */
+export const BRIDGE_UNREACHABLE = "bridge_unreachable";
+
+/**
+ * Whether stderr says the agent ran but could not reach the bridge, as the code above — or nothing.
+ *
+ * Two spellings, both the CLI's own: the permission tool it was told to route through is "not
+ * found" (the server never connected, so its tools never registered), or it names the server —
+ * `mcpConfigJson` calls it `dai` — as one it failed to connect to. Anything else on stderr is some
+ * other death and stays unclassified, i.e. permanent.
+ */
+export function bridgeFailureCode(stderr: string | undefined): string | undefined {
+  if (stderr === undefined) return undefined;
+  if (stderr.includes(PERMISSION_PROMPT_TOOL) && /not found/i.test(stderr)) return BRIDGE_UNREACHABLE;
+  if (/(failed to connect|connection (refused|failed|error)|could not connect)[^\n]*\bdai\b/i.test(stderr)) return BRIDGE_UNREACHABLE;
+  return undefined;
 }
 
 /** Does this run need the agent to call BACK into us — for an approval, or for a host-implemented
@@ -315,7 +343,13 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
             : {}),
         });
       } catch (e) {
-        yield { type: "other", error: `the agent's permission/tool bridge could not start: ${e instanceof Error ? e.message : String(e)}` };
+        // TRANSIENT: a loopback listener that could not bind is a fact about this moment's ports, not
+        // about the workflow — see `BRIDGE_UNREACHABLE`.
+        yield {
+          type: "other",
+          error: `the agent's permission/tool bridge could not start: ${e instanceof Error ? e.message : String(e)}`,
+          errorCode: BRIDGE_UNREACHABLE,
+        };
         return;
       }
     }
@@ -405,7 +439,19 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
       // A failed LAUNCH is named as one. It has no exit code, so it arrives as the sentinel `-1`, and
       // "exited with code -1" is the least useful sentence available for what is usually the commonest
       // first-run outcome — the binary is not installed, or is not where it was said to be.
-      if (code !== 0 && !sawResult) yield { type: "other", error: launchError(c, command) ?? `agent CLI exited with code ${code}` };
+      //
+      // An ordinary nonzero exit carries what STDERR said. The code alone names nothing — `exited
+      // with code 1` covered a permission tool the CLI could not find on the bridge, and the sentence
+      // saying so was in the pipe (`AgentProcess.stderrTail`).
+      if (code !== 0 && !sawResult) {
+        const tail = c.stderrTail?.();
+        const bridgeCode = bridgeFailureCode(tail);
+        yield {
+          type: "other",
+          error: launchError(c, command) ?? exitMessage("agent CLI", code, tail),
+          ...(bridgeCode !== undefined ? { errorCode: bridgeCode } : {}),
+        };
+      }
     } finally {
       if (onAbort) opts.abortSignal?.removeEventListener("abort", onAbort);
       // ALWAYS kill, and always tear the bridge down. The consumer can finalize this generator early

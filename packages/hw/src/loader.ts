@@ -39,7 +39,7 @@ import {
   type TransitionDecl,
   type WorkflowBundle,
 } from "./format.js";
-import { ExprError, parseExpression, selfPathOf, type Argument, type Expr } from "./expr.js";
+import { ExprError, parseExpression, referencesOf, selfPathOf, type Argument, type Expr } from "./expr.js";
 import { bindArguments, bindTransitionContext, EXPRESSION_REFS, lowerExpression, parametersFor, positionalNames, type LowerOptions } from "./lowerExpr.js";
 import { environmentIdentity, mergeOperationFields, resolutionEnvironment } from "./merge.js";
 import { normalizeSession, type NormalizedSession, type SessionAncestor, type SessionWriter } from "./session.js";
@@ -928,7 +928,16 @@ export function desugarState(
       const withInputs = t.inputs === undefined ? {} : { inputRefs: wired };
       if (t.when === undefined) return { ...t, ...withInputs };
       try {
-        return { ...t, ...withInputs, whenRef: bindTransitionContext(lowerExpression(parseExpression(t.when), lower), t.to) };
+        const parsed = parseExpression(t.when);
+        // Which children's OUTCOME the guard reads — the fact that makes it an explicit answer to
+        // that child's failure. See `LoadedTransition.handles`.
+        const handles = [...new Set(referencesOf(parsed).filter((p) => p[0] === "children" && p[2] === "outcome").map((p) => p[1]!))];
+        return {
+          ...t,
+          ...withInputs,
+          whenRef: bindTransitionContext(lowerExpression(parsed, lower), t.to),
+          ...(handles.length > 0 ? { handles } : {}),
+        };
       } catch (e) {
         // Carried, not thrown — see `LoadedTransition.whenError`.
         return { ...t, ...withInputs, whenError: (e as Error).message };

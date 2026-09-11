@@ -211,7 +211,10 @@ function readContent(content: unknown): Pick<AgentStreamMessage, "text" | "think
  * Default-PERMANENT is deliberate. An unrecognised code from a later version retries zero times rather
  * than an unknown number of times against an unknown condition.
  */
-export const RETRIABLE_AGENT_ERROR_CODES: ReadonlySet<string> = new Set(["rate_limit", "overloaded", "server_error"]);
+// `bridge_unreachable` is not the SDK's: it is `@declarative-ai/agents-cli`'s own code for a CLI that ran but
+// never connected to the loopback bridge this side stood up for it. A fact about one launch's ports
+// and timing, not about the workflow, and the next launch ordinarily works.
+export const RETRIABLE_AGENT_ERROR_CODES: ReadonlySet<string> = new Set(["rate_limit", "overloaded", "server_error", "bridge_unreachable"]);
 
 /** Would retrying this failure plausibly help? Absent code ⇒ no, per the default above. */
 export function isRetriableAgentError(code: string | undefined): boolean {

@@ -192,7 +192,7 @@ describe("a transition written on a child mount", () => {
     // Unhandled, a child that terminates with error takes the state down with it (SPEC §3.3). Routing
     // it from the mount is what handling looks like — and the point of writing it there is that it
     // cannot be confused with any OTHER child's failure.
-    const files = (transitions?: { to: string }[]): Record<string, StateDef> => ({
+    const files = (transitions?: { to: string; when?: string }[]): Record<string, StateDef> => ({
       root: {
         children: { risky: { state: "root/risky", ...(transitions ? { transitions } : {}) }, recover: { state: "root/recover" } },
         sequence: ["risky"],
@@ -204,7 +204,18 @@ describe("a transition written on a child mount", () => {
     expect(unhandled.outcome).toBe("error");
     expect(unhandled.reason).toContain("no transition handled it");
 
-    const handled = await runMarking(files([{ to: "recover" }]), "root");
+    // A rule that does not NAME the failure is not an answer to it, however true its condition. An
+    // unconditional "after risky, recover" is about a risky that finished; a guard on the child's
+    // output is true of a child that wrote nothing at all. Neither is consulted while the failure
+    // stands, and the state ends the same way as with no rule.
+    const implicit = await runMarking(files([{ to: "recover" }]), "root");
+    expect(implicit.outcome).toBe("error");
+    expect(implicit.reason).toContain("no transition handled it");
+    const coincidental = await runMarking(files([{ to: "recover", when: "isEmpty(.children.risky.output.done)" }]), "root");
+    expect(coincidental.outcome).toBe("error");
+    expect(coincidental.order).toEqual(["risky"]);
+
+    const handled = await runMarking(files([{ to: "recover", when: ".children.risky.outcome === 'error'" }]), "root");
     expect(handled.outcome).toBe("success");
     expect(handled.order).toEqual(["risky", "recover"]);
   });

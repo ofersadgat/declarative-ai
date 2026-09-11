@@ -44,7 +44,7 @@ import type { JsonValue } from "./deps.js";
 import { launchError } from "./cliQuery.js";
 import { defaultStartMcpBridge, type McpBridge, type StartMcpBridge } from "./mcpBridge.js";
 import { MCP_SERVER_NAME } from "./mcpProtocol.js";
-import { defaultSpawn, type SpawnProcess } from "./process.js";
+import { defaultSpawn, exitMessage, type SpawnProcess } from "./process.js";
 
 /** The executable this adapter drives. */
 export const CODEX_COMMAND = "codex";
@@ -485,7 +485,7 @@ export function createCodexAgentQuery(config: CodexAgentOptions = {}): AgentQuer
         // A failed LAUNCH is named as one, for the same reason the `claude` sibling does it: a spawn
         // that never happened has no exit code, so it arrives as `-1`, which says nothing about the
         // binary being absent.
-        yield { type: "other", error: launchError(c, config.command ?? CODEX_COMMAND) ?? `codex exited with code ${code}` };
+        yield { type: "other", error: launchError(c, config.command ?? CODEX_COMMAND) ?? exitMessage("codex", code, c.stderrTail?.()) };
         return;
       }
       if (run.text === undefined) {

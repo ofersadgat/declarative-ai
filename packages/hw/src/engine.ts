@@ -1559,7 +1559,9 @@ export class WorkflowEngine {
       index: instance.index,
       iteration: instance.iteration,
     });
-    instance.unhandledFailures.clear(); // a taken transition handles preceding child failures
+    // A taken transition handles preceding child failures — and it could only be taken because its
+    // guard names every one of them (`firstMatchingTransition`), so clearing the set is exact.
+    instance.unhandledFailures.clear();
     if (taken.to.startsWith("terminate.")) {
       consumeEligibility();
       return `terminated-${taken.to.slice("terminate.".length) as TerminationOutcome}` as const;
@@ -1633,6 +1635,20 @@ export class WorkflowEngine {
     const scope = this.scopeFor(instance, (_op, _key, inFlight) => {
       if (inFlight) deferred = true;
     });
+    /**
+     * A child's failure is answered only by a rule that NAMES its outcome (SPEC §3.3).
+     *
+     * While a child's `error`/`timeout` stands unhandled, a rule whose guard does not read
+     * `.children.<key>.outcome` for every such child is not consulted at all — not evaluated, not
+     * taken, whatever its condition would have said. This is what "explicitly handled" means: a
+     * guard that happens to hold over a dead child (`isEmpty(.children.draft.output.questions)` is
+     * true of a child that wrote nothing) is not a decision about the failure, and letting it fire
+     * walked a run past a dead draft with that child's outputs missing from everything downstream.
+     * An unconditional rule names nothing, so it sits out too. Nothing answering ⇒ the state ends
+     * in error, in the caller's "none" branch.
+     */
+    const failed = instance.unhandledFailures;
+    const answers = (t: LoadedTransition): boolean => failed.size === 0 || [...failed].every((key) => t.handles?.includes(key) === true);
     const firstOf = (
       transitions: readonly LoadedTransition[] | undefined,
     ): { to: string } | typeof WAITING | typeof GUARD_FAILED | undefined => {
@@ -1640,6 +1656,7 @@ export class WorkflowEngine {
         // A guard that failed to lower never fires: validation blocks the run, and reading it as
         // unconditional would be the worst possible interpretation of a typo.
         if (t.whenError !== undefined) continue;
+        if (!answers(t)) continue;
         if (t.whenRef === undefined) return { to: t.to, ...(t.inputRefs !== undefined ? { inputRefs: t.inputRefs } : {}) };
         deferred = false;
         const r = resolveRef(t.whenRef, scope);

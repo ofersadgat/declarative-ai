@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { isOk, type ExecServices, type FunctionInputs } from "@declarative-ai/exec";
-import { cliArgv, cliRefusal, createCliAgentQuery } from "../src/cliQuery.js";
-import type { AgentProcess, SpawnProcess } from "../src/process.js";
+import { BRIDGE_UNREACHABLE, bridgeFailureCode, cliArgv, cliRefusal, createCliAgentQuery } from "../src/cliQuery.js";
+import { stderrTail, type AgentProcess, type SpawnProcess } from "../src/process.js";
 import { CLI_CONFIG_ONLY_CAPS, CLI_DELEGATED_CAPS, createCliAgentFunction } from "../src/runtime.js";
 import { injectedToolAllowEntries, mcpConfigJson, PERMISSION_PROMPT_TOOL } from "../src/mcpProtocol.js";
 
@@ -245,7 +245,7 @@ describe("the bridge lifecycle", () => {
     };
     const seen = [];
     for await (const m of createCliAgentQuery({ spawn, startBridge })({ prompt: "x", canUseTool: async () => ({ allow: true }) })) seen.push(m);
-    expect(seen).toEqual([{ type: "other", error: expect.stringMatching(/bridge could not start.*not installed/) }]);
+    expect(seen).toEqual([{ type: "other", error: expect.stringMatching(/bridge could not start.*not installed/), errorCode: BRIDGE_UNREACHABLE }]);
     expect(argv).toHaveLength(0);
   });
 
@@ -756,6 +756,52 @@ describe("not installed — named as a launch failure, not as an exit code", () 
     const seen = [];
     for await (const m of createCliAgentQuery({ spawn })({ prompt: "hi" })) seen.push(m);
     expect(seen[0]?.error).toBe("agent CLI exited with code 2");
+  });
+
+  it("carries what the CLI said on stderr, which is the only place a startup death is explained", async () => {
+    // Seen live: a run recorded as `exited with code 1` had this sentence in the pipe nobody read,
+    // and the workflow went on as though the model had merely failed to answer.
+    const stderr = "Error: MCP tool mcp__dai__approve (passed via --permission-prompt-tool) not found. Available MCP tools: none\n";
+    const spawn: SpawnProcess = () => ({
+      lines: (async function* () {})(),
+      kill: () => {},
+      exit: Promise.resolve(1),
+      stderrTail: () => stderr.trim(),
+    });
+    const seen = [];
+    for await (const m of createCliAgentQuery({ spawn })({ prompt: "hi" })) seen.push(m);
+    expect(seen[0]?.error).toBe(`agent CLI exited with code 1: ${stderr.trim()}`);
+    // …and NAMES it as the bridge being unreachable, which is the transient case a retry can get past.
+    expect(seen[0]?.errorCode).toBe(BRIDGE_UNREACHABLE);
+    const result = await createCliAgentFunction({ command: "claude", spawn }).run(inputs(), {});
+    expect(isOk(result)).toBe(false);
+    expect(!isOk(result) && result.error.classification).toBe("network-retriable"); // the class `withRetry`'s transient cap re-attempts
+  });
+
+  it("leaves every other stderr death permanent — only the bridge is ours to retry past", async () => {
+    const spawn: SpawnProcess = () => ({
+      lines: (async function* () {})(),
+      kill: () => {},
+      exit: Promise.resolve(1),
+      stderrTail: () => "Error: Invalid model name: claude-opus-9",
+    });
+    const seen = [];
+    for await (const m of createCliAgentQuery({ spawn })({ prompt: "hi" })) seen.push(m);
+    expect(seen[0]?.errorCode).toBeUndefined();
+    const result = await createCliAgentFunction({ command: "claude", spawn }).run(inputs(), {});
+    expect(!isOk(result) && result.error.classification).toBe("permanent");
+    expect(bridgeFailureCode('Failed to connect to MCP server "dai": ECONNREFUSED')).toBe(BRIDGE_UNREACHABLE);
+    expect(bridgeFailureCode("MCP server 'other' failed to connect")).toBeUndefined();
+  });
+
+  it("keeps the LAST of a long stderr, where the line that names the death is", () => {
+    const tail = stderrTail(16);
+    expect(tail.read()).toBeUndefined();
+    tail.push("   \n");
+    expect(tail.read()).toBeUndefined();
+    tail.push("warning: old news\n");
+    tail.push("Error: the end");
+    expect(tail.read()).toBe("s\nError: the end");
   });
 });
 
