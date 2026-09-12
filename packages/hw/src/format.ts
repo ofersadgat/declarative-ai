@@ -107,6 +107,16 @@ export const RESOLVER_REFS = {
    * shape it already has instead of needing a variadic call convention the model does not have.
    */
   record: "op.record",
+  /**
+   * APPLYING a callable VALUE (SPEC §6.2) — `.inputs.reviewer(.inputs.doc)`.
+   *
+   * The one resolver that DISPATCHES rather than computes: its `callee` operand resolves to an
+   * operation, its `arg<n>` operands are bound into that operation's slots by position (spreads by
+   * name), and the result is read back exactly as a lowered call's is — the engine runs what the
+   * binding demands, and resolution reads. A resolver rather than a lowered call because the callee
+   * is not known until the value is: nothing static can name the operation this edge will run.
+   */
+  apply: "op.apply",
 } as const;
 
 /** Every well-known resolver ref, for registry seeding and validator checks. */
@@ -152,6 +162,21 @@ export type BindingDecl =
   | {
       expr: string;
       /**
+       * An `environment` layer for every CALL this expression makes (SPEC §4.2) — merged nearest-wins
+       * ABOVE the state's own, so `{ "session": null }` here gives a title-generating prompt a fresh
+       * conversation and `{ "tools": [] }` takes a call's tools away. Legal on any binding; absent, a
+       * call borrows the enclosing instance's environment.
+       */
+      environment?: EnvironmentDecl;
+      /**
+       * The value this binding takes if evaluation FAILS (SPEC §4.2, §5.3) — a callee that errors,
+       * a result the field's schema refuses. Type-checked against the field exactly as the
+       * expression is. With it the failure is journaled and this stands in; without it the failure
+       * is the instance's. Legal on a FIELD binding (§5.3); a wire into a child has the child's
+       * own `default`/`optional` for the same job.
+       */
+      failureValue?: JsonValue;
+      /**
        * FAN OUT over this wire (WORKFLOWS.md §6.2): the bound value must be an array, and the child is
        * entered once per element with this input holding the element. Legal ONLY on a child mount's
        * `inputs` — anywhere else there is nothing to enter per element, and the loader refuses it.
@@ -183,6 +208,22 @@ export function isBindingDecl(value: unknown): boolean {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const o = value as Record<string, unknown>;
   return BINDING_TAGS.some((k) => k in o) || o.kind === "prompt" || o.kind === "function";
+}
+
+/**
+ * The WRAPPED binding form — `{ "binding": … }` — for the value positions where a bare binding could
+ * not be told from data (SPEC §5.3).
+ *
+ * Inside `config` and `args` a value is opaque JSON handed to an executor, so `{ "expr": "…" }`
+ * there might be a literal object with an `expr` key. The wrapper is the slot form outputs and
+ * `title` already use, and a `binding` key is one no executor's configuration legitimately contains,
+ * so a wrapped object is never an accident. Exactly one key: a wrapper carrying anything else is a
+ * slot declaration, which those positions do not take.
+ */
+export function isWrappedBinding(value: unknown): value is { binding: BindingDecl } {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === 1 && keys[0] === "binding" && isBindingDecl((value as { binding: unknown }).binding);
 }
 
 /**
@@ -299,15 +340,25 @@ export interface ExecEnvironmentDecl {
    * which one wins — all to save an author one rename.
    */
   session?: SessionDecl;
-  /** Logical names of tools the operation may call mid-loop — resolved through `registry.tools`. */
-  tools?: string[];
-  /** Authored per-operation permission baseline (DESIGN §5.1, "the definition-authored baseline"). */
-  permissions?: {
-    profile?: PermissionProfile;
-    default?: PermissionMode;
+  /** Logical names of tools the operation may call mid-loop — resolved through `registry.tools`.
+   *  A value (SPEC §5.3), so a binding may stand in for the whole list. */
+  tools?: Bindable<string[]>;
+  /**
+   * Authored per-operation permission baseline (DESIGN §5.1, "the definition-authored baseline").
+   *
+   * A value (SPEC §5.3): the whole block, or its `profile`/`default`/`other`, may be a binding —
+   * written bare, since the format knows each one's type. Materialized before anything runs, so an
+   * engine reader sees the literal ({@link literalPermissions}).
+   */
+  permissions?: Bindable<PermissionsDecl>;
+}
+
+export interface PermissionsDecl {
+    profile?: Bindable<PermissionProfile>;
+    default?: Bindable<PermissionMode>;
     tools?: Record<string, PermissionMode>;
     /** What a tool the host does not register resolves to — see `ProfileTable.other`. */
-    other?: PermissionMode;
+    other?: Bindable<PermissionMode>;
     /**
      * WHERE each tool may act, as authored on this operation.
      *
@@ -316,7 +367,37 @@ export interface ExecEnvironmentDecl {
      * the host supplies — it cannot widen past it, for the same reason it cannot widen past a profile.
      */
     scopes?: ScopeDecl[];
-  };
+}
+
+/** A permission field as a LITERAL — what a materialized definition holds (SPEC §5.3). */
+export interface LiteralPermissions {
+  profile?: PermissionProfile;
+  default?: PermissionMode;
+  tools?: Record<string, PermissionMode>;
+  other?: PermissionMode;
+  scopes?: ScopeDecl[];
+}
+
+/**
+ * The permissions block an engine reads — every binding in it written in by materialization. A
+ * binding still present is a definition that was never materialized, which the engine treats as
+ * "nothing declared" rather than reading a binding object as a profile name.
+ */
+export function literalPermissions(env: ExecEnvironmentDecl | undefined): LiteralPermissions | undefined {
+  const declared = env?.permissions;
+  if (declared === undefined || isBindingDecl(declared)) return undefined;
+  const p = declared as PermissionsDecl;
+  const literal = <T>(v: Bindable<T> | undefined): T | undefined => (v === undefined || (typeof v !== "string" && isBindingDecl(v)) ? undefined : (v as T));
+  const out: LiteralPermissions = {};
+  const profile = literal<PermissionProfile>(p.profile);
+  if (profile !== undefined) out.profile = profile;
+  const mode = literal<PermissionMode>(p.default);
+  if (mode !== undefined) out.default = mode;
+  const other = literal<PermissionMode>(p.other);
+  if (other !== undefined) out.other = other;
+  if (p.tools !== undefined) out.tools = p.tools;
+  if (p.scopes !== undefined) out.scopes = p.scopes;
+  return out;
 }
 
 /**
@@ -342,10 +423,14 @@ export interface OperationFields extends ExecEnvironmentDecl {
    * replaced the old `prompt.skill` and `registry.skills` (REFERENCES.md §7.1). A referenced `.md`
    * is still a template; nothing about interpolation changes.
    */
-  prompt?: string;
-  system?: string;
-  /** Registry name — a host function, or a runtime adapter (`claude-code`, …). */
-  function?: string;
+  prompt?: Bindable<string>;
+  system?: Bindable<string>;
+  /**
+   * Registry name — a host function, or a runtime adapter (`claude-code`, …) — or a BINDING whose
+   * value is a function-kind callable (SPEC §7.1): `{ "expr": ".inputs.reviewer" }` runs whatever
+   * callable the input carries, typed at load by the input's declared signature.
+   */
+  function?: Bindable<string>;
   /**
    * A FUNCTION operation's authored arguments, bound to its input slots BY NAME.
    *
@@ -424,24 +509,49 @@ export interface OperationFields extends ExecEnvironmentDecl {
   // the prompt runner is what type-checks the assembled call. Any field NOT owned by hw
   // (`OPERATION_OWN_FIELDS`) is passed through to the call config too, so a knob missing from this
   // list still reaches the model — it just is not statically known here.
-  model?: string;
-  maxOutputTokens?: number;
-  stopSequences?: string[];
-  seed?: number;
-  maxSteps?: number;
+  //
+  // Every one of these is a VALUE (SPEC §5.3), so each may be a binding in its place: a known field
+  // is written bare (`"model": { "expr": ".inputs.model" }`), and a knob hw has never heard of is
+  // WRAPPED (`"foo": { "binding": { "expr": … } }`), because an unknown knob is opaque JSON and a bare
+  // binding there could not be told from a literal object — see `isWrappedBinding`.
+  model?: Bindable<string>;
+  maxOutputTokens?: Bindable<number>;
+  stopSequences?: Bindable<string[]>;
+  seed?: Bindable<number>;
+  maxSteps?: Bindable<number>;
   toolChoice?: JsonValue;
   providerOptions?: Record<string, JsonValue>;
-  outputModalities?: string[];
-  temperature?: number;
-  topP?: number;
-  topK?: number;
-  presencePenalty?: number;
-  frequencyPenalty?: number;
+  outputModalities?: Bindable<string[]>;
+  temperature?: Bindable<number>;
+  topP?: Bindable<number>;
+  topK?: Bindable<number>;
+  presencePenalty?: Bindable<number>;
+  frequencyPenalty?: Bindable<number>;
   /** How hard to think. Mirrors `llm`'s `ReasoningSpec` by hand, as everything on this authoring
    *  surface does — `xhigh` included, because a delegated agent has such a tier and an author must be
    *  able to write it here or the level cannot be requested at all. */
-  reasoning?: { effort?: "low" | "medium" | "high" | "xhigh"; budgetTokens?: number };
+  reasoning?: Bindable<{ effort?: "low" | "medium" | "high" | "xhigh"; budgetTokens?: number }>;
 }
+
+/**
+ * The call-configuration fields hw KNOWS the type of, with that type — the ones a bare binding may
+ * stand in for (SPEC §5.3). Anything else authored on a prompt operation is an opaque knob, bindable
+ * only through the wrapped form.
+ */
+export const CONFIG_FIELD_SCHEMAS: Readonly<Record<string, JsonSchema>> = {
+  model: { type: "string" },
+  maxOutputTokens: { type: "integer" },
+  stopSequences: { type: "array", items: { type: "string" } },
+  seed: { type: "integer" },
+  maxSteps: { type: "integer" },
+  outputModalities: { type: "array", items: { type: "string" } },
+  temperature: { type: "number" },
+  topP: { type: "number" },
+  topK: { type: "integer" },
+  presencePenalty: { type: "number" },
+  frequencyPenalty: { type: "number" },
+  reasoning: { type: "object" },
+};
 
 /** The fields that make an operation a PROMPT, and the ones that make it a FUNCTION. */
 const PROMPT_FIELDS = ["prompt", "system"] as const;
@@ -545,8 +655,14 @@ export interface ChildDecl {
   state?: string;
   /** Wiring into the child's declared inputs — the same authored binding sugar (§2.1). */
   inputs?: Record<string, BindingDecl>;
-  /** SPEC §10.4: starting this child does not block the sequence. */
-  async?: boolean;
+  /**
+   * SPEC §10.4: starting this child does not block the sequence.
+   *
+   * A value (SPEC §5.3): a binding here is resolved in the PARENT's scope when the mount is entered —
+   * the moment the flag is read — so "run this review in the background when the change is small"
+   * is one expression rather than two mounts.
+   */
+  async?: Bindable<boolean>;
   /**
    * Defaults for THIS MOUNT of the child, and its subtree (§5).
    *
@@ -676,13 +792,33 @@ export interface LimitsDecl {
   timeout?: number;
 }
 
+/**
+ * A value position that may be COMPUTED (SPEC §5.3): the literal, or a binding in its place.
+ *
+ * Every value in a state file is a binding; what stays authored is structure — `id`, `children`,
+ * `sequence`, `transitions`, a slot's `schema`. Where the format knows the field's type the binding is
+ * written BARE in the value's place, which is this type.
+ */
+export type Bindable<T> = T | BindingDecl;
+
+/**
+ * The state's `title` (SPEC §5.2): the INSTANCE's display name, slot-shaped — a binding under
+ * `binding`, evaluated once when the instance is created, typed as a string. A task shows the nearest
+ * declared title on its active path, itself included, and the state's `label` while it settles.
+ */
+export interface TitleDecl {
+  binding: BindingDecl;
+  description?: string;
+}
+
 export interface StateDef {
   /** The state's PATH REFERENCE (§2.1) — equal to its own location, so it may be omitted and
    *  derived (a present-but-mismatched `id` is a load error). Bare paths hang off the default
    *  workflow root; `/…`, `$VAR/…`, `file:…`, and `./…` are the escape hatches. */
   id?: string;
-  label?: string;
-  description?: string;
+  label?: Bindable<string>;
+  title?: TitleDecl;
+  description?: Bindable<string>;
   inputs?: Record<string, ParameterDecl>;
   outputs?: Record<string, NamedParameterDecl>;
   /** The state's operation (§7.1). A state with children and no operation is a pure composite;
@@ -703,8 +839,39 @@ export interface StateDef {
    * the mount, the round it is eligible in is already the one it is about.
    */
   transitions?: TransitionDecl[];
-  limits?: LimitsDecl;
+  limits?: { max_iterations?: Bindable<number>; timeout?: Bindable<number> };
 }
+
+/**
+ * One COMPUTED FIELD of a loaded state (SPEC §5.3): a value position whose author wrote a binding.
+ *
+ * The loader takes the binding out of the document, leaves the position empty, and records it here;
+ * the engine evaluates every field once at instance entry, in dependency order, and writes the value
+ * back at `path` before anything reads the definition. A field is a node in the same graph the
+ * inputs and the operation are in, which is what lets a title read `.inputs.issue` and a model
+ * choice read `.title`.
+ */
+export interface LoadedField {
+  /**
+   * WHERE the value goes, in AUTHORED terms — `title`, `label`, `limits.max_iterations`,
+   * `operation.prompt`, `operation.function`, `operation.config.model`, `environment.tools`. The
+   * authored names rather than the lowered op's (`user`, `functionRef`) because they are also the
+   * names an expression reads the field back under (§6.1), and one spelling has to serve both.
+   */
+  path: string;
+  ref: Ref<InlineFamily>;
+  /** The field's own type — a string for a title, a number for a limit, a callable for `function`. */
+  schema?: JsonSchema;
+  /** The kind the value is read as — `function`/`prompt` for a callable field, else data. */
+  kind?: RefKind;
+  /** See `BindingDecl.failureValue`. */
+  failureValue?: JsonValue;
+  /** See `BindingDecl.environment` — the layer this field's calls run under, merged over the state's. */
+  environment?: ExecEnvironmentDecl;
+}
+
+/** The authored roots a FIELD is read back under (§6.1), beside `operation.*` and `limits.*`. */
+export const FIELD_NAMESPACES = ["title", "label", "description", "environment"] as const;
 
 /**
  * A state after loading: its operation desugared to base `Ref` cases, ready for the checker and the
@@ -713,10 +880,22 @@ export interface StateDef {
  * execution environment rather than the partial defaults layer the author wrote.
  */
 export interface LoadedState
-  extends Omit<StateDef, "operation" | "environment" | "inputs" | "outputs" | "children" | "sequence" | "transitions"> {
+  extends Omit<StateDef, "operation" | "environment" | "inputs" | "outputs" | "children" | "sequence" | "transitions" | "label" | "title" | "description" | "limits"> {
   /** Transitions with their guards lowered (§1). */
   transitions?: LoadedTransition[];
   id: string;
+  /** Literal when authored so; absent while a bound one is unevaluated (see {@link fields}). */
+  label?: string;
+  /** The instance's display name, once its field has been evaluated (§5.2). Never authored here. */
+  title?: string;
+  description?: string;
+  limits?: LimitsDecl;
+  /**
+   * The state's COMPUTED FIELDS (§5.3), in declaration order — which is their scheduling priority.
+   * Each names the position its value is written back to; the engine materializes a per-instance
+   * definition from these before the instance reads anything else.
+   */
+  fields?: LoadedField[];
   inputs?: Record<string, Parameter<InlineFamily>>;
   outputs?: Record<string, NamedParameter<InlineFamily>>;
   operation?: Operation<InlineFamily>;
@@ -798,8 +977,19 @@ export interface OutputSpread {
 /** Authoring metadata for one declared slot, kept alongside (never inside) the op. */
 export interface SlotMeta {
   default?: JsonValue;
+  /**
+   * A COMPUTED default (SPEC §5.3) — `"default": { "expr": … }` — lowered, resolved in the declaring
+   * state's own scope when nothing is wired in: at entry for an input, at termination for an output.
+   * Present-or-`default`, never both; either makes the slot optional and opts it out of reachability.
+   */
+  defaultRef?: Ref<InlineFamily>;
   optional?: boolean;
   description?: string;
+}
+
+/** Whether a slot has a fallback for an absent value — a literal default or a computed one. */
+export function hasDefault(meta: SlotMeta | undefined): boolean {
+  return meta?.default !== undefined || meta?.defaultRef !== undefined;
 }
 
 export interface LoadedChild {
@@ -816,6 +1006,8 @@ export interface LoadedChild {
    */
   each?: string[];
   async?: boolean;
+  /** A COMPUTED `async` (SPEC §5.3), lowered — resolved in the parent's scope at each entry. */
+  asyncRef?: Ref<InlineFamily>;
   /** The per-mount defaults this child was declared with, carried through so the closure walk can
    *  fold them into the chain (and so a lint surface can see why a state loaded as two variants). */
   environment?: EnvironmentDecl;
@@ -870,7 +1062,17 @@ export const GUARD_NAMESPACES = ["run", "limits"] as const;
  * that are evaluated once per element, and the validator refuses it everywhere else.
  */
 export const EACH_NAMESPACE = "each" as const;
-export const CONTEXT_NAMESPACES = [...REF_NAMESPACES, ...GUARD_NAMESPACES] as const;
+export const CONTEXT_NAMESPACES = [...REF_NAMESPACES, ...GUARD_NAMESPACES, ...FIELD_NAMESPACES] as const;
+
+/**
+ * The `functionRef` a FUNCTION operation carries while its callee is BOUND rather than named (SPEC
+ * §7.1, "`function` and `prompt` may be bound").
+ *
+ * A placeholder, never dispatched: the engine replaces the whole operation with the callee the
+ * field resolved to before the instance runs anything. The validator recognizes it to check the
+ * field's type instead of looking the name up in a registry it was never meant to be in.
+ */
+export const BOUND_CALLEE = "$bound";
 
 /**
  * What a read of a runtime path CONSUMES from a producing child — `undefined` for a read of nothing

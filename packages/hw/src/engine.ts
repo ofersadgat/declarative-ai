@@ -108,6 +108,12 @@ import {
 import type { OperationNode } from "./operationNode.js";
 import { isFannedOut } from "./fanout.js";
 import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, type Persistence } from "./ports.js";
+// Computed fields (SPEC §5.3): evaluated once at entry, written into a per-instance definition.
+import { fieldDependencies, fieldsView, materializeFields } from "./fields.js";
+import { bindIntoSlots } from "./loader.js";
+import { hasDefault, literalPermissions, type LoadedField } from "./format.js";
+import { isCallableKind, isCallableSchema } from "@declarative-ai/exec";
+import { isOperationValue } from "./resolve.js";
 import { uuidv7 } from "./ids.js";
 
 /**
@@ -539,6 +545,14 @@ interface Instance {
    * user drag it" cannot outlive the round that acted on it.
    */
   deferredKeys: Set<string>;
+  /**
+   * The instance's SETTLED computed fields (SPEC §5.3), by authored path — what `value.settled`
+   * journaled, and what a loaded instance is handed back. `def` is the definition with these written
+   * in; this is the record of which were.
+   */
+  fieldValues: Map<string, ResolvedValue>;
+  /** Fields not yet settled — read as PENDING by an expression, so a dependent parks. */
+  unsettledFields: Set<string>;
 }
 
 /**
@@ -1001,6 +1015,8 @@ export class WorkflowEngine {
       timedOut: false,
       notify: new Notifier(),
       deferredKeys: new Set(),
+      fieldValues: new Map(),
+      unsettledFields: new Set(),
     };
     // Pass 0, with `children` and `passes[0]` the same Map — the invariant every read depends on.
     instance.children = new Map();
@@ -1019,20 +1035,17 @@ export class WorkflowEngine {
     // resolves here, once, against the state's own scope — the by-name fill and the parent wire only
     // populate FREE inputs. Without this a bound input, which validation type-checks and fan-out
     // counts as a real consumer, would read as `undefined` everywhere `{ input: … }`/`inputs.*` is used.
-    this.resolveInputBindings(instance);
+    const inputFailure = this.resolveInputBindings(instance);
 
-    // SPEC §5 limits.timeout (seconds) → terminate.timeout.
     let timer: ReturnType<typeof setTimeout> | undefined;
-    if (def.limits?.timeout !== undefined) {
-      timer = setTimeout(() => {
-        instance.timedOut = true;
-        instance.abort.abort();
-        instance.notify.signal();
-      }, def.limits.timeout * 1000);
-    }
-
     try {
-      const loopRecord = await this.evaluationLoop(instance);
+      // The COMPUTED FIELDS (SPEC §5.3): the inputs have bound, and everything else the document
+      // computes settles now, in dependency order, before the instance reads its own definition.
+      const fieldFailure = inputFailure ?? (await this.evaluateFields(instance));
+      // SPEC §5 limits.timeout (seconds) → terminate.timeout — off the MATERIALIZED definition, since
+      // the limit itself may have been computed.
+      timer = this.startTimer(instance);
+      const loopRecord = fieldFailure !== undefined ? this.finish(instance, "error", fieldFailure) : await this.evaluationLoop(instance);
       // Attached HERE, at the one place a record leaves this instance, rather than at each of the
       // dozen `{ outcome: … }` returns inside the loop — every one of which would otherwise have to
       // remember, and a forgotten one is a `children.<key>.operation` that is silently empty.
@@ -1109,10 +1122,31 @@ export class WorkflowEngine {
       timedOut: false,
       notify: new Notifier(),
       deferredKeys: new Set(),
+      fieldValues: new Map(),
+      unsettledFields: new Set(),
     };
     instance.children = new Map();
     instance.passes.push(instance.children);
     if (entered !== undefined) instance.entered = entered;
+    // The SETTLED fields the stopped run journaled (SPEC §5.3), written back verbatim: a loaded
+    // instance does not pay for a title twice. A field the description lacks is evaluated by the
+    // continuation (`resumeInstance`), which is the one case a run stopped mid-evaluation leaves.
+    if (loaded.fields !== undefined) {
+      const values = new Map<string, ResolvedValue>();
+      for (const field of def.fields ?? []) {
+        const value = loaded.fields[field.path];
+        if (value === undefined) continue;
+        values.set(field.path, value);
+        instance.fieldValues.set(field.path, value);
+      }
+      const materialized = materializeFields(def, values, this.bindCallee(instance));
+      if ("error" in materialized) {
+        this.fatal ??= { classification: "permanent", reason: `loaded fields of '${loaded.stateId}' no longer fit its definition: ${materialized.error}` };
+        this.rootAbort?.abort();
+      } else {
+        instance.def = materialized.def;
+      }
+    }
     // The COMPLETED operation, fed through exactly the path a live settle takes — the node, then
     // `acceptOpOutputs` — so a loaded state is indistinguishable downstream from one that ran. Spend
     // is deliberately NOT rolled up: the recorded metrics belong to the run that paid them.
@@ -1192,7 +1226,7 @@ export class WorkflowEngine {
    */
   private async resumeInstance(loaded: LoadedInstance, def: LoadedState, abort: AbortController, parent: Instance | undefined): Promise<TerminationRecord> {
     const instance = this.buildLoadedInstance(loaded, def, abort, parent);
-    this.resolveInputBindings(instance);
+    const inputFailure = this.resolveInputBindings(instance);
 
     for (const group of groupLoadedChildren(loaded.children)) {
       const key = group.key;
@@ -1261,7 +1295,7 @@ export class WorkflowEngine {
       // `instance.entered` is NOT set here: `buildLoadedInstance` already read it off the last child
       // in entry order, which stays right when a terminated child entered after an async live one.
       const decl = instance.def.children?.[key];
-      if (decl !== undefined && decl.async !== true) instance.heldFor = key;
+      if (decl !== undefined && this.asyncOf(instance, decl) !== true) instance.heldFor = key;
     }
     // A finished child no round ever answered still owes an unhandled-failure mark when it ended badly.
     for (const key of instance.justFinished) {
@@ -1269,18 +1303,14 @@ export class WorkflowEngine {
       if (rec !== undefined && (rec.outcome === "error" || rec.outcome === "timeout")) instance.unhandledFailures.add(key);
     }
 
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    if (def.limits?.timeout !== undefined) {
-      timer = setTimeout(() => {
-        instance.timedOut = true;
-        instance.abort.abort();
-        instance.notify.signal();
-      }, def.limits.timeout * 1000);
-    }
-
     const initialEvaluation = (instance.opRun || def.operation === undefined) && instance.heldFor === undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const loopRecord = await this.evaluationLoop(instance, initialEvaluation);
+      // Whatever fields the stopped run had not settled are settled now — the rest came back with
+      // the description and were written in by `buildLoadedInstance`.
+      const fieldFailure = inputFailure ?? (await this.evaluateFields(instance));
+      timer = this.startTimer(instance);
+      const loopRecord = fieldFailure !== undefined ? this.finish(instance, "error", fieldFailure) : await this.evaluationLoop(instance, initialEvaluation);
       const record: TerminationRecord =
         instance.operation !== undefined ? { ...loopRecord, operation: instance.operation } : loopRecord;
       this.emit({
@@ -1540,7 +1570,7 @@ export class WorkflowEngine {
     // A transition's overrides are wiring too, and they resolve HERE rather than in `enterChild`, so
     // their calls are run here as well — same rule, same frame, same failure owner.
     if (taken.inputRefs !== undefined) {
-      const handedFailure = await this.runEmbeddedOps(instance, {}, Object.values(taken.inputRefs));
+      const handedFailure = await this.runEmbeddedOps(instance, this.wiresFor(taken.inputRefs, instance.def.children?.[taken.to]?.state));
       if (handedFailure !== undefined) return { failure: handedFailure };
     }
     const handed = this.resolveTransitionInputs(instance, taken.inputRefs);
@@ -1766,7 +1796,7 @@ export class WorkflowEngine {
     // computed, and the child parked forever — reported as `parked on unresolvable inputs (dataflow
     // deadlock)`, which names neither the call nor the reason.
     //
-    const wiringFailure = await this.runEmbeddedOps(instance, {}, Object.values(decl.inputs ?? {}));
+    const wiringFailure = await this.runEmbeddedOps(instance, this.wiresFor(decl.inputs ?? {}, decl.state));
     if (wiringFailure !== undefined) return { failure: wiringFailure };
 
     // The transition's own wiring, over the mount's, per NAME. Only a TAKEN transition supplies
@@ -1774,8 +1804,10 @@ export class WorkflowEngine {
     const resolved = this.resolveChildInputs(instance, key, decl, overrides);
     if (resolved === PENDING) return "parked";
 
+    const isAsync = this.asyncOf(instance, decl);
+    if (typeof isAsync === "object") return { failure: isAsync.failure };
     instance.entered = key;
-    if (decl.async !== true) instance.heldFor = key;
+    if (!isAsync) instance.heldFor = key;
 
     // Re-entering a child (SPEC §3.4) creates a fresh instance; a stale running
     // instance under the same key is canceled and replaced.
@@ -1940,8 +1972,10 @@ export class WorkflowEngine {
     if ("failure" in resolved) return { failure: resolved.failure };
     if ("blocked" in resolved) return this.blockMount(instance, key, decl, resolved.blocked);
 
+    const isAsync = this.asyncOf(instance, decl);
+    if (typeof isAsync === "object") return { failure: isAsync.failure };
     instance.entered = key;
-    if (decl.async !== true) instance.heldFor = key;
+    if (!isAsync) instance.heldFor = key;
     const prior = instance.children.get(key);
     if (prior?.status === "running") prior.abort.abort();
     // ONE occurrence for the whole entry: the elements share it and differ by `element`, which is what
@@ -1968,8 +2002,8 @@ export class WorkflowEngine {
   ): Promise<"parked" | { failure: Failure } | { blocked: string } | { elements: FanOutElement[] }> {
     const axisNames = decl.each ?? [];
     const wires = decl.inputs ?? {};
-    const axisWires = axisNames.map((name) => wires[name]).filter((wire): wire is Ref<InlineFamily> => wire !== undefined);
-    const axisFailure = await this.runEmbeddedOps(instance, {}, axisWires);
+    const axisWires = Object.fromEntries(Object.entries(wires).filter(([name]) => axisNames.includes(name)));
+    const axisFailure = await this.runEmbeddedOps(instance, this.wiresFor(axisWires, decl.state));
     if (axisFailure !== undefined) return { failure: axisFailure };
 
     const scope = this.scopeFor(instance);
@@ -1992,14 +2026,12 @@ export class WorkflowEngine {
       axes.push(value as JsonValue[]);
     }
 
-    const otherWires = Object.entries(wires)
-      .filter(([name]) => !axisNames.includes(name))
-      .map(([, wire]) => wire);
+    const otherWires = this.wiresFor(Object.fromEntries(Object.entries(wires).filter(([name]) => !axisNames.includes(name))), decl.state);
     const otherOverrides = Object.fromEntries(Object.entries(overrides ?? {}).filter(([name]) => !axisNames.includes(name)));
     const elements: FanOutElement[] = [];
     for (const [index, coords] of tuplesOf(axes).entries()) {
       const each: EachContext = { index, axis: Object.fromEntries(axisNames.map((name, a) => [name, coords[a]!])) };
-      const wiringFailure = await this.runEmbeddedOps(instance, {}, otherWires, each);
+      const wiringFailure = await this.runEmbeddedOps(instance, otherWires, [], each);
       if (wiringFailure !== undefined) return { failure: wiringFailure };
       const bound = Object.fromEntries(axisNames.map((name, a) => [name, axes[a]![coords[a]!] as ResolvedValue]));
       const resolved = this.resolveChildInputs(instance, key, decl, { ...bound, ...otherOverrides }, each);
@@ -2055,7 +2087,7 @@ export class WorkflowEngine {
 
     const run = async (): Promise<void> => {
       const terms: TerminationRecord[] = [];
-      if (decl.async === true) {
+      if (this.asyncOf(instance, decl) === true) {
         terms.push(...(await Promise.all(elements.map((element, index) => runElement(index, element)))));
       } else {
         for (const [index, element] of elements.entries()) {
@@ -2122,7 +2154,7 @@ export class WorkflowEngine {
   private blockMount(instance: Instance, key: string, decl: LoadedChild, reason: string): "started" {
     this.emit({ type: "instance.blocked", stateId: decl.state, childKey: key, parentInstanceId: instance.id, reason });
     instance.entered = key;
-    if (decl.async !== true) instance.heldFor = key;
+    if (this.asyncOf(instance, decl) !== true) instance.heldFor = key;
     const prior = instance.children.get(key);
     if (prior?.status === "running") prior.abort.abort();
     const record: ChildRecord = {
@@ -2174,8 +2206,27 @@ export class WorkflowEngine {
       instance.children.set(key, await this.loadTerminatedFanOut(instance, key, decl, loaded, abort));
       return;
     }
-    if (decl.async !== true) instance.heldFor = key;
+    if (this.asyncOf(instance, decl) !== true) instance.heldFor = key;
     instance.children.set(key, this.runFanOut(instance, key, decl, occurrence, elements));
+  }
+
+  /**
+   * Whether a mount is `async` — the literal flag, or a COMPUTED one resolved in this state's scope
+   * (SPEC §5.3) at the moment the flag is read.
+   *
+   * An error is the caller's to act on where the mount is being ENTERED (an unresolvable flag is a
+   * mount that cannot be entered as written); the other readers are re-reading a flag already acted
+   * on, and take the conservative answer — sync — rather than failing a step that is not an entry.
+   */
+  private asyncOf(instance: Instance, decl: LoadedChild): boolean | { failure: Failure } {
+    if (decl.asyncRef === undefined) return decl.async === true;
+    const r = resolveRef(decl.asyncRef, this.scopeFor(instance), "json");
+    if (isPending(r)) return { failure: { classification: "permanent", reason: `child '${decl.state}': its async flag reads a value that has not resolved` } };
+    if (isResolveError(r)) return { failure: { classification: "permanent", reason: `child '${decl.state}': async: ${r.error}` } };
+    if (typeof r.value !== "boolean") {
+      return { failure: { classification: "permanent", reason: `child '${decl.state}': async resolved to ${describeValue(r.value)}, not a boolean` } };
+    }
+    return r.value;
   }
 
   /** A terminated fan-out of a stopped run, as the one record its parent reads — history, not work. */
@@ -2279,7 +2330,7 @@ export class WorkflowEngine {
       // would otherwise fail anyway.
       let reason: string | undefined;
       if (slot.binding !== undefined) {
-        const r = resolveRef(slot.binding, scope);
+        const r = resolveRef(slot.binding, scope, slot.kind);
         // A canceled async child resolves to nothing rather than blocking termination.
         if (isPending(r)) value = undefined;
         else if (isResolveError(r)) reason = r.error;
@@ -2288,6 +2339,12 @@ export class WorkflowEngine {
         value = instance.outputs[name];
       }
       if (value === undefined) value = meta?.default;
+      // A COMPUTED default (SPEC §5.3), resolved now — at termination, in this state's scope.
+      if (value === undefined && meta?.defaultRef !== undefined) {
+        const r = resolveRef(meta.defaultRef, scope, slot.kind);
+        if (isResolveError(r)) reason ??= `default: ${r.error}`;
+        else if (!isPending(r)) value = r.value;
+      }
       if (value === undefined) {
         if (meta?.optional !== true) {
           return {
@@ -2325,13 +2382,19 @@ export class WorkflowEngine {
     }
     const artifacts: Record<string, unknown> = {};
     for (const a of this.artifacts) artifacts[a.name] = a;
+    // The state's own FIELDS (SPEC §6.1) — `title`, `label`, `limits`, the authored half of
+    // `operation`, `environment` — read off the definition this instance runs, PENDING where one has
+    // not settled yet.
+    const fields = fieldsView(instance.def, instance.unsettledFields);
     return {
+      ...fields,
       inputs: instance.inputs,
       outputs: instance.outputs,
-      // The state's own call as a value (SPEC.md §6.1). `{}` before it has run, so a guard reading
+      // The state's own call as a value (SPEC.md §6.1): the authored fields, with the call's RESULT
+      // node laid over them once it exists. `{}` for the result before it has run, so a guard reading
       // `operation.outcome` gets `undefined` rather than throwing — the same shape a never-entered
-      // child gets.
-      operation: instance.operation ?? {},
+      // child gets. The two halves' keys do not overlap.
+      operation: { ...(fields.operation as Record<string, unknown>), ...(instance.operation ?? {}) },
       children,
       // `run.cursor` is the child the cursor is ON: the one most recently ENTERED, not the one about
       // to be. Transitions are evaluated after an operation completes or a child terminates, so "we
@@ -2345,7 +2408,6 @@ export class WorkflowEngine {
         cursor: instance.entered ?? "",
         position: instance.entered !== undefined ? (instance.def.sequence?.indexOf(instance.entered) ?? -1) : -1,
       },
-      limits: { ...(instance.def.limits ?? {}) },
       artifacts,
       // In scope ONLY while one element of a fan-out is being wired (§6.2): `.each.index` and
       // `.each.axis.<input>`. Absent everywhere else, so a read outside that wiring resolves to
@@ -2388,7 +2450,7 @@ export class WorkflowEngine {
       optionalInput: (name) => {
         if (instance.def.inputs?.[name] === undefined) return false;
         const meta = instance.def.slotMeta?.[`inputs.${name}`];
-        return meta?.optional === true || meta?.default !== undefined;
+        return meta?.optional === true || meta?.default !== undefined || meta?.defaultRef !== undefined;
       },
       artifact: (name) => {
         const found = this.artifacts.find((a) => a.name === name);
@@ -2440,9 +2502,10 @@ export class WorkflowEngine {
       let v = provided[name];
       if (v === undefined) v = meta?.default;
       if (v === undefined) {
-        // A bound input is filled after entry by `resolveInputBindings` (it resolves against the
-        // instance's own scope); an optional input may stay unset. Neither is "missing".
-        if (slot.binding !== undefined || meta?.optional === true) continue;
+        // A bound input, and one with a COMPUTED default, are filled after entry by
+        // `resolveInputBindings` (they resolve against the instance's own scope); an optional input
+        // may stay unset. None is "missing".
+        if (slot.binding !== undefined || meta?.defaultRef !== undefined || meta?.optional === true) continue;
         return { error: `required input '${name}' missing` };
       }
       const err = this.validateSlotValue(name, slot, v);
@@ -2520,15 +2583,17 @@ export class WorkflowEngine {
       const wire = decl.inputs?.[name];
       let v: ResolvedValue | undefined = handed;
       if (v === undefined && wire !== undefined) {
-        const r = resolveRef(wire, scope);
+        // The child's slot kind travels: a callable slot takes an uncalled operation as its value.
+        const r = resolveRef(wire, scope, slot.kind);
         if (isPending(r)) return PENDING;
         if (isResolveError(r)) return { error: `${instance.stateId}: wiring child '${childKey}', input '${name}': ${r.error}` };
         v = r.value;
       }
       if (v === undefined) v = meta?.default;
       if (v === undefined) {
-        // A bound input resolves after entry (`resolveInputBindings`); an optional input may stay unset.
-        if (slot.binding !== undefined || meta?.optional === true) continue;
+        // A bound input, or one with a computed default, resolves after entry (`resolveInputBindings`);
+        // an optional input may stay unset.
+        if (slot.binding !== undefined || meta?.defaultRef !== undefined || meta?.optional === true) continue;
         return { error: `${instance.stateId}: wiring child '${childKey}': required input '${name}' missing` };
       }
       const err = this.validateSlotValue(name, slot, v, decl.state);
@@ -2546,16 +2611,205 @@ export class WorkflowEngine {
    * PENDING or unresolvable at entry leaves the slot unset, the same graceful outcome as an unwired
    * optional input.
    */
-  private resolveInputBindings(instance: Instance): void {
+  private resolveInputBindings(instance: Instance): Failure | undefined {
     const inputs = instance.def.inputs;
-    if (inputs === undefined) return;
+    if (inputs === undefined) return undefined;
     const scope = this.scopeFor(instance);
     for (const [name, slot] of Object.entries(inputs)) {
       if (instance.inputs[name] !== undefined) continue; // already wired or defaulted
       const binding = slot.binding;
-      if (binding === undefined) continue;
-      const r = resolveRef(binding, scope);
-      if (isResolvedValue(r)) instance.inputs[name] = r.value;
+      if (binding !== undefined) {
+        const r = resolveRef(binding, scope, slot.kind);
+        if (isResolvedValue(r)) instance.inputs[name] = r.value;
+        continue;
+      }
+      // A COMPUTED default (SPEC §5.3): the slot's own fallback, resolved here in the declaring
+      // state's scope — so it may read the inputs that WERE provided. Unlike a bound input's
+      // graceful absence, a default that cannot be computed is an error: the author said what an
+      // absent value should be, and the state cannot honestly run without it.
+      const defaultRef = instance.def.slotMeta?.[`inputs.${name}`]?.defaultRef;
+      if (defaultRef === undefined) continue;
+      const r = resolveRef(defaultRef, scope, slot.kind);
+      if (isPending(r)) return { classification: "permanent", reason: `input '${name}': its default reads a value that has not settled` };
+      if (isResolveError(r)) return { classification: "permanent", reason: `input '${name}': default: ${r.error}` };
+      const complaint = this.validateSlotValue(name, slot, r.value);
+      if (complaint !== undefined) return { classification: "permanent", reason: `default: ${complaint}` };
+      instance.inputs[name] = r.value;
+    }
+    return undefined;
+  }
+
+  // --- computed fields (SPEC §5.3) --------------------------------------------
+
+  /** SPEC §5 `limits.timeout` (seconds) → `terminate.timeout`, off the instance's own definition. */
+  private startTimer(instance: Instance): ReturnType<typeof setTimeout> | undefined {
+    const timeout = instance.def.limits?.timeout;
+    if (timeout === undefined) return undefined;
+    return setTimeout(() => {
+      instance.timedOut = true;
+      instance.abort.abort();
+      instance.notify.signal();
+    }, timeout * 1000);
+  }
+
+  /**
+   * Evaluate the instance's computed fields — ONCE, at entry, in dependency order — and give the
+   * instance the definition it runs (SPEC §5.3).
+   *
+   * Every field is a node in a dependency graph: it reads inputs, and any other field by name, and
+   * it is evaluated once everything it reads has settled. Whatever is ready runs together, started
+   * in declaration order — the priority a cap on concurrent calls would honour — and each wave is
+   * written into the definition before the next reads it, so `.operation.config.model` reading
+   * `.title` sees the title. A cycle cannot reach here (the loader refuses one), so a wave with
+   * nothing ready is reported rather than spun on.
+   *
+   * A field already settled — handed back with a loaded description — is left alone; that is what
+   * "once" means across a restart.
+   */
+  private async evaluateFields(instance: Instance): Promise<Failure | undefined> {
+    const fields = instance.def.fields ?? [];
+    const pending = fields.filter((f) => !instance.fieldValues.has(f.path));
+    if (pending.length === 0) return undefined;
+    for (const f of pending) instance.unsettledFields.add(f.path);
+    const deps = new Map(fields.map((f) => [f.path, fieldDependencies(f, fields)] as const));
+    while (instance.unsettledFields.size > 0) {
+      const ready = pending.filter(
+        (f) => instance.unsettledFields.has(f.path) && (deps.get(f.path) ?? []).every((d) => !instance.unsettledFields.has(d)),
+      );
+      if (ready.length === 0) {
+        return { classification: "permanent", reason: `fields form a cycle: ${[...instance.unsettledFields].join(", ")}` };
+      }
+      const outcomes = await Promise.all(ready.map(async (f) => [f, await this.evaluateField(instance, f)] as const));
+      const values = new Map<string, ResolvedValue>();
+      for (const [field, outcome] of outcomes) {
+        if ("failure" in outcome) return outcome.failure;
+        values.set(field.path, outcome.value);
+        instance.fieldValues.set(field.path, outcome.value);
+        instance.unsettledFields.delete(field.path);
+      }
+      const materialized = materializeFields(instance.def, values, this.bindCallee(instance));
+      if ("error" in materialized) return { classification: "permanent", reason: materialized.error };
+      instance.def = materialized.def;
+    }
+    return undefined;
+  }
+
+  /**
+   * How a bound `function` field's callable becomes this instance's operation: the loader's own
+   * slot binding, with its load-time error read as a run-time one.
+   */
+  private bindCallee(instance: Instance): (callee: Operation<InlineFamily>, authored: Record<string, Parameter<InlineFamily>>) => Record<string, Parameter<InlineFamily>> | { error: string } {
+    return (callee, authored) => {
+      if (callee.kind !== "function") return { error: "a bound callee must be a function" };
+      try {
+        return bindIntoSlots(callee.input, authored, undefined, {}, callee.functionRef, instance.stateId);
+      } catch (e) {
+        return { error: (e as Error).message };
+      }
+    };
+  }
+
+  /**
+   * Evaluate ONE field: run the calls it demands, resolve it, check it against its type, journal it.
+   *
+   * A failure — a callee that errors, a value the type refuses, a read that never settles — is the
+   * instance's, unless the binding declared a `failureValue`: then the failure is journaled with the
+   * fallback beside it and the instance carries on (SPEC §5.3).
+   */
+  private async evaluateField(instance: Instance, field: LoadedField): Promise<{ value: ResolvedValue } | { failure: Failure }> {
+    const settled = (outcome: "value" | "error", value: ResolvedValue | undefined, error?: string, fallback?: boolean): void => {
+      this.emit({
+        type: "value.settled",
+        instanceId: instance.id,
+        stateId: instance.stateId,
+        field: field.path,
+        outcome,
+        ...(value !== undefined ? { value } : {}),
+        ...(error !== undefined ? { error } : {}),
+        ...(fallback ? { fallback } : {}),
+      });
+    };
+    const failed = (reason: string): { value: ResolvedValue } | { failure: Failure } => {
+      if (field.failureValue !== undefined) {
+        settled("error", field.failureValue, reason, true);
+        return { value: field.failureValue };
+      }
+      settled("error", undefined, reason);
+      return { failure: { classification: "permanent", reason: `field '${field.path}': ${reason}` } };
+    };
+    for (;;) {
+      const demanded = await this.runDemanded(instance, field.ref, undefined, field.environment, field.kind);
+      if ("failure" in demanded) return failed(demanded.failure.reason);
+      const r = resolveRef(field.ref, this.scopeFor(instance), field.kind);
+      if (isPending(r)) {
+        // Pending on a DEFERRED call — a decision outside the run — waits for it; pending on anything
+        // else at entry is a read of something that will never settle here.
+        if (demanded.waiting && (await this.waitForProgress(instance))) continue;
+        return failed("reads a value that has not settled");
+      }
+      if (isResolveError(r)) return failed(r.error);
+      const value = r.value;
+      const complaint = this.checkFieldValue(field, value);
+      if (complaint !== undefined) return failed(complaint);
+      settled("value", value);
+      return { value };
+    }
+  }
+
+  /** A settled field against its own type (SPEC §5.3): a callable by shape, a value by schema. */
+  private checkFieldValue(field: LoadedField, value: ResolvedValue): string | undefined {
+    if (isCallableKind(field.kind)) {
+      // A template string is a legitimate `prompt`; a NAME is a legitimate `function` (resolved at
+      // dispatch, as a literal one is); an operation of the field's kind is what the type promises.
+      if (typeof value === "string") return undefined;
+      if (isOperationValue(value) && value.kind === field.kind) return undefined;
+      return `resolved to ${value === null ? "null" : Array.isArray(value) ? "an array" : `a ${typeof value}`}, not a ${field.kind}`;
+    }
+    if (field.schema === undefined || isCallableSchema(field.schema)) return undefined;
+    return this.validateSlotValue(field.path, { kind: field.kind ?? "json", schema: field.schema }, value);
+  }
+
+  /**
+   * Run the calls a binding DEMANDS until it demands none — the resolution-driven loop a guard's
+   * calls already run under, for a binding that is not a rule.
+   *
+   * A static walk (`embeddedOpsOf`) sees every call whose callee is NAMED. A call THROUGH A VALUE
+   * (`op.apply`, SPEC §6.2) names nothing until the value resolves, so it can only be found by
+   * resolving: the resolver reports the operation it needs, this runs it, and resolution is tried
+   * again, because one answer can unlock the next demand. `waiting` says a demanded call is a
+   * DEFERRED one still in flight, which is the caller's to wait on.
+   */
+  private async runDemanded(
+    instance: Instance,
+    binding: Ref<InlineFamily>,
+    each?: EachContext,
+    /** The environment the demanded calls run under — a field's own layer, else the instance's. */
+    env?: ExecEnvironmentDecl,
+    /** The consuming slot's kind, so an uncalled operation feeding a callable slot is not run. */
+    kind?: RefKind,
+  ): Promise<{ waiting: boolean } | { failure: Failure }> {
+    const started = new Set<string>();
+    for (;;) {
+      const higherFailure = await this.runHigherOrder(instance, binding, each);
+      if (higherFailure !== undefined) return { failure: higherFailure };
+      const fresh = new Map<string, Operation<InlineFamily>>();
+      let waiting = false;
+      resolveRef(
+        binding,
+        this.scopeFor(
+          instance,
+          (op, key, inFlight) => {
+            if (inFlight) waiting = true;
+            else if (!started.has(key)) fresh.set(key, op);
+          },
+          each,
+        ),
+        kind,
+      );
+      if (fresh.size === 0) return { waiting };
+      for (const key of fresh.keys()) started.add(key);
+      const results = await Promise.all([...fresh].map(async ([key, op]) => [key, await this.startCall(instance, op, env)] as const));
+      for (const [key, outcome] of results) if (outcome !== PENDING) this.rememberAnswer(instance, key, outcome);
     }
   }
 
@@ -2698,8 +2952,16 @@ export class WorkflowEngine {
     return this.ownOperations;
   }
 
-  /** State operations with their callees already resolved, by state id. */
-  private readonly resolvedOps = new Map<string, Operation<InlineFamily>>();
+  /**
+   * State operations with their callees already resolved, by the operation OBJECT.
+   *
+   * By object rather than by state id, because a state's operation is no longer one object per
+   * state: a bound `function` or `prompt` (SPEC §7.1) gives each INSTANCE its own, and a cache keyed
+   * on the id would hand the second instance the first one's callee. The static operation is still
+   * one object shared by every instance of a state, so the hoist keeps its whole benefit there — and
+   * a per-instance one is collected with the instance.
+   */
+  private readonly resolvedOps = new WeakMap<Operation<InlineFamily>, Operation<InlineFamily>>();
   /**
    * A state's operation with every name in it resolved against the registry — done ONCE per state
    * rather than on every dispatch.
@@ -2714,12 +2976,12 @@ export class WorkflowEngine {
    * dispatch produces the run-fatal error with the message it always did. Turning a hoist into a new
    * failure point would make an optimization change behaviour.
    */
-  private operationFor(instance: Instance, op: Operation<InlineFamily>): Operation<InlineFamily> {
-    const cached = this.resolvedOps.get(instance.stateId);
+  private operationFor(_instance: Instance, op: Operation<InlineFamily>): Operation<InlineFamily> {
+    const cached = this.resolvedOps.get(op);
     if (cached !== undefined) return cached;
     const out = resolveCalls(op, this.config.registry.functions);
     const resolved = "error" in out ? op : out.op;
-    this.resolvedOps.set(instance.stateId, resolved);
+    this.resolvedOps.set(op, resolved);
     return resolved;
   }
 
@@ -2786,8 +3048,18 @@ export class WorkflowEngine {
     /** The element being wired, when these are a fanned-out mount's wires (§6.2). */
     each?: EachContext,
   ): Promise<Failure | undefined> {
-    for (const binding of [...Object.values(input).map((p) => p.binding), ...spread]) {
+    const bindings: Array<{ binding: Ref<InlineFamily> | undefined; kind?: RefKind }> = [
+      ...Object.values(input).map((p) => ({ binding: p.binding, kind: p.kind })),
+      ...spread.map((binding) => ({ binding })),
+    ];
+    for (const { binding, kind } of bindings) {
       if (!binding) continue;
+      // An UNCALLED operation feeding a CALLABLE slot is the slot's value, not a call to make (SPEC
+      // §4.1). The static walk below would read it as a zero-argument call and run it — which for a
+      // `function`-kind input meant paying for the function once to pass it and once to apply it.
+      if (isCallableKind(kind) && "op" in binding && typeof binding.op !== "string" && binding.parameters === undefined && binding.op.spread === undefined) {
+        continue;
+      }
       // HIGHER-ORDER first (§3.5): one application per element, and how many there are is not known
       // until the array resolves — so this cannot be a static walk like `embeddedOpsOf` is.
       const higherFailure = await this.runHigherOrder(instance, binding, each);
@@ -2810,10 +3082,27 @@ export class WorkflowEngine {
         // cache could serialize.
         if (outcome !== PENDING) this.rememberAnswer(instance, key, outcome);
       }
+      // Then whatever the static walk could not see — a call THROUGH A VALUE (§6.2), whose callee is
+      // known only once the value is. Demand-driven, exactly as a guard's calls are.
+      const demanded = await this.runDemanded(instance, binding, each, undefined, kind);
+      if ("failure" in demanded) return demanded.failure;
     }
     return undefined;
   }
 
+
+  /**
+   * A mount's wires as the SLOTS they fill — each wire under the child's declared kind for that
+   * input — so running their calls knows which wire feeds a callable slot and must pass its
+   * operation rather than run it. A child the bundle lacks, or an input it does not declare, gets
+   * the data kind, which reads as it always did.
+   */
+  private wiresFor(wires: Record<string, Ref<InlineFamily>>, childStateId: string | undefined): Record<string, Parameter<InlineFamily>> {
+    const declared = childStateId === undefined ? undefined : this.config.bundle.states[childStateId]?.inputs;
+    const out: Record<string, Parameter<InlineFamily>> = {};
+    for (const [name, binding] of Object.entries(wires)) out[name] = { kind: declared?.[name]?.kind ?? "json", binding };
+    return out;
+  }
 
   /**
    * Run the calls this round's guards actually NEED — demanded by resolution, in evaluation order,
@@ -2900,9 +3189,9 @@ export class WorkflowEngine {
    * property of where the call appears, so one function behaves the same way in a guard, in an
    * input binding and as a state's whole operation.
    */
-  private async startCall(instance: Instance, op: Operation<InlineFamily>): Promise<Resolved> {
+  private async startCall(instance: Instance, op: Operation<InlineFamily>, env?: ExecEnvironmentDecl): Promise<Resolved> {
     const key = hashOperation(op);
-    if (!this.isDeferred(op)) return this.runEmbeddedOp(instance, op, undefined, key);
+    if (!this.isDeferred(op)) return this.runEmbeddedOp(instance, op, undefined, key, env);
     const already = this.deferredCalls.get(key);
     if (already !== undefined) return PENDING;
 
@@ -2916,6 +3205,7 @@ export class WorkflowEngine {
           cancel = () => handle.cancel();
         },
         key,
+        env,
       );
       this.deferredCalls.delete(key);
       if (outcome !== PENDING) this.deferredResults.set(key, outcome);
@@ -3074,8 +3364,13 @@ export class WorkflowEngine {
     onHandle?: (handle: { cancel: () => Promise<void> }) => void,
     /** The caller's content key for this call — what makes a re-evaluation share its site. */
     siteKey?: string,
+    /**
+     * The environment this call runs under, when the binding that made it wrote one (SPEC §4.2) —
+     * a field's own layer, merged over the state's. Else the instance's.
+     */
+    environment?: ExecEnvironmentDecl,
   ): Promise<Resolved> {
-    const env = instance.def.environment ?? {};
+    const env = environment ?? instance.def.environment ?? {};
     const resourceKey = instance.resourceKey;
     // Its arguments are already bound into `op.input` as literals (`resolveEmbedded`), so this reads
     // them back out as values.
@@ -3114,11 +3409,20 @@ export class WorkflowEngine {
     // A call gets a site of its own — sequence 0 is the state's operation, and a call written into a
     // binding or a guard is a different place in the instance, so the two never share an identity.
     const scope = this.callSiteScope(instance, siteKey);
+    // A call joins no conversation — UNLESS the binding that made it wrote a `session` of its own
+    // (SPEC §4.2): `null` gives the call a fresh one, keyed on the call site so it never shares the
+    // instance's own fresh stream; a ref expression names a position to continue from.
+    let session: SessionBinding | undefined;
+    if (environment !== undefined && "session" in environment) {
+      const resolved = this.sessionFor(instance, environment, `${instance.id}#${scope.sequence}`);
+      if ("error" in resolved) return { error: resolved.error };
+      session = resolved;
+    }
     let outcome;
     try {
       const handle = this.operations.start(
         rendered,
-        await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, undefined, toolsOrFailure.gate, scope, op.kind),
+        await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, session, toolsOrFailure.gate, scope, op.kind),
       );
       onHandle?.(handle);
       outcome = await handle.result;
@@ -3460,9 +3764,12 @@ export class WorkflowEngine {
     // Seeded whichever way the policy is enforced. It used to happen on the wrapping path only, so a
     // DELEGATED state authoring `profile: "read-only"` ran under `full` — the ledger's default —
     // before any of the rest of this had a chance to matter.
-    if (env.permissions?.profile) this.permissions.seedProfile(sessionId, env.permissions.profile);
+    // LITERAL by the time anything runs: a bound profile (SPEC §5.3) was written in at entry.
+    const permissions = literalPermissions(env);
+    if (permissions?.profile) this.permissions.seedProfile(sessionId, permissions.profile);
 
-    const named = env.tools ?? [];
+    // An array by the time anything runs: a BOUND tool list (SPEC §5.3) was written in at entry.
+    const named = Array.isArray(env.tools) ? env.tools : [];
     const tools: Record<string, Tool> = {};
     for (const name of named) {
       const tool = this.config.registry.tools.get(name);
@@ -3495,7 +3802,7 @@ export class WorkflowEngine {
       sessionId,
       approve: escalate,
       tools: Object.fromEntries(Object.entries(tools).map(([name, tool]) => [name, { readOnly: tool.readOnly }])),
-      ...(env.permissions !== undefined ? { authored: env.permissions } : {}),
+      ...(permissions !== undefined ? { authored: permissions } : {}),
       ...(smart !== undefined ? { smart } : {}),
       ...(customProfiles !== undefined ? { profiles: customProfiles } : {}),
       ...(scopeOf !== undefined ? { scopeOf } : {}),
@@ -3511,9 +3818,9 @@ export class WorkflowEngine {
     // `constructor` or `toString` used to resolve its permission mode — and its smart-approval rule
     // — to a prototype member, handing a FUNCTION to a permission decision. Far-fetched input, but
     // "does it fail open?" is not a question worth leaving open on this path.
-    const authoredTools = env.permissions?.tools;
+    const authoredTools = permissions?.tools;
     const authoredMode = (name: string): PermissionMode | undefined =>
-      (authoredTools !== undefined && Object.hasOwn(authoredTools, name) ? authoredTools[name] : undefined) ?? env.permissions?.default;
+      (authoredTools !== undefined && Object.hasOwn(authoredTools, name) ? authoredTools[name] : undefined) ?? permissions?.default;
     const guarded: Record<string, Tool> = {};
     for (const [name, tool] of Object.entries(tools)) {
       guarded[name] = withPermission(tool, {
@@ -3529,7 +3836,7 @@ export class WorkflowEngine {
         scopeOf,
         // This state's own authored block, so a host layering a floor under a per-state table can
         // see both at the moment of decision.
-        ...(env.permissions !== undefined ? { authored: env.permissions } : {}),
+        ...(permissions !== undefined ? { authored: permissions } : {}),
       });
     }
     if (this.permissions.resolveProfile(sessionId) === "plan") {
@@ -3688,8 +3995,14 @@ export class WorkflowEngine {
    * position and every instance agrees — which is exactly today's behaviour, and the reason this step
    * can land before the store does.
    */
-  private sessionFor(instance: Instance): SessionBinding | { error: string } {
-    const env = instance.def.environment ?? {};
+  private sessionFor(
+    instance: Instance,
+    /** A binding's own environment (SPEC §4.2), when a CALL asks — else the instance's. */
+    environment?: ExecEnvironmentDecl,
+    /** What a fresh conversation is keyed on: the instance, or one call site inside it. */
+    freshKey: string = instance.id,
+  ): SessionBinding | { error: string } {
+    const env = environment ?? instance.def.environment ?? {};
     // NORMALIZED by the loader (`normalizeSession`), so a name arriving here already carries the
     // scope of the state that WROTE it — including one an ancestor's `environment` supplied, which
     // is the case the origin-time normalization exists for: after the merge a root's declaration and
@@ -3713,7 +4026,7 @@ export class WorkflowEngine {
       declared = outcome.session;
     }
     return resolveSession(declared, {
-      instanceId: instance.id,
+      instanceId: freshKey,
       inheritedResourceKey: instance.resourceKey,
       positionOf: () => undefined,
       // The scope seam: a name is qualified by a state, and the state resolves to the nearest
@@ -3835,7 +4148,7 @@ export class WorkflowEngine {
     }
     for (const name of Object.keys(produced)) {
       const meta = instance.def.slotMeta?.[`outputs.${name}`];
-      if (meta?.optional !== true && meta?.default === undefined && instance.outputs[name] === undefined) {
+      if (meta?.optional !== true && !hasDefault(meta) && instance.outputs[name] === undefined) {
         return { classification: "api-retriable", reason: `${op} operation did not produce required output '${name}'` };
       }
     }
@@ -4151,7 +4464,7 @@ function buildOutputSchema(slots: Record<string, NamedParameter<InlineFamily>>, 
     // default when the model omits it (see `finish`, `acceptOpOutputs`), so requiring the model to
     // produce it would force a fabricated value and can trip strict schema validation. This matches
     // the `optional !== true && default === undefined` rule every other optionality check applies.
-    if (meta?.optional !== true && meta?.default === undefined) required.push(name);
+    if (meta?.optional !== true && !hasDefault(meta)) required.push(name);
   }
   return { type: "object", properties, required, additionalProperties: true };
 }

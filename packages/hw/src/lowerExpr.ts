@@ -88,6 +88,21 @@ export function lowerExpression(expr: Expr, options: LowerOptions = {}): Ref<Inl
       if (path !== undefined) return resolveName(path.join("."), options);
       return edge(RESOLVER_REFS.member, { value: down(expr.obj), prop: { text: expr.prop } });
     }
+    case "call": {
+      // Applying a VALUE (SPEC §6.2). Nothing static names the callee, so its arguments cannot bind
+      // to slots here: they ride the edge BY POSITION (`arg0`, `arg1`, …) and by name (a spread), and
+      // the `op.apply` resolver binds them against whatever operation the callee resolves to, exactly
+      // as `bindArguments` would have against a declaration. An object-literal spread keeps its keys
+      // in the source, but the callee's slots are unknown until run time, so it too is deferred.
+      const args: Record<string, Ref<InlineFamily>> = { callee: down(expr.callee) };
+      const spread: Ref<InlineFamily>[] = [];
+      let position = 0;
+      for (const arg of expr.args) {
+        if (isSpread(arg)) spread.push(down(arg.value));
+        else args[`arg${position++}`] = down(arg);
+      }
+      return edge(RESOLVER_REFS.apply, args, spread);
+    }
     case "object":
       // An object literal's KEYS ARE THE PARAMETER NAMES. Every other node maps ordered arguments
       // onto a signature the language or the callee wrote down; this one has no signature, because
@@ -177,7 +192,11 @@ export interface LowerOptions {
 }
 
 /** The runtime namespaces, for the one diagnostic that has to survive the dot becoming required. */
-const RUNTIME_ROOTS: ReadonlySet<string> = new Set(["inputs", "outputs", "children", "artifacts", "conversations", "run", "limits", "each"]);
+const RUNTIME_ROOTS: ReadonlySet<string> = new Set([
+  "inputs", "outputs", "children", "artifacts", "conversations", "run", "limits", "each",
+  // The state's own fields (SPEC §6.1) — read back under their authored names.
+  "operation", "environment", "title", "label", "description",
+]);
 
 /**
  * Lower a bare name to what it names, or fail saying so.
@@ -300,7 +319,15 @@ export const EXPRESSION_REFS: ReadonlySet<string> = new Set<string>([
   RESOLVER_REFS.or,
   RESOLVER_REFS.cond,
   RESOLVER_REFS.record,
+  RESOLVER_REFS.apply,
 ]);
+
+/** The positional arguments of an `op.apply` edge, in order — the `arg<n>` slots `lowerExpression` wrote. */
+export function applyArgumentNames(input: Readonly<Record<string, unknown>>): string[] {
+  return Object.keys(input)
+    .filter((name) => /^arg\d+$/.test(name))
+    .sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)));
+}
 
 /**
  * The input a call may declare to be told WHICH RULE it is part of.

@@ -48,6 +48,8 @@ export * from "./integrity.js";
 // becomes an ordinary registry-dispatched operation (SPEC.md §7.5).
 export * from "./userFunctions.js";
 export * from "./shape.js";
+// Computed fields (SPEC §5.3): extraction at load, materialization at entry, the expression view.
+export * from "./fields.js";
 export * from "./expand.js";
 export * from "./loader.js";
 export * from "./resolve.js";

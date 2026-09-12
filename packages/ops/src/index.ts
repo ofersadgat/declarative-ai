@@ -15,4 +15,6 @@ export * from "./metrics.js";
 export * from "./registry.js";
 export * from "./metadata.js";
 export * from "./signatureSchema.js";
+// The CALLABLE type — what a `prompt`/`function`-kind slot's `schema` holds (hw SPEC §4.1).
+export * from "./callable.js";
 export * from "./typed.js";

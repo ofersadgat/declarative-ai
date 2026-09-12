@@ -115,6 +115,8 @@ export const STATE_SHAPE: Shape = {
   fields: {
     id: { t: "ref" },
     label: scalar,
+    // Slot-shaped (SPEC §5.2): a binding under `binding`, so a path there transcludes as one.
+    title: { t: "object", fields: { binding: { t: "binding" }, description: scalar } },
     description: scalar,
     inputs: slotMap,
     outputs: slotMap,

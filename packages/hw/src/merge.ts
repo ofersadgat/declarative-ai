@@ -28,7 +28,7 @@
  * tool; a unioning merge would leave no way to take one away.
  */
 import type { JsonValue } from "@declarative-ai/exec";
-import { inferredKind, OPERATION_OWN_FIELDS, type NamedParameterDecl, type OperationFields, type ParameterDecl } from "./format.js";
+import { inferredKind, OPERATION_OWN_FIELDS, type NamedParameterDecl, type OperationFields, type ParameterDecl, type PermissionsDecl } from "./format.js";
 
 /** Fields with a merge rule of their own — everything else is nearest-wins, wholesale. */
 const MERGED_FIELDS: ReadonlySet<string> = new Set(["args", "input", "output", "conversation", "permissions", "tools", "path"]);
@@ -180,15 +180,20 @@ export function mergeOperationFields(base: OperationFields, over: OperationField
 
   if (over.permissions !== undefined) {
     const priorPerms = base.permissions;
-    out.permissions = priorPerms
-      ? {
-          ...priorPerms,
-          ...over.permissions,
-          ...(priorPerms.tools || over.permissions.tools
-            ? { tools: { ...priorPerms.tools, ...over.permissions.tools } }
-            : {}),
-        }
-      : over.permissions;
+    // A BOUND block (SPEC §5.3) on either side replaces wholesale: a binding has no keys to merge per
+    // key, and spreading one would scatter its `expr` into a literal that means nothing.
+    const bound = (p: unknown): boolean => typeof p === "string" || (p !== null && typeof p === "object" && !Array.isArray(p) && ("expr" in (p as object) || "binding" in (p as object)));
+    if (priorPerms && !bound(priorPerms) && !bound(over.permissions)) {
+      const prior = priorPerms as PermissionsDecl;
+      const next = over.permissions as PermissionsDecl;
+      out.permissions = {
+        ...prior,
+        ...next,
+        ...(prior.tools || next.tools ? { tools: { ...prior.tools, ...next.tools } } : {}),
+      };
+    } else {
+      out.permissions = over.permissions;
+    }
   }
 
   return out;

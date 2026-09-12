@@ -704,6 +704,32 @@ signature's input/output type and its instances' input/output match" is a fact o
 render-time transform. The input side is `additionalProperties` over that shape, since the slot names
 belong to whoever declared them and every slot shares the one hole the fold collapses them into.
 
+#### The callable type
+
+What a `prompt`- or `function`-kind slot's `schema` holds (hw SPEC §4.1): the callable's I/O contract as
+plain JSON — bindings stripped, a defaulted slot folded into `optional`, and self-describing through
+`kind`. Source: `callable.ts`.
+
+```ts
+type CallableKind = "prompt" | "function";
+interface CallableSlot { kind?: RefKind; schema?: JsonSchema; optional?: boolean; index?: number; }
+interface CallableSchema {
+  kind: CallableKind;
+  input?: Record<string, CallableSlot>;      // absent => accepts any arguments
+  output?: { kind?: RefKind; schema?: JsonSchema };   // absent => the unconstrained type
+}
+function isCallableKind(kind: unknown): kind is CallableKind;
+function isCallableSchema(schema: unknown): schema is CallableSchema;   // decided by `kind` alone
+function callableSchemaFor(kind: CallableKind, schema?: JsonSchema): CallableSchema;  // stamp a slot's kind in
+function callableSchemaOf<F>(op: Operation<F>, deref: SchemaDeref<F>): CallableSchema; // an UNCALLED op's type
+function callablePositionalOrder(schema: CallableSchema): string[];     // by `index`, else declaration order
+```
+
+`kind` lives IN the schema because an inferred type has no slot to carry a kind on — `.inputs.reviewer`
+in an expression is a schema and nothing else. `kindFor` reads it back, so a slot whose schema is a
+callable type is a callable slot whether or not the slot restated the kind. A slot with no schema is
+"some callable": typed by kind alone, accepting anything, returning the unconstrained type.
+
 ### Op metadata
 
 Annotations keyed **by** an op's identity, never **part of** it. Source: `metadata.ts`.
@@ -1443,6 +1469,20 @@ that `kindFor` reads, not a constraint) and `x-`-prefixed extension keywords are
 **`x-type` is the one exception**: a slot declaring a type name accepts only producers declaring the same
 name. Consumer-side `anyOf` is the documented next addition.
 
+#### Callable subtyping
+
+`isSubcallable(producer, consumer)` is the same question for two callable types (hw SPEC §6.2). Source:
+`callable.ts`.
+
+```ts
+function isSubcallable(producer: CallableSchema, consumer: CallableSchema, resolve?: ResolveRef): SubtypeResult;
+```
+
+The kinds must match; every slot the consumer declares must be one the producer accepts, with the
+consumer's schema a subschema of the producer's (inputs are CONTRAVARIANT); every slot the producer
+requires must be one the consumer declares; and the producer's output must be a subschema of the
+consumer's (COVARIANT). A side that declares no `input` or no `output` constrains nothing there.
+
 ### The binding checker
 
 ONE generic checker, parameterized by the ref family with injectable resolution, replacing findmyprompt's
@@ -1463,6 +1503,12 @@ function isUniversalSchema(s: SchemaDocument | undefined): boolean;   // `{}` ac
 
 The id family resolves refs through stores; the inline family passes documents directly. A literal binding
 becomes a `const`-constrained schema, so a literal satisfies an `enum`-constrained consumer.
+
+A CALLABLE consumer — `opts.kind` of `prompt`/`function`, or a consumer schema that is a callable type —
+is checked by `isSubcallable` rather than `isSubschema`. An uncalled operation feeding one (`{ op }` with
+no `parameters`) is typed as its own contract via `callableSchemaOf`; a data producer there is an error,
+and so is a callable where data was expected. `isUniversalSchema` treats `kind` as constraining, so a
+callable type is never mistaken for `{}`.
 
 ### Schema validation
 
@@ -2484,7 +2530,7 @@ The ports (apps implement these). Source: `ports.ts`.
 | --- | --- |
 | `Persistence` | `record(event: EngineEvent, atMs: number): void` — the durable run-record sink (SPEC §10.2). |
 | `InMemoryPersistence` | the bundled buffering implementation (embedding & tests); exposes `events`. |
-| `EngineEvent` | the run-record event union: `instance.entered`, `instance.blocked`, `operation.started`, `operation.dispatched` (the record for a call exists — emitted from the record layer's callback after the row is inserted and before the provider call; carries the scoped `operationId`), `operation.completed`, `operation.failed`, `call.waiting`, `call.settled`, `transition.taken`, `child.superseded`, `instance.terminated`. Settled events' `operationId` is the SCOPED id (`scopedOperationId(hashOperation(op), scope)`), the same key `withRecord` files the record under. |
+| `EngineEvent` | the run-record event union: `instance.entered`, `instance.blocked`, `operation.started`, `operation.dispatched` (the record for a call exists — emitted from the record layer's callback after the row is inserted and before the provider call; carries the scoped `operationId`), `operation.completed`, `operation.failed`, `call.waiting`, `call.settled`, `value.settled` (a computed field settled — `field` path, `outcome`, its `value`, and `error`/`fallback` when a `failureValue` stood in; SPEC §5.3), `transition.taken`, `child.superseded`, `instance.terminated`. Settled events' `operationId` is the SCOPED id (`scopedOperationId(hashOperation(op), scope)`), the same key `withRecord` files the record under. |
 | `OperationKind` | `"prompt" \| "function"` — the two operation types (the event `op` field). |
 | `ArtifactRef` / `isArtifactRef` | `{ artifact: true; name; format?; content?; path? }` — an artifact value flowing through workflow inputs/outputs. |
 
@@ -2539,9 +2585,12 @@ also re-exports the op vocabulary (`Operation`, `PromptOp`, `FunctionOp`, `Param
 #### The authored state
 
 ```ts
+type Bindable<T> = T | BindingDecl;              // a VALUE position: the literal, or a binding in its place (SPEC §5.3)
+interface TitleDecl { binding: BindingDecl; description?: string; }   // slot-shaped, typed string (SPEC §5.2)
+
 interface StateDef {
   id?: string;                                   // = the path-derived id; may be omitted
-  label?: string; description?: string;
+  label?: Bindable<string>; title?: TitleDecl; description?: Bindable<string>;
   inputs?:  Record<string, ParameterDecl>;       // config knobs are inputs with a `default` (no separate params)
   outputs?: Record<string, NamedParameterDecl>;
   operation?: OperationDecl;                     // ONE operation (a state with only children is a composite)
@@ -2550,9 +2599,16 @@ interface StateDef {
   sequence?: string[];
   transitions?: TransitionDecl[];         // rules about the STATE (its own output, an entry, a limit).
                                           // A rule about one child goes on that child's mount — the default
-  limits?: LimitsDecl;
+  limits?: { max_iterations?: Bindable<number>; timeout?: Bindable<number> };
 }
 ```
+
+**Every value is a binding** (SPEC §5.3). What stays authored is STRUCTURE — `id`, `children`,
+`sequence`, `transitions`, a slot's `schema`; every other value position takes a binding in place of the
+literal. A known field is written BARE (`"label": { "expr": "…" }`, `"model": { "expr": "…" }`,
+`"function": { "expr": ".inputs.reviewer" }`); inside `config` and `args`, whose values are opaque JSON, it
+is WRAPPED as `{ "binding": … }` (`isWrappedBinding`). The loader takes each out as a `LoadedField` and the
+engine evaluates them once at instance entry, in dependency order — see [The loaded form](#the-loaded-form).
 
 A state has **one `operation`** and a sibling **`environment`**. That split is the point: the operation is
 what the state *is* (and is part of its identity); the environment is *how it runs* (session, tools,
@@ -2582,10 +2638,15 @@ interface EnvironmentDecl {
                                                     // fresh"; absent => this state gets its OWN
                                                     // conversation (there is no run default) and
                                                     // INHERITS the enclosing resource bundle
-  tools?: string[];                                 // logical names resolved through registry.tools
+  tools?: Bindable<string[]>;                       // logical names resolved through registry.tools
   conversation?: { mode: ConversationMode; artifacts?: string[] };
-  permissions?: { profile?: PermissionProfile; default?: PermissionMode; tools?: Record<string, PermissionMode> };
+  permissions?: Bindable<PermissionsDecl>;          // the block, or its profile/default/other, may be bound
 }
+interface PermissionsDecl {
+  profile?: Bindable<PermissionProfile>; default?: Bindable<PermissionMode>; other?: Bindable<PermissionMode>;
+  tools?: Record<string, PermissionMode>; scopes?: ScopeDecl[];
+}
+function literalPermissions(env: ExecEnvironmentDecl | undefined): LiteralPermissions | undefined;  // what the engine reads
 type ConversationMode = "full_history" | "summary" | "fresh" | "selected_artifacts";
 ```
 
@@ -2607,7 +2668,8 @@ interface ParameterDecl {
 interface NamedParameterDecl extends ParameterDecl { name?: string; }
 
 interface ChildDecl {
-  state: string; inputs?: Record<string, BindingDecl>; async?: boolean;
+  state: string; inputs?: Record<string, BindingDecl>;
+  async?: Bindable<boolean>;   // a binding is resolved in the PARENT's scope when the mount is entered
   // Defaults for THIS MOUNT and its subtree, between the parent's `environment` and the child's own.
   // One state mounted twice under two of these loads as two variants — which is how one review state
   // runs under two different agents.
@@ -2638,16 +2700,37 @@ rather than a constraint.
 #### The loaded form
 
 ```ts
-interface LoadedState extends Omit<StateDef, "operation" | "inputs" | "outputs" | "children"> {
+interface LoadedState extends Omit<StateDef, "operation" | "inputs" | "outputs" | "children" | …> {
   id: string;
+  label?: string; title?: string; description?: string;   // literal, or absent while a bound one is unevaluated
   inputs?:  Record<string, Parameter<InlineFamily>>;
   outputs?: Record<string, NamedParameter<InlineFamily>>;
   operation?: Operation<InlineFamily>;                 // a real op — the authored sugar is gone
   children?: Record<string, LoadedChild>;
   slotMeta?: Record<string, SlotMeta>;                 // keyed "<section>.<name>"
+  fields?: LoadedField[];                              // the COMPUTED FIELDS (SPEC §5.3), in declaration order
 }
-interface SlotMeta { default?: JsonValue; optional?: boolean; description?: string; }
-interface LoadedChild { state: string; inputs?: Record<string, Ref<InlineFamily>>; async?: boolean; }
+interface LoadedField {
+  path: string;                 // where the value goes, in AUTHORED terms: `title`, `operation.prompt`,
+                                // `operation.function`, `operation.config.model`, `environment.tools`, …
+  ref: Ref<InlineFamily>;
+  schema?: JsonSchema; kind?: RefKind;
+  failureValue?: JsonValue;     // stands in when evaluation fails; without it the failure is the instance's
+  environment?: ExecEnvironmentDecl;   // the binding's own layer, merged over the state's, for its calls
+}
+const FIELD_NAMESPACES: readonly ["title", "label", "description", "environment"];   // roots a field is read back under (§6.1)
+const BOUND_CALLEE = "$bound";  // the `functionRef` a bound `function` carries until the engine replaces the op
+interface SlotMeta {
+  default?: JsonValue;
+  defaultRef?: Ref<InlineFamily>;   // a COMPUTED default (`"default": { "expr": … }`): an input's resolves at entry
+                                    // in the state's own scope, an output's at termination. Either makes the slot optional.
+  optional?: boolean; description?: string;
+}
+function hasDefault(meta: SlotMeta | undefined): boolean;   // a literal default or a computed one
+interface LoadedChild {
+  state: string; inputs?: Record<string, Ref<InlineFamily>>;
+  async?: boolean; asyncRef?: Ref<InlineFamily>;   // a COMPUTED flag, resolved in the parent's scope at each entry
+}
 
 interface WorkflowBundle {
   rootId: string;
@@ -2660,6 +2743,19 @@ interface WorkflowBundle {
 optionality, docs), kept **alongside** the op so it can never affect the op's identity; the engine reads it
 when filling free slots.
 
+A binding's own `environment` may carry `session: null` (a fresh conversation for the calls it makes,
+keyed on the call site) or a ref expression; a session NAME there is a validation error. Calls made
+without one join no conversation.
+
+`fields` is what `fields.ts` (re-exported) manages: `extractTopLevelFields` / `extractOperationFields` /
+`liftWrappedArgs` / `lowerFields` at load, `fieldDependencies` / `fieldCycle` / `forbiddenFieldRead` for the
+graph and the validator, `materializeFields(def, values, bindCallee)` for the per-instance definition the
+engine runs, and `fieldsView(def, unsettled)` for the expression roots. A field is evaluated ONCE at
+instance entry — ready fields run together, started in declaration order — and journaled as
+`value.settled`; a loaded instance hands its settled values back in `LoadedInstance.fields` and pays for
+none of them again. A callable slot's `schema` is stamped with its kind at load (`callableSchemaFor`),
+so `inputs.fn.schema` on a loaded state is a self-describing `CallableSchema`.
+
 | Export | Purpose |
 | --- | --- |
 | `TerminationOutcome` | `"success" \| "error" \| "canceled" \| "timeout"`. |
@@ -2667,7 +2763,8 @@ when filling free slots.
 | `TERMINATE_TARGETS` | the terminal transition targets (`terminate.success`, …). |
 | `REF_NAMESPACES` | `inputs`, `outputs`, `children`, `artifacts`, `conversations` — the **data** namespaces authored bindings address, and which `{ expr }` leaves may read. |
 | `GUARD_NAMESPACES` | `run`, `limits` — control-flow scalars reachable from guards only, never from a reference binding. |
-| `CONTEXT_NAMESPACES` | `[...REF_NAMESPACES, ...GUARD_NAMESPACES]`. The old `function.*` namespace is **gone**: a function state's result is an ordinary state output, so guards read `outputs.*` / `children.<key>.outputs.*` uniformly. |
+| `FIELD_NAMESPACES` | `title`, `label`, `description`, `environment` — the state's own fields, read back under their authored names (SPEC §6.1); `operation.*` carries the authored fields (`prompt`, `system`, `function`, `config`) beside the call's result node, and `limits.*` was already a root. |
+| `CONTEXT_NAMESPACES` | `[...REF_NAMESPACES, ...GUARD_NAMESPACES, ...FIELD_NAMESPACES]`. The old `function.*` namespace is **gone**: a function state's result is an ordinary state output, so guards read `outputs.*` / `children.<key>.outputs.*` uniformly. |
 
 ### Binding desugaring
 
@@ -2677,11 +2774,12 @@ What an author may write in a binding slot, and what the loader lowers it to. So
 ```ts
 type BindingDecl =
   | Ref<InlineFamily>                             // the base cases: {text} | {json} | {result} | {refs} | {op}
-  | { child: string; output?: string }
-  | { input: string }
-  | { expr: string }
-  | { artifact: string }
-  | { conversation: string; message?: number };
+  | string                                        // a runtime reference (`.inputs.x`) or an expression
+  | { expr: string;
+      environment?: EnvironmentDecl;              // a layer for every CALL the expression makes (SPEC §4.2)
+      failureValue?: JsonValue;                   // stands in when a FIELD binding fails (SPEC §5.3)
+      each?: boolean };                           // fan out — a child mount's wire only
+function isWrappedBinding(v: unknown): v is { binding: BindingDecl };   // `{ "binding": … }` inside config/args
 
 function desugarBinding(binding: BindingDecl, where: string, stateId: string): Ref<InlineFamily>;
 function desugarOperation(decl: OperationDecl, stateId: string,
@@ -2699,6 +2797,7 @@ const RESOLVER_REFS = {
   scope:        "scope.get",        // read a declared inputs.* value by name
   artifact:     "artifact.get",     // read a session-owned artifact by name
   conversation: "conversation.get", // read a session transcript, or one message of it
+  apply:        "op.apply",         // a call THROUGH a callable VALUE: `.inputs.fn(x)` (SPEC §6.2)
 } as const;
 const RESOLVER_REF_VALUES: readonly string[];     // all of them, for registry seeding + validator checks
 ```
@@ -2730,8 +2829,14 @@ re-exported from the package root, because each is reusable against a custom eng
 ```ts
 // inferExpr.ts — expression TYPE inference (what makes `{ expr }` not a typing hole)
 type ExprScope = Record<string, JsonSchema>;                       // root name -> that namespace's schema
-interface InferResult { schema: JsonSchema; unresolved: string[][]; }
+interface InferResult {
+  schema: JsonSchema;
+  unresolved: string[][];   // bad paths — errors
+  issues: string[];         // a call through a value that is not callable, an argument its signature refuses — errors
+  warnings: string[];       // a call through an UNTYPED callable (SPEC §7.5.2) — legal, unchecked, said out loud
+}
 function inferExpression(expr: Expr, scope: ExprScope): InferResult;
+function inferRef(ref: Ref<InlineFamily>, scope: ExprScope): InferResult;   // the same, over the lowered tree
 function joinSchemas(a: JsonSchema, b: JsonSchema): JsonSchema;    // least schema accepting both branches
 function isBooleanSchema(s: JsonSchema): boolean;                  // what a `when` guard must satisfy
 function isUniversalSchema(s: JsonSchema | undefined): boolean;
@@ -2746,12 +2851,19 @@ interface ResolutionScope {
   artifact(name: string): JsonValue | undefined;
   conversation(session: string, message?: number): JsonValue | undefined;
 }
-function resolveRef(ref: Ref<InlineFamily>, scope: ResolutionScope): Resolved;
+function resolveRef(ref: Ref<InlineFamily>, scope: ResolutionScope, kind?: RefKind): Resolved;  // `kind`: the consuming slot's
 function resolveInputs(input: Record<string, Parameter<InlineFamily>>, scope: ResolutionScope):
   { values: FunctionInputs } | Pending | { error: string };
 function isResolvedValue(r: Resolved): r is { value: JsonValue };
 function isResolveError(r: Resolved): r is { error: string };
+function isOperationValue(v: unknown): v is Operation<InlineFamily>;   // what a callable slot holds
 ```
+
+A `prompt`/`function`-kind consumer bound to an UNCALLED operation receives the operation itself as its
+value (the higher-order slot), which is why `resolveRef` takes the consuming slot's `kind`. An
+`op.apply` edge resolves its `callee` to such a value, binds its `arg<n>` operands by the callee's
+positional order and its spreads by name, and reads the bound call's result exactly as a lowered call
+does — the engine runs what resolution demands (`operationResult` reports the miss).
 
 Member access projects property schemas, each operator has a fixed signature (comparison → boolean,
 arithmetic → number, logical → the join of its branches), and an unresolved reference is *reported*, not
@@ -2789,6 +2901,13 @@ may be a function op or a prompt op, and the built-in operation library (arithme
 objects, `map`/`filter`/`flatMap`/`reduce`) are ordinary entries in the same resolver set. There is
 still no assignment, no loops, no imports and no I/O; a call's effect is dispatched by the engine and
 memoized by the resolved operation's content hash.
+
+A callee that is not a NAME is a VALUE of callable type (SPEC §6.2): `.inputs.reviewer(.inputs.doc)`,
+`(a ? f : g)(x)`, a call's result called again. That parses to a `call` node (`{ type: "call"; callee;
+args }`) beside `apply`, lowers to an `op.apply` edge, and is type-checked at load against the callee's
+declared signature — the `CallableSchema` on a `function`-kind slot — with an untyped callable degrading
+to a warning rather than an error. An UNCALLED reference (`classify`, `$/functions/classify`) infers to
+the operation's own contract, so a callable passed into a callable slot is checked at load too.
 
 Arithmetic has SYNTAX too now — `+` `-` `*` `/`, standard precedence — and it is pure sugar: `a + b`
 parses to the same node `add(a, b)` does, so the lowering, the inference, the fan-out planner and the

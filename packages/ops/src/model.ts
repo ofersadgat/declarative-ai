@@ -288,6 +288,11 @@ export interface InlineFamily {
  * `{ type: "string" }` cannot drift apart between the loader, the checker, and the engine.
  */
 export function kindFor(schema: SchemaDocument | undefined): RefKind {
+  // A CALLABLE type says its own kind (`callable.ts`): `{ kind: "function", input, output }` is a
+  // function-kind slot whether or not the slot around it restated it. Tested inline rather than
+  // through `isCallableSchema`, because that module imports this one.
+  const kind = schema?.kind;
+  if (kind === "prompt" || kind === "function") return kind;
   if (schema?.type !== "string") return "json";
   return schema.contentEncoding !== undefined || schema.contentMediaType !== undefined ? "blob" : "text";
 }

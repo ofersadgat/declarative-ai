@@ -17,5 +17,7 @@
  * §1.2 rule applied in its lighter form. `SchemaValidator` simply implements that seam.
  */
 export * from "./subtype.js";
+// Callable subtyping (hw SPEC §6.2): contravariant parameters, covariant output.
+export * from "./callable.js";
 export * from "./checker.js";
 export * from "./ajv.js";

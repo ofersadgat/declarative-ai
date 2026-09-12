@@ -1124,6 +1124,28 @@ arguments, and exactly what JaiRA's app supplies in its richer form.
   model — composed-vs-delegated runtimes, the `Tool` seam, the session-keyed environment overlay, and
   the permission granularities — is specified in §5.1.
 
+- **Every value is a binding; structure is not.** SPEC §5.3 lets any value position of a state file carry
+  a binding — a computed `title`, a `config.model` chosen from an input, a `function` taken from a
+  callable-typed input — and keeps `id`, `children`, `sequence`, `transitions` and every `schema`
+  authored, because those are what the values are checked against. The loader takes the bindings out
+  (`fields.ts`: `extractTopLevelFields`, `extractOperationFields`) and leaves each position empty; the
+  engine evaluates them ONCE at instance entry, in dependency order with declaration order as the
+  scheduling priority, writes each back at its path into a per-instance definition
+  (`materializeFields`), and journals each as `value.settled`. Dependency order is the semantic and
+  declaration order only a hint, since JSON promises no key order. A field's world is the inputs and the
+  other fields — reading a child, an output or the operation's result is refused at load. The
+  `operation` cache is keyed on the operation OBJECT rather than the state id for exactly this reason:
+  a bound callee gives each instance its own.
+
+- **Callable types are signatures.** A `prompt`/`function`-kind slot's `schema` is a `CallableSchema`
+  (`ops/callable.ts`) — the callee's `input`/`output` contract, self-describing through `kind`. An
+  uncalled reference infers to the operation's own contract; a call THROUGH a value (`.inputs.fn(x)`,
+  the `call` node and the `op.apply` resolver) is checked against the slot's declared signature and
+  dispatched demand-driven, since nothing static can name the callee. Subtyping is `isSubcallable`
+  (`validate/callable.ts`): contravariant parameters, covariant output. A callable typed by kind alone is
+  the §7.5.2 degradation — usable, unchecked, warned about — which is what let signature-carrying
+  types land before expression-valued fields without a compatibility layer.
+
 ### 7.1 User-defined functions
 
 [SPEC.md](SPEC.md) §7.5 specifies the authoring surface — three body forms, a signature read from

@@ -13,13 +13,14 @@
  * (`RESOLVER_REFS`), which is why this module has one uniform producer path and no wiring
  * special cases.
  */
-import type { InlineFamily, JsonValue, Operation, Parameter, Ref, RefTree, ResolvedValue } from "@declarative-ai/exec";
-import { carryCall, isOk } from "@declarative-ai/exec";
+import type { InlineFamily, JsonValue, Operation, Parameter, Ref, RefKind, RefTree, ResolvedValue } from "@declarative-ai/exec";
+import { carryCall, isCallableKind, isOk } from "@declarative-ai/exec";
+import { applyArgumentNames } from "./lowerExpr.js";
 import { applyBinary, evaluate, isPending, memberOf, parseExpression, PENDING, type BinaryOp, type Pending } from "./expr.js";
 import type { Failure } from "@declarative-ai/json";
 import { admitsError, errorValueSchemaFor, resolutionFailure } from "./errorValue.js";
 import { BUILTINS } from "./builtins.js";
-import { RESOLVER_REFS, RESOLVER_REF_SET } from "./format.js";
+import { positionalOrder, RESOLVER_REFS, RESOLVER_REF_SET } from "./format.js";
 
 /**
  * What a resolution can yield: a value, PENDING (an async producer still in flight), or an error.
@@ -76,8 +77,14 @@ export interface ResolutionScope {
   operationResult?(op: Operation<InlineFamily>): Resolved | undefined;
 }
 
-/** Resolve one binding to a value. */
-export function resolveRef(ref: Ref<InlineFamily>, scope: ResolutionScope): Resolved {
+/**
+ * Resolve one binding to a value.
+ *
+ * `kind` is the CONSUMING slot's, when the caller has one in hand: a `prompt`/`function`-kind slot
+ * bound to an uncalled operation receives the operation itself as its value (the higher-order slot,
+ * SPEC §4.1), where a data slot bound to the same edge would run it.
+ */
+export function resolveRef(ref: Ref<InlineFamily>, scope: ResolutionScope, kind?: RefKind): Resolved {
   if ("text" in ref) return { value: ref.text };
   if ("json" in ref) return { value: ref.json };
   // A `blob` leaf IS the bytes (DESIGN §3.7): hydration is the family's business, so there is
@@ -94,7 +101,24 @@ export function resolveRef(ref: Ref<InlineFamily>, scope: ResolutionScope): Reso
     return isOk(r) ? { value: r.value } : { error: r.error.reason, failure: r.error };
   }
   if ("refs" in ref) return resolveTree(ref.refs, scope);
-  return resolveProducer(ref, scope);
+  return resolveProducer(ref, scope, kind);
+}
+
+/**
+ * Is this value an OPERATION — the thing a callable slot holds and `op.apply` dispatches?
+ *
+ * Structural, because a callable travels as plain JSON: through an input, out of a child, back in
+ * from a journal. The two kinds are the only two operation shapes there are, and each is known by the
+ * one field that makes it what it is.
+ */
+export function isOperationValue(value: unknown): value is Operation<InlineFamily> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const op = value as { kind?: unknown; input?: unknown; output?: unknown; functionRef?: unknown; user?: unknown };
+  if (op.input === null || typeof op.input !== "object" || Array.isArray(op.input)) return false;
+  if (op.output === null || typeof op.output !== "object" || Array.isArray(op.output)) return false;
+  if (op.kind === "function") return typeof op.functionRef === "string";
+  if (op.kind === "prompt") return typeof op.user === "string";
+  return false;
 }
 
 /** A tree position that is not a primitive — the only shape the leaf/node discrimination applies to. */
@@ -240,7 +264,12 @@ function hasPendingElement(values: readonly unknown[]): boolean {
  * run ⇒ reuse its outputs; in flight ⇒ PENDING). An embedded op is either one of the well-known
  * resolvers the loader synthesized, or an author-embedded operation the engine must run.
  */
-function resolveProducer(ref: { op: Operation<InlineFamily> | string; parameters?: Record<string, Parameter<InlineFamily>> }, scope: ResolutionScope): Resolved {
+function resolveProducer(
+  ref: { op: Operation<InlineFamily> | string; parameters?: Record<string, Parameter<InlineFamily>> },
+  scope: ResolutionScope,
+  /** The consuming slot's kind, when known — see {@link resolveRef}. */
+  kind?: RefKind,
+): Resolved {
   const producer = ref.op;
   if (typeof producer === "string") {
     const outputs = scope.childOutputs(producer);
@@ -268,7 +297,11 @@ function resolveProducer(ref: { op: Operation<InlineFamily> | string; parameters
   // This branch used to key on `producer.kind !== "function"`, which meant every PROMPT operation was
   // read as higher-order — so calling one returned its own definition as the value instead of running
   // it, and the binding got an object where the callee's result belonged.
-  if (!isResolver && ref.parameters === undefined && producer.kind !== "function") {
+  //
+  // A CALLABLE consumer (`kind` prompt/function) takes the definition whatever the op's kind: that is
+  // what the slot IS (SPEC §4.1). Without the consumer's kind in hand a function op with nothing bound
+  // keeps its older reading — a zero-argument call — so a data slot wired to `f` still runs `f`.
+  if (!isResolver && ref.parameters === undefined && producer.spread === undefined && (isCallableKind(kind) || producer.kind !== "function")) {
     return { value: producer as unknown as JsonValue };
   }
   if (!isResolver) {
@@ -476,6 +509,41 @@ function runResolver(op: Operation<InlineFamily> & { kind: "function" }, scope: 
       const taken = operand(t.value ? "then" : "else");
       return taken === undefined ? { error: `cond producer is missing '${t.value ? "then" : "else"}'` } : taken;
     }
+    case RESOLVER_REFS.apply: {
+      // A call THROUGH a value (SPEC §6.2). The callee resolves to an operation; the positional
+      // arguments bind to its slots in the order it declares them and a spread by name — the rule
+      // `bindArguments` applies at load for a named callee, applied here for one nobody could name
+      // until now. The bound operation is then READ exactly as a lowered call is: the engine runs
+      // what the binding demands (`operationResult` reports the miss), and this resolves it.
+      const calleeArg = operand("callee");
+      if (calleeArg === undefined) return { error: "a call through a value has no callee" };
+      if (!isResolvedValue(calleeArg)) return calleeArg;
+      const callee = calleeArg.value;
+      if (!isOperationValue(callee)) return { error: `cannot call ${describeValue(callee)}: it is not an operation` };
+      const values: Record<string, ResolvedValue> = {};
+      const spread = resolveSpread(op, scope);
+      if (isPending(spread)) return PENDING;
+      if ("error" in spread) return spread;
+      Object.assign(values, spread.values);
+      const slots = Object.keys(callee.input);
+      if (slots.length > 0) {
+        for (const name of Object.keys(spread.values)) {
+          if (!slots.includes(name)) return { error: `a spread argument passes '${name}', which the callable does not accept` };
+        }
+      }
+      const order = positionalOrder(callee.input);
+      const args = applyArgumentNames(op.input);
+      if (args.length > order.length) {
+        return { error: `the callable takes ${order.length === 0 ? "no arguments" : `${order.length} argument${order.length === 1 ? "" : "s"} (${order.join(", ")})`}, but ${args.length} were given` };
+      }
+      for (const [i, argName] of args.entries()) {
+        const a = operand(argName);
+        if (a === undefined) continue;
+        if (!isResolvedValue(a)) return a;
+        values[order[i]!] = a.value;
+      }
+      return scope.operationResult?.(bindEmbedded(callee, values)) ?? PENDING;
+    }
     case "reduce": {
       // A FOLD: each step consumes the previous result, so the applications cannot be built up front
       // the way `map`'s can. Both sides rebuild the same CHAIN — the engine to run it, this to read
@@ -578,7 +646,15 @@ export function resolveEmbedded(
   const spread = resolveSpread(op, scope);
   if (isPending(spread)) return PENDING;
   if ("error" in spread) return spread;
-  const values = { ...spread.values, ...bound.values };
+  return { op: bindEmbedded(op, { ...spread.values, ...bound.values }) };
+}
+
+/**
+ * An operation with argument VALUES written into its input slots as literals — the identity of one
+ * call. Shared by a lowered call (`resolveEmbedded`) and a call through a value (`op.apply`), so the
+ * two spellings of "apply this operation to these arguments" hash to one key.
+ */
+function bindEmbedded(op: Operation<InlineFamily>, values: Record<string, ResolvedValue>): Operation<InlineFamily> {
   const input = Object.fromEntries(
     Object.entries(op.input).map(([name, p]) => {
       const value = values[name];
@@ -589,7 +665,14 @@ export function resolveEmbedded(
   // on would make the op hash as though the arguments were still pending — two identities for one
   // call, and the memo would miss on the second.
   const { spread: _expanded, ...rest } = op;
-  return { op: { ...rest, input } as Operation<InlineFamily> };
+  return { ...rest, input } as Operation<InlineFamily>;
+}
+
+/** A value, for a message: its JSON type. */
+function describeValue(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "an array";
+  return `a ${typeof value}`;
 }
 
 /**
@@ -787,7 +870,8 @@ export function resolveInputs(
   const values: Record<string, ResolvedValue> = {};
   for (const [name, param] of Object.entries(input)) {
     if (!param.binding) continue;
-    const r = resolveRef(param.binding, scope);
+    // The slot's kind travels: a callable slot bound to an uncalled operation takes the definition.
+    const r = resolveRef(param.binding, scope, param.kind);
     if (isPending(r)) return PENDING;
     if (isResolveError(r)) {
       // A failure is DATA (EXPRESSIONS.md §5). If the consuming slot declared that it accepts one of

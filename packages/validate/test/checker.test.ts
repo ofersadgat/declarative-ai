@@ -62,7 +62,7 @@ describe("the ONE binding checker (API.md, \"The binding checker\")", () => {
       output: { name: "output", kind: "json" },
     };
     const result = checkOperation(op, inline);
-    expect(result.errors[0]!.message).toMatch(/expects a prompt op but the producer is a function op/);
+    expect(result.errors[0]!.message).toMatch(/expects a prompt but the producer is a function/);
   });
 
   it("enforces the positional `index` invariant: all-set-or-all-unset, and distinct", () => {

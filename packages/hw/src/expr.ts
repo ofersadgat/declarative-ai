@@ -76,6 +76,18 @@ export type Expr =
    */
   | { type: "apply"; op: string; args: Argument[] }
   /**
+   * APPLYING a callable VALUE to arguments — `.inputs.reviewer(.inputs.doc)`, `(a ? f : g)(x)`.
+   *
+   * The counterpart of `apply` for a callee that is not a NAME but a value of callable type (SPEC
+   * §4.1): a `function`- or `prompt`-kind input, a field of the state, an uncalled reference that
+   * was passed in. `apply` names its operation and binds at load against the declaration the name
+   * resolves to; this one binds at run time against whatever operation the value turns out to be,
+   * and is CHECKED at load against the value's declared signature (§6.2). Two nodes rather than one
+   * with an optional name, because everything downstream — lowering, inference, resolution — does
+   * something different with the two, and a union member says so where a flag would not.
+   */
+  | { type: "call"; callee: Expr; args: Argument[] }
+  /**
    * An OBJECT LITERAL — `{ to_state: 'deploy', urgent: .inputs.severity > 2 }`.
    *
    * The aggregate literal, standing beside `lit` the way an object stands beside a scalar in JSON.
@@ -454,11 +466,15 @@ class Parser {
         continue;
       }
       if (this.atPunct("(")) {
-        const at = this.peek().pos;
         const callee = reference ?? pathOf(e)?.join(".");
-        if (callee === undefined) throw new ExprError("only a name may be called", at);
         this.next();
-        e = { type: "apply", op: OPERATION_ALIASES[callee] ?? callee, args: this.args() };
+        // A NAME is applied — the operation it resolves to, bound at load. Anything else — a runtime
+        // read, a parenthesized conditional, the result of another call — is a VALUE of callable type,
+        // applied at run time and checked at load against its declared signature (SPEC §6.2).
+        e =
+          callee === undefined
+            ? { type: "call", callee: e, args: this.args() }
+            : { type: "apply", op: OPERATION_ALIASES[callee] ?? callee, args: this.args() };
         reference = undefined;
         continue;
       }
@@ -724,6 +740,11 @@ export function evaluate(expr: Expr, context: Record<string, unknown>): ExprValu
     }
     case "apply":
       return applyOperator(expr, context);
+    case "call":
+      // Applying a VALUE needs a dispatcher: the value is an operation, and running one is the
+      // engine's job. The same refusal `ident` gets, for the same reason — this interpreter is the
+      // reference semantics for what the lowered form computes, not a second way to run things.
+      throw new ExprError("a call through a value is an operation, which only the lowered form can run", 0);
     case "object": {
       // STRICT in every value, like a built-in application and unlike the three lazy forms: an object
       // holding PENDING is not an object anyone can read, and handing one on would put the sentinel
@@ -881,6 +902,11 @@ export function referencesOf(expr: Expr): string[][] {
         // A spread's OPERAND is an argument like any other, and a reference inside it is a read this
         // state makes: `f(...opts)` reaches `.inputs.opts` exactly as `f(opts.a)` would. Walking
         // past it would hide that read from the validator's reachability check.
+        for (const arg of e.args) collect(isSpread(arg) ? arg.value : arg);
+        return undefined;
+      case "call":
+        // The CALLEE is a read too — `.inputs.reviewer(x)` reads `reviewer` exactly as it reads `x`.
+        collect(e.callee);
         for (const arg of e.args) collect(isSpread(arg) ? arg.value : arg);
         return undefined;
       case "object":

@@ -85,6 +85,13 @@ export interface LoadedInstance {
   sites?: ReadonlyArray<readonly [string, number]>;
   /** The next fresh site number — at least one past every recorded sequence. */
   nextSite?: number;
+  /**
+   * The instance's SETTLED FIELDS (SPEC §5.3), by authored path, as `value.settled` recorded them —
+   * a title, a bound model, whatever the author computed. Used verbatim: a loaded instance does not
+   * re-evaluate a field the stopped run already paid for, which is what "once" means across a
+   * restart. A field absent here (the run stopped mid-evaluation) is evaluated afresh.
+   */
+  fields?: Readonly<Record<string, ResolvedValue>>;
   /** In entry order. Superseded instances are omitted; their entries survive in `occurrence`. */
   children?: readonly LoadedInstance[];
 }

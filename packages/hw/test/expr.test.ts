@@ -191,10 +191,20 @@ describe("calls", () => {
     expect(parseExpression("1 / 2")).toMatchObject({ type: "apply", op: "div" });
   });
 
-  it("refuses to call something that is not a name", () => {
-    // An operation is NAMED by a reference, so there is no first-class function value to apply.
-    expect(() => parseExpression("(a ? f : g)(x)")).toThrow(/only a name may be called/);
-    expect(() => parseExpression("'literal'(x)")).toThrow(/only a name may be called/);
+  it("applies a VALUE when the callee is not a name (SPEC §6.2)", () => {
+    // A name is applied at load, against the declaration it resolves to. Anything else — a runtime
+    // read, a conditional, a literal — is a value of callable type, applied at run time and checked
+    // at load against its declared signature. The parser does not judge whether the value IS
+    // callable; the type checker does, which is why `'literal'(x)` parses.
+    expect(parseExpression(".inputs.reviewer(.inputs.doc)")).toMatchObject({
+      type: "call",
+      callee: { type: "member", obj: { type: "member", obj: { type: "self" }, prop: "inputs" }, prop: "reviewer" },
+      args: [{ type: "member" }],
+    });
+    expect(parseExpression("(a ? f : g)(x)")).toMatchObject({ type: "call", callee: { type: "apply", op: "op.cond" } });
+    expect(parseExpression("'literal'(x)")).toMatchObject({ type: "call", callee: { type: "lit", value: "literal" } });
+    // A call's result may itself be called.
+    expect(parseExpression("pick()(1)")).toMatchObject({ type: "call", callee: { type: "apply", op: "pick" } });
   });
 
   it("reports a malformed argument list", () => {

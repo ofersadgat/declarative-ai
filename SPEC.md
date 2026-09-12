@@ -77,6 +77,7 @@ Each state may define:
 
 - Inputs (including configuration knobs — inputs with a `default`).
 - Outputs.
+- A title — the instance's display name, computed from its inputs once, at entry (§5.3).
 - Child states.
 - Default child order.
 - Agent execution behavior.
@@ -176,7 +177,9 @@ every descendant.
 ### 3.3 Evaluation Loop
 
 1. Entering a state creates a new state instance. Declared inputs are resolved
-   and validated; validation failure blocks the state.
+   and validated; validation failure blocks the state. Every other bound field of
+   the document — `title`, a computed `config.model`, … — is then evaluated once,
+   in dependency order (§5.3); the operation waits for the fields it reads.
 2. The engine runs the highest-priority operation that has not yet run in this
    instance.
 3. When an operation completes, its outputs are validated and transitions are
@@ -423,7 +426,10 @@ binding      Where the value comes from (§4.2). Absent = a FREE slot, filled by
              caller: the parent's wiring for an input, the operation for an output.
 index        Positional sort key for bare/tuple ingestion. Wiring, not type.
 default      Value used when nothing is wired in. Also the explicit opt-out from the
-             reachability rule (§6.2).
+             reachability rule (§6.2). A value (§5.3), so `{ "expr": … }` computes it — at
+             entry for an input, in the state's own scope, so it may read the inputs that
+             WERE provided; at termination for an output. A literal object here is the
+             value it always was: only the `expr` and wrapped spellings are read as bindings.
 optional     Slots are required by default; `true` relaxes that.
 description  Human-readable documentation for the slot.
 ```
@@ -436,6 +442,45 @@ the generic/passthrough case (§4.4).
 `kind`, `schema`, `binding`, and `index` are the slot proper; `default`, `optional`, and
 `description` are authoring metadata carried alongside it. An output slot may also declare a
 `name`, which otherwise defaults to its key in the `outputs` map.
+
+**A `prompt` or `function` slot carries a SIGNATURE, not a JSON Schema.** A callable's type is its
+I/O contract, and that contract already has a shape: the `input` slot map and the `output` slot an
+operation declares (§7.1), which is also what a document, a TypeScript parameter list, and a registry
+entry are each read into (§7.5.2). So the `schema` of a callable slot is that same shape, and there is
+no second vocabulary for describing a function:
+
+```json
+{
+  "reviewer": {
+    "kind": "function",
+    "schema": {
+      "input": {
+        "doc": { "schema": { "type": "string" } },
+        "mode": { "schema": { "type": "string", "enum": ["plan", "code"] }, "optional": true }
+      },
+      "output": {
+        "schema": { "type": "object", "properties": { "verdict": { "type": "string" } }, "required": ["verdict"] }
+      }
+    }
+  }
+}
+```
+
+The `kind` must be written: nothing in a signature says which of the two it types, and an object with
+no `type` would otherwise read as `json`. `prompt` is a callable whose body is a template — a skill
+passed by value — rendered under the caller's `config` and `system` and dispatched to the prompt
+executor; `function` is every other callee, dispatched as §7.1 describes. A signature with no `input`
+accepts any arguments; one with no `output` returns the unconstrained type; a callable slot with no
+`schema` at all is "some callable", which §6.2 treats exactly as it treats an unannotated `.js`
+module: usable, untyped, and warned about.
+
+The VALUE of a callable slot is a reference to a callee — one resolved along the search path, or an
+embedded operation — never source text. An uncalled reference in an expression (`classify`,
+`$/prompts/turns/revise.md`, `.inputs.reviewer`) has callable type; `map(xs, classify)` has always
+relied on that (§6). What the signature adds is that the type now CARRIES the contract the reference
+resolved to, so a value passed into a `function` slot is checked against the slot's signature at load,
+a call made THROUGH such a value is typed (§6.2), and a callable bound into `operation.function` types
+the operation it becomes (§7.1).
 
 Inputs and outputs are required by default.
 
@@ -515,7 +560,38 @@ Literals are wired by their own form; there is no wrapper object:
 ```
 
 The same binding forms wire a child's inputs (`children.<key>.inputs`), fill an operation's
-input slots (`operation.input`), and derive a state's outputs (§4.3).
+input slots (`operation.input`), derive a state's outputs (§4.3) — and, since every value in a state
+file is a binding (§5.3), compute its `title`, its `config.model`, or its `function`.
+
+**An `{ "expr" }` binding may carry two more keys.** Both are about how the expression is EVALUATED
+rather than what it is worth:
+
+```text
+environment   An `environment` layer (§7.1a) for every call the expression makes, merged
+              nearest-wins ABOVE the state's own. `{ "session": null }` here gives a
+              title-generating prompt a fresh conversation of its own, keyed on the call site;
+              a ref expression names a position to continue from. A session NAME is refused —
+              a binding is not a scope a name is qualified by (§7.1b). Absent, a call borrows
+              the enclosing instance's tools and permissions and joins no conversation, as a
+              guard's call does.
+failureValue  The value this binding takes if evaluation FAILS — a callee that errors or times
+              out, or a result the field's schema refuses. Type-checked against the field exactly
+              as the expression is. With it, the failure is journaled and the value stands in;
+              without it, the failure is the instance's, as it is for any unresolvable binding
+              (§5.3).
+```
+
+```json
+{
+  "title": {
+    "binding": {
+      "expr": "title(.inputs.issue).title",
+      "environment": { "session": null },
+      "failureValue": "Untitled"
+    }
+  }
+}
+```
 
 ### 4.3 Outputs
 
@@ -686,6 +762,7 @@ but the MVP should define canonical JSON semantics first.
 ```text
 id
 label
+title
 description
 inputs
 outputs
@@ -703,7 +780,14 @@ limits
 : State ID, equal to relative path without suffix.
 
 `label`
-: Human-readable state name.
+: Human-readable state name — static, the same for every instance of the state.
+
+`title`
+: The INSTANCE's display name — a slot-shaped field of type string whose binding is evaluated
+  once, when the instance is created (§5.3). A task displays the title of the nearest instance on
+  its active path that declares one, itself included, and that state's `label` while the title is
+  still settling or when no state on the path declares one. The field exists so a board card can
+  say what a task is about rather than which state it is in.
 
 `description`
 : Short explanation of the state purpose.
@@ -742,6 +826,78 @@ limits
 `limits`
 : Iteration and timeout limits.
 
+### 5.3 Every Value Is a Binding
+
+A state file is a document of VALUES the engine reads, and any of them may be computed. Every value
+position accepts the binding forms of §4.2 — a literal, a reference, an `{ "expr" }` — with five
+exceptions, each of which is STRUCTURE the checker resolves values against rather than a value:
+
+```text
+id            the state's identity — derived from its location, never computed
+children      the map of mounts: which states this one composes, under which keys
+sequence      the spine — what definite-assignment analysis (§6.2) proves reachability over
+transitions   the rules — what reachability and the outcome-handling rule (§3.3) are read from
+schema        any slot's — the type every binding is checked against
+```
+
+`children.<key>.inputs`, `children.<key>.environment` and a transition's `inputs` are bindings
+already and stay so; it is the SHAPE of the graph — which mounts exist, in what order, under which
+rules — that stays authored. Everything else is a value: `label`, `title`, `description`,
+`limits.*`, a slot's `default`, `operation.function`, `operation.prompt`, `tools`, the permission
+baseline and its `profile`/`default`/`other`, and every field of `operation` and `environment` down
+to the leaves of `config`. A mount's `async` is a value too, with one difference in timing: it is
+resolved in the PARENT's scope when the mount is entered, which is the moment the flag is read.
+
+**Two spellings, decided by the position.** Where the format knows the field's type — a string, a
+number, a session, a callee — the binding is written BARE in the value's place:
+`"label": { "expr": "…" }`, `"function": { "expr": ".inputs.reviewer" }`. Inside `config` and
+`args`, whose values are opaque JSON handed to an executor, a bare binding could not be told from a
+literal object that happens to have an `expr` key, so there the binding is WRAPPED:
+`"model": { "binding": { "expr": ".inputs.model" } }`. The wrapper is the slot form outputs and
+`title` already use, and a `binding` key is one no executor's configuration legitimately contains,
+so a wrapped object is never an accident. A slot-shaped field — an output, `title` — carries its
+binding under `binding` as it always has.
+
+**Type checking is the ordinary rule.** A binding's inferred type (§6.2) must satisfy the field's
+type: the format's own for a built-in field (`title` is a string, `limits.max_iterations` a number,
+`function` a callable), the slot's `schema` for a slot. `failureValue` is checked the same way. A
+callable position is where signature-carrying types (§4.1) earn their place —
+`"function": { "expr": ".inputs.reviewer" }` types the operation's output off the slot's declared
+signature, exactly as a name would off the declaration it resolved to.
+
+**Evaluation is once, at entry, in dependency order.** When an instance is created its inputs bind
+first; that is the one ordering the format fixes. Every other binding in the document is a node in a
+DEPENDENCY GRAPH: it reads inputs, it may read any other field of the state by name (§6.1), and it is
+evaluated once everything it reads has settled. A field that reads an input still pending — one wired
+to a sibling in flight (§10.4) — settles when the input does, and that is still its one evaluation. A
+cycle between fields is a load error. The operation is a node in the same graph: it is dispatched once
+every field of its effective operation has settled and not before, so an expression-valued
+`config.model` delays the call, and a `title` that nothing reads delays nothing.
+
+**Ready bindings run in parallel, prioritized top to bottom.** Whatever is ready is started. Where
+the engine must choose — under a cap on concurrent model calls, when one exists — it prefers the
+binding declared EARLIER in a depth-first walk of the document: `title` before
+`operation.config.model` before `outputs.summary`. Declaration order is a scheduling hint and not a
+semantic. JSON promises no key order, and a document whose meaning changed when a formatter sorted
+its keys would be a document with a bug in it; dependency order is the semantic.
+
+**A failed binding is the instance's failure, unless the binding says otherwise.** A callee that
+errors, a value the field's schema refuses, a call that times out: the instance terminates with
+`error`, as it does for any unresolvable binding, because a value nobody can compute is a workflow
+with a hole in it and silence is the wrong response to that. `failureValue` (§4.2) is the escape
+hatch, per binding: the failure is journaled, the fallback stands in, and the instance continues.
+
+**Every settled value is journaled.** A `value.settled` event carries the instance, the field's path,
+and its value — or its error and the fallback that stood in for it. Between `instance.entered` and
+that event the field is PENDING, which a board renders as it sees fit. Durability follows: a resumed
+run reads its settled values back from the journal rather than recomputing them, which is what
+"once" means across a restart, and what keeps a title from being paid for twice and coming back
+different the second time.
+
+**The snapshot hashes the expression, not its value.** Two runs of one workflow may resolve
+`config.model` differently and are still runs of the same workflow; the run record says which model
+each call was actually made with.
+
 ## 6. Transition Expressions
 
 Expressions use a small language with JavaScript evaluation semantics:
@@ -773,6 +929,11 @@ The expression language should support:
 - Numeric comparisons.
 - String comparisons.
 - `.length` for arrays and strings.
+- Calls — `name(args)`, where `name` resolves along the search path (§7.5), and `e(args)`, where
+  `e` is ANY expression of callable type: a `function`- or `prompt`-kind input, a field of the
+  state, an uncalled reference that was passed in. The signature the arguments bind against is the
+  callee's declaration in the first case and the value's type in the second (§6.2); the argument
+  rules (§6.3) are the same for both.
 - Object literals — `{ to_state: 'deploy', urgent: .inputs.severity > 2 }`. Keys are bare
   identifiers or quoted strings, never computed (`get(o, k)` is the spelling for a computed read);
   values are full expressions. The aggregate literal, standing beside the scalar ones — its use is
@@ -938,8 +1099,31 @@ limits.timeout
 There is no `function.*` namespace. A function operation's result is an ordinary state output, so
 guards read `outputs.*` and `children.<id>.outputs.*` uniformly.
 
+The **state's own fields** — every top-level field of the document is a root under its own name.
+This is why data lives under `inputs.*` rather than at the top, and why the namespaces above are
+spelled the way they are: the top level was always reserved for the document's fields, and
+`limits.*` was already one of them.
+
+```text
+title
+label
+description
+limits.*
+operation.<field>       the effective operation's AUTHORED fields: config, input, function,
+                        prompt, session, tools, …
+environment.<field>     the resolved environment layer
+```
+
+These read a field's SETTLED value (§5.3), so a reference from one field to another is a dependency
+edge: `.operation.config.model` reading `.title` waits for the title. `operation.*` therefore
+carries two things under one root — the authored fields above and the call's RESULT node
+(`outcome`, `usage`, `cost`, `model`, `outputs.session`) described earlier. The key sets do not
+overlap, so `.operation.config.model` is the model the field resolved to and `.operation.model` is
+the model the call was actually made with: the same value once the call has run, and only the
+first exists before it.
+
 A reference whose root is not one of these namespaces is a validation error, as is a reference to
-an undeclared input, output, or child.
+an undeclared input, output, child, or field.
 
 ### 6.2 Static Validation
 
@@ -1001,6 +1185,25 @@ are answered:
   `{ …the state's resolved inputs, …the operation's bound slots }`, so a state whose declared input
   shares the slot's name fills it with nothing wired, while an expression's call has no enclosing
   instance to draw from and its arguments are all it gets.
+
+**A call THROUGH a value is checked against the value's signature.** `.inputs.reviewer(.inputs.doc)`
+binds its arguments to the `input` slots the `reviewer` slot's schema declares and types to its
+`output`, by the rules above — the slot's signature (§4.1) stands where a resolved declaration would.
+A callable slot that declares no signature constrains nothing, and a call through it infers to the
+unconstrained type: the degradation §7.5.2 already defines for a `.js` module, reported as a warning
+naming the slot, never silently.
+
+**Callable subtyping.** A producer signature P satisfies a consumer signature C when:
+
+- every slot C declares is one P accepts, with C's schema a subschema of P's — an argument the
+  consumer will pass must be one the producer takes, so inputs are CONTRAVARIANT;
+- every slot P REQUIRES is one C declares — the consumer must be able to fill it;
+- P's output is a subschema of C's — outputs are COVARIANT.
+
+A consumer with no `input` asks nothing of the producer's parameters, and one with no `output`
+accepts any return. An uncalled reference infers to the signature it resolved to, so passing
+`classify` where a `function` slot expects a text-to-label callable is checked at load — and so is
+`"function": { "expr": ".inputs.reviewer" }` (§7.1), where the consumer is the operation itself.
 
 A callee that declares no slots constrains nothing, which is what an implementation registered
 without a signature has always meant.
@@ -1110,8 +1313,9 @@ A **prompt operation** is one structured model call:
 
 ```text
 kind        "prompt" — optional; a `prompt` already says so.
-prompt      { "template": "…" } or { "skill": "<name>" } — exactly one. Both render with
-            {{.inputs.*}} interpolation; a skill resolves through registry.skills.
+prompt      { "template": "…" }, { "skill": "<name>" } or { "expr": "…" } — exactly one. All
+            render with {{.inputs.*}} interpolation; a skill resolves through registry.skills, and
+            an expr yields a prompt-kind value (§4.1) — a skill passed by value.
 system      Optional system prompt.
 config      The model-configuration surface (model, sampling, configRef, …).
 input       Slots (§4.1) feeding the call; a bound slot is resolved before the call runs. The op's
@@ -1126,7 +1330,8 @@ A **function operation** invokes a registered function:
 ```text
 kind        "function" — optional; a `function` already says so.
 function    A callee name, resolved along the search `path` like any other (§7.5) — or that name
-            APPLIED: `"function": "show_prompt(.inputs.doc, ...{ mode: 'plan' })"`.
+            APPLIED: `"function": "show_prompt(.inputs.doc, ...{ mode: 'plan' })"` — or a binding
+            whose value is a function-kind callable (§4.1): `{ "expr": ".inputs.reviewer" }`.
 args        The authored arguments, bound to the call's input slots BY NAME. Shorthand for `input`
             where the value is a constant and there is nothing to say about its type; a slot the
             author declared in `input` wins. They used to arrive as one blob in a slot called
@@ -1154,6 +1359,16 @@ Three consequences follow from it being the same call:
   an inherited call and a nearer `args` routinely restate one value — and saying two different
   things about one slot in one block is an error, because neither half is the more specific
   statement and so neither can win.
+
+**`function` and `prompt` may be bound.** `"function": { "expr": ".inputs.reviewer" }` runs
+whatever callable the input carries; `"prompt": { "expr": ".inputs.instructions" }` renders a
+prompt-kind value — a skill passed by value — under this state's `config` and `system`, so `expr`
+stands beside `template` and `skill` as the third of the exactly-one forms. Each is a value position
+like any other (§5.3), typed by the signature the expression infers to (§4.1): the operation's output
+and its argument slots are checked at load exactly as they are for a name, and a value whose slot
+declares no signature degrades to the unconstrained type with a warning (§6.2). What a bound value
+cannot do is change the KIND. The field it is bound to says whether this is a prompt or a function
+operation, and a callable of the other kind there is a type error, not a reinterpretation.
 
 **What a call returns is the callee's to say.** A state that declares no `output`/`outputs` takes
 the callee's, read off a module's return type, a document's `outputs`, or a registry entry's
@@ -1997,6 +2212,13 @@ validated outputs. The parent branches on `outputs.decision`.
 {
   "id": "feature/plan",
   "label": "Planning",
+  "title": {
+    "binding": {
+      "expr": "title(.inputs.issue).title",
+      "environment": { "session": null },
+      "failureValue": "Planning"
+    }
+  },
   "inputs": {
     "issue": {
       "kind": "blob",
@@ -2112,6 +2334,8 @@ Each state run records:
 - Output artifact references.
 - Conversation references.
 - Operation kind, target (prompt template/skill, or function name), and configuration.
+- Settled field values — `title`, a computed `config.model`, any bound field — each with its
+  error and fallback where `failureValue` stood in (§5.3).
 - Commands requested.
 - Commands executed.
 - Commands blocked.
@@ -2391,3 +2615,5 @@ resolved before expanding beyond the MVP:
 17. Workflow definitions are engine-owned; agents cannot read or modify them.
 18. User code runs only by approved content hash, and only from the copy frozen
     before the run began.
+19. Every value in a state file may be computed; the structure those values are
+    checked against — identity, mounts, spine, rules, schemas — may not.

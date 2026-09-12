@@ -14,11 +14,13 @@
  * coercion). A declared `schema` on an expr leaf is an ASSERTION checked against the inferred
  * type, not the only source of typing.
  */
-import type { InlineFamily, JsonSchema, JsonValue, Ref } from "@declarative-ai/exec";
+import type { CallableSchema, InlineFamily, JsonSchema, JsonValue, Ref } from "@declarative-ai/exec";
+import { callablePositionalOrder, callableSchemaOf, isCallableSchema } from "@declarative-ai/exec";
+import { isSubschema, type Schema } from "@declarative-ai/validate";
 import { BUILTIN_PARAMS } from "./builtins.js";
 import { isSpread, pathOf, selfPathOf, type Expr } from "./expr.js";
-import { RESOLVER_REFS } from "./format.js";
-import { pathOfRef } from "./lowerExpr.js";
+import { RESOLVER_REF_SET, RESOLVER_REFS } from "./format.js";
+import { applyArgumentNames, pathOfRef } from "./lowerExpr.js";
 
 /** The universal schema — "any value" (what an unconstrained slot accepts). */
 export const ANY_SCHEMA: JsonSchema = {};
@@ -53,13 +55,32 @@ export interface InferResult {
   /** Reference paths whose target could not be resolved in the scope — reported as errors by the
    *  validator (a typo'd reference is a mistake, not an `any`). */
   unresolved: string[][];
+  /**
+   * What inference found WRONG beyond a bad path: a call through a value that is not callable, an
+   * argument a callee's signature refuses, a required parameter nothing passes (SPEC §6.2). Reported
+   * as errors by the validator.
+   */
+  issues: string[];
+  /** A call through an UNTYPED callable — legal, unchecked, and said out loud (SPEC §7.5.2). */
+  warnings: string[];
+}
+
+/** The mutable report an inference walk fills — one per top-level call. */
+interface Report {
+  unresolved: string[][];
+  issues: string[];
+  warnings: string[];
+}
+
+function newReport(): Report {
+  return { unresolved: [], issues: [], warnings: [] };
 }
 
 /** Infer the result type of a parsed expression against a typed scope. */
 export function inferExpression(expr: Expr, scope: ExprScope): InferResult {
-  const unresolved: string[][] = [];
-  const schema = infer(expr, scope, unresolved);
-  return { schema, unresolved };
+  const report = newReport();
+  const schema = infer(expr, scope, report);
+  return { schema, ...report };
 }
 
 /**
@@ -77,12 +98,16 @@ export function inferExpression(expr: Expr, scope: ExprScope): InferResult {
  * would be worse than admitting it is unknown.
  */
 export function inferRef(ref: Ref<InlineFamily>, scope: ExprScope): InferResult {
-  const unresolved: string[][] = [];
-  const schema = inferOne(ref, scope, unresolved);
-  return { schema, unresolved };
+  const report = newReport();
+  const schema = inferOne(ref, scope, report);
+  return { schema, ...report };
 }
 
-function inferOne(ref: Ref<InlineFamily>, scope: ExprScope, unresolved: string[][]): JsonSchema {
+/** The inline family's deref is the identity — a slot's `schema` IS the document. */
+const inlineSchema = (schema: JsonSchema): JsonSchema => schema;
+
+function inferOne(ref: Ref<InlineFamily>, scope: ExprScope, report: Report): JsonSchema {
+  const { unresolved } = report;
   if ("text" in ref) return literalSchema(ref.text);
   if ("json" in ref) {
     const v = ref.json;
@@ -91,10 +116,20 @@ function inferOne(ref: Ref<InlineFamily>, scope: ExprScope, unresolved: string[]
   if (!("op" in ref)) return ANY_SCHEMA;
   const producer = ref.op;
   // A local child key names a producer whose schema is the CONSUMER's business, not the expression's.
-  if (typeof producer === "string" || producer.kind !== "function") return ANY_SCHEMA;
+  if (typeof producer === "string") return ANY_SCHEMA;
+  // An EMBEDDED operation — a document, a module symbol, a registry entry, reached by name. UNCALLED
+  // (no arguments bound) it is the operation as a VALUE, and its type is its own contract (SPEC
+  // §4.1): what `map(xs, classify)` passes, and what a `function`-kind slot receives. CALLED, its
+  // type is what it returns — which is what makes `classify(x) === 'y'` checkable rather than any.
+  if (producer.kind !== "function" || !RESOLVER_REF_SET.has(producer.functionRef)) {
+    if (ref.parameters === undefined && producer.spread === undefined) {
+      return callableSchemaOf(producer, inlineSchema) as unknown as JsonSchema;
+    }
+    return producer.output.schema ?? ANY_SCHEMA;
+  }
   const operand = (name: string): JsonSchema => {
     const binding = producer.input[name]?.binding;
-    return binding === undefined ? ANY_SCHEMA : inferOne(binding, scope, unresolved);
+    return binding === undefined ? ANY_SCHEMA : inferOne(binding, scope, report);
   };
 
   switch (producer.functionRef) {
@@ -108,6 +143,14 @@ function inferOne(ref: Ref<InlineFamily>, scope: ExprScope, unresolved: string[]
         return ANY_SCHEMA;
       }
       return s;
+    }
+    case RESOLVER_REFS.apply: {
+      // A call THROUGH a value (SPEC §6.2): the callee's type is its signature, and the arguments
+      // are checked against it exactly as a named call's are against a declaration.
+      const calleeBinding = producer.input.callee?.binding;
+      const callee = calleeBinding === undefined ? undefined : pathOfRef(calleeBinding);
+      const args = applyArgumentNames(producer.input).map(operand);
+      return applyResult(operand("callee"), args, (producer.spread ?? []).length, report, callee === undefined ? "a call through a value" : `a call through '.${callee.join(".")}'`);
     }
     case RESOLVER_REFS.member: {
       const propBinding = producer.input.prop?.binding;
@@ -171,7 +214,60 @@ function inferOne(ref: Ref<InlineFamily>, scope: ExprScope, unresolved: string[]
   }
 }
 
-function infer(expr: Expr, scope: ExprScope, unresolved: string[][]): JsonSchema {
+/**
+ * The result of applying a callable of type `callee` to arguments of these types (SPEC §6.2).
+ *
+ * The one rule both inference walks share — the AST's `call` node and the lowered `op.apply` edge —
+ * so the two cannot disagree about what a call through a value means. A typed callee is checked
+ * both ways: an argument its signature refuses is an issue, and so is a required parameter nothing
+ * passes; a callee that is not callable is an issue; an UNTYPED callee is the degradation §7.5.2
+ * defines — legal, unchecked, and reported as a warning naming the call.
+ */
+function applyResult(callee: JsonSchema, args: readonly JsonSchema[], spreads: number, report: Report, what: string): JsonSchema {
+  // "Some callable" — a slot typed by kind alone — is as untyped as no type at all (SPEC §4.1).
+  if (isUniversalSchema(callee) || (isCallableSchema(callee) && callee.input === undefined && callee.output === undefined)) {
+    report.warnings.push(`${what} applies an untyped callable, so its arguments and its result are not checked`);
+    return ANY_SCHEMA;
+  }
+  if (!isCallableSchema(callee)) {
+    report.issues.push(`${what} applies a value that is not callable — it is ${describe(callee)}`);
+    return ANY_SCHEMA;
+  }
+  const signature: CallableSchema = callee;
+  const input = signature.input;
+  if (input !== undefined) {
+    const order = callablePositionalOrder(signature);
+    if (args.length > order.length) {
+      report.issues.push(
+        `${what} takes ${order.length === 0 ? "no arguments" : `${order.length} argument${order.length === 1 ? "" : "s"} (${order.join(", ")})`}, but ${args.length} were given`,
+      );
+    }
+    args.forEach((arg, i) => {
+      const name = order[i];
+      const want = name === undefined ? undefined : input[name]?.schema;
+      if (want === undefined || isUniversalSchema(want) || isUniversalSchema(arg)) return;
+      const r = isSubschema(arg as Schema, want as Schema);
+      if (!r.ok) report.issues.push(`${what} passes argument '${name}' as a type the callable does not accept: ${r.reason}`);
+    });
+    // A spread may fill anything by name, and its keys are only knowable from its type — so only a
+    // call with NO spread can be told it left a required parameter unfilled.
+    if (spreads === 0) {
+      for (const [name, slot] of Object.entries(input)) {
+        const at = order.indexOf(name);
+        if (slot.optional !== true && (at < 0 || at >= args.length)) report.issues.push(`${what} does not pass '${name}', which the callable requires`);
+      }
+    }
+  }
+  return signature.output?.schema ?? ANY_SCHEMA;
+}
+
+/** A schema, for a message. */
+function describe(s: JsonSchema): string {
+  return typeof s.type === "string" ? `a ${s.type}` : JSON.stringify(s);
+}
+
+function infer(expr: Expr, scope: ExprScope, report: Report): JsonSchema {
+  const { unresolved } = report;
   switch (expr.type) {
     case "lit":
       return literalSchema(expr.value);
@@ -191,7 +287,7 @@ function infer(expr: Expr, scope: ExprScope, unresolved: string[][]): JsonSchema
       // loader resolves whole. Projecting into it here would report a missing property on a document
       // this scope has never heard of.
       if (expr.obj.type !== "self" && pathOf(expr) !== undefined) return ANY_SCHEMA;
-      const base = infer(expr.obj, scope, unresolved);
+      const base = infer(expr.obj, scope, report);
       const projected = projectProperty(base, expr.prop);
       if (projected === undefined) {
         // Only report a MISSING property when the base was actually typed — projecting off an
@@ -214,7 +310,7 @@ function infer(expr: Expr, scope: ExprScope, unresolved: string[][]): JsonSchema
       // thing the author wrote in that position" rather than "the first entry, whatever kind".
       const args: JsonSchema[] = [];
       for (const a of expr.args) {
-        const schema = infer(isSpread(a) ? a.value : a, scope, unresolved);
+        const schema = infer(isSpread(a) ? a.value : a, scope, report);
         if (!isSpread(a)) args.push(schema);
       }
       switch (expr.op) {
@@ -245,10 +341,24 @@ function infer(expr: Expr, scope: ExprScope, unresolved: string[][]): JsonSchema
           return builtinResult(expr.op, args) ?? ANY_SCHEMA;
       }
     }
+    case "call": {
+      // A call THROUGH a value: the callee's type comes from the scope — the declared signature of
+      // the input or field it reads — and the same rule the lowered walk applies decides the rest.
+      const callee = infer(expr.callee, scope, report);
+      const args: JsonSchema[] = [];
+      let spreads = 0;
+      for (const a of expr.args) {
+        const schema = infer(isSpread(a) ? a.value : a, scope, report);
+        if (isSpread(a)) spreads++;
+        else args.push(schema);
+      }
+      const path = selfPathOf(expr.callee);
+      return applyResult(callee, args, spreads, report, path === undefined ? "a call through a value" : `a call through '.${path.join(".")}'`);
+    }
     case "object":
       // The same schema the lowered walk builds, from the same helper — the two paths type an object
       // literal identically because there is one place that says what its type is.
-      return recordSchema(expr.entries.map((entry) => [entry.key, infer(entry.value, scope, unresolved)]));
+      return recordSchema(expr.entries.map((entry) => [entry.key, infer(entry.value, scope, report)]));
   }
 }
 

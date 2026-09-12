@@ -22,7 +22,9 @@
  * {@link CheckerHooks}. That is the whole difference between the two checkers this replaces.
  */
 import type { JsonSchema, JsonValue, SchemaDocument } from "@declarative-ai/json";
-import type { InlineFamily, Operation, Parameter, Ref, RefFamily, Signature } from "@declarative-ai/ops";
+import type { CallableSchema, InlineFamily, Operation, Parameter, Ref, RefFamily, Signature } from "@declarative-ai/ops";
+import { callableSchemaOf, isCallableKind, isCallableSchema } from "@declarative-ai/ops";
+import { isSubcallable } from "./callable.js";
 import { isSubschema, type ResolveRef, type Schema } from "./subtype.js";
 
 export interface CheckIssue {
@@ -108,7 +110,9 @@ export function schemaOfValue(v: JsonValue): JsonSchema {
  */
 export function isUniversalSchema(s: SchemaDocument | undefined): boolean {
   if (!s) return true;
-  return !["type", "enum", "const", "properties", "required", "items", "minimum", "maximum", "minLength", "maxLength", "additionalProperties", "x-type"].some(
+  // `kind` is what makes a CALLABLE type (`callable.ts`) a type at all: it constrains the value to
+  // be a callable of that kind, so a schema carrying it is not the universal one.
+  return !["type", "enum", "const", "properties", "required", "items", "minimum", "maximum", "minLength", "maxLength", "additionalProperties", "x-type", "kind"].some(
     (k) => k in s,
   );
 }
@@ -139,14 +143,41 @@ export function checkBinding<F extends RefFamily>(
 ): CheckIssue[] {
   const errors: CheckIssue[] = [];
   const producer = producerSchemaOf(binding, hooks, path, errors, opts.optOut === true, opts.kind);
+  // A CALLABLE consumer — a `prompt`/`function`-kind slot, or one whose schema is a callable type —
+  // is checked by callable subtyping (hw SPEC §6.2), never by `isSubschema`, which knows nothing of
+  // parameters. The slot's kind alone is a type: "some function", accepting anything.
+  const wanted: CallableSchema | undefined = isCallableSchema(consumerSchema)
+    ? consumerSchema
+    : isCallableKind(opts.kind)
+      ? { kind: opts.kind }
+      : undefined;
+  if (wanted !== undefined) {
+    if (producer === undefined || isUniversalSchema(producer)) return errors; // unknown, not wrong
+    if (!isCallableSchema(producer)) {
+      errors.push({ path, message: `expects a ${wanted.kind} but the producer is ${describe(producer)}` });
+      return errors;
+    }
+    const r = isSubcallable(producer, wanted, hooks.resolveRef);
+    if (!r.ok) errors.push({ path, message: `wiring is not compatible with the ${wanted.kind} slot: ${r.reason}` });
+    return errors;
+  }
   // Nothing to compare against is not a pass, it is silence: an unresolvable producer or an undeclared
   // slot type leaves nothing to decide. A DECLARED consumer schema always goes to `isSubschema`, even a
   // seemingly empty one — deciding "this constrains nothing" is that checker's job, and doing it here
   // with a different keyword list is how every rejection it models became a silent accept.
   if (producer === undefined || consumerSchema === undefined) return errors;
+  if (isCallableSchema(producer)) {
+    errors.push({ path, message: `wiring is not type-compatible with the slot: the producer is a ${producer.kind}, not a value` });
+    return errors;
+  }
   const result = isSubschema(producer as Schema, consumerSchema as Schema, hooks.resolveRef);
   if (!result.ok) errors.push({ path, message: `wiring is not type-compatible with the slot: ${result.reason}` });
   return errors;
+}
+
+/** A schema, for a message: its `type`, or the document. */
+function describe(schema: JsonSchema): string {
+  return typeof schema.type === "string" ? `a ${schema.type}` : JSON.stringify(schema);
 }
 
 function checkInto<F extends RefFamily>(
@@ -267,13 +298,13 @@ export function producerSchemaOf<F extends RefFamily>(
         " — order it before this use, or declare a `default` on the consuming slot",
     );
   }
-  // Higher-order: a `prompt`/`function` slot takes the op DEFINITION as its value, so the check is on
-  // KIND, not on the producer's output type.
-  if (consumerKind === "prompt" || consumerKind === "function") {
-    if (producer.kind !== consumerKind) {
-      err(`expects a ${consumerKind} op but the producer is a ${producer.kind} op`);
-    }
-    return undefined;
+  const typed = hooks.producerSchema?.(producer, path, err);
+  if (typed !== undefined) return typed;
+  // An UNCALLED reference to an operation — an edge with no arguments bound — feeding a callable slot
+  // is the op DEFINITION as a value, and its type is the op's own contract (hw SPEC §4.1). A call
+  // (`parameters` present) yields the op's OUTPUT, whatever the slot's kind.
+  if (isCallableKind(consumerKind) && (binding as { parameters?: unknown }).parameters === undefined) {
+    return callableSchemaOf(producer, (s) => schemaOf(hooks, s) ?? {}) as unknown as JsonSchema;
   }
-  return hooks.producerSchema?.(producer, path, err) ?? schemaOf(hooks, producer.output.schema);
+  return schemaOf(hooks, producer.output.schema);
 }

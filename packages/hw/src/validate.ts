@@ -21,17 +21,22 @@
  *     `T | undefined` never propagates silently.
  */
 import type { FunctionCapabilities, InlineFamily, JsonSchema, JsonValue, NamedParameter, Operation, Parameter, Ref, RefKind, RefTree } from "@declarative-ai/exec";
-import { isRequiredSlot } from "@declarative-ai/exec";
+import { isCallableSchema, isRequiredSlot } from "@declarative-ai/exec";
 import { checkBinding as checkBindingGeneric, isSubschema, producerSchemaOf, type CheckerHooks, type CheckIssue, type Schema } from "@declarative-ai/validate";
 import { parseExpression, referencesOf, type Expr } from "./expr.js";
+import { forbiddenFieldRead, isFieldRoot } from "./fields.js";
 import { EXPRESSION_REFS, pathOfRef, referencePathsOf } from "./lowerExpr.js";
 import { embeddedOpsOf } from "./resolve.js";
-import { validateSessionDecl } from "./session.js";
+import { isSessionExpr, isSessionRef, validateSessionDecl } from "./session.js";
 import { operationNodeSchema } from "./operationNode.js";
 import { ANY_SCHEMA, inferExpression, inferRef, isBooleanSchema, isUniversalSchema, type ExprScope } from "./inferExpr.js";
 import {
+  BOUND_CALLEE,
+  CONFIG_FIELD_SCHEMAS,
   EACH_NAMESPACE,
+  FIELD_NAMESPACES,
   GUARD_NAMESPACES,
+  hasDefault,
   REF_NAMESPACES,
   RESOLVER_REFS,
   TERMINATE_TARGETS,
@@ -53,7 +58,7 @@ export interface ValidationReport {
   warnings: ValidationIssue[];
 }
 
-const NAMESPACES: ReadonlySet<string> = new Set([...REF_NAMESPACES, ...GUARD_NAMESPACES]);
+const NAMESPACES: ReadonlySet<string> = new Set([...REF_NAMESPACES, ...GUARD_NAMESPACES, ...FIELD_NAMESPACES]);
 const TERMINATES: ReadonlySet<string> = new Set(TERMINATE_TARGETS);
 /** The termination outcomes a child's `outcome` can carry (SPEC §3.6). */
 const TERMINATE_OUTCOMES = ["success", "error", "canceled", "timeout"] as const;
@@ -157,6 +162,49 @@ function validateState(
   /** How this state types one binding — see {@link typeOf}. */
   const typed = typeOf(def.id, def, bundle, scope, reachable, errors, false);
 
+  // --- computed fields (SPEC §5.3) --------------------------------------------
+  //
+  // A field is evaluated at instance entry, so its world is the inputs and the other fields: a read
+  // of a child, an output or the operation's result is refused outright. Its value is then checked
+  // against the field's own type exactly as a wire is checked against a slot.
+  for (const field of def.fields ?? []) {
+    const path = field.path;
+    let readable = true;
+    for (const reference of referencePathsOf(field.ref)) {
+      const why = forbiddenFieldRead(reference);
+      if (why === undefined) continue;
+      err(path, why);
+      readable = false;
+    }
+    if (!readable) continue;
+    // A binding's own `session` (SPEC §4.2) is `null` — a fresh conversation — or a ref expression
+    // naming a position. A NAME is refused: it would need the scope it was written in, and a
+    // binding is not a place a name is qualified by (§7.1b).
+    const session = field.environment !== undefined && "session" in field.environment ? field.environment.session : undefined;
+    if (session !== undefined && session !== null && !isSessionExpr(session) && !isSessionRef(session)) {
+      err(path, `a binding's environment.session must be null (a fresh conversation) or a ref expression, not a session name`);
+    }
+    if (path === "operation.prompt") {
+      // A template string, or a prompt passed BY VALUE (SPEC §7.1) — either, and nothing else.
+      const schema = typed(field.ref);
+      if (!isUniversalSchema(schema) && schema.type !== "string" && !(isCallableSchema(schema) && schema.kind === "prompt")) {
+        err(path, `a prompt is a template string or a prompt callable, but this infers to ${describeSchema(schema)}`);
+      }
+      checkBinding(field.ref, undefined, path, id, def, bundle, scope, reachable, errors, true, undefined, undefined, warnings);
+    } else {
+      checkBinding(field.ref, field.schema, path, id, def, bundle, scope, reachable, errors, true, undefined, field.kind, warnings);
+    }
+    if (field.failureValue !== undefined && field.schema !== undefined && !isUniversalSchema(field.schema)) {
+      const r = isSubschema(schemaOfValue(field.failureValue) as Schema, field.schema as Schema);
+      if (!r.ok) err(path, `failureValue does not satisfy the field's type: ${r.reason}`);
+    }
+    // A bound callee (§7.1): what the state passes is checked against the SIGNATURE the field infers
+    // to, since there is no declaration a name would have resolved to.
+    if (path === "operation.function" && def.operation?.kind === "function") {
+      checkAgainstBoundCallee(def.operation, typed(field.ref), path, def, typed, err);
+    }
+  }
+
   // --- children ---------------------------------------------------------------
   for (const [key, child] of Object.entries(children)) {
     const childDef = bundle.states[child.state];
@@ -188,14 +236,18 @@ function validateState(
       const wanted: JsonSchema | undefined = axes?.includes(inputName) ? { type: "array", items: (consumer?.schema ?? {}) as JsonValue } : consumer?.schema;
       // Asked AT THE MOUNT: a wire into `key` resolves when `key` is entered, so a sibling that runs
       // after it is not proven for this binding even though it is for the state's own outputs.
-      checkBinding(binding, wanted, path, id, def, bundle, scope, reachable.enteredAt(key), errors, isOptOut(consumerMeta), axes);
+      checkBinding(binding, wanted, path, id, def, bundle, scope, reachable.enteredAt(key), errors, isOptOut(consumerMeta), axes, consumer?.kind, warnings);
+    }
+    // A COMPUTED `async` (SPEC §5.3): a boolean, in this state's scope, at the mount.
+    if (child.asyncRef !== undefined) {
+      checkBinding(child.asyncRef, { type: "boolean" }, `children.${key}.async`, id, def, bundle, scope, reachable.enteredAt(key), errors, false, undefined, "json", warnings);
     }
     // Required child inputs must be wired (or defaulted/optional).
     if (childDef) {
       for (const inputName of Object.keys(childDef.inputs ?? {})) {
         const wired = child.inputs && inputName in child.inputs;
         const meta = childDef.slotMeta?.[`inputs.${inputName}`];
-        if (!wired && meta?.optional !== true && meta?.default === undefined) {
+        if (!wired && meta?.optional !== true && !hasDefault(meta)) {
           err(`children.${key}.inputs`, `required child input '${inputName}' is not wired`);
         }
       }
@@ -285,7 +337,7 @@ function validateState(
         // well as everything before it; on the state's own list it proves what always runs.
         const at = mountKey === undefined ? reachable : reachable.enteredAt(mountKey);
         const proven = mountKey === undefined ? at : { ...at, always: new Set([...at.always, mountKey]) };
-        checkBinding(binding, consumer?.schema, path, id, def, bundle, scope, proven, errors, isOptOut(meta));
+        checkBinding(binding, consumer?.schema, path, id, def, bundle, scope, proven, errors, isOptOut(meta), undefined, consumer?.kind, warnings);
       }
       let ast: Expr | undefined;
       if (t.when !== undefined) {
@@ -312,11 +364,13 @@ function validateState(
         } else if (ast) {
           // A guard must INFER to boolean — strict, no truthiness coercion (§7.2): a `when` that
           // infers to `number` is a validation error, not a falsy surprise at run time.
-          const { schema, unresolved } = inferExpression(ast, scope);
+          const { schema, unresolved, issues, warnings: inferWarnings } = inferExpression(ast, scope);
           // Quoted with the leading dot the author had to write: `unresolved` carries the path with
           // its self root already dropped, and a message spelling an internal path sends the reader
           // looking for a name that appears nowhere in their file.
           for (const ref of unresolved) err(path, `references '.${ref.join(".")}', which resolves to no declared value`);
+          for (const issue of issues) err(path, issue);
+          for (const warning of inferWarnings) warn(path, warning);
           if (!isBooleanSchema(schema) && !isUniversalSchema(schema)) {
             err(path, `guard must infer to boolean, but infers to ${describeSchema(schema)} — compare explicitly`);
           }
@@ -351,8 +405,32 @@ function validateState(
       if (!SLOT_KINDS.has(slot.kind)) {
         err(`${path}.kind`, `unknown slot kind '${String(slot.kind)}'`);
       }
+      // A schema shaped like a signature on a DATA slot is a callable slot whose author forgot the
+      // kind (SPEC §4.1): nothing in a signature says which callable it types, so it cannot be
+      // guessed, and read as a plain object schema it constrains nothing.
+      if (!isCallableSchema(slot.schema) && looksLikeSignature(slot.schema)) {
+        warn(`${path}.schema`, `looks like a callable's signature (input/output) but the slot declares no callable kind — write kind: "function" or kind: "prompt"`);
+      }
       if (slot.binding !== undefined) {
-        checkBinding(slot.binding, slot.schema, path, id, def, bundle, scope, reachable, errors, isOptOut(def.slotMeta?.[path]));
+        checkBinding(slot.binding, slot.schema, path, id, def, bundle, scope, reachable, errors, isOptOut(def.slotMeta?.[path]), undefined, slot.kind, warnings);
+      }
+      // A COMPUTED default (§5.3) is checked against the slot exactly as a binding is. An input's
+      // resolves at entry, when neither a child nor a field has settled, so its world is the other
+      // inputs; an output's resolves at termination and may read anything a binding may.
+      const defaultRef = def.slotMeta?.[path]?.defaultRef;
+      if (defaultRef !== undefined) {
+        const at = `${path}.default`;
+        let readable = true;
+        if (section === "inputs") {
+          for (const reference of referencePathsOf(defaultRef)) {
+            const root = reference[0]!;
+            const why = forbiddenFieldRead(reference) ?? (isFieldRoot(root) ? `an input's default resolves before the state's fields settle, so it cannot read '.${reference.join(".")}'` : undefined);
+            if (why === undefined) continue;
+            err(at, why);
+            readable = false;
+          }
+        }
+        if (readable) checkBinding(defaultRef, slot.schema, at, id, def, bundle, scope, reachable, errors, true, undefined, slot.kind, warnings);
       }
     }
   }
@@ -452,9 +530,13 @@ function checkOperation(
   };
   /** How this state types one binding — see {@link typeOf}. */
   const typed = typeOf(stateId, def, bundle, scope, reachable, errors, false);
+  const boundPrompt = def.fields?.some((f) => f.path === "operation.prompt") === true;
   if (op.kind === "function") {
     if (typeof op.functionRef !== "string" || op.functionRef.length === 0) {
       err(`${path}.function`, "a function operation must name a function");
+    } else if (op.functionRef === BOUND_CALLEE) {
+      // A BOUND callee (SPEC §7.1) is checked where its field is: against the signature the field
+      // infers to, not against a registry the placeholder was never in.
     } else {
       checkAgainstRegistry(op.functionRef, `${path}.function`, err, warn, env);
       // The state's OWN call, against the signature its implementation declares.
@@ -465,7 +547,7 @@ function checkOperation(
       // and lint clean right up until dispatch.
       checkAgainstSignature(op, suppliedByState(op, def, typed), path, err, env);
     }
-  } else if (op.user === undefined || op.user === "") {
+  } else if ((op.user === undefined || op.user === "") && !boundPrompt) {
     warn(`${path}.prompt`, "prompt operation has an empty prompt (no template and no skill)");
   }
   if (op.kind === "prompt") checkWeights(op, path, stateId, errors, warn, env);
@@ -474,6 +556,7 @@ function checkOperation(
   // for a state op is the only spelling there is, `args` and `input` alike having become bindings by
   // the time they get here.
   checkSpreadArguments(op, (n) => op.input[n]?.binding !== undefined, path, stateId, typed, errors);
+  const inferWarnings: ValidationIssue[] = [];
   for (const [name, param] of Object.entries(op.input)) {
     if (param.binding !== undefined) {
       // The state's operation runs BEFORE any child (engine loop step 2/5), so no child output exists
@@ -488,9 +571,10 @@ function checkOperation(
         );
         continue;
       }
-      checkBinding(param.binding, param.schema, `${path}.input.${name}`, stateId, def, bundle, scope, reachable, errors);
+      checkBinding(param.binding, param.schema, `${path}.input.${name}`, stateId, def, bundle, scope, reachable, errors, false, undefined, param.kind, inferWarnings);
     }
   }
+  for (const issue of inferWarnings) warn(issue.path, issue.message);
 }
 
 /**
@@ -596,6 +680,8 @@ function hooksFor(
   optOut: boolean,
   /** States whose outputs are already being inferred — see {@link outputsObjectSchema}. */
   seen?: ReadonlySet<string>,
+  /** Where inference's warnings go, when the caller keeps any. */
+  warnings?: ValidationIssue[],
 ): CheckerHooks<InlineFamily> {
   const hooks: CheckerHooks<InlineFamily> = {
     /** A producer named by a LOCAL KEY is a declared child — the inline family's analog of an op id.
@@ -618,7 +704,7 @@ function hooksFor(
     },
     reachable: (ref) => (typeof ref === "string" ? reachable.always.has(ref) : true),
     producerSchema: (op, path, report) =>
-      resolverSchema(op, path, stateId, def, bundle, scope, reachable, errors, optOut, report, seen),
+      resolverSchema(op, path, stateId, def, bundle, scope, reachable, errors, optOut, report, seen, (message) => warnings?.push({ stateId, path, message })),
   };
   return hooks;
 }
@@ -677,6 +763,43 @@ function checkAgainstSignature(
   for (const [name, slot] of Object.entries(accepted)) {
     if (!isRequiredSlot(slot) || supplied(name)) continue;
     err(path, `operation '${op.functionRef}' requires an input '${name}', which this state does not pass`);
+  }
+}
+
+/**
+ * The state's arguments against a BOUND callee's signature (SPEC §7.1) — `checkAgainstSignature`
+ * for a callee nobody could name, where the declaration is the field's inferred callable type.
+ *
+ * The same two directions: a slot the state passes that the callable has no parameter for is an
+ * argument nothing reads, and a parameter the callable requires that nothing supplies fails the
+ * call. A callable typed by kind alone, or one whose type declares no parameters, constrains nothing.
+ */
+function checkAgainstBoundCallee(
+  op: Operation<InlineFamily> & { kind: "function" },
+  signature: JsonSchema,
+  path: string,
+  def: LoadedState,
+  typed: (ref: Ref<InlineFamily>) => JsonSchema,
+  err: (path: string, message: string) => void,
+): void {
+  if (!isCallableSchema(signature) || signature.input === undefined) return;
+  const accepted = signature.input;
+  if (Object.keys(accepted).length === 0) return;
+  for (const [name, param] of Object.entries(op.input)) {
+    const slot = accepted[name];
+    if (slot === undefined) {
+      err(path, `operation passes '${name}', which the bound callable does not accept`);
+      continue;
+    }
+    const want = slot.schema;
+    if (param.schema === undefined || want === undefined || isUniversalSchema(want) || isUniversalSchema(param.schema)) continue;
+    const check = isSubschema(param.schema as Schema, want as Schema);
+    if (!check.ok) err(path, `operation declares parameter '${name}' as a type the bound callable does not accept: ${check.reason}`);
+  }
+  const supplied = suppliedByState(op, def, typed);
+  for (const [name, slot] of Object.entries(accepted)) {
+    if (slot.optional === true || supplied(name)) continue;
+    err(path, `the bound callable requires an input '${name}', which this state does not pass`);
   }
 }
 
@@ -756,6 +879,8 @@ function* bindingsOf(def: LoadedState): Iterable<[string, Ref<InlineFamily>]> {
   for (const [i, t] of (def.transitions ?? []).entries()) {
     if (t.whenRef !== undefined) yield [`transitions[${i}].when`, t.whenRef];
   }
+  // A computed field's calls dispatch like any other (SPEC §5.3).
+  for (const field of def.fields ?? []) yield [field.path, field.ref];
 }
 
 /**
@@ -777,6 +902,10 @@ function checkBinding(
    * be read, and what it is typed from. Absent everywhere else, where a `.each` read is refused.
    */
   eachAxes?: readonly string[],
+  /** The consuming slot's kind — a callable slot takes an uncalled operation as its value (§4.1). */
+  kind?: RefKind,
+  /** Where inference's warnings go — a call through an untyped callable (§7.5.2). */
+  warnings?: ValidationIssue[],
 ): void {
   const bindingScope: ExprScope = eachAxes === undefined ? scope : { ...scope, [EACH_NAMESPACE]: eachSchema(eachAxes) };
   // Reference and reachability checks run over the WHOLE binding, once, before the type check.
@@ -814,8 +943,9 @@ function checkBinding(
     }
   }
   checkSpreads(binding, path, stateId, typeOf(stateId, def, bundle, bindingScope, reachable, errors, optOut), errors);
-  const issues = checkBindingGeneric(binding, consumerSchema, hooksFor(stateId, def, bundle, bindingScope, reachable, errors, optOut), path, {
+  const issues = checkBindingGeneric(binding, consumerSchema, hooksFor(stateId, def, bundle, bindingScope, reachable, errors, optOut, undefined, warnings), path, {
     optOut,
+    ...(kind !== undefined ? { kind } : {}),
   });
   for (const issue of issues) errors.push({ stateId, path: issue.path, message: issue.message });
 }
@@ -980,6 +1110,7 @@ function resolverSchema(
   err: (message: string) => void,
   /** States whose outputs are already being inferred — see {@link outputsObjectSchema}. */
   seen?: ReadonlySet<string>,
+  warn: (message: string) => void = () => {},
 ): JsonSchema | undefined {
   if (op.kind !== "function") return undefined;
 
@@ -989,8 +1120,14 @@ function resolverSchema(
   // in the loader, and a malformed expression fails there rather than here.
   if (EXPRESSION_REFS.has(op.functionRef)) {
     const asRef: Ref<InlineFamily> = { op };
-    const { schema, unresolved } = inferRef(asRef, scope);
+    const { schema, unresolved, issues, warnings } = inferRef(asRef, scope);
     for (const unres of unresolved) err(`expression references '.${unres.join(".")}', which resolves to no declared value`);
+    for (const issue of issues) err(issue);
+    for (const warning of warnings) warn(warning);
+    // A call through an UNTYPED callable (SPEC §7.5.2) leaves the expression's type UNKNOWN rather
+    // than universal: nothing can be said about it, which is the warning above, and "nothing to
+    // compare" is the checker's `undefined` — not `{}`, which a typed slot rightly rejects.
+    if (warnings.length > 0 && isUniversalSchema(schema)) return undefined;
     // Reachability applies to expressions too: reading a child's outputs from an expression is the
     // same edge as wiring it, so it carries the same proof obligation.
     for (const reference of referencePathsOf(asRef)) {
@@ -1169,7 +1306,7 @@ function outputsObjectSchema(
   for (const [name, slot] of Object.entries(outputs)) {
     properties[name] = slot.schema === undefined ? inferred(slot) : (slot.schema as JsonValue);
     const meta = state.slotMeta?.[`outputs.${name}`];
-    if (meta?.optional !== true && meta?.default === undefined) required.push(name);
+    if (meta?.optional !== true && !hasDefault(meta)) required.push(name);
   }
   return { type: "object", properties, ...(required.length > 0 ? { required } : {}) };
 }
@@ -1186,7 +1323,7 @@ const EMPTY_STATE_SET: ReadonlySet<string> = new Set<string>();
  * silently.
  */
 function isOptOut(meta: SlotMeta | undefined): boolean {
-  return meta?.default !== undefined || meta?.optional === true;
+  return hasDefault(meta) || meta?.optional === true;
 }
 
 interface Reachability {
@@ -1362,11 +1499,38 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle, seen: ReadonlySet
 
   // The state's OWN operation node (SPEC.md §6.1). Absent for a pure composite, so
   // `operation.cost` there is an unresolved reference rather than an object of unknowns.
-  const operation = operationNodeSchema(def.operation?.kind, outputDeclOf(def));
+  //
+  // The node carries the call's RESULT; the state's AUTHORED operation fields (§5.3) sit beside them
+  // under the same root — `prompt`, `system`, `function`, `config` — and the key sets do not overlap.
+  const node = operationNodeSchema(def.operation?.kind, outputDeclOf(def));
+  const operation: JsonSchema | undefined =
+    node === undefined
+      ? undefined
+      : {
+          ...node,
+          properties: {
+            ...(node.properties as Record<string, JsonValue>),
+            ...(def.operation?.kind === "prompt" ? { prompt: STRING_SCHEMA, system: STRING_SCHEMA } : { function: {} }),
+            // Open beyond the knobs hw knows, so a bound `providerOptions.x` is readable.
+            config: { type: "object", properties: { ...CONFIG_FIELD_SCHEMAS } as Record<string, JsonValue>, additionalProperties: {} } as JsonValue,
+          },
+        };
 
   const sequenceKeys = def.sequence ?? [];
 
   return {
+    // The state's own fields (§6.1), read back under their authored names.
+    title: STRING_SCHEMA,
+    label: STRING_SCHEMA,
+    description: STRING_SCHEMA,
+    environment: {
+      type: "object",
+      properties: {
+        tools: { type: "array", items: { type: "string" } } as JsonValue,
+        session: {} as JsonValue,
+        permissions: { type: "object" } as JsonValue,
+      },
+    },
     inputs: objectOf(def.inputs),
     // The state's OWN outputs, through the same reader a CHILD's go through — so an output that
     // adopts its binding's type adopts it for `.outputs.<name>` here as well. A second output
@@ -1392,6 +1556,14 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle, seen: ReadonlySet
     },
     limits: { type: "object", properties: { max_iterations: { type: "integer" } as JsonValue, timeout: { type: "integer" } as JsonValue } },
   };
+}
+
+const STRING_SCHEMA: JsonSchema = { type: "string" };
+
+/** A schema carrying `input`/`output` and no `type` — a signature by shape, if not by kind. */
+function looksLikeSignature(schema: JsonSchema | undefined): boolean {
+  if (schema === undefined || schema.type !== undefined) return false;
+  return ("input" in schema && typeof schema.input === "object") || ("output" in schema && typeof schema.output === "object");
 }
 
 /** An outputs object with every property lifted to an array of itself — a fanned-out child's view. */

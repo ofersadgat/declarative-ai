@@ -153,6 +153,28 @@ export type EngineEvent =
       /** `error` covers a cancelled wait too — a failure is data, and this says which kind arrived. */
       outcome: "value" | "error";
     }
+  /**
+   * A COMPUTED FIELD settled (SPEC §5.3) — `title`, a bound `config.model`, any value position the
+   * author wrote a binding in. Between `instance.entered` and this the field is PENDING, which a
+   * board renders as it sees fit; after it the value is what the instance runs with.
+   *
+   * Carries the VALUE, because this is the journal's copy of it: a resumed run reads its settled
+   * fields back from here rather than recomputing them, which is what "evaluated once" means across
+   * a restart — and what keeps a title from being paid for twice and coming back different. A field
+   * that FAILED and stood a `failureValue` in says so with `fallback`, and its `error` beside it.
+   */
+  | {
+      type: "value.settled";
+      instanceId: string;
+      stateId: string;
+      /** The field's authored path — `title`, `operation.config.model`, `environment.tools`. */
+      field: string;
+      outcome: "value" | "error";
+      value?: ResolvedValue;
+      error?: string;
+      /** The value is the binding's `failureValue`, standing in for one it could not compute. */
+      fallback?: boolean;
+    }
   /** `index` counts every transition; `iteration` counts only the backward ones — the passes. */
   | { type: "transition.taken"; instanceId: string; stateId: string; to: string; index: number; iteration: number }
   | { type: "child.superseded"; instanceId: string; stateId: string; childKey: string }

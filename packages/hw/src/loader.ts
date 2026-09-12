@@ -15,17 +15,22 @@
  * of states reachable from the root. It hashes the AUTHORED file, so two spellings of the same
  * sugar hash differently but a desugaring change never invalidates a stored snapshot.
  */
-import { canonicalize, hashCanonical, kindFor, sha256Hex, type InlineFamily, type JsonSchema, type JsonValue, type NamedParameter, type Operation, type Parameter, type Ref, type RefKind } from "@declarative-ai/exec";
+import { callableSchemaFor, canonicalize, hashCanonical, isCallableKind, kindFor, sha256Hex, type InlineFamily, type JsonSchema, type JsonValue, type NamedParameter, type Operation, type Parameter, type Ref, type RefKind } from "@declarative-ai/exec";
 import { isSubschema, type Schema } from "@declarative-ai/validate";
 import { computeFanOut } from "./fanout.js";
+import { extractOperationFields, extractTopLevelFields, fieldCycle, liftWrappedArgs, lowerFields } from "./fields.js";
 import {
   bindingForDocument,
+  BOUND_CALLEE,
+  hasDefault,
   inferredKind,
+  isWrappedBinding,
   kindIsAmbiguous,
   RESOLVER_REFS,
   type BindingDecl,
   type ChildDecl,
   type ExecEnvironmentDecl,
+  type LimitsDecl,
   type LoadedChild,
   type LoadedState,
   type LoadedTransition,
@@ -253,10 +258,19 @@ function desugarRuntimeReference(reference: string, where: string, stateId: stri
       if (rest.length === 0) bad("must name what it reads, as '.each.index' or '.each.axis.<input>'");
       return desugarBinding({ expr: reference }, where, stateId);
     }
+    case "title":
+    case "label":
+    case "description":
+    case "environment":
+    case "limits":
+      // The state's own fields (SPEC §6.1), read back from the definition the instance runs —
+      // evaluated, as `.operation.*` is, since a field is a value the instance settles at entry.
+      return desugarBinding({ expr: reference }, where, stateId);
     default:
       return bad(
         `starts with '${String(namespace)}', which is not a runtime namespace — ` +
-          `expected inputs, outputs, operation, children or artifacts — a conversation is read with ` +
+          `expected inputs, outputs, operation, children, artifacts, or one of the state's own fields ` +
+          `(title, label, description, environment, limits) — a conversation is read with ` +
           `messages(<session ref>), since a session is a position and not a name`,
       );
   }
@@ -284,10 +298,25 @@ function desugarParameter(
 ): { param: Parameter<InlineFamily>; meta?: SlotMeta } {
   const param: Parameter<InlineFamily> = { kind: kindOf(decl) };
   if (decl.schema !== undefined) param.schema = decl.schema;
+  // A CALLABLE slot's schema is a signature, made self-describing here (SPEC §4.1): the slot's kind
+  // is stamped into it, so inference, the checker and a scope built over the slots read one form.
+  if (isCallableKind(param.kind)) param.schema = callableSchemaFor(param.kind, decl.schema) as unknown as JsonSchema;
   if (decl.binding !== undefined) param.binding = desugarBinding(decl.binding, where, stateId, slotName, lower);
   if (decl.index !== undefined) param.index = decl.index;
   const meta: SlotMeta = {};
-  if (decl.default !== undefined) meta.default = decl.default;
+  // A default is a VALUE (SPEC §5.3), so it may be computed — but only the `{ expr }` and wrapped
+  // spellings are read as bindings here. A literal default that happens to be an object with a
+  // `text` or `json` key is the value it always was: a literal default IS a literal, and there is
+  // nothing a literal binding form could add except a way to misread one.
+  if (decl.default !== undefined) {
+    const computed = isWrappedBinding(decl.default)
+      ? decl.default.binding
+      : typeof decl.default === "object" && decl.default !== null && !Array.isArray(decl.default) && "expr" in decl.default
+        ? (decl.default as unknown as BindingDecl)
+        : undefined;
+    if (computed !== undefined) meta.defaultRef = desugarBinding(computed, `${where}.default`, stateId, slotName, lower);
+    else meta.default = decl.default;
+  }
   if (decl.optional !== undefined) meta.optional = decl.optional;
   if (decl.description !== undefined) meta.description = decl.description;
   return { param, ...(Object.keys(meta).length > 0 ? { meta } : {}) };
@@ -348,11 +377,14 @@ export function splitExecEnvironment(fields: OperationFields): { op: OperationFi
  * build an operation?" checks live here rather than in the type.
  */
 export function desugarOperation(
-  decl: OperationFields,
+  authored: OperationFields,
   stateId: string,
   outputs?: Record<string, NamedParameterDecl>,
   lower: LowerOptions = {},
 ): Operation<InlineFamily> {
+  // A wrapped `args` value is an input slot's binding (SPEC §5.3) — lifted before anything reads
+  // `args` as constants.
+  const decl = liftWrappedArgs(authored);
   const userFunctions = lower.userFunctions;
   // An EMBEDDED BODY (SPEC §7.5.1, form 2). The document declares its slots the way a state does and
   // supplies js/ts; the wrapper's parameters are those slots in `positionalOrder`, so a call binds
@@ -391,7 +423,18 @@ export function desugarOperation(
       stateId,
     );
   }
-  if (kind === "function" && decl.function === undefined) {
+  // By here a BOUND `prompt`/`function`/`system` has been taken out as a field (`fields.ts`) and the
+  // position holds a string or nothing. A callee DOCUMENT is not extracted — it is a static
+  // declaration, and a binding object in one of these positions there is an authoring error.
+  for (const field of ["prompt", "system", "function"] as const) {
+    if (decl[field] !== undefined && typeof decl[field] !== "string") {
+      throw new WorkflowLoadError(`operation.${field} is a binding, which a callee document cannot carry — only a state's own operation is evaluated per instance`, stateId);
+    }
+  }
+  const promptText = typeof decl.prompt === "string" ? decl.prompt : undefined;
+  const systemText = typeof decl.system === "string" ? decl.system : undefined;
+  const functionName = typeof decl.function === "string" ? decl.function : undefined;
+  if (kind === "function" && functionName === undefined) {
     throw new WorkflowLoadError(
       "function operation names no 'function', and no ancestor's environment supplies one",
       stateId,
@@ -423,12 +466,12 @@ export function desugarOperation(
     // in here — every render variable is just one of `input`.
     const op: Operation<InlineFamily> = {
       kind: "prompt",
-      user: decl.prompt ?? "",
+      user: promptText ?? "",
       config: callConfigOf(decl) as JsonValue,
       input,
       output,
     };
-    if (decl.system !== undefined) op.system = decl.system;
+    if (systemText !== undefined) op.system = systemText;
     return op;
   }
   // A FunctionOp — a host function, a sub-workflow, or a delegated runtime adapter alike (§3.1).
@@ -444,8 +487,10 @@ export function desugarOperation(
   // the engine looks up at dispatch — because that is what a loader with no registry and no
   // filesystem has always done, and it is what an unregistered function is supposed to be: a warning,
   // not a load failure (a state the run never enters never needs its function).
-  const call = parseCallForm(decl.function!, stateId);
-  const callee = lower.resolveOperation?.(call.callee);
+  const call = parseCallForm(functionName!, stateId);
+  // A BOUND callee (SPEC §7.1) is a placeholder the engine replaces per instance; nothing on the
+  // search path answers for it, and asking would only cost a lookup that must miss.
+  const callee = call.callee === BOUND_CALLEE ? undefined : lower.resolveOperation?.(call.callee);
   if (callee === undefined) {
     // Nothing declared the callee's positions, so nothing can say which slot an unnamed argument
     // fills. A NAMED one still can — that is the whole difference between the two forms — so the
@@ -638,7 +683,7 @@ function asArgument(expr: Expr, stateId: string, lower: LowerOptions): Ref<Inlin
  * write both", which would break the ordinary case of an environment's `args` restating what the
  * inherited call already passes.
  */
-function bindIntoSlots(
+export function bindIntoSlots(
   declared: Record<string, Parameter<InlineFamily>>,
   authored: Record<string, Parameter<InlineFamily>>,
   args: Record<string, JsonValue> | undefined,
@@ -879,6 +924,11 @@ export function desugarState(
   if (def.children === undefined && inferredChildren !== undefined && Object.keys(inferredChildren).length > 0) {
     def = { ...def, children: inferredChildren };
   }
+  // The COMPUTED FIELDS of the top level (SPEC §5.3) — `title`, a bound `label`, a bound limit —
+  // taken out of the document here, so everything below sees the positions as empty and the
+  // bindings are lowered once, with the rest of the state's.
+  const top = extractTopLevelFields(def);
+  def = top.def;
   // The environment this state resolves in, computed BEFORE anything below is desugared. Every
   // reference in the slots, the wiring and the children resolves against it, so it cannot be
   // assembled at the point the operation is (which is where it used to be) — see
@@ -969,7 +1019,12 @@ export function desugarState(
         state: resolveChildRef(child.state ?? `./${key}`, id, key, refs),
         ...(child.inputs ? { inputs: wired } : {}),
         ...(each.length > 0 ? { each } : {}),
-        ...(child.async !== undefined ? { async: child.async } : {}),
+        // A literal flag stays one; a BOUND one (SPEC §5.3) is lowered in this state's scope, to be
+        // resolved when the mount is entered — the moment the flag is read.
+        ...(typeof child.async === "boolean" ? { async: child.async } : {}),
+        ...(child.async !== undefined && typeof child.async !== "boolean"
+          ? { asyncRef: desugarBinding(child.async, `children.${key}.async`, id, undefined, lower) }
+          : {}),
         // Carried, never merged here: this layer belongs to the CHILD's chain, and folding it into
         // the parent's own environment would apply it to the parent's operation too (§5).
         ...(child.environment !== undefined ? { environment: child.environment } : {}),
@@ -983,8 +1038,24 @@ export function desugarState(
   // The effective operation (§5): the resolution environment above, then the op itself. Only a
   // state that DECLARES an operation gets one — otherwise every pure composite under an
   // `environment`-declaring root would inherit its ancestor's op and start running it.
-  const merged = def.operation !== undefined ? mergeOperationFields(environment, def.operation) : undefined;
+  // The operation's computed fields come out of the MERGED block (SPEC §5.3): a binding an ancestor's
+  // `environment` supplied is this state's to evaluate, in this state's scope, exactly as a literal
+  // it supplied is this state's to run under.
+  const mergedAll = def.operation !== undefined ? mergeOperationFields(environment, def.operation) : undefined;
+  const extracted = mergedAll !== undefined ? extractOperationFields(mergedAll) : undefined;
+  const merged = extracted?.op;
   const split = merged !== undefined ? splitExecEnvironment(merged) : undefined;
+
+  const fields = lowerFields(
+    [...top.found, ...(extracted?.found ?? [])],
+    (binding, where) => desugarBinding(binding, where, id, undefined, lower),
+    split?.env,
+  );
+  // A field that reads itself, through however many others, can never settle (§5.3).
+  const cycle = fieldCycle(fields);
+  if (cycle !== undefined) {
+    throw new WorkflowLoadError(`fields form a cycle: ${cycle.join(" → ")}`, id);
+  }
 
   // The cursor's order, defaulted to the order the children were declared in (§6). Resolved here
   // rather than in the engine so the validator's reachability pass and the lint surface see the same
@@ -997,9 +1068,14 @@ export function desugarState(
   // in place of the mistake they actually made two files away.
   const operationOrError = describeOperation(split, id, def.outputs, lower);
 
-  const { operation, environment: _e, inputs: _i, outputs: _o, children: _c, sequence: _s, transitions: _t, ...rest } = def;
+  const { operation, environment: _e, inputs: _i, outputs: _o, children: _c, sequence: _s, transitions: _t, title: _title, label, description, limits, ...rest } = def;
   return {
     ...rest,
+    // Literal where the author wrote a literal; a bound one left the position empty (`fields`).
+    ...(typeof label === "string" ? { label } : {}),
+    ...(typeof description === "string" ? { description } : {}),
+    ...(limits !== undefined ? { limits: limits as LimitsDecl } : {}),
+    ...(fields.length > 0 ? { fields } : {}),
     id,
     ...(inputs ? { inputs } : {}),
     ...(outputs ? { outputs } : {}),
