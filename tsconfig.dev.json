@@ -11,6 +11,7 @@
       "@declarative-ai/json": ["packages/json/src/index.ts"],
       "@declarative-ai/llm": ["packages/llm/src/index.ts"],
       "@declarative-ai/llm/model-catalog": ["packages/llm/src/model-catalog.ts"],
+      "@declarative-ai/log": ["packages/log/src/index.ts"],
       "@declarative-ai/ops": ["packages/ops/src/index.ts"],
       "@declarative-ai/permissions": ["packages/permissions/src/index.ts"],
       "@declarative-ai/promptop": ["packages/promptop/src/index.ts"],

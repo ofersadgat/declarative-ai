@@ -20,10 +20,16 @@
       "path": "../json/tsconfig.build.json"
     },
     {
+      "path": "../llm/tsconfig.build.json"
+    },
+    {
       "path": "../ops/tsconfig.build.json"
     },
     {
       "path": "../permissions/tsconfig.build.json"
+    },
+    {
+      "path": "../promptop/tsconfig.build.json"
     }
   ]
 }
