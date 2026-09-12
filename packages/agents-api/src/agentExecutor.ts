@@ -860,6 +860,22 @@ export class AgentExecutor extends PromptExecutor {
       }
     }
 
+    // A state that declares OUTPUTS is asking for a value, and the agent's own question tool is a
+    // conversation's affordance: it parks the call on a person mid-turn. Under a structured-output
+    // request the questions belong in the output — a `questions` slot the workflow's own gate puts
+    // to the person, with the state's context in hand — so the tool is not offered by default. It
+    // still is when the caller NAMED it: a logical tool aliased to it, or a mode authored for it in
+    // the baseline. Observed before this: a state with an output schema asked five questions
+    // through the tool, which the binary refused on its own limit, and the run went on as if the
+    // person had answered.
+    if (definition.schema !== undefined && !aliased.has(ASK_USER_TOOL) && !denySet.has(ASK_USER_TOOL)) {
+      const authored = ctx.policy?.baseline?.tools?.[ASK_USER_TOOL];
+      if (authored === undefined || authored === "deny") {
+        denied.push(ASK_USER_TOOL);
+        denySet.add(ASK_USER_TOOL);
+      }
+    }
+
     // The session decision was already made by `applySession`, which is the point of the refactor:
     // `providerSessionId` is present exactly when this transport may resume, and `messages` carries a
     // replayed transcript exactly when it may not. All that is left here is spelling those two facts

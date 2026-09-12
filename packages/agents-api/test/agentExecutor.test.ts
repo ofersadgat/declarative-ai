@@ -1276,6 +1276,46 @@ describe("a narrowing profile reaches the agent up front", () => {
     expect(bare.seen()?.disallowedTools).toBeUndefined();
   });
 
+  it("denies the agent's question tool under a STRUCTURED-OUTPUT request, and offers it under a text one", async () => {
+    // A state that declares outputs is asking for a value; its questions belong in the output, put
+    // to the person by the workflow's own gate. A text turn is a conversation, and keeps the tool.
+    const structured = op("do it", {});
+    const json = promptOp({
+      user: "do it",
+      config: {} as never,
+      output: { name: "answer", schema: { type: "object", properties: { items: { type: "array", items: { type: "string" } } }, required: ["items"] } },
+    });
+    const text = capturing();
+    await new AgentExecutor({ query: text.query }).start(structured, {}).result;
+    expect(text.seen()?.disallowedTools).toBeUndefined();
+    const asked = capturing({ structured: { items: [] } });
+    await new AgentExecutor({ query: asked.query }).start(json, {}).result;
+    expect(asked.seen()?.disallowedTools).toEqual(["AskUserQuestion"]);
+    // Under `read-only` the deny joins the profile's list rather than replacing it.
+    const both = capturing({ structured: { items: [] } });
+    await new AgentExecutor({ query: both.query }).start(json, gateWithProfile("read-only")).result;
+    expect(both.seen()?.disallowedTools).toEqual(expect.arrayContaining(["Bash", "AskUserQuestion"]));
+  });
+
+  it("keeps the question tool under a structured-output request when the caller NAMED it", async () => {
+    const json = promptOp({
+      user: "do it",
+      config: {} as never,
+      output: { name: "answer", schema: { type: "object", properties: { items: { type: "array", items: { type: "string" } } }, required: ["items"] } },
+    });
+    // Named in the baseline with a mode that is not deny…
+    const authored = capturing({ structured: { items: [] } });
+    const policy = { baseline: { tools: { AskUserQuestion: "ask" } } } as unknown as ExecServices["policy"];
+    await new AgentExecutor({ query: authored.query }).start(json, { policy } as ExecServices).result;
+    expect(authored.seen()?.disallowedTools).toBeUndefined();
+    // …or aliased from a logical tool the state declared.
+    const aliased = capturing({ structured: { items: [] } });
+    const ask: Tool = { description: "ask", readOnly: true, inputSchema: { type: "object" } as never, run: () => "" };
+    await new AgentExecutor({ query: aliased.query, nativeTools: { ask_user: { native: "AskUserQuestion" } } })
+      .start(json, { tools: { ask_user: ask } } as ExecServices).result;
+    expect(aliased.seen()?.disallowedTools).toBeUndefined();
+  });
+
   it("lets a transport state its own list — codex passes [] and answers with its sandbox instead", async () => {
     const { query, seen } = capturing();
     await new AgentExecutor({ query, mutatingNativeTools: [] }).start(op(), gateWithProfile("read-only")).result;
