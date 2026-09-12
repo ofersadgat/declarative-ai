@@ -592,7 +592,3 @@ the wire form, and `blob` as a ref kind. Clean typecheck across every package; t
 
 Known limits and non-blocking follow-ups are tracked in [DESIGN.md](DESIGN.md) §10.1. Publishing compiled
 artifacts is deferred until the contract stabilizes across the two consumers.
-
-## License
-
-MIT — see [LICENSE](LICENSE).
