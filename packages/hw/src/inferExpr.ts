@@ -435,6 +435,12 @@ export function builtinResult(name: string, args: readonly JsonSchema[]): JsonSc
       return a.type === "string" ? STRING : a.type === "array" ? a : ANY_SCHEMA;
     case "append":
       return arrayOf(joinSchemas(itemsOf(a), b));
+    case "flatten": {
+      // One level off: the element type of the element type when the elements are arrays, and the
+      // element type itself otherwise, since a non-array element is kept as it is.
+      const inner = itemsOf(a);
+      return arrayOf(inner.type === "array" ? itemsOf(inner) : inner);
+    }
     case "concat":
       // Array when either side is one, string otherwise — the implementation's own rule, restated.
       return a.type === "array" || b.type === "array" ? arrayOf(joinSchemas(itemsOf(a), itemsOf(b))) : STRING;

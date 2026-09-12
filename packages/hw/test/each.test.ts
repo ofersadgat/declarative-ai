@@ -381,3 +381,162 @@ describe("a stopped fan-out, loaded", () => {
     expect(outputs?.docs).toEqual(["recorded divider", "doc for badge", "doc for toggle"]);
   });
 });
+
+describe("a fan-out fed by a sibling child", () => {
+  /** A planner: one `seed` in, a list of components out — the array a fan-out is fed from. */
+  const PLAN: StateDef = {
+    label: "Plan",
+    inputs: { seed: { schema: { type: "string" }, optional: true } },
+    outputs: { components: { schema: { type: "array", items: COMPONENT_SCHEMA } } },
+    operation: { kind: "function", function: "plan", input: { seed: { kind: "json", binding: ".inputs.seed" } } },
+  };
+
+  /** Run with a `plan` that answers two components per seed, and the same `build` leaf as above. */
+  const runWithPlan = async (files: Record<string, StateDef>, inputs: Record<string, ResolvedValue> = {}): Promise<Outcome & { planned: unknown[] }> => {
+    const planned: unknown[] = [];
+    const calls: Array<Record<string, unknown>> = [];
+    const registry = newRegistry();
+    registry.functions.set(
+      "plan",
+      hostFunction(async (i: Record<string, unknown>) => {
+        planned.push(i.seed);
+        const seed = typeof i.seed === "string" ? `${i.seed}-` : "";
+        return ok({ components: [{ name: `${seed}badge` }, { name: `${seed}toggle` }] }) as ExecResult<ResolvedValue, WorkflowMetrics>;
+      }, HOST),
+    );
+    registry.functions.set(
+      "build",
+      hostFunction(async (i: Record<string, unknown>) => {
+        calls.push(i);
+        return ok({ doc: `doc for ${String(i.name)}`, size: String(i.name).length }) as ExecResult<ResolvedValue, WorkflowMetrics>;
+      }, HOST),
+    );
+    const persistence = new InMemoryPersistence();
+    const engine = new WorkflowEngine({ bundle: loadBundle(files, "root"), registry, validator: new SchemaValidator(), persistence });
+    const result = await engine.run({ inputs });
+    return {
+      outcome: result.outcome,
+      ...(result.failure ? { reason: result.failure.reason } : {}),
+      outputs: result.outputs as Record<string, unknown> | undefined,
+      calls,
+      finished: [],
+      events: persistence.events.map(({ event }) => event),
+      planned,
+    };
+  };
+
+  it("reads the array off the sibling's output, entering once per element", async () => {
+    const files: Record<string, StateDef> = {
+      root: {
+        label: "Root",
+        inputs: {},
+        outputs: { docs: { schema: { type: "array", items: { type: "string" } }, binding: ".children.component.output.doc" } },
+        children: {
+          plan: { state: "root/plan", inputs: {} },
+          component: { state: "root/component", inputs: { component: { expr: ".children.plan.output.components", each: true } } },
+        },
+        sequence: ["plan", "component"],
+      },
+      "root/plan": PLAN,
+      "root/component": COMPONENT,
+    };
+    expect(validateBundle(loadBundle(files, "root"), {}).errors).toEqual([]);
+    const { outcome, reason, calls, outputs } = await runWithPlan(files);
+    expect(reason).toBeUndefined();
+    expect(outcome).toBe("success");
+    expect(calls.map((c) => c.name)).toEqual(["badge", "toggle"]);
+    expect(outputs).toEqual({ docs: ["doc for badge", "doc for toggle"] });
+  });
+
+  it("waits for an async sibling still producing the array, then fans out over it", async () => {
+    const files: Record<string, StateDef> = {
+      root: {
+        label: "Root",
+        inputs: {},
+        outputs: { docs: { schema: { type: "array" }, binding: ".children.component.output.doc" } },
+        children: {
+          plan: { state: "root/plan", inputs: {}, async: true },
+          component: { state: "root/component", inputs: { component: { expr: ".children.plan.output.components", each: true } } },
+        },
+        sequence: ["plan", "component"],
+      },
+      "root/plan": PLAN,
+      "root/component": COMPONENT,
+    };
+    const { outcome, outputs } = await runWithPlan(files);
+    expect(outcome).toBe("success");
+    expect(outputs?.docs).toEqual(["doc for badge", "doc for toggle"]);
+  });
+
+  /**
+   * The sibling ITSELF fanned out, so its `components` output is an array PER element — an array of
+   * arrays. `each` never looks inside an element: fanning out over that read would hand each element
+   * one inner array, which the child (declaring one object) cannot take. The union is `flatten` of
+   * the read, computed in a state between them (WORKFLOWS.md §6.2).
+   */
+  describe("when the sibling is itself a fan-out", () => {
+    const seeds = { seeds: { schema: { type: "array", items: { type: "string" } } } };
+    const planMount = { state: "root/plan", inputs: { seed: { expr: ".inputs.seeds", each: true } } };
+
+    it("reads the sibling's output as an array of arrays, which the validator refuses to fan out over directly", () => {
+      const files: Record<string, StateDef> = {
+        root: {
+          label: "Root",
+          inputs: seeds,
+          outputs: { docs: { schema: { type: "array" }, binding: ".children.component.output.doc" } },
+          children: {
+            plan: planMount,
+            component: { state: "root/component", inputs: { component: { expr: ".children.plan.output.components", each: true } } },
+          },
+          sequence: ["plan", "component"],
+        },
+        "root/plan": PLAN,
+        "root/component": COMPONENT,
+      };
+      const report = validateBundle(loadBundle(files, "root"), {})
+        .errors.map((e) => `${e.path}: ${e.message}`)
+        .join("\n");
+      expect(report).toMatch(/children\.component\.inputs\.component: .*not allowed by consumer/);
+    });
+
+    it("fans out over the union through a state whose output is `flatten` of the read", async () => {
+      const files: Record<string, StateDef> = {
+        root: {
+          label: "Root",
+          inputs: seeds,
+          outputs: {
+            groups: { schema: { type: "array" }, binding: ".children.plan.output.components" },
+            docs: { schema: { type: "array", items: { type: "string" } }, binding: ".children.component.output.doc" },
+          },
+          children: {
+            plan: planMount,
+            gather: { state: "root/gather", inputs: { groups: ".children.plan.output.components" } },
+            component: { state: "root/component", inputs: { component: { expr: ".children.gather.output.components", each: true } } },
+          },
+          sequence: ["plan", "gather", "component"],
+        },
+        "root/plan": PLAN,
+        // No operation: the flattening IS the state (§3.7), resolved when it terminates.
+        "root/gather": {
+          label: "Gather",
+          inputs: { groups: { schema: { type: "array", items: { type: "array", items: COMPONENT_SCHEMA } } } },
+          outputs: { components: { schema: { type: "array", items: COMPONENT_SCHEMA }, binding: "flatten(.inputs.groups)" } },
+        },
+        "root/component": COMPONENT,
+      };
+      expect(validateBundle(loadBundle(files, "root"), {}).errors).toEqual([]);
+      const { outcome, reason, planned, calls, outputs } = await runWithPlan(files, { seeds: ["x", "y"] });
+      expect(reason).toBeUndefined();
+      expect(outcome).toBe("success");
+      expect(planned).toEqual(["x", "y"]);
+      // The parent still sees the planner's output NESTED, one inner array per seed …
+      expect(outputs?.groups).toEqual([
+        [{ name: "x-badge" }, { name: "x-toggle" }],
+        [{ name: "y-badge" }, { name: "y-toggle" }],
+      ]);
+      // … and the fan-out over the flattened union ran once per component, in order.
+      expect(calls.map((c) => c.name)).toEqual(["x-badge", "x-toggle", "y-badge", "y-toggle"]);
+      expect(outputs?.docs).toEqual(["doc for x-badge", "doc for x-toggle", "doc for y-badge", "doc for y-toggle"]);
+    });
+  });
+});

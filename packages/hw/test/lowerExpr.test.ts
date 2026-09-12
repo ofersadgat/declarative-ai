@@ -169,6 +169,7 @@ describe("inference over the tree agrees with inference over the AST", () => {
         n: { type: "integer" },
         flag: { type: "boolean" },
         list: { type: "array", items: { type: "string" } },
+        groups: { type: "array", items: { type: "array", items: { type: "integer" } } },
         nested: { type: "object", properties: { deep: { type: "number" } } },
       },
     },
@@ -198,6 +199,7 @@ describe("inference over the tree agrees with inference over the AST", () => {
     ".outputs.severity === 'high' ? 'escalate' : 'continue'",
     ".inputs.flag ? .inputs.n : 3",
     ".run.cursor === 'done' && .outputs.severity === 'high'",
+    "flatten(.inputs.groups)", "flatten(.inputs.list)",
     // the mistakes the validator has to keep catching
     ".nope", ".inputs.missing", ".inputs.nested.gone", ".children.done.output.absent",
   ];

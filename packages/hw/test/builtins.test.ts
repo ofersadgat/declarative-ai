@@ -18,6 +18,7 @@ const scope: ResolutionScope = {
       xs: [3, 1, 2, 3],
       o: { a: 1, b: 2 },
       pairs: [["x", 1], ["y", 2]],
+      groups: [[3, 1], [], [2, [3]], 4],
       nothing: null,
     },
   },
@@ -120,6 +121,12 @@ describe("arrays", () => {
   it("appends by returning a new array", () => {
     expect(ev("append(.inputs.xs, 9)")).toEqual([3, 1, 2, 3, 9]);
     expect(ev(".inputs.xs")).toEqual([3, 1, 2, 3]);
+  });
+
+  /** ONE level, like `flat()`: the inner `[3]` survives, and the bare `4` is kept where it is. */
+  it("flattens one level, keeping an element that is not an array", () => {
+    expect(ev("flatten(.inputs.groups)")).toEqual([3, 1, 2, [3], 4]);
+    expect(ev("flatten(.inputs.n)")).toEqual([]);
   });
 
   it("bounds `range`, so a typo cannot exhaust memory", () => {

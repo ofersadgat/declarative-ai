@@ -165,6 +165,13 @@ export const BUILTINS: Readonly<Record<string, Builtin>> = {
   }),
   /** NOT `push`: every value here is immutable, so this returns a new array. */
   append: define(["value", "item"], (v, item) => [...arr(v), item]),
+  /**
+   * ONE level, as `Array.prototype.flat()` does, and an element that is not an array stays where it
+   * is. The case that earns it a place: a fan-out fed by a sibling that itself fanned out reads an
+   * array of arrays (WORKFLOWS.md §6.2), and the union is `flatten` of that — one level, because
+   * one level is what one fan-out added.
+   */
+  flatten: define(["value"], (v) => arr(v).flatMap((x) => (Array.isArray(x) ? x : [x]))),
   range: define(["start", "end"], (s, e) => {
     const from = Math.trunc(num(s));
     const to = Math.trunc(num(e));
