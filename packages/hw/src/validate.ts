@@ -694,7 +694,9 @@ function hooksFor(
       const childState = bundle.states[child.state];
       const own = childState ? outputsObjectSchema(childState, bundle, seen ?? EMPTY_STATE_SET) : undefined;
       // A mount that FANS OUT (§6.2) is read back elementwise: every output an array, in element order.
-      const schema = own !== undefined && child.each !== undefined && child.each.length > 0 ? elementwise(own) : own;
+      // A SPLIT mount (§6.3) is read only on the far side of the split, where its batch is one element
+      // and it reads as an ordinary mount — the element's own outputs.
+      const schema = own !== undefined && child.each !== undefined && child.each.length > 0 && child.eachKind !== "split" ? elementwise(own) : own;
       return {
         kind: "function",
         functionRef: ref,
@@ -922,7 +924,7 @@ function checkBinding(
       // — an output, a guard, an ordinary mount's wire — it would resolve to nothing at run time,
       // and "nothing" is the answer that gets bound silently.
       if (eachAxes === undefined) {
-        errors.push({ stateId, path, message: `'.each' is only readable in the wiring of a child mount that fans out (an input marked each: true)` });
+        errors.push({ stateId, path, message: `'.each' is only readable in the wiring of a child mount that fans out (an input marked each)` });
       }
       continue;
     }
@@ -1135,7 +1137,7 @@ function resolverSchema(
       // `.each` is in the scope exactly when this expression is a fanned-out mount's wire (§6.2) —
       // the scope is what says where it may be read, so a read anywhere else is refused here.
       if (root === EACH_NAMESPACE) {
-        if (!(EACH_NAMESPACE in scope)) err(`'.each' is only readable in the wiring of a child mount that fans out (an input marked each: true)`);
+        if (!(EACH_NAMESPACE in scope)) err(`'.each' is only readable in the wiring of a child mount that fans out (an input marked each)`);
         continue;
       }
       if (!NAMESPACES.has(root)) {
@@ -1478,7 +1480,8 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle, seen: ReadonlySet
     // A mount that FANS OUT (§6.2) reads back every output as an ARRAY in element order — what the
     // engine's one record per key holds — so a consumer typed against the child's own declaration
     // would be typed against a single element it will never be handed.
-    const outputs = child.each !== undefined && child.each.length > 0 ? elementwise(own) : own;
+    // A SPLIT mount (§6.3) reads as an ordinary one: its batch, where it is read, is one element.
+    const outputs = child.each !== undefined && child.each.length > 0 && child.eachKind !== "split" ? elementwise(own) : own;
     // A child's own operation node, typed by ITS operation's kind — so
     // `children.plan.operation.output.session` is checked against what `plan` actually runs, and
     // pointing it at a `ui` gate is a load-time error rather than a runtime undefined.

@@ -27,7 +27,7 @@ import {
   type SessionStore,
 } from "@declarative-ai/exec";
 import { syncOnly } from "@declarative-ai/exec";
-import { WorkflowEngine, type CallResult } from "./engine.js";
+import { WorkflowEngine, type CallResult, type FanOutHost, type SplitEntry } from "./engine.js";
 import type { WorkflowBundle } from "./format.js";
 import type { LoadedInstance } from "./load.js";
 import { isByteStream, materialize, MaterializeError } from "./materialize.js";
@@ -89,6 +89,10 @@ export interface WorkflowExecutorOptions {
   /** Mints instance ids — see {@link EngineConfig.newInstanceId}. Forwarded because the engine is
    *  constructed inside this executor; a host or test that needs predictable ids supplies its own. */
   newInstanceId?: () => string;
+  /** Where a hosted fan-out's elements go — see {@link EngineConfig.fanOut}. Forwarded for the same reason. */
+  fanOut?: FanOutHost;
+  /** The lists this run is split on — see {@link EngineConfig.split}. Forwarded for the same reason. */
+  split?: readonly SplitEntry[];
 }
 
 const CAPABILITIES: Capabilities = {
@@ -230,6 +234,8 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
       ...(this.options.operations !== undefined ? { operations: this.options.operations } : {}),
       ...(this.options.sessions !== undefined ? { sessions: this.options.sessions } : {}),
       ...(this.options.newInstanceId !== undefined ? { newInstanceId: this.options.newInstanceId } : {}),
+      ...(this.options.fanOut !== undefined ? { fanOut: this.options.fanOut } : {}),
+      ...(this.options.split !== undefined ? { split: this.options.split } : {}),
       services: ctx,
       clock: ctx.clock,
       onEvent: (event) => {

@@ -111,7 +111,7 @@ import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, 
 // Computed fields (SPEC §5.3): evaluated once at entry, written into a per-instance definition.
 import { fieldDependencies, fieldsView, materializeFields } from "./fields.js";
 import { bindIntoSlots } from "./loader.js";
-import { hasDefault, literalPermissions, type LoadedField } from "./format.js";
+import { hasDefault, literalPermissions, SPAWN_DEFAULTS, type HostedEachKind, type LoadedField, type SpawnFields } from "./format.js";
 import { isCallableKind, isCallableSchema } from "@declarative-ai/exec";
 import { isOperationValue } from "./resolve.js";
 import { uuidv7 } from "./ids.js";
@@ -247,6 +247,83 @@ export interface EngineConfig {
    *  workspace that session's tools act within, so fan-out branches can isolate (e.g. per-worktree). Returns
    *  `undefined` ⇒ fall back to the single run-level `services.workspace`. Absent ⇒ always the run-level one. */
   workspaceFor?: (sessionId: string) => Workspace | undefined;
+  /**
+   * Where a HOSTED fan-out's elements go (WORKFLOWS.md §6.3) — the seam `each: "task"` and
+   * `each: "split"` hand their elements through. The engine resolves the elements exactly as it does
+   * for an inline fan-out and then, instead of entering them, asks the host what became of them; the
+   * answer settles the mount's record as an inline batch's gathered outputs would. Absent ⇒ a hosted
+   * mount fails with that reason, since the engine has no run of its own to make.
+   */
+  fanOut?: FanOutHost;
+  /**
+   * The lists THIS run is split on, when it is a run a `"split"` made — see {@link SplitEntry}. A
+   * mount whose `each: "split"` wire names one of these resolves the list to this run's element and
+   * runs it INLINE: the run is already on the far side of that split, and a second one over the same
+   * list would fan out over its siblings.
+   */
+  split?: readonly SplitEntry[];
+}
+
+/**
+ * One list a run is split on (§6.3): the wire's authored expression, and which element of it this
+ * run is. Matched by expression TEXT because that is what two mounts naming the same list share —
+ * the lowered wires are separate trees.
+ */
+export interface SplitEntry {
+  expr: string;
+  index: number;
+}
+
+/** What the host is handed for a hosted fan-out — see {@link EngineConfig.fanOut}. */
+export interface FanOutRequest {
+  kind: HostedEachKind;
+  /** The instance that mounted the fan-out: its durable id and its state. */
+  instanceId: string;
+  stateId: string;
+  /** The mount, and which entry of it — the address every mirrored `instance.entered` sits under. */
+  key: string;
+  occurrence: number;
+  /** The mounted state — what each element is a run of. */
+  state: string;
+  /**
+   * The elements, each with its inputs resolved, in element order. Empty when the mount is being
+   * CONTINUED from a stopped run and the elements are the recorded ones in `loaded`.
+   */
+  elements: ReadonlyArray<{ inputs: Record<string, ResolvedValue> }>;
+  /**
+   * The elements a stopped run recorded under this mount, when the run is being continued — the
+   * host's own mirrored rows, read back. The host answers from what it made for them, never by
+   * making them again.
+   */
+  loaded?: readonly LoadedInstance[];
+  /** Which element properties are its identity, title and dependencies, and how a split starts. */
+  spawn: SpawnFields;
+  /** The authored expression of each axis, by input — what a split run is split ON. */
+  exprs: Readonly<Record<string, string>>;
+  /** Whether the mount is `async` — the host runs the elements together, else one after another. */
+  async: boolean;
+  /** Fires when the mounting instance is aborted — the host stops waiting, and what it made is its own. */
+  signal: AbortSignal;
+}
+
+/**
+ * How a hosted fan-out ended — the mount's record. A `"task"` host gathers its elements' terminations
+ * with {@link combineElements}; a `"split"` host answers success with what it made, since nothing in
+ * this run reads the elements' outputs.
+ */
+export interface FanOutOutcome {
+  outcome: TerminationOutcome;
+  outputs?: Record<string, ResolvedValue>;
+  failure?: Failure;
+}
+
+export type FanOutHost = (request: FanOutRequest) => Promise<FanOutOutcome>;
+
+/** How one element ended — what a `"task"` host hands {@link combineElements} per element. */
+export interface ElementTermination {
+  outcome: TerminationOutcome;
+  outputs?: Record<string, ResolvedValue>;
+  failure?: Failure;
 }
 
 export interface WorkflowRunOptions {
@@ -346,7 +423,7 @@ function tuplesOf(axes: readonly (readonly unknown[])[]): number[][] {
  * element that ended badly naming the whole — with WHICH element, since "child 'component' failed"
  * is nothing anyone can act on when there were seven of them.
  */
-function combineElements(key: string, childDef: LoadedState | undefined, terms: readonly TerminationRecord[]): TerminationRecord {
+export function combineElements(key: string, childDef: LoadedState | undefined, terms: readonly ElementTermination[]): ElementTermination {
   const bad = terms.findIndex((term) => term.outcome !== "success");
   if (bad >= 0) {
     const term = terms[bad]!;
@@ -364,6 +441,17 @@ function combineElements(key: string, childDef: LoadedState | undefined, terms: 
   const outputs: Record<string, ResolvedValue> = {};
   for (const name of names) outputs[name] = terms.map((term) => term.outputs?.[name] ?? null) as ResolvedValue;
   return { outcome: "success", outputs };
+}
+
+/**
+ * How a batch settles its record. An inline batch gathers (§6.2). A SPLIT mount run inline is a run
+ * on the far side of the split (§6.3) — the batch is its one element, and the mount reads as an
+ * ordinary mount does: the element's own outputs, not one-element arrays of them. That is what lets
+ * every later sibling read `.children.ux.output.patterns` as the value it was written to expect.
+ */
+function settleBatch(key: string, decl: LoadedChild, childDef: LoadedState | undefined, terms: readonly TerminationRecord[]): TerminationRecord {
+  if (decl.eachKind === "split" && terms.length === 1) return terms[0]!;
+  return combineElements(key, childDef, terms);
 }
 
 /** A settled child record as the termination it recorded — the shape an element's run returns. */
@@ -535,6 +623,12 @@ interface Instance {
   justFinished: string[];
   /** Child keys whose error/timeout termination has not yet been handled by a transition. */
   unhandledFailures: Set<string>;
+  /**
+   * A hosted SPLIT under this instance settled, and its round has not yet answered (§6.3). If the
+   * round takes no rule, the state ends successfully: the sequence continues in the runs the host
+   * made, not here. A rule that fires clears it — the author said where to go instead.
+   */
+  endedBySplit?: boolean;
   abort: AbortController;
   timedOut: boolean;
   notify: Notifier;
@@ -1403,7 +1497,10 @@ export class WorkflowEngine {
           evaluationDue = true;
           continue;
         }
-        if (step === "entered" || step === "parked") continue;
+        if (step === "entered" || step === "parked") {
+          instance.endedBySplit = false;
+          continue;
+        }
         // "none": fall through — but a child failure no transition handled is fatal (SPEC §3.3).
         if (instance.unhandledFailures.size > 0) {
           const key = [...instance.unhandledFailures][0]!;
@@ -1413,6 +1510,9 @@ export class WorkflowEngine {
             reason: unhandledChildReason(key, rec),
           });
         }
+        // A hosted SPLIT settled and no rule answered it (§6.3): the rest of this sequence belongs to
+        // the runs the host made, one per element, and this run's part is done.
+        if (instance.endedBySplit === true) return await this.finishSuccess(instance);
       }
 
       // (2)/(5) The state's operation, then sequence children. A state has ONE operation (§7.1);
@@ -1982,8 +2082,124 @@ export class WorkflowEngine {
     // keeps a loop around a fan-out and a fan-out inside a loop from reading as the same thing.
     const occurrence = instance.entries.get(key) ?? 0;
     instance.entries.set(key, occurrence + 1);
-    instance.children.set(key, this.runFanOut(instance, key, decl, occurrence, resolved.elements));
+    const hosted = this.hostedKindOf(decl);
+    instance.children.set(
+      key,
+      hosted !== undefined
+        ? this.hostFanOut(instance, key, decl, hosted, occurrence, resolved.elements, undefined, isAsync)
+        : this.runFanOut(instance, key, decl, occurrence, resolved.elements),
+    );
     return "started";
+  }
+
+  /**
+   * Which hosted kind a mount is, if the host is to be handed its elements (§6.3) — or `undefined`
+   * for an inline batch, which is every `each: "inline"` mount and every `"split"` mount in a run
+   * that is already on the far side of that split (see {@link splitIndexOf}).
+   */
+  private hostedKindOf(decl: LoadedChild): HostedEachKind | undefined {
+    if (decl.eachKind === undefined) return undefined;
+    if (decl.eachKind === "split" && this.splitIndexOf(decl) !== undefined) return undefined;
+    return decl.eachKind;
+  }
+
+  /**
+   * This run's element in the list a `"split"` mount fans out over, when the run was made by that
+   * split — the entry in `config.split` whose expression is the mount's axis. A split is on ONE list
+   * (the loader refuses two axes), so the axis is the mount's only `each` wire.
+   */
+  private splitIndexOf(decl: LoadedChild): number | undefined {
+    const axis = decl.each?.[0];
+    const expr = axis !== undefined ? decl.eachExprs?.[axis] : undefined;
+    if (expr === undefined) return undefined;
+    return this.config.split?.find((entry) => entry.expr === expr)?.index;
+  }
+
+  /**
+   * A hosted fan-out's record (§6.3): the host is asked what became of the elements, and its answer
+   * settles the record exactly as an inline batch's gathered outputs do — same `justFinished`, same
+   * unhandled-failure bookkeeping, same wake. Nothing is entered here: the elements are runs the
+   * host makes, and the host mirrors their entry into this run's journal itself, which is what lets
+   * a stopped run find them again under `loaded`.
+   */
+  private hostFanOut(
+    instance: Instance,
+    key: string,
+    decl: LoadedChild,
+    kind: HostedEachKind,
+    occurrence: number,
+    elements: readonly FanOutElement[],
+    loaded: readonly LoadedInstance[] | undefined,
+    isAsync: boolean,
+  ): ChildRecord {
+    const recordAbort = new AbortController();
+    const onParentAbort = (): void => recordAbort.abort();
+    if (instance.abort.signal.aborted) recordAbort.abort();
+    else instance.abort.signal.addEventListener("abort", onParentAbort, { once: true });
+    const record: ChildRecord = { instanceId: this.newInstanceId(), status: "running", abort: recordAbort, promise: Promise.resolve() };
+
+    const settle = (term: FanOutOutcome): void => {
+      record.status = "done";
+      record.outcome = term.outcome;
+      record.outputs = term.outputs;
+      record.failure = term.failure;
+      if (instance.children.get(key) === record) {
+        if (!instance.justFinished.includes(key)) instance.justFinished.push(key);
+        if (term.outcome === "error" || term.outcome === "timeout") instance.unhandledFailures.add(key);
+        if (kind === "split" && term.outcome === "success") instance.endedBySplit = true;
+      }
+      instance.notify.signal();
+    };
+    const run = async (): Promise<void> => {
+      const host = this.config.fanOut;
+      if (host === undefined) {
+        settle({
+          outcome: "error",
+          failure: { classification: "permanent", reason: `child '${key}' is each: "${kind}", and this engine has no host to make a run of an element` },
+        });
+        return;
+      }
+      settle(await host(this.fanOutRequest(instance, key, decl, kind, occurrence, elements, loaded, isAsync, recordAbort.signal)));
+    };
+    // Started on a fresh tick, never synchronously: the caller registers this record under its key
+    // AFTER this returns, and a settle before that — a missing host answers at once — would find no
+    // record to book against and the failure would go unhandled, which here means unnoticed.
+    record.promise = Promise.resolve()
+      .then(run)
+      .catch((e: unknown) => {
+      settle({ outcome: "error", failure: { classification: "permanent", reason: `child '${key}' crashed: ${e instanceof Error ? e.message : String(e)}` } });
+    });
+    record.promise = record.promise.finally(() => {
+      instance.abort.signal.removeEventListener("abort", onParentAbort);
+    });
+    return record;
+  }
+
+  private fanOutRequest(
+    instance: Instance,
+    key: string,
+    decl: LoadedChild,
+    kind: HostedEachKind,
+    occurrence: number,
+    elements: readonly FanOutElement[],
+    loaded: readonly LoadedInstance[] | undefined,
+    isAsync: boolean,
+    signal: AbortSignal,
+  ): FanOutRequest {
+    return {
+      kind,
+      instanceId: instance.id,
+      stateId: instance.stateId,
+      key,
+      occurrence,
+      state: decl.state,
+      elements: elements.flatMap((element) => (element.inputs !== undefined ? [{ inputs: element.inputs }] : [])),
+      ...(loaded !== undefined ? { loaded } : {}),
+      spawn: decl.spawn ?? SPAWN_DEFAULTS,
+      exprs: decl.eachExprs ?? {},
+      async: isAsync,
+      signal,
+    };
   }
 
   /**
@@ -2038,6 +2254,18 @@ export class WorkflowEngine {
       if (resolved === PENDING) return "parked";
       if ("error" in resolved && typeof resolved.error === "string") return { blocked: resolved.error };
       elements.push({ inputs: resolved.values! });
+    }
+    // A run on the far side of a SPLIT over this list (§6.3) has ONE element of it: its own. The
+    // batch narrows to that element before anything is entered or matched against a stopped run's
+    // recorded elements, which is what keeps element 0 meaning the same thing on both sides of a
+    // load. The index the run was split at is a fact about the parent's batch, not this one.
+    const split = decl.eachKind === "split" ? this.splitIndexOf(decl) : undefined;
+    if (split !== undefined) {
+      const own = elements[split];
+      if (own === undefined) {
+        return { blocked: `${instance.stateId}: wiring child '${key}': this run is element ${split} of the list, which now has ${elements.length}` };
+      }
+      return { elements: [own] };
     }
     return { elements };
   }
@@ -2096,7 +2324,7 @@ export class WorkflowEngine {
           if (term.outcome !== "success") break;
         }
       }
-      const term = combineElements(key, childDef, terms);
+      const term = settleBatch(key, decl, childDef, terms);
       record.status = "done";
       record.outcome = term.outcome;
       record.outputs = term.outputs;
@@ -2187,6 +2415,20 @@ export class WorkflowEngine {
     const decl = instance.def.children?.[key];
     if (decl === undefined || this.config.bundle.states[decl.state] === undefined) return;
     const occurrence = loaded[0]?.occurrence ?? 0;
+    // A HOSTED fan-out's recorded elements are the host's mirrored rows (§6.3), and what became of
+    // them is the host's to say — asked again with the rows, never re-made from the list.
+    const hosted = this.hostedKindOf(decl);
+    if (hosted !== undefined) {
+      const isAsync = this.asyncOf(instance, decl) === true;
+      if (!isAsync) instance.heldFor = key;
+      // The list, re-read, travels beside the rows: a sequential batch stopped after its second
+      // element never made its third, and the host can only make it from the element itself. Where
+      // the list cannot be re-read now, the rows are the whole batch.
+      const resolved = await this.resolveFanOut(instance, key, decl);
+      const fresh = typeof resolved === "object" && "elements" in resolved ? resolved.elements : [];
+      instance.children.set(key, this.hostFanOut(instance, key, decl, hosted, occurrence, fresh, loaded, isAsync));
+      return;
+    }
     const byElement = new Map<number, LoadedInstance>(loaded.map((element) => [element.element ?? 0, element]));
     const anyLive = loaded.some((element) => element.live);
     const resolved = anyLive || byElement.size === 0 ? await this.resolveFanOut(instance, key, decl) : undefined;
@@ -2238,13 +2480,34 @@ export class WorkflowEngine {
     abort: AbortController,
   ): Promise<ChildRecord> {
     const childDef = this.config.bundle.states[decl.state];
+    // A HOSTED fan-out's history is the host's (§6.3): its mirrored rows hold no operation and no
+    // children, so reading them back as instances would recompute every output as nothing. The host
+    // is asked, with the rows, and answers from the runs it made for them.
+    const hosted = this.hostedKindOf(decl);
+    if (hosted !== undefined) {
+      const host = this.config.fanOut;
+      const term: FanOutOutcome =
+        host === undefined
+          ? { outcome: "error", failure: { classification: "permanent", reason: `child '${key}' is each: "${hosted}", and this engine has no host to answer for its elements` } }
+          : await host(this.fanOutRequest(instance, key, decl, hosted, loaded[0]?.occurrence ?? 0, [], loaded, this.asyncOf(instance, decl) === true, abort.signal));
+      if (hosted === "split" && term.outcome === "success") instance.endedBySplit = true;
+      return {
+        instanceId: this.newInstanceId(),
+        status: "done",
+        outcome: term.outcome,
+        ...(term.outputs !== undefined ? { outputs: term.outputs } : {}),
+        ...(term.failure !== undefined ? { failure: term.failure } : {}),
+        abort: new AbortController(),
+        promise: Promise.resolve(),
+      };
+    }
     const terms: TerminationRecord[] = [];
     if (childDef !== undefined) {
       for (const element of [...loaded].sort((a, b) => (a.element ?? 0) - (b.element ?? 0))) {
         terms.push(termOf(await this.loadTerminated(element, childDef, abort, instance)));
       }
     }
-    const term = combineElements(key, childDef, terms);
+    const term = settleBatch(key, decl, childDef, terms);
     return {
       instanceId: this.newInstanceId(),
       status: "done",

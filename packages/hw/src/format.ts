@@ -185,9 +185,58 @@ export type BindingDecl =
        * the outer axis; the other wires of the mount may read `.each.index` (the row-major position)
        * and `.each.axis.<input>` (the position along one wire). Zero elements enters nothing, and the
        * child's outputs then read as empty arrays.
+       *
+       * The value says what an element BECOMES (§6.3): `"inline"` — an instance in this run, which
+       * is what `true` has always meant and still means; `"task"` — a run of its own under this one,
+       * which the host makes and this run waits for, reading the outputs back gathered exactly as
+       * inline elements are; `"split"` — a run of its own BESIDE this one, carrying this run's history
+       * up to the mount and continuing the sequence from it, after which this run ends. The host
+       * decides what "a run of its own" is; the engine only hands the elements over.
        */
-      each?: boolean;
+      each?: EachKind | boolean;
+      /**
+       * For a `"task"` or `"split"` wire: which property of an element is its IDENTITY — what the
+       * host files the run it makes under, and what another element's `requires` names. Default `id`.
+       */
+      id?: string;
+      /** For a `"task"` or `"split"` wire: which property of an element titles the run it makes. Default `title`. */
+      title?: string;
+      /**
+       * For a `"task"` or `"split"` wire: which property of an element lists the ids of the elements
+       * it depends on. The host orders the runs it makes by it. Default `requires`.
+       */
+      requires?: string;
+      /**
+       * For a `"split"` wire: whether the host starts the runs it makes as soon as their dependencies
+       * are done (`"when_ready"`), or leaves them standing for a person (`"manual"`, the default).
+       * A `"task"` element is always started by the host, since this run is waiting on it.
+       */
+      start?: "manual" | "when_ready";
     };
+
+/**
+ * What an element of a fan-out becomes (WORKFLOWS.md §6.3) — a place: in this run, under it, or
+ * beside it. `true` is the spelling `"inline"` had before the other two existed.
+ */
+export type EachKind = "inline" | "task" | "split";
+
+/** The `each` kinds a host is handed the elements of — everything but inline. */
+export type HostedEachKind = Exclude<EachKind, "inline">;
+
+/**
+ * How a hosted fan-out reads its elements (§6.3): which property is an element's identity, which
+ * its title, which its dependencies — and whether a split run starts itself. Every field is the
+ * authored value or its default, so a host never re-derives the defaults.
+ */
+export interface SpawnFields {
+  id: string;
+  title: string;
+  requires: string;
+  start: "manual" | "when_ready";
+}
+
+/** The defaults a hosted fan-out's wire fills in when it names none. */
+export const SPAWN_DEFAULTS: Readonly<SpawnFields> = { id: "id", title: "title", requires: "requires", start: "manual" };
 
 /** Every key that tags an authored binding form — the base `Ref` cases plus the sugar. */
 const BINDING_TAGS: readonly string[] = ["text", "json", "result", "refs", "op", "expr"];
@@ -1005,6 +1054,20 @@ export interface LoadedChild {
    * edge means — it is a property of the MOUNT, which is what the engine consults when it enters one.
    */
   each?: string[];
+  /**
+   * What the elements BECOME (§6.3): absent is inline — instances in this run — and the other two
+   * are handed to the host's `fanOut` hook. One kind per mount: the loader refuses a mount whose
+   * `each` wires disagree, since the elements are one batch and a batch is in one place.
+   */
+  eachKind?: HostedEachKind;
+  /**
+   * The authored expression of each `each` wire, by input — kept beside the lowered wire because a
+   * SPLIT run is split on an EXPRESSION, and the engine has to recognise the same list in a later
+   * mount to narrow it to this run's element. The lowered `Ref` is not comparable; the text is.
+   */
+  eachExprs?: Record<string, string>;
+  /** The element fields a hosted fan-out reads — see the `id`/`title`/`requires`/`start` wire fields. */
+  spawn?: SpawnFields;
   async?: boolean;
   /** A COMPUTED `async` (SPEC §5.3), lowered — resolved in the parent's scope at each entry. */
   asyncRef?: Ref<InlineFamily>;

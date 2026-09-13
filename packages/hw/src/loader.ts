@@ -29,7 +29,9 @@ import {
   RESOLVER_REFS,
   type BindingDecl,
   type ChildDecl,
+  type EachKind,
   type ExecEnvironmentDecl,
+  type HostedEachKind,
   type LimitsDecl,
   type LoadedChild,
   type LoadedState,
@@ -40,10 +42,52 @@ import {
   type OutputSpread,
   type ParameterDecl,
   type SlotMeta,
+  SPAWN_DEFAULTS,
+  type SpawnFields,
   type StateDef,
   type TransitionDecl,
   type WorkflowBundle,
 } from "./format.js";
+
+/**
+ * The kind an authored `each` names (§6.3). `true` is `"inline"`; `false` is no fan-out at all and
+ * is refused rather than read as one, since a wire that says `each: false` was edited by someone who
+ * meant to take the flag off and left it lying.
+ */
+function eachKindOf(value: unknown, where: string, stateId: string): EachKind {
+  if (value === true || value === "inline") return "inline";
+  if (value === "task" || value === "split") return value;
+  throw new WorkflowLoadError(
+    `${where}: 'each' must be true, "inline", "task" or "split" (got ${JSON.stringify(value)}) — it says what an element becomes: an instance here, a run under this one, or a run beside it`,
+    stateId,
+  );
+}
+
+/**
+ * The element fields a hosted wire names — `id`, `title`, `requires`, `start` — checked here so a
+ * misspelt or misplaced one is refused at load. On an inline wire they describe nothing, since no
+ * run is made of an inline element, and are refused rather than ignored.
+ */
+function spawnFieldsOf(binding: { id?: unknown; title?: unknown; requires?: unknown; start?: unknown }, kind: EachKind, where: string, stateId: string): Partial<SpawnFields> {
+  const fields: Partial<SpawnFields> = {};
+  for (const name of ["id", "title", "requires"] as const) {
+    const value = binding[name];
+    if (value === undefined) continue;
+    if (typeof value !== "string" || value.length === 0) throw new WorkflowLoadError(`${where}: '${name}' must name an element property (got ${JSON.stringify(value)})`, stateId);
+    fields[name] = value;
+  }
+  if (binding.start !== undefined) {
+    if (binding.start !== "manual" && binding.start !== "when_ready") {
+      throw new WorkflowLoadError(`${where}: 'start' must be "manual" or "when_ready" (got ${JSON.stringify(binding.start)})`, stateId);
+    }
+    if (kind !== "split") throw new WorkflowLoadError(`${where}: 'start' is only meaningful on each: "split" — a task element is started by the run waiting on it`, stateId);
+    fields.start = binding.start;
+  }
+  if (kind === "inline" && Object.keys(fields).length > 0) {
+    throw new WorkflowLoadError(`${where}: 'id', 'title' and 'requires' describe an element a host makes a run of — they mean nothing on each: "inline"`, stateId);
+  }
+  return fields;
+}
 import { ExprError, parseExpression, referencesOf, selfPathOf, type Argument, type Expr } from "./expr.js";
 import { bindArguments, bindTransitionContext, EXPRESSION_REFS, lowerExpression, parametersFor, positionalNames, type LowerOptions } from "./lowerExpr.js";
 import { environmentIdentity, mergeOperationFields, resolutionEnvironment } from "./merge.js";
@@ -143,7 +187,7 @@ export function desugarBinding(
     // flag that arrives is one written somewhere nothing can fan out: an output, an operation
     // argument, a transition override. Refused rather than ignored, because a silently dropped `each`
     // would hand the child the whole array as one value and report success.
-    if (binding.each === true) {
+    if (binding.each !== undefined) {
       throw new WorkflowLoadError(`${where}: 'each' is only legal on a child mount's inputs (children.<key>.inputs.<name>)`, stateId);
     }
     return desugarExpression(binding.expr, where, stateId, lower);
@@ -1003,14 +1047,35 @@ export function desugarState(
       // The flag is a fact about the mount and is taken off the binding here, so the wire itself
       // lowers to the same producer edge any other wire does: the resolver never sees `each`.
       const each: string[] = [];
+      const eachExprs: Record<string, string> = {};
+      // What the elements become (§6.3) — one answer per mount. The first `each` wire sets it and
+      // every later one must agree: a batch is in one place.
+      let eachKind: EachKind | undefined;
+      let spawn: Partial<SpawnFields> = {};
       for (const [inputName, binding] of Object.entries(child.inputs ?? {})) {
         const where = `children.${key}.inputs.${inputName}`;
-        if (typeof binding === "object" && binding !== null && "expr" in binding && binding.each === true) {
+        if (typeof binding === "object" && binding !== null && "expr" in binding && binding.each !== undefined) {
+          const kind = eachKindOf(binding.each, where, id);
+          if (eachKind !== undefined && kind !== eachKind) {
+            throw new WorkflowLoadError(
+              `${where}: each: "${kind}" disagrees with the mount's other each wire (each: "${eachKind}") — a mount's elements are one batch, in one place`,
+              id,
+            );
+          }
+          eachKind = kind;
+          spawn = { ...spawn, ...spawnFieldsOf(binding, kind, where, id) };
           each.push(inputName);
+          eachExprs[inputName] = binding.expr;
           wired[inputName] = desugarBinding({ expr: binding.expr }, where, id, undefined, lower);
           continue;
         }
         wired[inputName] = desugarBinding(binding, where, id, undefined, lower);
+      }
+      const hosted = eachKind !== undefined && eachKind !== "inline";
+      // A split is on ONE list: the run it makes is "element i of that list", and an element of a
+      // product of two lists is a pair nothing downstream can name a run by.
+      if (eachKind === "split" && each.length > 1) {
+        throw new WorkflowLoadError(`children.${key}: each: "split" is on one list, and this mount fans out over ${each.length} (${each.join(", ")})`, id);
       }
       children[key] = {
         // A child that declares no `state` is the one its KEY names (REFERENCES.md §7.3), so the
@@ -1019,6 +1084,7 @@ export function desugarState(
         state: resolveChildRef(child.state ?? `./${key}`, id, key, refs),
         ...(child.inputs ? { inputs: wired } : {}),
         ...(each.length > 0 ? { each } : {}),
+        ...(hosted ? { eachKind: eachKind as HostedEachKind, eachExprs, spawn: { ...SPAWN_DEFAULTS, ...spawn } } : {}),
         // A literal flag stays one; a BOUND one (SPEC §5.3) is lowered in this state's scope, to be
         // resolved when the mount is entered — the moment the flag is read.
         ...(typeof child.async === "boolean" ? { async: child.async } : {}),
