@@ -175,6 +175,22 @@ export type EngineEvent =
       /** The value is the binding's `failureValue`, standing in for one it could not compute. */
       fallback?: boolean;
     }
+  /**
+   * A HOSTED fan-out's elements became runs of their own (§6.3) — the host's record of what it made,
+   * written under the mount BEFORE the runs exist, so that a split copy cut at the mount carries it
+   * too and every run in the batch holds the same list. `runs` is every element of the batch, the
+   * one this run keeps included (a split keeps one, a task mount keeps none), each with the id of
+   * the run it became; a reader that is one of those runs finds itself in the list by that id.
+   */
+  | {
+      type: "fanout.made";
+      instanceId: string;
+      stateId: string;
+      childKey: string;
+      occurrence: number;
+      kind: "task" | "split";
+      runs: Array<{ element: number; id?: string; runId: string; title: string }>;
+    }
   /** `index` counts every transition; `iteration` counts only the backward ones — the passes. */
   | { type: "transition.taken"; instanceId: string; stateId: string; to: string; index: number; iteration: number }
   | { type: "child.superseded"; instanceId: string; stateId: string; childKey: string }

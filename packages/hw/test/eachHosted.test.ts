@@ -156,7 +156,7 @@ describe("what the loader says about the three kinds", () => {
     const mount = loadBundle(fan("task", { title: "name" }), "root").states.root!.children!.component!;
     expect(mount.eachKind).toBe("task");
     expect(mount.eachExprs).toEqual({ component: ".inputs.components" });
-    expect(mount.spawn).toEqual({ id: "id", title: "name", requires: "requires", start: "manual" });
+    expect(mount.spawn).toEqual({ id: "id", title: "name", requires: "requires", start: "when_ready" });
   });
 
   it("refuses a value that is none of the three", () => {
@@ -209,7 +209,7 @@ describe("`each: \"task\"` — the elements go to the host, and the run waits fo
     expect(request.stateId).toBe("root");
     expect(request.occurrence).toBe(0);
     expect(request.async).toBe(false);
-    expect(request.spawn).toEqual({ id: "id", title: "name", requires: "requires", start: "manual" });
+    expect(request.spawn).toEqual({ id: "id", title: "name", requires: "requires", start: "when_ready" });
     expect(request.exprs).toEqual({ component: ".inputs.components" });
     expect(request.elements.map((e) => e.inputs)).toEqual(THREE.map((component) => ({ component })));
     expect(outputs).toEqual({ docs: ["made divider", "made badge", "made toggle"], last: "doc for " });
@@ -290,6 +290,103 @@ describe("`each: \"split\"` — the elements go to the host, and this run ends",
     const { outcome, calls } = await run(files, "root", { inputs: { components: THREE }, host: made });
     expect(outcome).toBe("success");
     expect(calls).toHaveLength(1);
+  });
+
+  it("over exactly one element is no split: the element runs here, the sequence continues, and no host is asked", async () => {
+    const { outcome, reason, calls, requests, outputs } = await run(fan("split"), "root", { inputs: { components: [THREE[1]!] }, host: made });
+    expect({ outcome, reason }).toEqual({ outcome: "success" });
+    expect(requests).toEqual([]);
+    // The one element ran here, then `after`: nothing was put beside this run, so this run went on.
+    expect(componentsOf(calls)).toEqual(["badge"]);
+    expect(calls).toHaveLength(2);
+    expect(outputs?.last).toBeDefined();
+    // And the mount reads as an ordinary mount, as it does on the far side of a split.
+    expect(outputs?.docs).toEqual("doc for badge");
+  });
+
+  it("over exactly one element is still no split when a stopped run is loaded: the recorded element continues here", async () => {
+    const { outcome, reason, calls, requests, outputs } = await run(fan("split"), "root", {
+      inputs: { components: [THREE[1]!] },
+      host: made,
+      loaded: {
+        id: "i-root",
+        stateId: "root",
+        inputs: { components: [THREE[1]!] },
+        live: true,
+        cursor: 0,
+        children: [{ id: "i-0", stateId: "root/component", childKey: "component", occurrence: 0, element: 0, inputs: { component: THREE[1]! }, live: true }],
+      },
+    });
+    expect({ outcome, reason }).toEqual({ outcome: "success" });
+    expect(requests).toEqual([]);
+    expect(componentsOf(calls)).toEqual(["badge"]);
+    expect(outputs?.docs).toEqual("doc for badge");
+  });
+
+  it("keeps the element the host answers \"continue\" with: it runs here as element 0, the run is split on the list, later mounts narrow, and the sequence goes on", async () => {
+    const files: Record<string, StateDef> = {
+      root: {
+        label: "Root",
+        inputs: { components: { schema: { type: "array", items: COMPONENT_SCHEMA } } },
+        outputs: {
+          first: { schema: { type: "string" }, binding: ".children.first.output.doc", optional: true },
+          second: { schema: { type: "string" }, binding: ".children.second.output.doc", optional: true },
+          last: { schema: { type: "string" }, binding: ".children.after.output.doc", optional: true },
+        },
+        children: {
+          first: { state: "root/component", inputs: { component: { expr: ".inputs.components", each: "split" } } },
+          second: { state: "root/component", inputs: { component: { expr: ".inputs.components", each: "split" } } },
+          after: { state: "root/after", inputs: { docs: ".children.second.output.doc" } },
+        },
+        sequence: ["first", "second", "after"],
+      },
+      "root/component": COMPONENT,
+      "root/after": AFTER,
+    };
+    const kept = async (): Promise<FanOutOutcome> => ({ outcome: "continue", index: 1 });
+    const { outcome, reason, calls, requests, outputs, events } = await run(files, "root", { inputs: { components: THREE }, host: kept });
+    expect({ outcome, reason }).toEqual({ outcome: "success" });
+    // Asked ONCE, at the first mount over the list. The second narrowed to the kept element on its own.
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.elements).toHaveLength(3);
+    expect(componentsOf(calls)).toEqual(["badge", "badge"]);
+    expect(calls).toHaveLength(3);
+    expect(outputs).toEqual({ first: "doc for badge", second: "doc for badge", last: "doc for " });
+    // Journaled as element 0 of a one-element batch — the shape a split copy's own row has.
+    const entered = events.filter((e) => e.type === "instance.entered" && e.childKey === "first");
+    expect(entered.map((e) => (e.type === "instance.entered" ? [e.element, e.inputs] : undefined))).toEqual([[0, { component: THREE[1] }]]);
+  });
+
+  it("books a \"continue\" answer as a failed child when the mount is a task mount, or when the host was asked about recorded rows", async () => {
+    const kept = async (): Promise<FanOutOutcome> => ({ outcome: "continue", index: 0 });
+    const task = await run(fan("task"), "root", { inputs: { components: THREE }, host: kept });
+    expect(task.outcome).toBe("error");
+    expect(task.reason).toMatch(/a "task" mount has nothing to keep/);
+    expect(task.calls).toEqual([]);
+    const element = (id: string, index: number, name: string): LoadedInstance => ({
+      id,
+      stateId: "root/component",
+      childKey: "component",
+      occurrence: 0,
+      element: index,
+      inputs: { component: { name } },
+      live: index === 2,
+    });
+    const rows = await run(fan("task"), "root", {
+      inputs: { components: THREE },
+      host: kept,
+      loaded: { id: "i-root", stateId: "root", inputs: { components: THREE }, live: true, cursor: 0, children: [element("i-0", 0, "divider"), element("i-1", 1, "badge"), element("i-2", 2, "toggle")] },
+    });
+    expect(rows.outcome).toBe("error");
+    expect(rows.reason).toMatch(/nothing to keep|continued from its rows/);
+  });
+
+  it("over no elements is still a split: the host is asked, makes nothing, and this run ends", async () => {
+    const { outcome, calls, requests, outputs } = await run(fan("split"), "root", { inputs: { components: [] }, host: made });
+    expect(outcome).toBe("success");
+    expect(requests).toHaveLength(1);
+    expect(calls).toEqual([]);
+    expect(outputs?.last).toBeUndefined();
   });
 
   it("on the far side of the split, narrows the list to this run's element and runs it inline", async () => {

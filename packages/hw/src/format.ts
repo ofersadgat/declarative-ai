@@ -191,7 +191,10 @@ export type BindingDecl =
        * which the host makes and this run waits for, reading the outputs back gathered exactly as
        * inline elements are; `"split"` — a run of its own BESIDE this one, carrying this run's history
        * up to the mount and continuing the sequence from it, after which this run ends. The host
-       * decides what "a run of its own" is; the engine only hands the elements over.
+       * decides what "a run of its own" is; the engine only hands the elements over. A split host
+       * may KEEP one element for this run: the run is then split on the list at that element and
+       * continues with it inline, the rest being runs of their own. A split over exactly one element
+       * is no split at all: the element runs here and the sequence continues, no host asked.
        */
       each?: EachKind | boolean;
       /**
@@ -208,8 +211,9 @@ export type BindingDecl =
       requires?: string;
       /**
        * For a `"split"` wire: whether the host starts the runs it makes as soon as their dependencies
-       * are done (`"when_ready"`), or leaves them standing for a person (`"manual"`, the default).
-       * A `"task"` element is always started by the host, since this run is waiting on it.
+       * are done (`"when_ready"`, the default — a run that requires nothing is started the moment it
+       * is made), or leaves them standing for a person (`"manual"`). A `"task"` element is always
+       * started by the host, since this run is waiting on it.
        */
       start?: "manual" | "when_ready";
     };
@@ -236,7 +240,7 @@ export interface SpawnFields {
 }
 
 /** The defaults a hosted fan-out's wire fills in when it names none. */
-export const SPAWN_DEFAULTS: Readonly<SpawnFields> = { id: "id", title: "title", requires: "requires", start: "manual" };
+export const SPAWN_DEFAULTS: Readonly<SpawnFields> = { id: "id", title: "title", requires: "requires", start: "when_ready" };
 
 /** Every key that tags an authored binding form — the base `Ref` cases plus the sugar. */
 const BINDING_TAGS: readonly string[] = ["text", "json", "result", "refs", "op", "expr"];
