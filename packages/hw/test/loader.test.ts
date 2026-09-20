@@ -27,7 +27,7 @@ describe("desugaring (API.md, \"Binding desugaring\")", () => {
     expect((goalsWire as { op: { input: Record<string, { binding?: unknown }> } }).op.input.value!.binding).toEqual({ op: "goals" });
     // A literal stays a literal.
     expect(plan.children!["critique"]!.inputs!["severity_threshold"]).toEqual({ text: "significant" });
-    // `{ expr }` → a TREE of operator producer edges (EXPRESSIONS.md §1), not a source string handed
+    // `{ $expr: expr }` → a TREE of operator producer edges (EXPRESSIONS.md §1), not a source string handed
     // to an interpreter. The root here is the outermost operator, and a child read sits at a leaf as
     // a `context.get` chain — which is what lets the fan-out planner and the validator walk an
     // expression with the same code they walk every other binding with.
@@ -200,7 +200,7 @@ describe("validateBundle failure modes", () => {
     const guards = files[PLAN_ID]!.children!["critique"]!.transitions!;
     guards[0]!.when = ".children.critique.output.outcome ===";
     guards[2]!.when = ".children.nonchild.outcome === 'success'";
-    files[PLAN_ID]!.outputs!["outcome"]!.binding = { expr: ".bogusroot.x" };
+    files[PLAN_ID]!.outputs!["outcome"]!.binding = { $expr: ".bogusroot.x" };
     const report = validateBundle(loadBundle(files, PLAN_ID));
     const messages = report.errors.map((e) => e.message).join("\n");
     expect(messages).toMatch(/does not parse/);
@@ -217,7 +217,7 @@ describe("validateBundle failure modes", () => {
    */
   it("fails at LOAD for a bare name that resolves nowhere, naming the missing dot", () => {
     const files = specPlanningFiles();
-    files[PLAN_ID]!.outputs!["outcome"]!.binding = { expr: "children.critique.outputs.outcome" };
+    files[PLAN_ID]!.outputs!["outcome"]!.binding = { $expr: "children.critique.outputs.outcome" };
     expect(() => loadBundle(files, PLAN_ID)).toThrow(/did you mean '\.children\.critique\.outputs\.outcome'/);
   });
 
@@ -324,7 +324,7 @@ describe("a resolved definition is plain JSON", () => {
       inputs: { issue: { schema: { type: "string" }, default: "significant", optional: true, description: "d" } },
       outputs: {
         "ctx_*": { binding: ".children.ctx.output" },
-        verdict: { binding: { expr: ".children.ctx.output.n > 1" } },
+        verdict: { binding: { $expr: ".children.ctx.output.n > 1" } },
         whole: { binding: ".children.ctx.output" },
       },
       children: { ctx: { state: "root/ctx", inputs: { seed: ".inputs.issue" } } },

@@ -129,7 +129,7 @@ describe("ref TREES — primitives, and what a tree cannot contain", () => {
   // The loader lowers sugar at a parameter's `binding` and does not walk into `refs`, so sugar written
   // inside a tree arrives here unlowered.
   it("refuses unlowered binding sugar nested in a tree, naming the keyword", () => {
-    expect(error({ refs: { a: { expr: ".inputs.n" } } })).toMatch(/'expr' binding sugar cannot be nested/);
+    expect(error({ refs: { a: { $expr: ".inputs.n" } } })).toMatch(/'\$expr' binding sugar cannot be nested/);
   });
 
   // A key that merely SHARES a sugar keyword's name is still an ordinary object property — the same
@@ -140,7 +140,7 @@ describe("ref TREES — primitives, and what a tree cannot contain", () => {
 
   it("RESOLVES a top-level producer edge — only nesting one in a tree is refused", () => {
     // The edge resolves; it does not refuse. A child that has not run is `undefined` (SPEC §3.4),
-    // which is the same answer `{ expr: ".children.c.output" }` gives for the same path.
+    // which is the same answer `{ $expr: ".children.c.output" }` gives for the same path.
     const r = resolveRef({ op: "c" }, scope);
     expect(isResolveError(r)).toBe(false);
     expect(isResolvedValue(r) && r.value).toBeUndefined();

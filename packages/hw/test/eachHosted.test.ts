@@ -109,7 +109,7 @@ function fan(each: unknown, extra: Record<string, unknown> = {}, mount: Record<s
         last: { schema: { type: "string" }, binding: ".children.after.output.doc", optional: true },
       },
       children: {
-        component: { state: "root/component", inputs: { component: { expr: ".inputs.components", each, ...extra } }, ...mount },
+        component: { state: "root/component", inputs: { component: { $expr: ".inputs.components", each, ...extra } }, ...mount },
         after: { state: "root/after", inputs: { docs: ".children.component.output.doc" } },
       },
       sequence: ["component", "after"],
@@ -174,16 +174,16 @@ describe("what the loader says about the three kinds", () => {
   it("refuses a mount whose each wires name different kinds, and a split over two lists", () => {
     const files = fan("task");
     const mount = files.root!.children!.component as { inputs: Record<string, unknown> };
-    mount.inputs.other = { expr: ".inputs.components", each: "split" };
+    mount.inputs.other = { $expr: ".inputs.components", each: "split" };
     expect(() => loadBundle(files, "root")).toThrow(/disagrees with the mount's other each wire/);
     const two = fan("split");
-    (two.root!.children!.component as { inputs: Record<string, unknown> }).inputs.other = { expr: ".inputs.components", each: "split" };
+    (two.root!.children!.component as { inputs: Record<string, unknown> }).inputs.other = { $expr: ".inputs.components", each: "split" };
     expect(() => loadBundle(two, "root")).toThrow(/each: "split" is on one list/);
   });
 
   it("still refuses `each` of any spelling off a mount's inputs", () => {
     const files = fan("inline");
-    (files.root as { outputs: Record<string, unknown> }).outputs.stray = { schema: { type: "array" }, binding: { expr: ".inputs.components", each: "task" } };
+    (files.root as { outputs: Record<string, unknown> }).outputs.stray = { schema: { type: "array" }, binding: { $expr: ".inputs.components", each: "task" } };
     expect(() => loadBundle(files, "root")).toThrow(/'each' is only legal on a child mount's inputs/);
   });
 });
@@ -334,8 +334,8 @@ describe("`each: \"split\"` — the elements go to the host, and this run ends",
           last: { schema: { type: "string" }, binding: ".children.after.output.doc", optional: true },
         },
         children: {
-          first: { state: "root/component", inputs: { component: { expr: ".inputs.components", each: "split" } } },
-          second: { state: "root/component", inputs: { component: { expr: ".inputs.components", each: "split" } } },
+          first: { state: "root/component", inputs: { component: { $expr: ".inputs.components", each: "split" } } },
+          second: { state: "root/component", inputs: { component: { $expr: ".inputs.components", each: "split" } } },
           after: { state: "root/after", inputs: { docs: ".children.second.output.doc" } },
         },
         sequence: ["first", "second", "after"],
@@ -426,8 +426,8 @@ describe("`each: \"split\"` — the elements go to the host, and this run ends",
           second: { schema: { type: "string" }, binding: ".children.second.output.doc", optional: true },
         },
         children: {
-          first: { state: "root/component", inputs: { component: { expr: ".inputs.components", each: "split" } } },
-          second: { state: "root/component", inputs: { component: { expr: ".inputs.components", each: "split" } } },
+          first: { state: "root/component", inputs: { component: { $expr: ".inputs.components", each: "split" } } },
+          second: { state: "root/component", inputs: { component: { $expr: ".inputs.components", each: "split" } } },
         },
         sequence: ["first", "second"],
       },

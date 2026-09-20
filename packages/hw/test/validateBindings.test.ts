@@ -31,13 +31,13 @@ describe("`.length` on arrays and strings (§7.2)", () => {
         note: { schema: { type: "string" } },
         config: { schema: { type: "object", properties: { a: { type: "string" } } } },
       },
-      outputs: { size: { schema: declared, binding: { expr: leaf } } },
+      outputs: { size: { schema: declared, binding: { $expr: leaf } } },
       operation: { kind: "prompt", model: "m", prompt: "go" },
       transitions: [{ to: "terminate.success", when: guard }],
     } as StateDef,
   });
 
-  it("infers an integer for an array's length — in a guard AND in an `{ expr }` leaf", () => {
+  it("infers an integer for an array's length — in a guard AND in an `{ $expr: expr }` leaf", () => {
     expect(messages(files(".inputs.items.length > 0", ".inputs.items.length"), "root")).toBe("");
   });
 
@@ -128,7 +128,7 @@ describe("what a producer edge may name (§7.4)", () => {
   it("still accepts the ordinary literal and scope forms", () => {
     expect(messages(withBinding({ text: "literal" }), "root")).toBe("");
     expect(messages(withBinding(".inputs.seed"), "root")).toBe("");
-    expect(messages(withBinding({ expr: ".inputs.seed" }), "root")).toBe("");
+    expect(messages(withBinding({ $expr: ".inputs.seed" }), "root")).toBe("");
   });
 });
 

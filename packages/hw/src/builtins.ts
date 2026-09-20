@@ -101,6 +101,11 @@ function safeKey(v: unknown, seen: Set<object> = new Set(), depth = 0): string {
 
 const same = (a: unknown, b: unknown): boolean => safeKey(a) === safeKey(b);
 
+/** The smallest or largest of a list, `undefined` for an empty one. */
+function extreme(values: readonly unknown[], pick: (...ns: number[]) => number): number | undefined {
+  return values.length === 0 ? undefined : values.reduce<number>((best, v) => pick(best, num(v)), num(values[0]));
+}
+
 function define(params: readonly string[], fn: (...values: unknown[]) => unknown): Builtin {
   return { params, fn: (args) => fn(...params.map((p) => args[p])) };
 }
@@ -114,8 +119,11 @@ export const BUILTINS: Readonly<Record<string, Builtin>> = {
   mul: define(["a", "b"], (a, b) => num(a) * num(b)),
   div: define(["a", "b"], (a, b) => num(a) / num(b)),
   mod: define(["a", "b"], (a, b) => num(a) % num(b)),
-  min: define(["a", "b"], (a, b) => Math.min(num(a), num(b))),
-  max: define(["a", "b"], (a, b) => Math.max(num(a), num(b))),
+  // Two numbers, or ONE array — the largest of `xs` is what `xs.indexOf(max)` asks for (NAMES.md §8),
+  // and `max(xs)` had no answer but NaN. An empty array has no largest element, which is `undefined`
+  // here as absence is everywhere else, rather than the `-Infinity` no journal can hold.
+  min: define(["a", "b"], (a, b) => (Array.isArray(a) && b === undefined ? extreme(a, Math.min) : Math.min(num(a), num(b)))),
+  max: define(["a", "b"], (a, b) => (Array.isArray(a) && b === undefined ? extreme(a, Math.max) : Math.max(num(a), num(b)))),
   abs: define(["a"], (a) => Math.abs(num(a))),
   round: define(["a"], (a) => Math.round(num(a))),
   floor: define(["a"], (a) => Math.floor(num(a))),
@@ -239,6 +247,13 @@ export const BUILTINS: Readonly<Record<string, Builtin>> = {
   replace: define(["value", "find", "with"], (v, f, w) => str(v).split(str(f)).join(str(w))),
   startsWith: define(["value", "prefix"], (v, p) => str(v).startsWith(str(p))),
   endsWith: define(["value", "suffix"], (v, sfx) => str(v).endsWith(str(sfx))),
+  /**
+   * WHERE an item is — the first element equal to it, `-1` when none is. Equality is `contains`'s, so
+   * an object is found by value. Written `indexOf(xs, max)` it means `indexOf(xs, max(xs))`: naming an
+   * operation in the item position asks where ITS answer over the list sits, which is what makes
+   * "the one with the most remaining" a single expression (see `applySugar`).
+   */
+  indexOf: define(["value", "item"], (v, item) => arr(v).findIndex((x) => same(x, item))),
   /** Substring for a string, membership for an array — what an author means by "contains". */
   contains: define(["value", "item"], (v, item) => (Array.isArray(v) ? v.some((x) => same(x, item)) : str(v).includes(str(item)))),
 

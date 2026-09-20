@@ -91,7 +91,7 @@ describe("a transition wires the child it enters", () => {
     // over `b`'s note, and both mean the `b` that just ran: the wiring resolves before the pass
     // opens and before the reset, so the plain spelling is the right one and `[-2]` would reach
     // past the thing the rule is about.
-    const { engine, seen } = bundleOf(files(undefined, { why: { expr: ".children.b.output.note" } }));
+    const { engine, seen } = bundleOf(files(undefined, { why: { $expr: ".children.b.output.note" } }));
     expect((await engine.run({ inputs: {} })).outcome).toBe("success");
     expect(seen).toEqual(["first time", "sayB spoke"]);
   });
@@ -100,7 +100,7 @@ describe("a transition wires the child it enters", () => {
     // What this buys beyond tidiness: at the moment a rule is evaluated the child it is about to
     // re-enter has not been cleared, so its last output is readable — and accumulating across
     // passes needs no history indexing at all.
-    const { engine, seen } = bundleOf(files(undefined, { why: { expr: ".children.work.output.n" } }));
+    const { engine, seen } = bundleOf(files(undefined, { why: { $expr: ".children.work.output.n" } }));
     expect((await engine.run({ inputs: {} })).outcome).toBe("success");
     expect(seen).toEqual(["first time", "1"]);
   });
@@ -190,7 +190,7 @@ describe("accumulating across passes needs no history at all", () => {
                     when: ".run.iteration < .limits.max_iterations",
                     // BOTH sides are the current pass: `judge` just ran, and `collect` has not been
                     // cleared yet. One expression, no history.
-                    inputs: { all: { expr: "concat(.children.collect.output.all, .children.judge.output.found)" } },
+                    inputs: { all: { $expr: "concat(.children.collect.output.all, .children.judge.output.found)" } },
                   },
                 ],
               },

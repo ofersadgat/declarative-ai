@@ -75,6 +75,11 @@ export interface ResolutionScope {
    * through the same PENDING join.
    */
   operationResult?(op: Operation<InlineFamily>): Resolved | undefined;
+  /**
+   * What a SCOPED NAME reads as, for this instance (NAMES.md §3): `scope` is the state that scopes
+   * it, settled at load, and the instance decides which enclosing instance of that state is meant.
+   */
+  scopedName?(name: string, scope: string): Resolved;
 }
 
 /**
@@ -175,7 +180,7 @@ function isRefLeaf(tree: TreeNode): boolean {
  */
 const NON_TREE_FORMS: Readonly<Record<string, readonly string[]>> = {
   op: ["parameters"],
-  expr: [],
+  $expr: [],
 };
 
 /**
@@ -385,6 +390,12 @@ function runResolver(op: Operation<InlineFamily> & { kind: "function" }, scope: 
       // A name the state does not DECLARE still refuses. That is the case this was protecting — a
       // typo reading as `undefined` — and it is untouched, because the author never opted into it.
       return scope.optionalInput(name) ? { value: undefined as unknown as JsonValue } : { error: `input '${name}' is not set` };
+    }
+    case RESOLVER_REFS.name: {
+      const name = text("name");
+      const at = text("in");
+      if (name === undefined || at === undefined) return { error: "name producer is missing name/in" };
+      return scope.scopedName?.(name, at) ?? { error: `the name '${name}' cannot be read here — this scope resolves no names` };
     }
     case RESOLVER_REFS.artifact: {
       const name = text("name");

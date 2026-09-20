@@ -86,7 +86,7 @@ const applier = (signature: unknown, expr = ".inputs.fn(.inputs.text)") => ({
     fn: { kind: "function", schema: signature },
     text: { kind: "text", schema: { type: "string" } },
   },
-  outputs: { loud: { schema: { type: "string" }, binding: { expr } } },
+  outputs: { loud: { schema: { type: "string" }, binding: { $expr: expr } } },
   operation: { kind: "function", function: "noop" },
 });
 
@@ -107,10 +107,10 @@ describe("a function-kind slot carries a signature", () => {
       children: { child: { state: "plan/child", inputs: { fn, text: ".inputs.issue" } } },
       outputs: { loud: { schema: { type: "string" }, binding: ".children.child.output.loud" } },
     });
-    const good = validateBundle(bundleFor({ "plan.json": parent({ expr: "shout" }), "plan/child.json": applier(STRING_TO_STRING) }));
+    const good = validateBundle(bundleFor({ "plan.json": parent({ $expr: "shout" }), "plan/child.json": applier(STRING_TO_STRING) }));
     expect(good.errors).toEqual([]);
     // `count` takes an integer where the slot promises to pass a string: contravariance refuses it.
-    const wrong = validateBundle(bundleFor({ "plan.json": parent({ expr: "count" }), "plan/child.json": applier(STRING_TO_STRING) }));
+    const wrong = validateBundle(bundleFor({ "plan.json": parent({ $expr: "count" }), "plan/child.json": applier(STRING_TO_STRING) }));
     expect(wrong.errors.map((e) => e.message).join("\n")).toMatch(/passes 'text', which the producer does not accept/);
     // Data where a function belongs.
     const data = validateBundle(bundleFor({ "plan.json": parent({ text: "shout" }), "plan/child.json": applier(STRING_TO_STRING) }));
@@ -144,7 +144,7 @@ describe("a function VALUE flows through a slot and is applied", () => {
     const bundle = bundleFor({
       "plan.json": {
         inputs: { issue: { kind: "text", schema: { type: "string" } } },
-        children: { child: { state: "plan/child", inputs: { fn: { expr: "shout" }, text: ".inputs.issue" } } },
+        children: { child: { state: "plan/child", inputs: { fn: { $expr: "shout" }, text: ".inputs.issue" } } },
         outputs: { loud: { schema: { type: "string" }, binding: ".children.child.output.loud" } },
       },
       "plan/child.json": applier(STRING_TO_STRING),
@@ -163,7 +163,7 @@ describe("a function VALUE flows through a slot and is applied", () => {
     const spread = bundleFor({
       "plan.json": {
         inputs: { issue: { kind: "text", schema: { type: "string" } } },
-        children: { child: { state: "plan/child", inputs: { fn: { expr: "shout" }, text: ".inputs.issue" } } },
+        children: { child: { state: "plan/child", inputs: { fn: { $expr: "shout" }, text: ".inputs.issue" } } },
         outputs: { loud: { schema: { type: "string" }, binding: ".children.child.output.loud" } },
       },
       "plan/child.json": applier(STRING_TO_STRING, ".inputs.fn(...{ text: .inputs.text })"),

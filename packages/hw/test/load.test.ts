@@ -260,7 +260,7 @@ describe("a loaded run", () => {
 describe("what a loaded operation reports", () => {
   it("carries the conversation position the recorded call ended at", async () => {
     // `operation.output.session` has to read on a loaded state as it did on the original: a later
-    // state binding `{"expr": "...operation.output.session"}` is binding to a position, and a resume
+    // state binding `{"$expr": "...operation.output.session"}` is binding to a position, and a resume
     // that dropped it would resolve that expression to nothing.
     const files: Record<string, StateDef> = {
       root: {

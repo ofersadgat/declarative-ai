@@ -426,7 +426,7 @@ binding      Where the value comes from (§4.2). Absent = a FREE slot, filled by
              caller: the parent's wiring for an input, the operation for an output.
 index        Positional sort key for bare/tuple ingestion. Wiring, not type.
 default      Value used when nothing is wired in. Also the explicit opt-out from the
-             reachability rule (§6.2). A value (§5.3), so `{ "expr": … }` computes it — at
+             reachability rule (§6.2). A value (§5.3), so `{ "$expr": … }` computes it — at
              entry for an input, in the state's own scope, so it may read the inputs that
              WERE provided; at termination for an output. A literal object here is the
              value it always was: only the `expr` and wrapped spellings are read as bindings.
@@ -541,7 +541,7 @@ cases.
 | `".children.context.outputs.plan_doc"` | One named output of the child. | the same, projecting `plan_doc` |
 | `".children.context.outputs"` | The child's whole outputs object, as one value. | `{ "op": "context" }` |
 | `".inputs.issue"` | This state's declared input, by name. | a `scope.get` producer |
-| `{ "expr": ".outputs.weaknesses" }` | A small computation in the expression DSL (§6). | an `expr.eval` producer whose output schema is the inferred type |
+| `{ "$expr": ".outputs.weaknesses" }` | A small computation in the expression DSL (§6). | an `expr.eval` producer whose output schema is the inferred type |
 | `".artifacts.design_doc"` | A session-owned artifact, by name. | an `artifact.get` producer |
 | `"messages(<session ref>)"` | A conversation, by ref — a session is a position, not a name. | a `conversation.get` producer |
 
@@ -563,7 +563,7 @@ The same binding forms wire a child's inputs (`children.<key>.inputs`), fill an 
 input slots (`operation.input`), derive a state's outputs (§4.3) — and, since every value in a state
 file is a binding (§5.3), compute its `title`, its `config.model`, or its `function`.
 
-**An `{ "expr" }` binding may carry two more keys.** Both are about how the expression is EVALUATED
+**An `{ "$expr" }` binding may carry two more keys.** Both are about how the expression is EVALUATED
 rather than what it is worth:
 
 ```text
@@ -585,7 +585,7 @@ failureValue  The value this binding takes if evaluation FAILS — a callee that
 {
   "title": {
     "binding": {
-      "expr": "title(.inputs.issue).title",
+      "$expr": "title(.inputs.issue).title",
       "environment": { "session": null },
       "failureValue": "Untitled"
     }
@@ -610,7 +610,7 @@ terminates.
     },
     "outcome": {
       "schema": { "type": "string", "enum": ["complete", "blocked"] },
-      "binding": { "expr": ".children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'" }
+      "binding": { "$expr": ".children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'" }
     }
   }
 }
@@ -829,7 +829,7 @@ limits
 ### 5.3 Every Value Is a Binding
 
 A state file is a document of VALUES the engine reads, and any of them may be computed. Every value
-position accepts the binding forms of §4.2 — a literal, a reference, an `{ "expr" }` — with five
+position accepts the binding forms of §4.2 — a literal, a reference, an `{ "$expr" }` — with five
 exceptions, each of which is STRUCTURE the checker resolves values against rather than a value:
 
 ```text
@@ -850,10 +850,10 @@ resolved in the PARENT's scope when the mount is entered, which is the moment th
 
 **Two spellings, decided by the position.** Where the format knows the field's type — a string, a
 number, a session, a callee — the binding is written BARE in the value's place:
-`"label": { "expr": "…" }`, `"function": { "expr": ".inputs.reviewer" }`. Inside `config` and
+`"label": { "$expr": "…" }`, `"function": { "$expr": ".inputs.reviewer" }`. Inside `config` and
 `args`, whose values are opaque JSON handed to an executor, a bare binding could not be told from a
 literal object that happens to have an `expr` key, so there the binding is WRAPPED:
-`"model": { "binding": { "expr": ".inputs.model" } }`. The wrapper is the slot form outputs and
+`"model": { "$binding": { "$expr": ".inputs.model" } }`. The wrapper is the slot form outputs and
 `title` already use, and a `binding` key is one no executor's configuration legitimately contains,
 so a wrapped object is never an accident. A slot-shaped field — an output, `title` — carries its
 binding under `binding` as it always has.
@@ -862,7 +862,7 @@ binding under `binding` as it always has.
 type: the format's own for a built-in field (`title` is a string, `limits.max_iterations` a number,
 `function` a callable), the slot's `schema` for a slot. `failureValue` is checked the same way. A
 callable position is where signature-carrying types (§4.1) earn their place —
-`"function": { "expr": ".inputs.reviewer" }` types the operation's output off the slot's declared
+`"function": { "$expr": ".inputs.reviewer" }` types the operation's output off the slot's declared
 signature, exactly as a name would off the declaration it resolved to.
 
 **Evaluation is once, at entry, in dependency order.** When an instance is created its inputs bind
@@ -911,7 +911,7 @@ References to a child that has started but not yet finished are pending, not
 evaluation round, and input wiring using one waits for it to resolve
 (Section 10.4).
 
-The same language is used for transition conditions (`when`), for `{ "expr": … }` binding leaves
+The same language is used for transition conditions (`when`), for `{ "$expr": … }` binding leaves
 (§4.2), and for `{{…}}` interpolation in prompt templates. It is no longer the wiring default:
 ordinary data references are structured bindings, not expression strings, so the DSL survives only
 where a computation is genuinely needed.
@@ -939,6 +939,18 @@ The expression language should support:
   values are full expressions. The aggregate literal, standing beside the scalar ones — its use is
   an OPTIONS BAG at a call site, where naming what an argument means beats counting positions, and
   where a call whose options grow renumbers nobody.
+
+**Receiver calls.** `recv.name(args)` is sugar for `name(recv, args)` and lowers to the same tree,
+as `xs[i]` already lowers to `at(xs, i)` — so `.any.map('remaining').indexOf(max)` is
+`indexOf(map(.any, 'remaining'), max)`. It applies when `recv` is a RUNTIME value — a leading-dot
+read, or a call's result — and `name` is an operation. A bare `confidence.score(…)` stays a module
+symbol (a bare dotted path is one name), and `.inputs.f(x)` stays a call of a callable VALUE when the
+declared type of `.inputs` has a property `f`.
+
+Two builtin spellings make that read as written: `map(xs, 'key')` with a STRING plucks the property
+off each element (it is `pluck(xs, 'key')`), and `indexOf(xs, v)` answers where `v` is (`-1` for
+nowhere) — with `indexOf(xs, op)` meaning `indexOf(xs, op(xs))`, so `indexOf(xs, max)` is where the
+largest sits. `max`/`min` accordingly take two numbers or ONE list.
 
 Supported operators:
 
@@ -991,7 +1003,7 @@ preserved for expressions; for modules, provenance replaces it.
 Expressions may read from a controlled context. The namespaces split by **role**.
 
 The **ref vocabulary** — the data namespaces authored bindings address. They are readable from
-`{ "expr": … }` leaves and from guards too, since an expr leaf is itself a producer over the same
+`{ "$expr": … }` leaves and from guards too, since an expr leaf is itself a producer over the same
 data:
 
 ```text
@@ -1065,7 +1077,7 @@ the consumer names that input as its session — so the choice is made at the po
 }
 ```
 
-Each consumer declares `"session": { "expr": ".inputs.thread" }`. `refine` CONTINUES the planning
+Each consumer declares `"session": { "$expr": ".inputs.thread" }`. `refine` CONTINUES the planning
 thread — `.end` resolves at the head, so it appends after `plan` and would append after anything else
 that had spoken since. The two `explore_*` children wire the POSITION instead, and `refine` has since
 claimed it: each branches from the point immediately after `plan`, so each sees `plan`'s turn and
@@ -1086,7 +1098,7 @@ human can scrub a transcript in a UI, but the expression language exposes operat
 `{}` before the operation has run, so a guard reading it early sees absence rather than an error.
 
 The **guard-only scalars** — control-flow state, never addressable by a reference binding,
-reachable only from `when` guards and `{ "expr": … }` leaves:
+reachable only from `when` guards and `{ "$expr": … }` leaves:
 
 ```text
 run.iteration
@@ -1143,7 +1155,7 @@ this consumer?". The producer's schema is read from what the binding lowers to:
 - `{ "child", "output" }` — the named property's schema; selecting an output the child does not
   declare is an error;
 - `{ "input" }` — the declared slot's own schema;
-- `{ "expr" }` — the inferred result type (below);
+- `{ "$expr" }` — the inferred result type (below);
 - `{ "artifact" }` / `{ "conversation" }` — session-owned resources whose contents are known only
   at run time, so the check defers to run-time validation.
 
@@ -1164,13 +1176,13 @@ result is not statically typed, and stays unconstrained — genuinely unknown ra
 undeclared. Inference is cut off at a state already being inferred, so a child that mounts an
 ancestor terminates rather than looping.
 
-**Expression typing.** Every `when` guard and every `{ "expr": … }` leaf is type-inferred against
+**Expression typing.** Every `when` guard and every `{ "$expr": … }` leaf is type-inferred against
 the namespaces of §6.1: member access projects property schemas, comparison and `!` yield boolean,
 `&&`/`||` and `?:` yield the join of their branches, and a literal infers to its exact value — so
 `cond ? 'complete' : 'blocked'` infers as the enum `["complete", "blocked"]` and satisfies an
 enum-constrained slot instead of widening to `string`. A guard **must infer to boolean**: this is
 strict, with no truthiness coercion, so a `when` that infers to a number is a validation error
-rather than a falsy surprise at run time. A `schema` declared on an `{ "expr" }` leaf is an
+rather than a falsy surprise at run time. A `schema` declared on an `{ "$expr" }` leaf is an
 *assertion*, checked against the inferred type; it is not the only source of typing.
 
 **A call is checked against its callee's slots.** The callee declares them — a document's `input`, a
@@ -1203,7 +1215,7 @@ naming the slot, never silently.
 A consumer with no `input` asks nothing of the producer's parameters, and one with no `output`
 accepts any return. An uncalled reference infers to the signature it resolved to, so passing
 `classify` where a `function` slot expects a text-to-label callable is checked at load — and so is
-`"function": { "expr": ".inputs.reviewer" }` (§7.1), where the consumer is the operation itself.
+`"function": { "$expr": ".inputs.reviewer" }` (§7.1), where the consumer is the operation itself.
 
 A callee that declares no slots constrains nothing, which is what an implementation registered
 without a signature has always meant.
@@ -1313,7 +1325,7 @@ A **prompt operation** is one structured model call:
 
 ```text
 kind        "prompt" — optional; a `prompt` already says so.
-prompt      { "template": "…" }, { "skill": "<name>" } or { "expr": "…" } — exactly one. All
+prompt      { "template": "…" }, { "skill": "<name>" } or { "$expr": "…" } — exactly one. All
             render with {{.inputs.*}} interpolation; a skill resolves through registry.skills, and
             an expr yields a prompt-kind value (§4.1) — a skill passed by value.
 system      Optional system prompt.
@@ -1331,7 +1343,7 @@ A **function operation** invokes a registered function:
 kind        "function" — optional; a `function` already says so.
 function    A callee name, resolved along the search `path` like any other (§7.5) — or that name
             APPLIED: `"function": "show_prompt(.inputs.doc, ...{ mode: 'plan' })"` — or a binding
-            whose value is a function-kind callable (§4.1): `{ "expr": ".inputs.reviewer" }`.
+            whose value is a function-kind callable (§4.1): `{ "$expr": ".inputs.reviewer" }`.
 args        The authored arguments, bound to the call's input slots BY NAME. Shorthand for `input`
             where the value is a constant and there is nothing to say about its type; a slot the
             author declared in `input` wins. They used to arrive as one blob in a slot called
@@ -1360,8 +1372,8 @@ Three consequences follow from it being the same call:
   things about one slot in one block is an error, because neither half is the more specific
   statement and so neither can win.
 
-**`function` and `prompt` may be bound.** `"function": { "expr": ".inputs.reviewer" }` runs
-whatever callable the input carries; `"prompt": { "expr": ".inputs.instructions" }` renders a
+**`function` and `prompt` may be bound.** `"function": { "$expr": ".inputs.reviewer" }` runs
+whatever callable the input carries; `"prompt": { "$expr": ".inputs.instructions" }` renders a
 prompt-kind value — a skill passed by value — under this state's `config` and `system`, so `expr`
 stands beside `template` and `skill` as the third of the exactly-one forms. Each is a value position
 like any other (§5.3), typed by the signature the expression infers to (§4.1): the operation's output
@@ -1428,14 +1440,18 @@ alongside the rest, because each of these is a per-CALL decision:
 ```text
 session       The conversation this call joins (DESIGN.md §1.6, and §7.1b below for the
               full grammar). A NAME shares an append-only stream by declaration, and is
-              qualified by the SCOPE it was written in; {"join": …} takes an ancestor's
-              declaration without naming it; {"expr": …} names an exact position computed
+              qualified by the SCOPE it was written in; {"$join": …} takes an ancestor's
+              declaration without naming it; {"$expr": …} names an exact position computed
               at run time, normally from `operation.output.session` — or its `.end`, the
               same conversation with no position, which continues the thread rather than
               branching from a point (§6.1); `null` starts a fresh one, and absent means
-              this state gets its own. The DECLARED (name, scope) pair separately keys the
-              state's workspace and permissions, which are inherited when nothing is
-              declared. `fork` is a property OF the session, not a field beside it.
+              this state gets its own. `$fork` is a property OF the session, not a field
+              beside it. A session names a conversation and nothing else — see `workspace`.
+workspace     The RESOURCE BUNDLE this call runs in (§7.1c): the directory its tools act
+              within, the permission ledger, the scope a "session" approval covers. A scoped
+              name like `session`'s, or `null` for a fresh private one; absent inherits. Declared
+              apart from the session, so many sessions may share one workspace and one
+              session may cross several.
 tools         Logical names of tools the operation may call mid-loop, resolved through
               registry.tools. A composed prompt operation runs them in a bounded loop; a
               delegated agent is handed the allow-list.
@@ -1458,26 +1474,28 @@ name**, never at the places that use it. That is the property worth protecting: 
 a name means from one place, without visiting a single use site.
 
 ```text
-"review"                              { name: "review", in: <the state that wrote it> }
-{ "name": "review", "in": "parent" }  the name lives in the enclosing composite
-{ "name": "review", "in": "batch" }   ...in the nearest enclosing `batch`
-{ "name": "review", "in": "global" }  ...at the run root
-{ "join": "nearest" }                 take the nearest ancestor's declaration, whatever it is called
-{ "id": … } | { "expr": … }           an absolute position, and one computed per instance
-null                                  a fresh, private conversation
+"review"                               { "$ref": "review", "$in": <the state that scopes it> }
+{ "$ref": "review", "$in": "parent" }  the name lives in the enclosing composite
+{ "$ref": "review", "$in": "batch" }   ...in the nearest enclosing `batch`
+{ "$ref": "review", "$in": "global" }  ...at the run root
+{ "$join": "nearest" }                 take the nearest ancestor's declaration, whatever it is called
+{ "id": … } | { "$expr": … }           an absolute position, and one computed per instance
+null                                   a fresh, private conversation
 ```
 
-Every form but `null` also takes `"fork": true` — always branch, rather than appending when the
-position is still the head.
+Every form but `null` also takes `"$fork": true` — always branch, rather than appending when the
+position is still the head. Every key the state system acts on is a `$`-key (§7.1c); the old
+spellings (`name`, `in`, `join`, `fork`, `expr`) are REFUSED, each with a message naming its
+replacement, rather than read as synonyms.
 
-**`in` qualifies a name; `join` takes someone else's.** `in` answers *"when I write `review`, which
+**`$in` qualifies a name; `$join` takes someone else's.** `$in` answers *"when I write `review`, which
 other `review`s do I mean?"* — it never selects a session by itself. A declaration that produces no
-name produces a session nothing can refer to, which is what `null` already says, so `{ "in": … }`
-with no `name` is a load error. `join` is the other half, for a state that wants in without knowing
+name produces a session nothing can refer to, which is what `null` already says, so `{ "$in": … }`
+with no `$ref` is a load error. `$join` is the other half, for a state that wants in without knowing
 what the conversation is called, and its value chooses **how much structural change should break
 the assumption**:
 
-| `join` | asserts | breaks when |
+| `$join` | asserts | breaks when |
 | --- | --- | --- |
 | `"parent"` | my immediate parent declares one | a wrapper composite is inserted between us |
 | `<state id>` | that specific ancestor declares one | that state is renamed or stops declaring |
@@ -1494,9 +1512,9 @@ Three rules make the whole thing total:
   its own: after the merge the two are the same value, and only the loader still knows who wrote it.
   It also means there is no lookup anywhere — no use site resolves anything, so no inserted layer can
   change what a name already means.
-- **`join` is resolved at load time**, to the concrete `{ name, in }` it names. It never reaches a
+- **`$join` is resolved at load time**, to the concrete `{ $ref, $in }` it names. It never reaches a
   run. "Declares" means *wrote*, never *inherited* — a state that only inherited a session is not a
-  writer, which is what lets `join: "parent"` fail where `join: "nearest"` succeeds.
+  writer, which is what lets `$join: "parent"` fail where `$join: "nearest"` succeeds.
 - **A scope resolves to an INSTANCE**, addressed by its path in the tree. This is why loops need no
   rule of their own: a scope above the loop is one instance on every pass, so the worktree and the
   permission ledger survive the iterations (DESIGN §5.1), and one inside it is a new instance each
@@ -1505,15 +1523,126 @@ Three rules make the whole thing total:
 
 Two consequences read as surprises exactly once, and both are the inverse of what the flat namespace
 did silently. **Two siblings that each write `"review"` do not share** — two writers, two scopes; they
-share by naming a common one, `{ "name": "review", "in": "parent" }`. And **a bare name on a leaf is
-private**, since a leaf's scope is itself; it is `null` with a label on it.
+share by naming a common one, `{ "$ref": "review", "$in": "parent" }`, or by an ancestor DECLARING the
+name (`environment.names`, §7.1c), which scopes every use below it there. And **a bare name on a leaf
+is private**, since a leaf's scope is itself; it is `null` with a label on it.
 
 `"document"` is reserved and refused. It was specified as "the file this declaration was written
 in", and there is no such unit here: a state *is* a file (§3.1 infers children from the directory
 listing), so a document's root is the writer itself and the keyword would mean nothing that an
-absent `in` does not. The unit it was reaching for — the root of a mounted subtree, the nearest
+absent `$in` does not. The unit it was reaching for — the root of a mounted subtree, the nearest
 ancestor reached by a cross-namespace reference — is real and computable, and is left unnamed rather
 than given a word that means something else.
+
+#### 7.1c Scoped names in any position
+
+What §7.1b says of a session name holds for a name in ANY position; `session` is only its first
+user (`scope.ts`). There is no new structure — everything rides the shape-mismatch rule of §2.1:
+
+| In the position | Means |
+| --- | --- |
+| a **string** where an object is expected | a **variable string** |
+| — starting with `$` | a **reference**: file resolution, unchanged (`$/lib/review.operation`) |
+| — anything else | a **scoped name** — if an enclosing scope declares it, or the position provides; else a path off the default root, as before |
+| an **object** where a string is expected | `{ "$ref": <variable string> }`, read the same two ways |
+| an object **with `$`-keys** | a special object: `$`-keys instruct, plain keys configure |
+
+In an untyped position — a function's `args` — only the explicit `{ "$ref" }` form counts.
+
+**`$`-keys.** A key the state system acts on is spelled with a leading `$`, so a reader can tell an
+instruction from payload: `$ref`, `$in`, `$join`, `$fork`, `$any`, `$pick`, `$expr`, and `$binding`
+(the wrapper for a computed value inside `args`/`config`). The format's own structural keys —
+`inputs`, `children`, a slot's `binding`, a mount wire's `each` — are never payload and stay bare.
+
+**Where a name is scoped.** (1) If an `environment.names.<name>` entry is visible at the use —
+written by this state or inherited — the scope is the state that WROTE THE ENTRY. (2) Otherwise it is
+the state that wrote the use. (3) `$in` / `$join` redirect either. Resolved at load to
+`(name, state id)`; at run time the state resolves to its nearest enclosing INSTANCE and the key is
+`name#<instance address>` — one key above a loop, a new one per pass inside it, `key[i]` per `each`
+element, and the same key in a resumed run.
+
+```jsonc
+"environment": {
+  "names": {
+    "impl":   { "from": "main" },                    // a workspace's configuration
+    "plan":   { "$any": [ … ], "$pick": "…" },       // a model role
+    "review": {}                                     // scoped HERE, so children writing "review" share it
+  },
+  "session":   "draft",                              // no entry needed: the position provides
+  "workspace": "impl",
+  "model":     { "$ref": "plan" }
+}
+```
+
+**An inner entry of the same name** is one of three things: `{ "from": "dev" }` OVERRIDES (a new
+name scoped here, configured only by this block — `names` is the one key that does not deep-merge
+down the tree); `{ "$ref": "impl", "from": "dev" }` is the same with the ENCLOSING entry's block
+pasted in (inside an entry its own name means the enclosing one, so this is templating, not a cycle);
+`{ "$in": "parent", "branch": "x" }` CONTRIBUTES to the ancestor's identity. Contributions and the
+plain keys beside a use's `$ref` are collected over the whole tree before anything reads them, so a
+sibling sees what a sibling contributed — and two writers that give one identity CONFLICTING
+configuration are a lint error, at the second — compared by VALUE, so key order never reads as a
+disagreement. The plain keys beside a `$ref` are overrides of the NAME in every position that takes
+one: `session`, `workspace`, and a value. **One name is one type**: whichever position first
+binds it (a session, a workspace, a value) says what it is, and a bind that disagrees is refused at
+that bind point. The configuration is held to the position's type there too: a name bound into a
+function's parameter or a typed call setting is checked against it like any literal, and one bound
+as a `session` or `workspace` against the schema the HOST gives for that position
+(`validateBundle(bundle, { positions: { workspace: … } })`) — the engine hands that configuration
+to the host opaquely, so only the host can say what it is.
+
+**In a value position** a name reads as its configuration with its key beside it —
+`{ "to": "origin", "$key": "review#/" }` — which is how a function keeps "the same merge request on
+every pass" without the format knowing what one is. A typed position takes the payload and drops
+that one key — and only that one: any other `$`-key in a computed value (a response schema's
+`$schema`, `$defs`) is the value's own. A name may sit INSIDE a literal argument, at any depth, and
+is read in place: the argument is assembled around it — whatever the argument is CALLED; inside
+`args` there are no format keys, so a parameter named `workspace` or `session` holds a name like any
+other. A name is usable only where a VALUE is read (a binding, an argument, a call setting,
+`tools`, `permissions`): in a position that holds STRUCTURE (`inputs`, `operation.input`, `children`)
+a declared name is passed over and the string means the file it always did. A name that no enclosing
+scope declares, in a position that cannot provide one, and that names no file, is a load error.
+
+**`workspace`** is the second providing position. The engine hands `workspaceFor(key, { name,
+configuration })` the key and the name's `names` entry; what a workspace IS stays the host's. It is
+narrower than `session` on purpose: no `{ id }` and no `$expr`, because a bundle is fixed when its
+instance is created. `null` means what it means on a session — a FRESH, PRIVATE one, whatever the
+chain named: the bundle of the instance that wrote it (key `#<instance address>`), shared with the
+subtree below and with nothing else. The run's own bundle is reached by declaring nothing, or
+explicitly by a name scoped at the run (`{ "$ref": "main", "$in": "global" }`).
+
+**`environment.functions.<name>.args`** gives a function its default arguments for a subtree, under
+the function's NAME — which is what keeps them typed (the block is checked against that function's
+parameters, at the block — a child mount's `environment.functions` included) and alive (it is not
+the operation's `args`, so a layer that changes `kind` never drops it). Precedence: the state's own
+`args`, then the nearest block (merged per key down the tree), then the function's own default.
+`null` takes a default away. The merge is deep for literal maps and WHOLE wherever either side is an
+instruction, at every depth: a nearer `{ "opts": { "remote": { "draft": true } } }` replaces a
+default's `{ "opts": { "remote": { "$ref": "review" } } }` at `remote`, and keeps `opts`' other keys.
+
+**`$any` / `$pick`** — a value may be alternatives with a rule for choosing:
+
+```jsonc
+{ "$any":  [ { "model": "claude-fable-5-1", "reasoning": { "effort": "high" } }, { "model": "…" } ],
+  "$pick": ".any[.any.map(model_limits).map('remaining').indexOf(max)]" }
+```
+
+`$pick` is an expression and what it RETURNS is the value used; it reads the alternatives as `.any`.
+Absent, the first alternative wins. `null` is a VALUE — it may be listed and it may be chosen
+(`"remote": { "$any": [ … , null ] }`). What is not USABLE is an alternative that references
+something that is not there: `{ "$ref": "$/roles.plan" }` with no such file on any layer (or no such
+property in it) is skipped, with a warning, which is what lets a base layer list a role a project may
+not define. Absence is asked of the alternative's OWN reference only — a role file that is there and
+itself points at something missing is a mistake, and a load error like any other. A ROLE — a `names`
+entry holding `$any` — is declared whole where it is scoped (a `$in` contribution may not add
+alternatives), has no identity and so no key, and a use of it IS the pick: the plain keys beside that
+use's `$ref` are its own, laid over whichever alternative is chosen. WHEN the pick runs belongs to the position, not to the
+author: a `model` is fixed when its session is created — chosen by the first call in the
+conversation, journaled (`value.settled`) under every instance that runs on it, read back on a load,
+and chosen afresh by the next session (a call that continues the conversation BY REF is a position in
+it, not another session, and does not choose again) — and anything else is fixed when the instance
+that reads it is entered. A model alternative may be an object: its other keys are call configuration, laid UNDER
+what the state itself wrote.
 
 #### 7.1a Inheritance
 
@@ -1624,8 +1753,8 @@ An agent operation may not:
       "state": "feature/plan/critique/address_weaknesses",
       "inputs": {
         "plan_doc": ".inputs.plan_doc",
-        "weaknesses": { "expr": ".outputs.weaknesses" },
-        "critique_report": { "expr": ".outputs.critique_report" }
+        "weaknesses": { "$expr": ".outputs.weaknesses" },
+        "critique_report": { "$expr": ".outputs.critique_report" }
       },
       "transitions": [
         {
@@ -1638,7 +1767,7 @@ An agent operation may not:
       "state": "feature/plan/critique/human_review",
       "inputs": {
         "plan_doc": ".inputs.plan_doc",
-        "critique_report": { "expr": ".outputs.critique_report" }
+        "critique_report": { "$expr": ".outputs.critique_report" }
       },
       "transitions": [
         {
@@ -1749,7 +1878,7 @@ A function definition supplies its body in one of three ways. The first two are 
 search path; the third is a module beside them.
 
 ```text
-expression   { "expr": "max(0, 1 - 0.35 * .inputs.severity)" }
+expression   { "$expr": "max(0, 1 - 0.35 * .inputs.severity)" }
              The closed language of §6. No file to approve, no compiler, no runtime.
 
 embedded     { "kind": "function", "input": {…}, "outputs": {…},
@@ -1788,7 +1917,7 @@ returned.** Anything else is a statement list and must `return` for itself. A tr
 decides nothing, since an expression followed by one still parses as an expression statement.
 
 This matters more than the keystrokes it saves. The expression form is what makes the three body
-forms a genuine progression rather than three unrelated syntaxes: an `{ "expr" }` document that
+forms a genuine progression rather than three unrelated syntaxes: an `{ "$expr" }` document that
 outgrows the closed language of §6 — it needs a loop, or a built-in the language does not have —
 becomes an embedded body by changing which key it is written under, and the text between the quotes
 often does not change at all.
@@ -2122,7 +2251,7 @@ Called from a state, positionally, in the parameter order the file already fixes
 ```json
 {
   "outputs": {
-    "confidence": { "binding": { "expr": "confidence(.inputs.max_severity_rank, .inputs.iteration)" } }
+    "confidence": { "$binding": { "$expr": "confidence(.inputs.max_severity_rank, .inputs.iteration)" } }
   }
 }
 ```
@@ -2214,7 +2343,7 @@ validated outputs. The parent branches on `outputs.decision`.
   "label": "Planning",
   "title": {
     "binding": {
-      "expr": "title(.inputs.issue).title",
+      "$expr": "title(.inputs.issue).title",
       "environment": { "session": null },
       "failureValue": "Planning"
     }
@@ -2232,7 +2361,7 @@ validated outputs. The parent branches on `outputs.decision`.
         "enum": ["complete", "blocked"]
       },
       "binding": {
-        "expr": ".children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'"
+        "$expr": ".children.critique.outputs.outcome === 'clean' ? 'complete' : 'blocked'"
       }
     },
     "plan_doc": {

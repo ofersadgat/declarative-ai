@@ -76,7 +76,7 @@ describe("the load-time lint", () => {
       leaf: promptLeaf(),
     };
     files["root"]!.children!["review"]!.state = "consumer";
-    files["root"]!.children!["review"]!.inputs = { s: { expr: ".children.plan.operation.output.session" } };
+    files["root"]!.children!["review"]!.inputs = { s: { $expr: ".children.plan.operation.output.session" } };
     files["consumer"] = { ...promptLeaf(), inputs: { s: { schema: {} } } };
     expect(errorsFor(files, "root")).toEqual([]);
   });
@@ -86,7 +86,7 @@ describe("the load-time lint", () => {
     // like any other, so asking IT for an end is the same reach-too-far as `.session.position`.
     const files = (expr: string): Record<string, StateDef> => ({
       root: {
-        children: { plan: { state: "leaf" }, review: { state: "consumer", inputs: { s: { expr } } } },
+        children: { plan: { state: "leaf" }, review: { state: "consumer", inputs: { s: { $expr: expr } } } },
         sequence: ["plan", "review"],
         outputs: { r: { binding: ".children.review.output.answer" } },
       },
@@ -110,7 +110,7 @@ describe("the load-time lint", () => {
       leaf: { ...promptLeaf(), inputs: { s: { schema: {} } } },
     };
     files["root"]!.children!["review"]!.state = "leaf";
-    files["root"]!.children!["review"]!.inputs = { s: { expr: ".children.gate.operation.output.session" } };
+    files["root"]!.children!["review"]!.inputs = { s: { $expr: ".children.gate.operation.output.session" } };
     const errors = errorsFor(files, "root");
     expect(errors.some((e) => /operation.*outputs/.test(e) || /resolves to no declared value/.test(e))).toBe(true);
   });
@@ -128,7 +128,7 @@ describe("the load-time lint", () => {
       consumer: { ...promptLeaf(), inputs: { s: { schema: {} } } },
     };
     files["root"]!.children!["review"]!.state = "consumer";
-    files["root"]!.children!["review"]!.inputs = { s: { expr: ".children.plan.operation.attempts" } };
+    files["root"]!.children!["review"]!.inputs = { s: { $expr: ".children.plan.operation.attempts" } };
     expect(errorsFor(files, "root").some((e) => /resolves to no declared value/.test(e))).toBe(true);
   });
 
@@ -136,7 +136,7 @@ describe("the load-time lint", () => {
     const files: Record<string, StateDef> = {
       root: {
         children: { gate: { state: "gate" } },
-        outputs: { r: { schema: { type: "number" }, binding: { expr: ".children.gate.operation.cost" } } },
+        outputs: { r: { schema: { type: "number" }, binding: { $expr: ".children.gate.operation.cost" } } },
       },
       gate: { outputs: { decision: { schema: { type: "string" } } }, operation: { kind: "function", function: "choose_option" } },
     };

@@ -2,7 +2,7 @@
  * A child that HAS NOT RUN is `undefined` (SPEC §3.4), not a resolution failure.
  *
  * The two spellings of the same path used to disagree: `".children.c.output.x"` lowers to a
- * producer edge and REFUSED, while `{ expr: ".children.c.output.x" }` lowers to a `member` chain
+ * producer edge and REFUSED, while `{ $expr: ".children.c.output.x" }` lowers to a `member` chain
  * and yielded `undefined`. Since a guard is always lowered as an expression and a wire usually is
  * not, the split read as "guards are lenient, wiring is strict" — which is not a rule anyone wrote.
  *
@@ -83,7 +83,7 @@ describe("a child that has not run (SPEC §3.4)", () => {
 
   it("means the SAME THING written as an expression — the two forms agree", async () => {
     const asEdge = await run(files(EDGE, { optional: true }));
-    const asExpr = await run(files({ expr: EDGE }, { optional: true }));
+    const asExpr = await run(files({ $expr: EDGE }, { optional: true }));
     expect(asExpr.outcome).toBe(asEdge.outcome);
     expect(asExpr.seen["b"]).toBe(asEdge.seen["b"]);
     expect(asExpr.order).toEqual(asEdge.order);

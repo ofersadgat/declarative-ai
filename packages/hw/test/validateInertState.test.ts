@@ -31,7 +31,7 @@ const inert = (outputs: StateDef["outputs"]): Record<string, StateDef> => ({
 describe("a state with no operation and no children", () => {
   it("is not warned about when its outputs are computed from what it was handed", () => {
     const files = inert({
-      score: { schema: { type: "number" }, binding: { expr: "max(0, 1 - .inputs.rank / 3)" } },
+      score: { schema: { type: "number" }, binding: { $expr: "max(0, 1 - .inputs.rank / 3)" } },
     });
     expect(warnings(files, "root")).toBe("");
   });

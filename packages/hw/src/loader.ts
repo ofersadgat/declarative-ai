@@ -24,11 +24,16 @@ import {
   BOUND_CALLEE,
   hasDefault,
   inferredKind,
+  hasComputedPart,
+  isNameUse,
+  isPick,
   isWrappedBinding,
+  refusedBindingSpelling,
   kindIsAmbiguous,
   RESOLVER_REFS,
   type BindingDecl,
   type ChildDecl,
+  type EnvironmentDecl,
   type EachKind,
   type ExecEnvironmentDecl,
   type HostedEachKind,
@@ -89,9 +94,12 @@ function spawnFieldsOf(binding: { id?: unknown; title?: unknown; requires?: unkn
   return fields;
 }
 import { ExprError, parseExpression, referencesOf, selfPathOf, type Argument, type Expr } from "./expr.js";
-import { bindArguments, bindTransitionContext, EXPRESSION_REFS, lowerExpression, parametersFor, positionalNames, type LowerOptions } from "./lowerExpr.js";
-import { environmentIdentity, mergeOperationFields, resolutionEnvironment } from "./merge.js";
-import { normalizeSession, type NormalizedSession, type SessionAncestor, type SessionWriter } from "./session.js";
+import { bindArguments, bindContextRoot, bindTransitionContext, EXPRESSION_REFS, lowerExpression, parametersFor, positionalNames, type LowerOptions } from "./lowerExpr.js";
+import { environmentIdentity, mergeArgs, mergeJson, mergeOperationFields, resolutionEnvironment } from "./merge.js";
+import { isSessionJoin, normalizeSession, type NormalizedSession, type SessionAncestor, type SessionWriter } from "./session.js";
+import { anchorScope } from "./scope.js";
+import { isFreshWorkspace, normalizeWorkspace, type NormalizedWorkspace, type WorkspaceAncestor } from "./workspace.js";
+import { NameTable, normalizeNames, type NameEntry, type VisibleNames } from "./names.js";
 import { resolveStateRef, StateRefError, type StateRefOptions } from "./ref.js";
 import { expandReferences } from "./expand.js";
 import { isDataFile, isRuntimeReference, MODULE_EXTENSIONS, parseReferencedFile, REGISTRY_ROOT, resolveReference, selectProperty, type Vfs } from "./reference.js";
@@ -181,7 +189,7 @@ export function desugarBinding(
   // operation. §3.1's first tier: the operation itself, as a value, with nothing applied to it.
   if (isOperationDecl(binding)) return { op: desugarOperation(binding as OperationFields, stateId, undefined, lower) };
 
-  if ("expr" in binding) {
+  if ("$expr" in binding) {
     // `each` is a property of a MOUNT — "enter this child once per element" — and only the children
     // loop below knows it is lowering a mount's wire, so it strips the flag before reaching here. A
     // flag that arrives is one written somewhere nothing can fan out: an output, an operation
@@ -190,9 +198,72 @@ export function desugarBinding(
     if (binding.each !== undefined) {
       throw new WorkflowLoadError(`${where}: 'each' is only legal on a child mount's inputs (children.<key>.inputs.<name>)`, stateId);
     }
-    return desugarExpression(binding.expr, where, stateId, lower);
+    return desugarExpression(binding.$expr, where, stateId, lower);
   }
+  if ("$literal" in binding) return lowerLiteral(binding.$literal, where, stateId, lower);
+  if (isPick(binding)) return lowerPick(binding, where, stateId, lower);
+  if (isNameUse(binding)) {
+    // Normalized where it was WRITTEN (`normalizeStateNames`), so the scope is already a state id.
+    // One that is not is a name reached some way the loader's walk does not cover.
+    if (binding.$in === undefined) throw new WorkflowLoadError(`${where}: the name '${binding.$ref}' reached lowering with no scope`, stateId);
+    return resolverEdge(RESOLVER_REFS.name, { name: { text: binding.$ref }, in: { text: binding.$in } });
+  }
+  const refused = refusedBindingSpelling(binding);
+  if (refused !== undefined) throw new WorkflowLoadError(`${where}: ${refused}`, stateId);
   throw new WorkflowLoadError(`${where}: unrecognized binding form ${JSON.stringify(binding)}`, stateId);
+}
+
+/**
+ * Lower a LITERAL that has computed parts inside it — a name, alternatives, a wrapped binding — to
+ * the tree that assembles it.
+ *
+ * Only the path down to a computed part becomes structure: an object on it is a `record` edge (the
+ * resolver an object literal in an expression already lowers to), an array on it is `append` folded
+ * over its items, and every subtree with nothing computed in it stays the one `json` leaf it was.
+ * So an argument bag that mentions a name once costs one edge per level above the name, and the
+ * function receives exactly the object the author wrote, with the name read in place.
+ */
+function lowerLiteral(value: JsonValue, where: string, stateId: string, lower: LowerOptions): Ref<InlineFamily> {
+  if (!hasComputedPart(value)) return { json: value };
+  if (isWrappedBinding(value)) return desugarBinding(value.$binding, where, stateId, undefined, lower);
+  if (isNameUse(value) || isPick(value)) return desugarBinding(value, where, stateId, undefined, lower);
+  if (Array.isArray(value)) {
+    return value.reduce<Ref<InlineFamily>>(
+      (list, item, i) => resolverEdge("append", { value: list, item: lowerLiteral(item, `${where}.${i}`, stateId, lower) }),
+      { json: [] },
+    );
+  }
+  const entries = Object.entries(value as Record<string, JsonValue>).map(([key, child]) => [key, lowerLiteral(child, `${where}.${key}`, stateId, lower)] as const);
+  return resolverEdge(RESOLVER_REFS.record, Object.fromEntries(entries));
+}
+
+/**
+ * Lower `{ "$any": […], "$pick": "…" }` to the tree that chooses (NAMES.md §6).
+ *
+ * The alternatives are literal by the time they are here — expansion spliced any file they named —
+ * so `.any` is bound into the pick as a constant and what comes out is an ordinary binding, with no
+ * second context for the engine to evaluate it in. With no `$pick` there is nothing to evaluate at
+ * all: the first alternative wins, decided now.
+ *
+ * `null` is a VALUE here, as it is everywhere an author writes it — `"remote": null` is how a gate
+ * opts out of a remote, so "a remote if there is one, else none" has to be sayable as alternatives.
+ * What "usable" means was settled before this point: an alternative that REFERENCES something
+ * (`{ "$ref": "$/roles.plan" }`) and finds nothing there is not usable, and expansion dropped it
+ * (`expandAlternatives`) — which is what lets a base layer list a role a project may not define.
+ */
+function lowerPick(binding: { $any: JsonValue[]; $pick?: string }, where: string, stateId: string, lower: LowerOptions): Ref<InlineFamily> {
+  const alternatives = binding.$any;
+  if (!Array.isArray(alternatives) || alternatives.length === 0) {
+    throw new WorkflowLoadError(`${where}: '$any' is a non-empty list of alternatives`, stateId);
+  }
+  const computed = (value: JsonValue): boolean =>
+    value !== null && typeof value === "object" && (Array.isArray(value) ? value.some(computed) : Object.entries(value).some(([k, v]) => k.startsWith("$") || computed(v)));
+  if (alternatives.some(computed)) {
+    throw new WorkflowLoadError(`${where}: an alternative is a literal value (or a '$/…' reference to one) — it cannot itself be computed`, stateId);
+  }
+  if (binding.$pick === undefined) return { json: alternatives[0] as JsonValue };
+  if (typeof binding.$pick !== "string") throw new WorkflowLoadError(`${where}: '$pick' is an expression — a string`, stateId);
+  return bindContextRoot(desugarExpression(binding.$pick, `${where}.$pick`, stateId, lower), "any", alternatives);
 }
 
 /**
@@ -258,7 +329,7 @@ function desugarRuntimeReference(reference: string, where: string, stateId: stri
     case "outputs": {
       // This state's own outputs are only reachable by evaluation, which is what `expr` is.
       if (rest.length === 0) bad("must name an output");
-      return desugarBinding({ expr: `.outputs.${rest.join(".")}` }, where, stateId);
+      return desugarBinding({ $expr: `.outputs.${rest.join(".")}` }, where, stateId);
     }
     case "children": {
       const [child, section, ...tail] = rest;
@@ -276,7 +347,7 @@ function desugarRuntimeReference(reference: string, where: string, stateId: stri
         return resolverEdge(RESOLVER_REFS.select, { value: childEdge, key: { text: tail.join(".") } });
       }
       // `outcome` and anything else about a child is control-flow state, which guards read.
-      return desugarBinding({ expr: `.children.${child}.${[section, ...tail].join(".")}` }, where, stateId);
+      return desugarBinding({ $expr: `.children.${child}.${[section, ...tail].join(".")}` }, where, stateId);
     }
     case "artifacts": {
       if (rest.length !== 1) bad("must name exactly one artifact, as '.artifacts.<name>'");
@@ -292,7 +363,7 @@ function desugarRuntimeReference(reference: string, where: string, stateId: stri
       // the call has completed. `operationNodeSchema` types it, so a name the call never returns is
       // still a load-time error and not a silent undefined.
       if (rest.length === 0) bad("must name something on the operation, as '.operation.output.<name>'");
-      return desugarBinding({ expr: `.operation.${rest.join(".")}` }, where, stateId);
+      return desugarBinding({ $expr: `.operation.${rest.join(".")}` }, where, stateId);
     }
     case "each": {
       // The element position of a fanned-out mount (§6.2) — `.each.index`, `.each.axis.<input>`.
@@ -300,7 +371,7 @@ function desugarRuntimeReference(reference: string, where: string, stateId: stri
       // root, which the engine puts in scope only while it wires one element. WHERE it may be read is
       // the validator's rule, not this desugaring's.
       if (rest.length === 0) bad("must name what it reads, as '.each.index' or '.each.axis.<input>'");
-      return desugarBinding({ expr: reference }, where, stateId);
+      return desugarBinding({ $expr: reference }, where, stateId);
     }
     case "title":
     case "label":
@@ -309,7 +380,7 @@ function desugarRuntimeReference(reference: string, where: string, stateId: stri
     case "limits":
       // The state's own fields (SPEC §6.1), read back from the definition the instance runs —
       // evaluated, as `.operation.*` is, since a field is a value the instance settles at entry.
-      return desugarBinding({ expr: reference }, where, stateId);
+      return desugarBinding({ $expr: reference }, where, stateId);
     default:
       return bad(
         `starts with '${String(namespace)}', which is not a runtime namespace — ` +
@@ -353,9 +424,11 @@ function desugarParameter(
   // `text` or `json` key is the value it always was: a literal default IS a literal, and there is
   // nothing a literal binding form could add except a way to misread one.
   if (decl.default !== undefined) {
+    const refused = refusedBindingSpelling(decl.default, true);
+    if (refused !== undefined) throw new WorkflowLoadError(`${where}.default: ${refused}`, stateId);
     const computed = isWrappedBinding(decl.default)
-      ? decl.default.binding
-      : typeof decl.default === "object" && decl.default !== null && !Array.isArray(decl.default) && "expr" in decl.default
+      ? decl.default.$binding
+      : typeof decl.default === "object" && decl.default !== null && !Array.isArray(decl.default) && "$expr" in decl.default
         ? (decl.default as unknown as BindingDecl)
         : undefined;
     if (computed !== undefined) meta.defaultRef = desugarBinding(computed, `${where}.default`, stateId, slotName, lower);
@@ -401,13 +474,14 @@ function defaultOutput(): NamedParameter<InlineFamily> {
  * set and the permission baseline — so the loader hands each consumer only what it needs.
  */
 export function splitExecEnvironment(fields: OperationFields): { op: OperationFields; env: ExecEnvironmentDecl } {
-  const { session, tools, permissions, ...op } = fields;
+  const { session, workspace, tools, permissions, ...op } = fields;
   const env: ExecEnvironmentDecl = {};
   // `session` is tested against `undefined` rather than for truthiness because `null` is a REAL
   // declaration — "start fresh, whatever the chain said" — and dropping it here would silently
   // restore the inherited session the author was opting out of. `fork` used to be split out beside
   // it and is now a property OF it, so the two can no longer arrive from different layers.
   if (session !== undefined) env.session = session;
+  if (workspace !== undefined) env.workspace = workspace;
   if (tools !== undefined) env.tools = tools;
   if (permissions !== undefined) env.permissions = permissions;
   return { op, env };
@@ -875,7 +949,7 @@ function outputSlotFor(output: Record<string, ParameterDecl> | undefined, stateI
 }
 
 /**
- * Canonicalize every session declaration a state WRITES, at the place it was written (§1.6).
+ * Canonicalize every SCOPED NAME a state WRITES, at the place it was written (§1.6, NAMES.md §3).
  *
  * This is the pass that makes scoped names work, and it has to run before the environment merge for
  * one reason: the merge is a nearest-wins overwrite, so afterwards a root's `session: "planning"`
@@ -883,33 +957,153 @@ function outputSlotFor(output: Record<string, ParameterDecl> | undefined, stateI
  * origin stamps the scope on while the origin is still known, and everything downstream — the merge,
  * the variant identity, the engine — then handles one already-scoped value.
  *
- * Three declaration sites belong to one state, and all three are its own writing:
+ * Three things are written by one state, in this order because each needs the one before:
+ *
+ *  1. its `names` entries — which decide where a name it declares LIVES, so they come first;
+ *  2. its `session` declarations, in the three sites below;
+ *  3. every other use — a `{ "$ref": name }` still standing after expansion, wherever it sits.
+ *
+ * A use's scope is the state that wrote a VISIBLE entry for the name, and the writer of the use when
+ * there is none (NAMES.md §3); `$in` redirects either. "Visible" is the chain that reached this state
+ * plus its own entries — and, inside a child mount's `environment`, that layer's entries too.
+ *
+ * The three session sites belong to one state, and all three are its own writing:
  *
  *  - `environment.session` — the default for its SUBTREE;
  *  - `operation.session` — the session its own call joins;
  *  - `children.<key>.environment.session` — a layer it applies to one child (§7.1a). Written by THIS
- *    state, so it scopes here: `in: "parent"` inside a mount environment means this state's parent.
+ *    state, so it scopes here: `$in: "parent"` inside a mount environment means this state's parent.
  *
- * What a state DECLARED, for a descendant's `join`, is its operation's declaration where it has one
+ * What a state DECLARED, for a descendant's `$join`, is its operation's declaration where it has one
  * and its subtree default otherwise — "the session this state's own call runs in, as it wrote it".
- * A state that only INHERITED one is not a writer, which is what makes `join: "parent"` able to fail
- * where `join: "nearest"` succeeds.
+ * A state that only INHERITED one is not a writer, which is what makes `$join: "parent"` able to fail
+ * where `$join: "nearest"` succeeds.
  */
-function normalizeStateSessions(
+function normalizeStateNames(
   def: StateDef,
   writer: SessionWriter,
-  ancestry: readonly SessionAncestor[],
-): { def: StateDef; declared?: NormalizedSession; error?: { path: string; message: string } } {
+  ancestry: readonly Ancestor[],
+  inherited: VisibleNames,
+  table: NameTable,
+): { def: StateDef; declared?: NormalizedSession; workspace?: NormalizedWorkspace; error?: { path: string; message: string } } {
   let error: { path: string; message: string } | undefined;
-  const at = (path: string, value: unknown): NormalizedSession | undefined => {
-    const outcome = normalizeSession(value as never, writer, ancestry);
+  // FIRST complaint only, and reported against the state rather than thrown: one unusable
+  // declaration must not hide every other authoring error in the document.
+  const complain = (path: string, message: string): void => {
+    error ??= { path, message };
+  };
+
+  const namesAt = (authored: unknown, path: string, enclosing: VisibleNames): Record<string, NameEntry> | undefined => {
+    if (authored === undefined) return undefined;
+    const outcome = normalizeNames(authored, writer, ancestry, enclosing, table, path);
     if ("error" in outcome) {
-      // FIRST complaint only, and reported against the state rather than thrown: one unusable
-      // session must not hide every other authoring error in the document.
-      error ??= { path, message: outcome.error };
+      complain(outcome.error.path, outcome.error.message);
       return undefined;
     }
-    return outcome.session;
+    return outcome.names;
+  };
+
+  const sessionAt = (path: string, value: unknown, visible: VisibleNames): NormalizedSession | undefined => {
+    const outcome = normalizeSession(value as never, writer, ancestry, (name) => visible[name]?.$in);
+    if ("error" in outcome) {
+      complain(path, outcome.error);
+      return undefined;
+    }
+    const session = outcome.session;
+    // A `$join` took an ancestor's declaration verbatim, and the ancestor already bound it.
+    if (session !== null && session !== undefined && "$ref" in session && !isSessionJoin(value)) {
+      const site = { state: writer.id, path };
+      // The plain keys beside the `$ref` override the NAME's configuration, so they go to the table
+      // with every other writer's — and are held to the position's type with the rest of it.
+      if (outcome.configuration !== undefined) table.configure(session.$ref, session.$in, outcome.configuration, site);
+      table.bind(session.$ref, session.$in, "session", site);
+    }
+    return session;
+  };
+
+  // The OTHER providing position. Same three sites, same rule for where the name lives; the plain
+  // keys beside a `$ref` configure the NAME, so they go to the table with every other writer's.
+  const workspaceAt = (path: string, value: unknown, visible: VisibleNames): NormalizedWorkspace | undefined => {
+    const outcome = normalizeWorkspace(value, writer, ancestry, (name) => visible[name]?.$in);
+    if ("error" in outcome) {
+      complain(path, outcome.error);
+      return undefined;
+    }
+    const workspace = outcome.workspace;
+    if (workspace !== undefined && !isFreshWorkspace(workspace) && !(value !== null && typeof value === "object" && "$join" in value)) {
+      const site = { state: writer.id, path };
+      if (outcome.configuration !== undefined) table.configure(workspace.$ref, workspace.$in, outcome.configuration as Record<string, JsonValue>, site);
+      table.bind(workspace.$ref, workspace.$in, "workspace", site);
+    }
+    return workspace;
+  };
+
+  /**
+   * Every OTHER use: a `{ "$ref": name }` left standing by expansion, which resolved every `$ref`
+   * that named a file. Found by shape rather than by position, so a name works wherever a value
+   * does without this pass knowing the list. Some keys are never entered: a JSON Schema's `$ref` is
+   * JSON Schema's (REFERENCES.md §6), and `names`, `session` and `workspace` were handled above.
+   *
+   * Those keys are the FORMAT's, and only where the format is what is being read. Inside an argument
+   * bag a key is whatever the function calls its parameter — `workspace`, `session` and `schema` are
+   * exactly what a host function is likely to call one — so once the walk is in `args` (`payload`)
+   * nothing is skipped: there is no format below that point, only the operation's own data.
+   */
+  const usesIn = (value: unknown, path: string, visible: VisibleNames, payload = false): unknown => {
+    if (Array.isArray(value)) return value.map((item, i) => usesIn(item, `${path}.${i}`, visible, payload));
+    if (value === null || typeof value !== "object") return value;
+    const node = value as Record<string, unknown>;
+    if (typeof node.$ref === "string") {
+      const { $ref: name, $in: redirect, ...overrides } = node;
+      // What a refused use is left as: still a name, scoped at its writer, so the load goes on and
+      // the complaint is what the author reads - not a second error from lowering about the first.
+      const unusable = { $ref: name, $in: writer.id };
+      const stray = Object.keys(overrides).find((key) => key.startsWith("$"));
+      if (stray !== undefined) {
+        complain(path, `'${stray}' means nothing beside a '$ref' here — a name in a value position takes '$in' and plain keys that configure it`);
+        return unusable;
+      }
+      if (redirect !== undefined && (typeof redirect !== "string" || redirect === "")) {
+        complain(path, "'$in' must name an ancestor state, or one of parent, global");
+        return unusable;
+      }
+      const declaredAt = redirect === undefined ? visible[name]?.$in : undefined;
+      const scope = declaredAt !== undefined ? { id: declaredAt } : anchorScope(redirect as string | undefined, writer, ancestry, `name '${name}'`);
+      if ("error" in scope) {
+        complain(path, scope.error);
+        return unusable;
+      }
+      const site = { state: writer.id, path };
+      table.bind(name, scope.id, "value", site);
+      // A name whose entry holds ALTERNATIVES is a role, and reads as the choice among them. It has
+      // no identity worth a key — nothing is created for it — so the use becomes the pick itself,
+      // lowered like one written in place. Read off the IDENTITY the use resolved to (the table),
+      // not off whichever entry is nearest: `$in` can reach past a nearer role of the same name.
+      const role = table.roleOf(name, scope.id);
+      if (role !== undefined) {
+        // With no identity there is nothing shared for a use's plain keys to configure, so they are
+        // this use's own: they override the alternative chosen HERE (NAMES.md §2's `$ref` row), which
+        // is said by laying them over every alternative — whichever is picked carries them.
+        if (Object.keys(overrides).length === 0) return role;
+        const flat = role.$any.findIndex((alternative) => alternative === null || typeof alternative !== "object" || Array.isArray(alternative));
+        if (flat !== -1) {
+          complain(path, `the keys beside '$ref: "${name}"' override the alternative that is chosen, and alternative ${flat} of '${name}' is ${JSON.stringify(role.$any[flat])}, which has no keys to override — write it as an object`);
+          return unusable;
+        }
+        return { ...role, $any: role.$any.map((alternative) => mergeJson(alternative as Record<string, JsonValue>, overrides as Record<string, JsonValue>)) };
+      }
+      table.configure(name, scope.id, overrides as Record<string, JsonValue>, site);
+      return { $ref: name, $in: scope.id };
+    }
+    let out: Record<string, unknown> | undefined;
+    for (const [key, child] of Object.entries(node)) {
+      if (!payload && (key === "schema" || key === "names" || key === "session" || key === "workspace")) continue;
+      const next = usesIn(child, path === "" ? key : `${path}.${key}`, visible, payload || (key === "args" && ARGS_PARENT.test(path)));
+      if (next === child) continue;
+      out ??= { ...node };
+      out[key] = next;
+    }
+    return out ?? value;
   };
 
   let out = def;
@@ -917,38 +1111,88 @@ function normalizeStateSessions(
     out = { ...out, ...patch };
   };
 
+  const ownNames = namesAt(def.environment?.names, "environment.names", inherited);
+  const visible: VisibleNames = { ...inherited, ...ownNames };
+
   let envSession: NormalizedSession | undefined;
-  if (def.environment !== undefined && "session" in def.environment) {
-    envSession = at("environment.session", def.environment.session);
-    replace({ environment: { ...def.environment, session: envSession } });
+  let envWorkspace: NormalizedWorkspace | undefined;
+  if (def.environment !== undefined) {
+    const environment = { ...def.environment };
+    if (ownNames !== undefined) environment.names = ownNames;
+    if ("session" in def.environment) {
+      envSession = sessionAt("environment.session", def.environment.session, visible);
+      environment.session = envSession;
+    }
+    if ("workspace" in def.environment) {
+      envWorkspace = workspaceAt("environment.workspace", def.environment.workspace, visible);
+      environment.workspace = envWorkspace;
+    }
+    replace({ environment });
   }
   let opSession: NormalizedSession | undefined;
   let wroteOp = false;
   if (def.operation !== undefined && "session" in def.operation) {
     wroteOp = true;
-    opSession = at("operation.session", def.operation.session);
+    opSession = sessionAt("operation.session", def.operation.session, visible);
     replace({ operation: { ...out.operation, session: opSession } as StateDef["operation"] });
+  }
+  let opWorkspace: NormalizedWorkspace | undefined;
+  const wroteOpWorkspace = def.operation !== undefined && "workspace" in def.operation;
+  if (wroteOpWorkspace) {
+    opWorkspace = workspaceAt("operation.workspace", def.operation!.workspace, visible);
+    replace({ operation: { ...out.operation, workspace: opWorkspace } as StateDef["operation"] });
   }
 
   const children = out.children;
   if (children !== undefined) {
     let rewritten: Record<string, ChildDecl> | undefined;
     for (const [key, child] of Object.entries(children)) {
-      if (child.environment === undefined || !("session" in child.environment)) continue;
-      const session = at(`children.${key}.environment.session`, child.environment.session);
+      const layer = child.environment;
+      if (layer === undefined || (!("session" in layer) && !("workspace" in layer) && layer.names === undefined)) continue;
+      const at = `children.${key}.environment`;
+      const mountNames = namesAt(layer.names, `${at}.names`, visible);
+      const environment = { ...layer };
+      if (mountNames !== undefined) environment.names = mountNames;
+      if ("session" in layer) environment.session = sessionAt(`${at}.session`, layer.session, { ...visible, ...mountNames });
+      if ("workspace" in layer) environment.workspace = workspaceAt(`${at}.workspace`, layer.workspace, { ...visible, ...mountNames });
       rewritten ??= { ...children };
-      rewritten[key] = { ...child, environment: { ...child.environment, session } };
+      rewritten[key] = { ...child, environment };
     }
     if (rewritten !== undefined) replace({ children: rewritten });
   }
 
+  // The remaining uses, over the whole document. A child mount's `environment` sees that layer's
+  // names as well; everything else — its wires included — is this state's own scope.
+  const { children: mounts, ...rest } = out;
+  out = usesIn(rest, "", visible) as StateDef;
+  if (mounts !== undefined) {
+    const walked: Record<string, ChildDecl> = {};
+    for (const [key, child] of Object.entries(mounts)) {
+      const { environment, ...wiring } = child;
+      const mount = usesIn(wiring, `children.${key}`, visible) as ChildDecl;
+      walked[key] =
+        environment === undefined
+          ? mount
+          : { ...mount, environment: usesIn(environment, `children.${key}.environment`, { ...visible, ...(environment.names as VisibleNames | undefined) }) as EnvironmentDecl };
+    }
+    out = { ...out, children: walked };
+  }
+
   const declared = wroteOp ? opSession : envSession;
+  const workspace = wroteOpWorkspace ? opWorkspace : envWorkspace;
   return {
     def: out,
     ...(declared !== undefined ? { declared } : {}),
+    ...(workspace !== undefined ? { workspace } : {}),
     ...(error !== undefined ? { error } : {}),
   };
 }
+
+/** Where an `args` key IS an argument bag - on an operation, an environment, or a function's defaults - rather than a slot that happens to be called `args`. */
+const ARGS_PARENT = /^(operation|environment|children\.[^.]+\.environment)(\.functions\.[^.]+)?$/;
+
+/** One state on the path to a writer, with what it WROTE for each providing position — what a `$join` searches. */
+type Ancestor = SessionAncestor & WorkspaceAncestor;
 
 /**
  * Desugar one authored state file into its loaded form.
@@ -1054,7 +1298,7 @@ export function desugarState(
       let spawn: Partial<SpawnFields> = {};
       for (const [inputName, binding] of Object.entries(child.inputs ?? {})) {
         const where = `children.${key}.inputs.${inputName}`;
-        if (typeof binding === "object" && binding !== null && "expr" in binding && binding.each !== undefined) {
+        if (typeof binding === "object" && binding !== null && "$expr" in binding && binding.each !== undefined) {
           const kind = eachKindOf(binding.each, where, id);
           if (eachKind !== undefined && kind !== eachKind) {
             throw new WorkflowLoadError(
@@ -1065,8 +1309,8 @@ export function desugarState(
           eachKind = kind;
           spawn = { ...spawn, ...spawnFieldsOf(binding, kind, where, id) };
           each.push(inputName);
-          eachExprs[inputName] = binding.expr;
-          wired[inputName] = desugarBinding({ expr: binding.expr }, where, id, undefined, lower);
+          eachExprs[inputName] = binding.$expr;
+          wired[inputName] = desugarBinding({ $expr: binding.$expr }, where, id, undefined, lower);
           continue;
         }
         wired[inputName] = desugarBinding(binding, where, id, undefined, lower);
@@ -1107,7 +1351,7 @@ export function desugarState(
   // The operation's computed fields come out of the MERGED block (SPEC §5.3): a binding an ancestor's
   // `environment` supplied is this state's to evaluate, in this state's scope, exactly as a literal
   // it supplied is this state's to run under.
-  const mergedAll = def.operation !== undefined ? mergeOperationFields(environment, def.operation) : undefined;
+  const mergedAll = def.operation !== undefined ? withFunctionDefaults(mergeOperationFields(environment, def.operation)) : undefined;
   const extracted = mergedAll !== undefined ? extractOperationFields(mergedAll) : undefined;
   const merged = extracted?.op;
   const split = merged !== undefined ? splitExecEnvironment(merged) : undefined;
@@ -1160,9 +1404,75 @@ export function desugarState(
     // one: `normalizeStateSessions` ran over every writer on this path before the merge, so what the
     // chain holds here has its scope resolved and its `join` already taken (`session.ts`).
     ...("session" in environment ? { scopeSession: environment.session as NormalizedSession } : {}),
+    // The bundle this state's OWN instance runs in is what its call runs in — its operation's
+    // `workspace` where it wrote one, else the chain's. A child the chain names a workspace for
+    // resolves its own, through its own `scopeWorkspace`; one it names none for inherits the
+    // ENCLOSING INSTANCE's bundle (`resourceKeyFor`) — which, under a state that has both an
+    // operation and children, is the bundle that operation runs in. Deliberately unlike the rest of
+    // `operation`: a bundle belongs to an instance, and "absent" means "where my parent is working".
+    ...(mergedAll !== undefined && "workspace" in mergedAll
+      ? { scopeWorkspace: mergedAll.workspace as NormalizedWorkspace }
+      : "workspace" in environment
+        ? { scopeWorkspace: environment.workspace as NormalizedWorkspace }
+        : {}),
+    ...functionDefaultsOf(def),
     ...(spreads.length > 0 ? { outputSpreads: spreads } : {}),
     ...(Object.keys(slotMeta).length > 0 ? { slotMeta } : {}),
   };
+}
+
+/**
+ * Every `functions` block this state WROTE, with the path it wrote it at — its own `environment`'s,
+ * and each layer it applies to one child (`children.<key>.environment`). Both are its writing, so
+ * both are checked at its lines.
+ */
+function functionDefaultsOf(def: StateDef): Pick<LoadedState, "functionDefaults"> {
+  const written: NonNullable<LoadedState["functionDefaults"]> = [];
+  if (def.environment?.functions !== undefined) written.push({ path: "environment.functions", functions: def.environment.functions });
+  for (const [key, child] of Object.entries(def.children ?? {})) {
+    if (child.environment?.functions !== undefined) written.push({ path: `children.${key}.environment.functions`, functions: child.environment.functions });
+  }
+  return written.length > 0 ? { functionDefaults: written } : {};
+}
+
+/**
+ * Does the DECLARED type of a receiver have this property — the question that separates a callable
+ * input being called (`.inputs.f(x)`) from a receiver call (`.inputs.xs.map(f)`), NAMES.md §8.
+ *
+ * Answered from the state's own `inputs`, which is where a callable value is declared: `.inputs`
+ * has a property per slot, and below a slot its schema says. Anything else — a child's output, a
+ * call's result — has no declaration in hand at this point, and "cannot say" is `false`: the word
+ * after the dot is then tried as an operation, and a callable that really is there is still reached
+ * the way it always could be, `(.children.k.output.f)(x)`.
+ */
+function declaresProperty(def: StateDef, recv: Expr, name: string): boolean {
+  const path = selfPathOf(recv);
+  if (path === undefined || path[0] !== "inputs") return false;
+  if (path.length === 1) return def.inputs !== undefined && Object.hasOwn(def.inputs, name);
+  let schema: unknown = def.inputs?.[path[1]!]?.schema;
+  for (const segment of [...path.slice(2), name]) {
+    const properties = (schema as { properties?: Record<string, unknown> } | undefined)?.properties;
+    if (properties === undefined || !Object.hasOwn(properties, segment)) return false;
+    schema = properties[segment];
+  }
+  return true;
+}
+
+/**
+ * Put a function's DEFAULT ARGUMENTS under the state's own (NAMES.md §7).
+ *
+ * Read off the merged block, where the chain's `functions` has already merged per key down the
+ * tree, and applied only once the callee's NAME is in hand — which is the point of keying the
+ * defaults by function: `args` written on a root would reach every function under it, and a change
+ * of `kind` would drop it (`KIND_SPECIFIC`), while this reaches exactly the function it names and is
+ * not the operation's `args` until this moment. A bound callee (`function: { "$expr" }`) has no name
+ * at load and takes no defaults.
+ */
+function withFunctionDefaults(merged: OperationFields): OperationFields {
+  const name = typeof merged.function === "string" ? merged.function : undefined;
+  const defaults = name === undefined ? undefined : merged.functions?.[name]?.args;
+  if (defaults === undefined || inferredKind(merged) !== "function") return merged;
+  return { ...merged, args: mergeArgs(defaults, merged.args) };
 }
 
 /**
@@ -1342,7 +1652,7 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
    * Expand one state's document references (REFERENCES.md §4), or pass it through untouched when
    * the caller supplied no filesystem — an in-memory bundle has nothing to resolve against.
    */
-  const expandFor = (id: string, def: StateDef, path?: readonly string[]): StateDef => {
+  const expandFor = (id: string, def: StateDef, path: readonly string[] | undefined, enclosing: Readonly<Record<string, unknown>>): StateDef => {
     if (options.vfs === undefined) return def;
     // The inherited search path, when the chain declared one, replaces the single default root for
     // this state's bare references (EXPRESSIONS.md §4). The primary root stays first, so an id under
@@ -1358,6 +1668,9 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
         ...(options.onWarn !== undefined ? { onWarn: options.onWarn } : {}),
         ...(options.shadowing !== undefined ? { shadowing: options.shadowing } : {}),
         ...(options.onReferencedFile !== undefined ? { onRead: options.onReferencedFile } : {}),
+        // The names the chain above declares: what a bare string here may mean before it means a
+        // file, and what an entry pasting its own name pastes (NAMES.md §4, §6).
+        enclosing,
       }) as StateDef;
     } catch (e) {
       throw new WorkflowLoadError((e as Error).message, id);
@@ -1431,8 +1744,11 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
 
   // Transitive closure from the root, carrying each path's accumulated environment.
   const states: Record<string, LoadedState> = {};
+  // What the whole tree says about its scoped names — filled by each state as it is reached, closed
+  // after the walk, because a name's configuration has writers on more than one path (NAMES.md §4).
+  const names = new NameTable();
   const sourceOf = new Map<string, string>();
-  const queue: Array<{ id: string; variant: string; inherited: OperationFields; ancestry: readonly SessionAncestor[] }> = [
+  const queue: Array<{ id: string; variant: string; inherited: OperationFields; ancestry: readonly Ancestor[] }> = [
     { id: rootId, variant: rootId, inherited: {}, ancestry: [] },
   ];
   while (queue.length > 0) {
@@ -1454,7 +1770,7 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
     // reference with a path you have not loaded yet. Everything else inherits normally.
     const ownEnvironment = def.environment !== undefined && !Array.isArray(def.environment) && typeof def.environment === "object" ? def.environment : undefined;
     const searchPath = resolutionEnvironment(inherited, ownEnvironment).path;
-    const expanded = expandFor(id, def, searchPath);
+    const expanded = expandFor(id, def, searchPath, inherited.names ?? {});
     // Desugared against the SOURCE id: `./goals` means "under the state's own path", and a variant
     // suffix is an identity for this mount, not a different place on disk.
   /**
@@ -1614,13 +1930,15 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
     const lower: LowerOptions = {
       resolveOperation: (name) => resolveOperationName(name, id, searchPath),
       resolveName: (name) => resolveValueName(name, id, searchPath, lower),
+      receiverHas: (recv, name) => declaresProperty(expanded, recv, name),
       ...(options.userFunctions !== undefined ? { userFunctions: options.userFunctions } : {}),
     };
     // Session declarations are canonicalized HERE, before the merge and before desugaring, because
     // this is the last point at which "who wrote this" is still known (§1.6). The ancestry carries
     // each ancestor's VARIANT id, so a scope resolves to the state as this path reaches it — which
     // is what makes two mounts of one subtree scope their names apart instead of colliding.
-    const scoped = normalizeStateSessions(expanded, { id: variant, source: id }, ancestry);
+    // Everything on the chain was normalized by the state that wrote it, so every entry has its scope.
+    const scoped = normalizeStateNames(expanded, { id: variant, source: id }, ancestry, (inherited.names ?? {}) as VisibleNames, names);
     const loaded = desugarState(id, scoped.def, inherited, refs, childrenByParent.get(id), lower);
     loaded.id = variant;
     if (scoped.error !== undefined) loaded.sessionError = scoped.error;
@@ -1639,9 +1957,14 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
     // What a descendant's `join` searches: this state, plus everything above it. Carried rather than
     // recomputed because "did this state WRITE a session" is knowable only where its own document is
     // in hand — after the merge every state appears to have one.
-    const childAncestry: readonly SessionAncestor[] = [
+    const childAncestry: readonly Ancestor[] = [
       ...ancestry,
-      { id: variant, source: id, ...(scoped.declared !== undefined ? { declared: scoped.declared } : {}) },
+      {
+        id: variant,
+        source: id,
+        ...(scoped.declared !== undefined ? { declared: scoped.declared } : {}),
+        ...(scoped.workspace !== undefined ? { workspace: scoped.workspace } : {}),
+      },
     ];
     // From the LOADED children, so inferred ones (§6) are walked exactly like declared ones and
     // their references are already resolved to canonical ids. Each child's `state` is then rewritten
@@ -1667,6 +1990,24 @@ export function loadBundle(files: Record<string, unknown>, rootRef: string, opti
     expandOutputSpreads(state, states);
     const fanOut = computeFanOut(state);
     if (fanOut !== undefined) state.fanOut = fanOut;
+  }
+
+  // A name's configuration is every writer's contribution, so it is only known now. It lands on the
+  // state that SCOPES the name — a use carries that id — and a disagreement lands on the state whose
+  // line has to change.
+  const closed = names.finish();
+  for (const [scope, configs] of closed.configs) {
+    const state = states[scope];
+    if (state !== undefined) state.names = configs;
+  }
+  for (const { state: at, path, message } of closed.complaints) {
+    const state = states[at];
+    if (state !== undefined) (state.nameErrors ??= []).push({ path, message });
+  }
+  // Where each identity was first put into a position — the bind point its type answers at (§5).
+  for (const { state: at, ...bind } of closed.binds) {
+    const state = states[at];
+    if (state !== undefined) (state.nameBinds ??= []).push(bind);
   }
 
   // Keep the authored files for hashing — the snapshot identity is what the AUTHOR wrote. A variant

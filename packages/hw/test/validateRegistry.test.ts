@@ -61,7 +61,7 @@ describe("an unregistered functionRef", () => {
   });
 
   it("never flags the loader's own synthesized resolvers, which are engine built-ins", () => {
-    // The fixture's `{ expr }` / `{ child, output }` sugar lowers onto RESOLVER_REFS function ops.
+    // The fixture's `{ $expr: expr }` / `{ child, output }` sugar lowers onto RESOLVER_REFS function ops.
     // An empty registry must not report those as missing.
     const report = validateBundle(bundle(), { functions: new Map(), strict: true });
     expect(report.errors.map((e) => e.message).join("\n")).not.toMatch(/resolver|expr|select/i);

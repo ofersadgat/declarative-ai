@@ -250,7 +250,7 @@ describe("runtime references", () => {
 
   it("reads a string binding with operators or a call as an expression", () => {
     // The counterpart: a string expansion cannot read as a path is left for the desugarer, so an
-    // expression needs no `{ expr }` wrapper to be one (EXPRESSIONS.md §1).
+    // expression needs no `{ $expr: expr }` wrapper to be one (EXPRESSIONS.md §1).
     const defs = {
       "w.json": {
         inputs: { n: { schema: { type: "integer" } } },
@@ -435,7 +435,7 @@ describe("an expression calls an operation resolved along the path", () => {
   it("lowers a call to a producer edge on the resolved operation, with the argument bound", () => {
     const state = load({
       inputs: { issue: { schema: { type: "string" } } },
-      outputs: { verdict: { binding: { expr: "classify(.inputs.issue)" } } },
+      outputs: { verdict: { binding: { $expr: "classify(.inputs.issue)" } } },
       operation: { kind: "prompt", prompt: "go", model: "m" },
     }).states.plan!;
 
@@ -454,7 +454,7 @@ describe("an expression calls an operation resolved along the path", () => {
   it("nests a call inside an operator, since an operator IS an application", () => {
     const state = load({
       inputs: { issue: { schema: { type: "string" } } },
-      outputs: { hot: { binding: { expr: "classify(.inputs.issue).severity === 'high'" } } },
+      outputs: { hot: { binding: { $expr: "classify(.inputs.issue).severity === 'high'" } } },
       operation: { kind: "prompt", prompt: "go", model: "m" },
     }).states.plan!;
     const binding = state.outputs!.hot!.binding as { op: { functionRef?: string } };
@@ -464,7 +464,7 @@ describe("an expression calls an operation resolved along the path", () => {
   it("reports a name that resolves to no operation", () => {
     expect(() =>
       load({
-        outputs: { v: { binding: { expr: "nosuchthing(1)" } } },
+        outputs: { v: { binding: { $expr: "nosuchthing(1)" } } },
         operation: { kind: "prompt", prompt: "go", model: "m" },
       }),
     ).toThrow(/matches no file|not a known operation/);
@@ -479,7 +479,7 @@ describe("an expression calls an operation resolved along the path", () => {
   it("lets a child and a callee share a name without interacting", () => {
     const state = load({
       children: { classify: { state: "./classify" } },
-      outputs: { v: { binding: { expr: "classify(1)" } } },
+      outputs: { v: { binding: { $expr: "classify(1)" } } },
       operation: { kind: "prompt", prompt: "go", model: "m" },
     }).states.plan!;
     // The binding resolved to the PATH operation, not to the child.

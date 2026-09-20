@@ -29,6 +29,7 @@ import { EXPRESSION_REFS, pathOfRef, referencePathsOf } from "./lowerExpr.js";
 import { embeddedOpsOf } from "./resolve.js";
 import { isSessionExpr, isSessionRef, validateSessionDecl } from "./session.js";
 import { operationNodeSchema } from "./operationNode.js";
+import { NAME_KEY } from "./scope.js";
 import { ANY_SCHEMA, inferExpression, inferRef, isBooleanSchema, isUniversalSchema, type ExprScope } from "./inferExpr.js";
 import {
   BOUND_CALLEE,
@@ -83,6 +84,15 @@ export interface ValidationEnvironment {
    * which wants every reference to resolve, turns this on; the pre-run gate does not.
    */
   strict?: boolean;
+  /**
+   * What a PROVIDING position's configuration is, as a schema (NAMES.md §4, §5) — `workspace`'s is
+   * whatever the host's `workspaceFor` makes a workspace from (`{ "from": "main" }`), `session`'s
+   * whatever its session store takes. The engine hands a name's configuration to the host opaquely,
+   * so only the host can say what type it is; with a schema here, a name put into that position is
+   * held to it — its entry, every contribution, and the plain keys beside each `$ref` — at the bind
+   * point. Absent ⇒ that position's configuration is not checked.
+   */
+  positions?: { session?: JsonSchema; workspace?: JsonSchema };
   /** Assert a NON-interactive context (search/optimizer, which cannot answer a prompt): an operation
    *  bound to an interactive entry is then an error. Unset ⇒ not checked. */
   interactive?: boolean;
@@ -262,7 +272,7 @@ function validateState(
       // A PROMPT callee needs no registry entry — it dispatches to the prompt executor.
       if (op.kind !== "function") continue;
       checkAgainstRegistry(op.functionRef, where, err, warn, env);
-      checkAgainstSignature(op, suppliedByCall(op, parameters, typed), where, err, env);
+      checkAgainstSignature(op, suppliedByCall(op, parameters, typed), where, err, env, typed);
     }
   }
 
@@ -283,6 +293,29 @@ function validateState(
   // because it is a question about the TREE, and only the walk knows which state wrote what; carried
   // to this pass so it is reported beside every other authoring error instead of aborting the load.
   if (def.sessionError !== undefined) err(def.sessionError.path, def.sessionError.message);
+  for (const complaint of def.nameErrors ?? []) err(complaint.path, complaint.message);
+
+  // A function's DEFAULT ARGUMENTS (NAMES.md §7), against the function they are for. Living under the
+  // function's name is what makes this check possible at all — an `args` written on a root had no
+  // function to be checked against — and it is made HERE, at the block that wrote the default, so a
+  // misspelled parameter is one finding at its source rather than one per state that inherits it.
+  for (const { path, functions } of def.functionDefaults ?? []) {
+    for (const [name, defaults] of Object.entries(functions)) {
+      checkFunctionDefaults(name, defaults.args ?? {}, `${path}.${name}.args`, err, warn, env);
+    }
+  }
+
+  // A name put into a PROVIDING position is held to that position's type (NAMES.md §5), at the bind
+  // point: the line that put it there, not the entry that defined it. What the type IS belongs to
+  // the host (`env.positions`). A `value` bind needs nothing here — it is a binding, and is typed
+  // where it is read like any other (`resolverSchema`).
+  for (const bind of def.nameBinds ?? []) {
+    const expected = bind.kind === "value" ? undefined : env.positions?.[bind.kind];
+    if (expected === undefined || isUniversalSchema(expected)) continue;
+    const configuration = (bundle.states[bind.in]?.names?.[bind.name] ?? {}) as JsonValue;
+    const check = isSubschema(closedSchemaOf(configuration) as Schema, expected as Schema);
+    if (!check.ok) err(bind.path, `'${bind.name}' is configured as ${JSON.stringify(configuration)}, which is not what a ${bind.kind} takes: ${check.reason}`);
+  }
 
   // --- sequence ---------------------------------------------------------------
   const sequence = def.sequence ?? [];
@@ -545,7 +578,7 @@ function checkOperation(
       // state exists to run was the one call nobody compared against its impl. A state could name
       // every parameter wrongly, or pass nothing at all to a function that requires three arguments,
       // and lint clean right up until dispatch.
-      checkAgainstSignature(op, suppliedByState(op, def, typed), path, err, env);
+      checkAgainstSignature(op, suppliedByState(op, def, typed), path, err, env, typed);
     }
   } else if ((op.user === undefined || op.user === "") && !boundPrompt) {
     warn(`${path}.prompt`, "prompt operation has an empty prompt (no template and no skill)");
@@ -712,6 +745,46 @@ function hooksFor(
 }
 
 /**
+ * One `environment.functions.<name>.args` block against that function's declared parameters.
+ *
+ * Names first, for the reason `checkAgainstSignature` gives: JSON Schema objects are open, so an
+ * argument nothing reads can only be caught by name. A LITERAL is then held to its parameter's type;
+ * a computed default — a scoped name, a wrapped binding — has no value yet and is typed where it is
+ * bound, like any other binding. An entry that declares no signature constrains nothing, and one
+ * that is not registered is the same finding it is for an operation: a warning, since a state the
+ * run never enters never needs its function.
+ */
+function checkFunctionDefaults(
+  name: string,
+  args: Record<string, JsonValue>,
+  path: string,
+  err: (path: string, message: string) => void,
+  warn: (path: string, message: string) => void,
+  env: ValidationEnvironment,
+): void {
+  if (env.functions === undefined) return;
+  const entry = env.functions.get(name);
+  if (entry === undefined) {
+    (env.strict === true ? err : warn)(path, `gives default arguments to '${name}', which is not a registered function`);
+    return;
+  }
+  const accepted = entry.signature?.input;
+  if (accepted === undefined || Object.keys(accepted).length === 0) return;
+  for (const [key, value] of Object.entries(args)) {
+    const slot = accepted[key];
+    if (slot === undefined) {
+      err(`${path}.${key}`, `'${name}' has no parameter '${key}' — it takes ${Object.keys(accepted).join(", ")}`);
+      continue;
+    }
+    const computed = value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).some((k) => k.startsWith("$"));
+    // `null` is how a nearer layer takes a default AWAY ("remote": null), so it is not held to the type.
+    if (computed || value === null || slot.schema === undefined || isUniversalSchema(slot.schema)) continue;
+    const check = isSubschema(schemaOfValue(value) as Schema, slot.schema as Schema);
+    if (!check.ok) err(`${path}.${key}`, `default for '${name}' parameter '${key}' is not the type it takes: ${check.reason}`);
+  }
+}
+
+/**
  * A callee DOCUMENT declares the parameters a call's arguments bind to; the implementation it names
  * lives in the registry. When the entry declares a signature, the two must agree — and this is the
  * only check that can catch them drifting.
@@ -727,6 +800,8 @@ function checkAgainstSignature(
   path: string,
   err: (path: string, message: string) => void,
   env: ValidationEnvironment,
+  /** How the calling state types a binding — what a SCOPED NAME bound into a slot is held to (NAMES.md §5). */
+  typed?: (ref: Ref<InlineFamily>) => JsonSchema,
 ): void {
   const entry = env.functions?.get(op.functionRef);
   const declared = entry?.signature;
@@ -747,7 +822,19 @@ function checkAgainstSignature(
     }
     // Where BOTH sides declare a type, they must agree.
     const want = slot.schema;
-    if (param.schema === undefined || want === undefined || isUniversalSchema(want)) continue;
+    if (want === undefined || isUniversalSchema(want)) continue;
+    if (param.schema === undefined) {
+      // A SCOPED NAME put into this parameter is an error HERE when it is not the type the parameter
+      // takes (NAMES.md §5) — at the bind point, not at the entry that defined it. Its type is known
+      // exactly: the configuration the whole tree gave it, overrides included, with its key beside
+      // it. Confined to a name because nothing else an untyped slot holds was ever held to the
+      // signature at load, and starting to would be a different change than this one.
+      const binding = param.binding;
+      if (typed === undefined || binding === undefined || !isNameRead(binding)) continue;
+      const check = isSubschema(typed(binding) as Schema, want as Schema);
+      if (!check.ok) err(`${path}.input.${name}`, `the name bound to '${op.functionRef}' parameter '${name}' is not the type it takes: ${check.reason}`);
+      continue;
+    }
     const check = isSubschema(param.schema as Schema, want as Schema);
     if (!check.ok) {
       err(path, `operation '${op.functionRef}' declares parameter '${name}' as a type its implementation does not accept: ${check.reason}`);
@@ -818,6 +905,11 @@ function checkAgainstBoundCallee(
  * every declared parameter is present whether or not anybody supplied it, and the check could never
  * have fired again.
  */
+/** Is this binding a read of a SCOPED NAME — the `name.get` edge a `{ "$ref": name }` lowers to? */
+function isNameRead(ref: Ref<InlineFamily>): boolean {
+  return "op" in ref && typeof ref.op !== "string" && ref.op.kind === "function" && ref.op.functionRef === RESOLVER_REFS.name;
+}
+
 function suppliedByState(
   op: Operation<InlineFamily> & { kind: "function" },
   def: LoadedState,
@@ -1160,6 +1252,18 @@ function resolverSchema(
   }
 
   switch (op.functionRef) {
+    case RESOLVER_REFS.name: {
+      // A SCOPED NAME reads as its configuration with its key beside it, and the configuration was
+      // settled at load — so its type is known exactly, and the slot it is bound into checks it like
+      // any literal. This is the bind-point check of NAMES.md §5 for every value position at once: a
+      // function's parameter, a typed call setting, an output.
+      const name = literalTextOf(op.input.name);
+      const scopedIn = literalTextOf(op.input.in);
+      if (name === undefined || scopedIn === undefined) return undefined;
+      const configuration = bundle.states[scopedIn]?.names?.[name];
+      const block = configuration !== null && typeof configuration === "object" && !Array.isArray(configuration) ? configuration : {};
+      return closedSchemaOf({ ...block, [NAME_KEY]: "" } as JsonValue, (key) => key === NAME_KEY);
+    }
     case RESOLVER_REFS.select: {
       // `{ child, output }`: project one property off the child's outputs object.
       const value = op.input.value;
@@ -1231,6 +1335,20 @@ function literalTextOf(param: Parameter<InlineFamily> | undefined): string | und
 }
 
 /** The schema an inline JSON literal satisfies — precise enough for the subschema check. */
+/**
+ * A value described EXACTLY, objects closed: these keys and no others. `schemaOfValue` leaves an
+ * object open, which is right for a literal handed to a consumer that may ignore what it does not
+ * read; a name's configuration is held to a position's type, and a position that forbids a key it
+ * does not know (`additionalProperties: false`) must be able to refuse one. `loose` names keys whose
+ * VALUE is not pinned — the key the engine adds is a string nobody can know at load.
+ */
+function closedSchemaOf(v: JsonValue, loose: (key: string) => boolean = () => false): JsonSchema {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return schemaOfValue(v);
+  const properties: Record<string, JsonValue> = {};
+  for (const [k, val] of Object.entries(v)) properties[k] = (loose(k) ? { type: "string" } : closedSchemaOf(val)) as JsonValue;
+  return { type: "object", properties, required: Object.keys(v), additionalProperties: false };
+}
+
 function schemaOfValue(v: JsonValue): JsonSchema {
   if (v === null) return { type: "null" };
   if (Array.isArray(v)) return { type: "array" };

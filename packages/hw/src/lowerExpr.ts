@@ -20,8 +20,8 @@
  * structural for free — so `fanout.ts` recognizes a context-rooted `children` chain instead, which
  * is still a walk over the tree rather than a second parse.
  */
-import type { InlineFamily, Operation, Parameter, Ref } from "@declarative-ai/exec";
-import { ExprError, isSpread, OPERATOR_PARAMS, pathOf, type Argument, type Expr } from "./expr.js";
+import type { InlineFamily, JsonValue, Operation, Parameter, Ref } from "@declarative-ai/exec";
+import { applySugar, ExprError, isSpread, OPERATOR_PARAMS, pathOf, receiverCallOf, type Argument, type Expr } from "./expr.js";
 
 /** The operations whose `op` argument is an operation REFERENCE rather than a data path (§3.5). */
 const HIGHER_ORDER_NAMES: ReadonlySet<string> = new Set(["map", "filter", "flatMap", "reduce"]);
@@ -89,6 +89,14 @@ export function lowerExpression(expr: Expr, options: LowerOptions = {}): Ref<Inl
       return edge(RESOLVER_REFS.member, { value: down(expr.obj), prop: { text: expr.prop } });
     }
     case "call": {
+      // `recv.name(args)` is sugar for `name(recv, args)` (NAMES.md §8) — the same AST, as `xs[i]` is
+      // `at(xs, i)` — when the receiver is a runtime value and `name` is an operation. It stays a
+      // call of a callable VALUE when the receiver's declared type has a property of that name:
+      // `.inputs.f(x)` with an input `f` is the input being called, whatever else `f` might name.
+      const receiver = receiverCallOf(expr);
+      if (receiver !== undefined && options.receiverHas?.(receiver.recv, receiver.name) !== true && isOperationName(receiver.name, options)) {
+        return down(applySugar(receiver.name, [receiver.recv, ...expr.args]));
+      }
       // Applying a VALUE (SPEC §6.2). Nothing static names the callee, so its arguments cannot bind
       // to slots here: they ride the edge BY POSITION (`arg0`, `arg1`, …) and by name (a spread), and
       // the `op.apply` resolver binds them against whatever operation the callee resolves to, exactly
@@ -114,6 +122,15 @@ export function lowerExpression(expr: Expr, options: LowerOptions = {}): Ref<Inl
       );
     case "apply": {
       const builtin = OPERATOR_PARAMS[expr.op];
+      // `indexOf(xs, op)` with an operation only the search path knows. The parser rewrote the
+      // built-in case already (`applySugar`); a project's own operation is known only here.
+      if (expr.op === "indexOf" && expr.args.length === 2) {
+        const [list, item] = expr.args as [Argument, Argument];
+        const named = isSpread(item) || isSpread(list) ? undefined : pathOf(item)?.join(".");
+        if (named !== undefined && options.resolveOperation?.(named) !== undefined) {
+          return down({ type: "apply", op: "indexOf", args: [list, { type: "apply", op: named, args: [list] }] });
+        }
+      }
       if (builtin !== undefined) {
         // A HIGHER-ORDER operation takes an operation in its `op` position, so that argument is a
         // REFERENCE rather than a data path: `map(xs, classify)` passes the operation `classify`,
@@ -168,8 +185,21 @@ export function lowerExpression(expr: Expr, options: LowerOptions = {}): Ref<Inl
   }
 }
 
+/** Is this word an OPERATION — a built-in, or something the search path resolves to one? */
+function isOperationName(name: string, options: LowerOptions): boolean {
+  return OPERATOR_PARAMS[name] !== undefined || options.resolveOperation?.(name) !== undefined;
+}
+
 /** What lowering needs from its caller: how to turn a NAME into the thing it names. */
 export interface LowerOptions {
+  /**
+   * Does the DECLARED type of this receiver have a property of this name (NAMES.md §8)?
+   *
+   * What separates `.inputs.f(x)` — a callable input, called — from `.inputs.xs.map(f)`. Lowering
+   * has no types of its own, so the loader answers from the state's declared slots; absent, or
+   * unable to say, the answer is "no" and the word after the dot is tried as an operation.
+   */
+  receiverHas?: (recv: Expr, name: string) => boolean;
   /** Resolve a non-built-in operation name — a reference along the `path`, read as an operation. */
   resolveOperation?: (name: string) => Operation<InlineFamily> | undefined;
   /**
@@ -379,6 +409,43 @@ export function bindTransitionContext(ref: Ref<InlineFamily>, to: string): Ref<I
     ...ref,
     op: { ...producer, input } as Operation<InlineFamily>,
     ...(filled !== undefined ? { parameters: filled } : {}),
+  };
+}
+
+/**
+ * Close a lowered tree over ONE root of its context: every read of `.<root>` becomes the literal.
+ *
+ * What makes `$pick` an ordinary binding (NAMES.md §6). The expression reads its alternatives as
+ * `.any`, and the alternatives are known at load — so rather than teach the engine a second context
+ * a pick is evaluated in, the root is bound HERE and what is left is a tree like any other: its
+ * calls are found by the walk that finds every binding's calls, it is typed by the inference that
+ * types every binding, and it is journaled by whatever position it fills.
+ *
+ * A rebuild rather than a mutation, for the reason {@link bindTransitionContext} gives.
+ */
+export function bindContextRoot(ref: Ref<InlineFamily>, root: string, value: JsonValue): Ref<InlineFamily> {
+  if (!("op" in ref)) return ref;
+  const producer = ref.op;
+  if (typeof producer === "string") return ref;
+  if (producer.kind === "function" && producer.functionRef === RESOLVER_REFS.context) {
+    const name = producer.input.name?.binding;
+    if (name !== undefined && "text" in name && name.text === root) return { json: value };
+  }
+  const walked = (params: Record<string, Parameter<InlineFamily>> | undefined): Record<string, Parameter<InlineFamily>> | undefined => {
+    if (params === undefined) return undefined;
+    const out: Record<string, Parameter<InlineFamily>> = {};
+    for (const [name, p] of Object.entries(params)) out[name] = p.binding ? { ...p, binding: bindContextRoot(p.binding, root, value) } : p;
+    return out;
+  };
+  const parameters = walked(ref.parameters);
+  return {
+    ...ref,
+    op: {
+      ...producer,
+      input: walked(producer.input) ?? producer.input,
+      ...(producer.spread !== undefined ? { spread: producer.spread.map((s) => bindContextRoot(s, root, value)) } : {}),
+    } as Operation<InlineFamily>,
+    ...(parameters !== undefined ? { parameters } : {}),
   };
 }
 

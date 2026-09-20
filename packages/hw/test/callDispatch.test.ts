@@ -128,7 +128,7 @@ describe("a call runs and its result reaches the binding", () => {
   /** The op the call names produces a value that lands in a declared output. */
   const withCall = {
     inputs: { issue: { kind: "text", schema: { type: "string" } } },
-    outputs: { loud: { schema: { type: "string" }, binding: { expr: "shout(.inputs.issue)" } } },
+    outputs: { loud: { schema: { type: "string" }, binding: { $expr: "shout(.inputs.issue)" } } },
     operation: { kind: "function", function: "noop" },
   };
 
@@ -154,12 +154,12 @@ describe("a call runs and its result reaches the binding", () => {
 describe("a spread argument", () => {
   const spreadLiteral = {
     inputs: { issue: { kind: "text", schema: { type: "string" } } },
-    outputs: { loud: { schema: { type: "string" }, binding: { expr: "shout(...{ text: .inputs.issue })" } } },
+    outputs: { loud: { schema: { type: "string" }, binding: { $expr: "shout(...{ text: .inputs.issue })" } } },
     operation: { kind: "function", function: "noop" },
   };
   const spreadValue = {
     inputs: { bag: { kind: "json", schema: { type: "object", properties: { text: { type: "string" } } } } },
-    outputs: { loud: { schema: { type: "string" }, binding: { expr: "shout(....inputs.bag)" } } },
+    outputs: { loud: { schema: { type: "string" }, binding: { $expr: "shout(....inputs.bag)" } } },
     operation: { kind: "function", function: "noop" },
   };
 
@@ -196,8 +196,8 @@ describe("a spread argument", () => {
       {
         inputs: { bag: { kind: "json", schema: { type: "object", properties: { text: { type: "string" } } } } },
         outputs: {
-          a: { schema: { type: "string" }, binding: { expr: "shout(....inputs.bag)" } },
-          b: { schema: { type: "string" }, binding: { expr: "shout(.inputs.bag.text)" } },
+          a: { schema: { type: "string" }, binding: { $expr: "shout(....inputs.bag)" } },
+          b: { schema: { type: "string" }, binding: { $expr: "shout(.inputs.bag.text)" } },
         },
         operation: { kind: "function", function: "noop" },
       },
@@ -211,7 +211,7 @@ describe("a spread argument", () => {
   it("refuses a written-out key the callee has no slot for", () => {
     expect(() =>
       bundleFor({
-        outputs: { loud: { schema: { type: "string" }, binding: { expr: "shout(...{ nope: 'x' })" } } },
+        outputs: { loud: { schema: { type: "string" }, binding: { $expr: "shout(...{ nope: 'x' })" } } },
         operation: { kind: "function", function: "noop" },
       }),
     ).toThrow(/no parameter 'nope'/);
@@ -221,7 +221,7 @@ describe("a spread argument", () => {
     expect(() =>
       bundleFor({
         inputs: { issue: { kind: "text", schema: { type: "string" } } },
-        outputs: { loud: { schema: { type: "string" }, binding: { expr: "shout(.inputs.issue, ...{ text: 'x' })" } } },
+        outputs: { loud: { schema: { type: "string" }, binding: { $expr: "shout(.inputs.issue, ...{ text: 'x' })" } } },
         operation: { kind: "function", function: "noop" },
       }),
     ).toThrow(/passed 'text' twice/);
@@ -240,7 +240,7 @@ describe("validating a deferred spread", () => {
 
   const withSpread = (bagSchema: unknown, expr: string, extra: Record<string, unknown> = {}) => ({
     inputs: { bag: { kind: "json", schema: bagSchema } },
-    outputs: { out: { binding: { expr } } },
+    outputs: { out: { binding: { $expr: expr } } },
     operation: { kind: "function", function: "noop" },
     ...extra,
   });
@@ -407,7 +407,7 @@ describe("a call's output type", () => {
 describe("running it", () => {
   const withCall = {
     inputs: { issue: { kind: "text", schema: { type: "string" } } },
-    outputs: { loud: { schema: { type: "string" }, binding: { expr: "shout(.inputs.issue)" } } },
+    outputs: { loud: { schema: { type: "string" }, binding: { $expr: "shout(.inputs.issue)" } } },
     operation: { kind: "function", function: "noop" },
   };
 
@@ -427,8 +427,8 @@ describe("running it", () => {
       {
         inputs: { issue: { kind: "text", schema: { type: "string" } } },
         outputs: {
-          a: { schema: { type: "string" }, binding: { expr: "shout(.inputs.issue)" } },
-          b: { schema: { type: "string" }, binding: { expr: "shout(.inputs.issue)" } },
+          a: { schema: { type: "string" }, binding: { $expr: "shout(.inputs.issue)" } },
+          b: { schema: { type: "string" }, binding: { $expr: "shout(.inputs.issue)" } },
         },
         operation: { kind: "function", function: "noop" },
       },
@@ -444,8 +444,8 @@ describe("running it", () => {
       {
         inputs: { a: { kind: "text", schema: { type: "string" } }, b: { kind: "text", schema: { type: "string" } } },
         outputs: {
-          x: { schema: { type: "string" }, binding: { expr: "shout(.inputs.a)" } },
-          y: { schema: { type: "string" }, binding: { expr: "shout(.inputs.b)" } },
+          x: { schema: { type: "string" }, binding: { $expr: "shout(.inputs.a)" } },
+          y: { schema: { type: "string" }, binding: { $expr: "shout(.inputs.b)" } },
         },
         operation: { kind: "function", function: "noop" },
       },
@@ -460,7 +460,7 @@ describe("running it", () => {
 describe("a prompt operation as a callee", () => {
   const withPromptCall = {
     inputs: { issue: { kind: "text", schema: { type: "string" } } },
-    outputs: { verdict: { schema: { type: "string" }, binding: { expr: "classify(.inputs.issue)" } } },
+    outputs: { verdict: { schema: { type: "string" }, binding: { $expr: "classify(.inputs.issue)" } } },
     operation: { kind: "function", function: "noop" },
   };
 
@@ -504,7 +504,7 @@ describe("a call's arguments are visible to the static passes", () => {
         outputs: {
           // TWO consumers of the same child output — one direct, one through a call.
           direct: { schema: { type: "string" }, binding: ".children.c.output.doc" },
-          shouted: { schema: { type: "string" }, binding: { expr: "shout(.children.c.output.doc)" } },
+          shouted: { schema: { type: "string" }, binding: { $expr: "shout(.children.c.output.doc)" } },
         },
       },
       "plan/c.json": {
@@ -519,7 +519,7 @@ describe("a call's arguments are visible to the static passes", () => {
   it("reports a call argument that reads an undeclared child", () => {
     const bundle = loadWith({
       "plan.json": {
-        outputs: { v: { schema: { type: "string" }, binding: { expr: "shout(.children.ghost.output.x)" } } },
+        outputs: { v: { schema: { type: "string" }, binding: { $expr: "shout(.children.ghost.output.x)" } } },
         operation: { kind: "function", function: "noop" },
       },
     });
@@ -537,7 +537,7 @@ describe("a call's arguments are visible to the static passes", () => {
     const bundle = loadWith({
       "plan.json": {
         inputs: { issue: { kind: "text", schema: { type: "string" } } },
-        outputs: { v: { schema: { type: "string" }, binding: { expr: "shout(.inputs.issue)" } } },
+        outputs: { v: { schema: { type: "string" }, binding: { $expr: "shout(.inputs.issue)" } } },
         operation: { kind: "function", function: "noop" },
       },
     });
@@ -548,7 +548,7 @@ describe("a call's arguments are visible to the static passes", () => {
   it("runs a call with no arguments", async () => {
     const { result } = await run(
       {
-        outputs: { loud: { schema: { type: "string" }, binding: { expr: "shout()" } } },
+        outputs: { loud: { schema: { type: "string" }, binding: { $expr: "shout()" } } },
         operation: { kind: "function", function: "noop" },
       },
       {},
@@ -567,7 +567,7 @@ describe("a rooted reference as a callee", () => {
     const bare = await run(
       {
         inputs: { issue: { kind: "text", schema: { type: "string" } } },
-        outputs: { v: { schema: { type: "string" }, binding: { expr: "shout(.inputs.issue)" } } },
+        outputs: { v: { schema: { type: "string" }, binding: { $expr: "shout(.inputs.issue)" } } },
         operation: { kind: "function", function: "noop" },
       },
       { issue: "hi" },
@@ -575,7 +575,7 @@ describe("a rooted reference as a callee", () => {
     const rooted = await run(
       {
         inputs: { issue: { kind: "text", schema: { type: "string" } } },
-        outputs: { v: { schema: { type: "string" }, binding: { expr: "$JAIRA/functions/shout(.inputs.issue)" } } },
+        outputs: { v: { schema: { type: "string" }, binding: { $expr: "$JAIRA/functions/shout(.inputs.issue)" } } },
         operation: { kind: "function", function: "noop" },
       },
       { issue: "hi" },
@@ -673,7 +673,7 @@ describe("a call inside a guard", () => {
 describe("the call memo is scoped and injectable", () => {
   const def = {
     inputs: { issue: { kind: "text", schema: { type: "string" } } },
-    outputs: { loud: { schema: { type: "string" }, binding: { expr: "shout(.inputs.issue)" } } },
+    outputs: { loud: { schema: { type: "string" }, binding: { $expr: "shout(.inputs.issue)" } } },
     operation: { kind: "function", function: "noop" },
   };
 
@@ -735,7 +735,7 @@ describe("the call memo is scoped and injectable", () => {
 describe("operations dispatch through the operation executor", () => {
   const def = {
     inputs: { issue: { kind: "text", schema: { type: "string" } } },
-    outputs: { loud: { schema: { type: "string" }, binding: { expr: "shout(.inputs.issue)" } } },
+    outputs: { loud: { schema: { type: "string" }, binding: { $expr: "shout(.inputs.issue)" } } },
     operation: { kind: "function", function: "noop" },
   };
 
@@ -822,7 +822,7 @@ describe("a callee document is checked against its registered signature", () => 
   const bundle = () =>
     bundleFor({
       inputs: { issue: { kind: "text", schema: { type: "string" } } },
-      outputs: { v: { schema: { type: "string" }, binding: { expr: "shout(.inputs.issue)" } } },
+      outputs: { v: { schema: { type: "string" }, binding: { $expr: "shout(.inputs.issue)" } } },
       operation: { kind: "function", function: "noop" },
     });
 
@@ -855,7 +855,7 @@ describe("a callee document is checked against its registered signature", () => 
 describe("map applies an operation to every element", () => {
   const mapDef = {
     inputs: { issues: { kind: "json", schema: { type: "array", items: { type: "string" } } } },
-    outputs: { loud: { schema: { type: "array" }, binding: { expr: "map(.inputs.issues, shout)" } } },
+    outputs: { loud: { schema: { type: "array" }, binding: { $expr: "map(.inputs.issues, shout)" } } },
     operation: { kind: "function", function: "noop" },
   };
 
@@ -883,7 +883,7 @@ describe("map applies an operation to every element", () => {
     const { result } = await run(
       {
         inputs: { issues: { kind: "json", schema: { type: "array" } } },
-        outputs: { kept: { schema: { type: "array" }, binding: { expr: "filter(.inputs.issues, shout)" } } },
+        outputs: { kept: { schema: { type: "array" }, binding: { $expr: "filter(.inputs.issues, shout)" } } },
         operation: { kind: "function", function: "noop" },
       },
       { issues: ["a", "", "b"] as never },
@@ -896,7 +896,7 @@ describe("map applies an operation to every element", () => {
     expect(() =>
       bundleFor({
         inputs: { issues: { kind: "json", schema: { type: "array" } } },
-        outputs: { x: { schema: { type: "array" }, binding: { expr: "map(.inputs.issues, 1 + 2)" } } },
+        outputs: { x: { schema: { type: "array" }, binding: { $expr: "map(.inputs.issues, 1 + 2)" } } },
         operation: { kind: "function", function: "noop" },
       }),
     ).toThrow();
@@ -911,7 +911,7 @@ describe("map applies an operation to every element", () => {
 describe("reduce folds sequentially", () => {
   const reduceDef = {
     inputs: { parts: { kind: "json", schema: { type: "array" } } },
-    outputs: { joined: { schema: { type: "string" }, binding: { expr: "reduce(.inputs.parts, joinTwo, '')" } } },
+    outputs: { joined: { schema: { type: "string" }, binding: { $expr: "reduce(.inputs.parts, joinTwo, '')" } } },
     operation: { kind: "function", function: "noop" },
   };
 
@@ -934,8 +934,8 @@ describe("reduce folds sequentially", () => {
       {
         inputs: { parts: { kind: "json", schema: { type: "array" } } },
         outputs: {
-          a: { schema: { type: "string" }, binding: { expr: "reduce(.inputs.parts, joinTwo, '')" } },
-          b: { schema: { type: "string" }, binding: { expr: "reduce(.inputs.parts, joinTwo, '')" } },
+          a: { schema: { type: "string" }, binding: { $expr: "reduce(.inputs.parts, joinTwo, '')" } },
+          b: { schema: { type: "string" }, binding: { $expr: "reduce(.inputs.parts, joinTwo, '')" } },
         },
         operation: { kind: "function", function: "noop" },
       },
@@ -958,7 +958,7 @@ describe("calls and higher-order under stress", () => {
     const { result } = await run(
       {
         inputs: { xs: { kind: "json", schema: { type: "array" } } },
-        outputs: { out: { schema: { type: "array" }, binding: { expr: "map(slice(.inputs.xs, 1, 3), shout)" } } },
+        outputs: { out: { schema: { type: "array" }, binding: { $expr: "map(slice(.inputs.xs, 1, 3), shout)" } } },
         operation: { kind: "function", function: "noop" },
       },
       { xs: ["a", "b", "c", "d"] as never },
@@ -970,7 +970,7 @@ describe("calls and higher-order under stress", () => {
     const { result } = await run(
       {
         inputs: { xs: { kind: "json", schema: { type: "array" } } },
-        outputs: { out: { schema: { type: "array" }, binding: { expr: "map(map(.inputs.xs, shout), shout)" } } },
+        outputs: { out: { schema: { type: "array" }, binding: { $expr: "map(map(.inputs.xs, shout), shout)" } } },
         operation: { kind: "function", function: "noop" },
       },
       { xs: ["a", "b"] as never },
@@ -982,7 +982,7 @@ describe("calls and higher-order under stress", () => {
     const { result } = await run(
       {
         inputs: { notList: { kind: "text", schema: { type: "string" } } },
-        outputs: { out: { schema: { type: "array" }, binding: { expr: "map(.inputs.notList, shout)" } } },
+        outputs: { out: { schema: { type: "array" }, binding: { $expr: "map(.inputs.notList, shout)" } } },
         operation: { kind: "function", function: "noop" },
       },
       { notList: "nope" },
@@ -996,7 +996,7 @@ describe("calls and higher-order under stress", () => {
     const { result, calls } = await run(
       {
         inputs: { issue: { kind: "text", schema: { type: "string" } } },
-        outputs: { out: { schema: { type: "string" }, binding: { expr: "shout(shout(.inputs.issue))" } } },
+        outputs: { out: { schema: { type: "string" }, binding: { $expr: "shout(shout(.inputs.issue))" } } },
         operation: { kind: "function", function: "noop" },
       },
       { issue: "ab" },
@@ -1023,7 +1023,7 @@ describe("calls and higher-order under stress", () => {
       bundle: bundleFor({
         inputs: { xs: { kind: "json", schema: { type: "array" } } },
         // The slot accepts an array of anything, errors included — so the failure travels (§5).
-        outputs: { out: { schema: { type: "array" }, binding: { expr: "map(.inputs.xs, shout)" } } },
+        outputs: { out: { schema: { type: "array" }, binding: { $expr: "map(.inputs.xs, shout)" } } },
         operation: { kind: "function", function: "noop" },
       }),
       registry,

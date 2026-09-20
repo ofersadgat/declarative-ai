@@ -47,7 +47,7 @@ describe("property access", () => {
 
   /**
    * Access is an OWN-property lookup. Native lookup falls through to the prototype, so
-   * `constructor`, `__proto__` and every prototype method were readable — and a `{ expr }` binding
+   * `constructor`, `__proto__` and every prototype method were readable — and a `{ $expr: expr }` binding
    * reading one yielded a FUNCTION as a slot value, in a dataflow that is JSON all the way down.
    * `inferExpr`'s `projectProperty` has always said `.length` is the one property a string or an
    * array exposes; this is the evaluator agreeing with its own type-checker.

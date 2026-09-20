@@ -31,7 +31,7 @@ function replanBundle(): Record<string, StateDef> {
           inputs: {
             // THE WIRE THIS IS ABOUT. At the moment `draft` runs in pass n, `critique[-1]` is pass
             // n's critique, which has not run — so the findings that sent it back are one before.
-            prior: { expr: ".children.critique[-2].output.note" },
+            prior: { $expr: ".children.critique[-2].output.note" },
           },
         },
         critique: {
@@ -109,7 +109,7 @@ describe("a loop reads the pass before it", () => {
               b: {
                 state: "root/b",
                 // `a` re-runs each pass, so its history grows; `length` reads how many there are.
-                inputs: { all: { expr: ".children.a.length" } },
+                inputs: { all: { $expr: ".children.a.length" } },
                 transitions: [{ to: "a", when: ".run.iteration < .limits.max_iterations" }],
               },
             },
@@ -154,7 +154,7 @@ describe("a loop reads the pass before it", () => {
               context: { state: "root/context" },
               work: {
                 state: "root/work",
-                inputs: { first: { expr: ".children.context[0].output.v" } },
+                inputs: { first: { $expr: ".children.context[0].output.v" } },
                 transitions: [{ to: "work", when: ".run.iteration < .limits.max_iterations" }],
               },
             },
@@ -199,7 +199,7 @@ describe("a loop reads the pass before it", () => {
               a: { state: "root/a" },
               b: {
                 state: "root/b",
-                inputs: { bare: ".children.a.output.n", indexed: { expr: ".children.a[-1].output.n" } },
+                inputs: { bare: ".children.a.output.n", indexed: { $expr: ".children.a[-1].output.n" } },
               },
             },
           },
@@ -283,7 +283,7 @@ describe("a running pass parks its readers, whichever spelling asks", () => {
     // Absent this, the bracketed form read a running child as `undefined`, the optional input was
     // silently skipped, and the state ran with nothing in it. That is the failure this whole
     // document exists about, reintroduced by a spelling.
-    const { outcome, saw } = await readsWhileRunning({ expr: ".children.a[-1].output.n" });
+    const { outcome, saw } = await readsWhileRunning({ $expr: ".children.a[-1].output.n" });
     expect(outcome).toBe("success");
     expect(saw).toBe("done");
   });

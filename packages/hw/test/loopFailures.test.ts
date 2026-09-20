@@ -95,7 +95,7 @@ describe("inputs the loader and the lint refuse", () => {
   it("a rule reading an output the source does not publish is named", () => {
     const files = base();
     files["root"]!.children!["b"]!.transitions = [
-      { to: "work", when: ".run.iteration < .limits.max_iterations", inputs: { why: { expr: ".children.b.output.nope" } } },
+      { to: "work", when: ".run.iteration < .limits.max_iterations", inputs: { why: { $expr: ".children.b.output.nope" } } },
     ];
     expect(errorsFor(files).length).toBeGreaterThan(0);
   });
@@ -103,7 +103,7 @@ describe("inputs the loader and the lint refuse", () => {
   it("a rule reading a child that does not exist is named", () => {
     const files = base();
     files["root"]!.children!["b"]!.transitions = [
-      { to: "work", when: ".run.iteration < .limits.max_iterations", inputs: { why: { expr: ".children.ghost.output.n" } } },
+      { to: "work", when: ".run.iteration < .limits.max_iterations", inputs: { why: { $expr: ".children.ghost.output.n" } } },
     ];
     expect(errorsFor(files).length).toBeGreaterThan(0);
   });
@@ -122,7 +122,7 @@ describe("inputs the loader and the lint refuse", () => {
 
   it("an expression that does not parse fails at LOAD, naming the binding", () => {
     const files = base();
-    files["root"]!.children!["work"]!.inputs = { why: { expr: ".children.b.output.n ===" } };
+    files["root"]!.children!["work"]!.inputs = { why: { $expr: ".children.b.output.n ===" } };
     expect(() => loadBundle(files, "root")).toThrow(/does not parse/);
   });
 
@@ -133,11 +133,11 @@ describe("inputs the loader and the lint refuse", () => {
     // for putting the wiring on the rule instead: a rule is evaluated at a point where its source
     // demonstrably ran.
     const required = base();
-    required["root"]!.children!["work"]!.inputs = { why: { expr: ".children.b[-1].output.n" } };
+    required["root"]!.children!["work"]!.inputs = { why: { $expr: ".children.b[-1].output.n" } };
     expect(errorsFor(required).some((m) => /not proven to have run/.test(m))).toBe(true);
 
     const optional = base();
-    optional["root"]!.children!["work"]!.inputs = { why: { expr: ".children.b[-1].output.n" } };
+    optional["root"]!.children!["work"]!.inputs = { why: { $expr: ".children.b[-1].output.n" } };
     optional["root/work"] = leaf("work", { n: str }, { why: { ...str, optional: true } });
     expect(errorsFor(optional)).toEqual([]);
   });
@@ -147,7 +147,7 @@ describe("inputs the loader and the lint refuse", () => {
     // proven, and the slot does not have to be widened to accept its absence.
     const files = base();
     files["root"]!.children!["b"]!.transitions = [
-      { to: "work", when: ".run.iteration < .limits.max_iterations", inputs: { why: { expr: ".children.b.output.n" } } },
+      { to: "work", when: ".run.iteration < .limits.max_iterations", inputs: { why: { $expr: ".children.b.output.n" } } },
     ];
     expect(errorsFor(files)).toEqual([]);
   });
@@ -259,7 +259,7 @@ describe("a call that throws", () => {
     const seen: unknown[] = [];
     const f = files(true);
     (f["root"]!.children as Record<string, { inputs?: unknown }>)["after"]!.inputs = {
-      why: { expr: ".children.work.outcome" },
+      why: { $expr: ".children.work.outcome" },
     };
     f["root/after"] = leaf("after", { n: str }, { why: { ...str, optional: true } });
     const { outcome } = await run(
@@ -293,7 +293,7 @@ describe("a failure inside a loop", () => {
         work: { state: "root/work", transitions: [{ to: "judge", when: ".children.work.outcome === 'error'" }, { to: "judge" }] },
         judge: {
           state: "root/judge",
-          inputs: { last: { expr: ".children.work[-1].outcome" }, count: { expr: ".children.work.length" } },
+          inputs: { last: { $expr: ".children.work[-1].outcome" }, count: { $expr: ".children.work.length" } },
           transitions: [{ to: "work", when: ".run.iteration < .limits.max_iterations" }],
         },
       },
@@ -335,7 +335,7 @@ describe("a failure inside a loop", () => {
       {
         to: "work",
         when: ".run.iteration < .limits.max_iterations",
-        inputs: { prior: { expr: ".children.work.output.n" } },
+        inputs: { prior: { $expr: ".children.work.output.n" } },
       },
     ] as never;
     f["root/work"] = leaf("work", { n: str }, { prior: { ...str, optional: true } });
@@ -382,7 +382,7 @@ describe("a required input a rule cannot fill", () => {
             {
               to: "work",
               when: ".run.iteration < .limits.max_iterations",
-              inputs: { prior: { expr: ".children.work.output.n" } },
+              inputs: { prior: { $expr: ".children.work.output.n" } },
             },
           ],
         },

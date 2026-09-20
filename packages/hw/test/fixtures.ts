@@ -5,7 +5,7 @@
  *
  * Written in the post-ops-redesign format (DESIGN §3.1): one `operation` per state, slots
  * carrying JSON Schemas, and wiring as authored BINDING SUGAR (`{ child, output }`, `{ input }`,
- * `{ expr }`) that the loader lowers to base `Ref` cases.
+ * `{ $expr: expr }`) that the loader lowers to base `Ref` cases.
  */
 import type { StateDef } from "../src/format.js";
 
@@ -36,7 +36,7 @@ export function specPlanningFiles(): Record<string, StateDef> {
       outputs: {
         outcome: {
           schema: { type: "string", enum: ["complete", "blocked"] },
-          binding: { expr: ".children.critique.output.outcome === 'clean' ? 'complete' : 'blocked'" },
+          binding: { $expr: ".children.critique.output.outcome === 'clean' ? 'complete' : 'blocked'" },
         },
         plan_doc: { ...artifact("markdown"), binding: ".children.context.output.plan_doc" },
         // A "passthrough" output: the whole child result as ONE value. `*` is required now that a
@@ -130,14 +130,14 @@ export function specPlanningFiles(): Record<string, StateDef> {
           state: "feature/plan/critique/address_weaknesses",
           inputs: {
             plan_doc: ".inputs.plan_doc",
-            weaknesses: { expr: ".operation.output.weaknesses" },
-            critique_report: { expr: ".operation.output.critique_report" },
+            weaknesses: { $expr: ".operation.output.weaknesses" },
+            critique_report: { $expr: ".operation.output.critique_report" },
           },
           transitions: [{ to: "terminate.success", when: ".children.address_weaknesses.outcome === 'success'" }],
         },
         human_review: {
           state: "feature/plan/critique/human_review",
-          inputs: { plan_doc: ".inputs.plan_doc", critique_report: { expr: ".operation.output.critique_report" } },
+          inputs: { plan_doc: ".inputs.plan_doc", critique_report: { $expr: ".operation.output.critique_report" } },
           transitions: [{ to: "terminate.success", when: ".children.human_review.outcome === 'success'" }],
         },
       },

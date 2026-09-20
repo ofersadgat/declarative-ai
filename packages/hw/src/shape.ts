@@ -13,9 +13,16 @@
 
 /** What a position expects. */
 export type Shape =
-  /** A record with known fields, and optionally an open tail (`rest`) for map-shaped blocks. */
-  | { t: "object"; fields?: Record<string, Shape>; rest?: Shape }
-  | { t: "array"; of: Shape }
+  /**
+   * A record with known fields, and optionally an open tail (`rest`) for map-shaped blocks.
+   *
+   * `value` marks a position whose whole content is a VALUE the engine can compute at entry (SPEC
+   * §5.3) — `tools`, `permissions` — as against STRUCTURE the loader reads (`inputs`, `children`,
+   * `operation`). Only a value position can hold a scoped name (NAMES.md §5): a name reads as a value
+   * per instance, and structure has to be there before there is an instance to read it for.
+   */
+  | { t: "object"; fields?: Record<string, Shape>; rest?: Shape; value?: true }
+  | { t: "array"; of: Shape; value?: true }
   /** A plain string or number: a reference here must be written `{"$ref": …}`. */
   | { t: "scalar" }
   /** A string that IS a path — `id`, `children[].state`. Resolved, never transcluded. */
@@ -31,7 +38,21 @@ export type Shape =
    */
   | { t: "binding" }
   /** Arbitrary JSON whose type nothing knows: only an explicit `{"$ref"}` counts (§3.1). */
-  | { t: "any" };
+  | { t: "any" }
+  /**
+   * A position that PROVIDES what a name is bound to (NAMES.md §4) — `session` creates the
+   * conversation the first time a name is used, so the name needs no entry and no file. It expects
+   * an object (the thing provided), which is what makes a string here a variable string: `$…` is a
+   * reference as everywhere, and anything else is a scoped name that expansion leaves for the
+   * loader to anchor. It never falls back to a file, because the position itself is the fallback.
+   */
+  | { t: "name"; position: string }
+  /**
+   * `environment.names` — a map of name → configuration block (NAMES.md §4). Untyped inside, like
+   * `args`, with one reading of its own: inside an entry, the entry's own name means the ENCLOSING
+   * entry, so `{ "$ref": "impl", … }` pastes rather than cycles.
+   */
+  | { t: "names" };
 
 const scalar: Shape = { t: "scalar" };
 const anyJson: Shape = { t: "any" };
@@ -70,25 +91,44 @@ const operationFields: Record<string, Shape> = {
   input: slotMap,
   output: parameter,
   // Execution environment, inherited by the same rule as everything else.
-  session: scalar,
+  session: { t: "name", position: "session" },
+  workspace: { t: "name", position: "workspace" },
   sessionId: scalar,
-  tools: { t: "array", of: scalar },
+  tools: { t: "array", of: scalar, value: true },
   conversation: { t: "object", fields: { mode: scalar, artifacts: { t: "array", of: scalar } } },
   permissions: {
     t: "object",
     fields: { profile: scalar, default: scalar, tools: { t: "object", rest: scalar } },
+    value: true,
   },
   // The LlmConfiguration surface, inline on a prompt operation (§7.2).
   model: scalar,
   maxOutputTokens: scalar,
-  stopSequences: { t: "array", of: scalar },
+  stopSequences: { t: "array", of: scalar, value: true },
   seed: scalar,
   maxSteps: scalar,
   toolChoice: anyJson,
-  providerOptions: { t: "object", rest: anyJson },
+  providerOptions: { t: "object", rest: anyJson, value: true },
 };
 
 const operation: Shape = { t: "object", fields: operationFields };
+
+/**
+ * An `environment` block: an operation's fields, all optional, plus what only a DEFAULTS layer can
+ * say. `names` configures scoped names for the subtree (NAMES.md §4) and `functions` gives a
+ * function its default arguments (§7); neither is on `operation`, because an operation is one call
+ * and both of these are statements about a subtree.
+ */
+const environment: Shape = {
+  t: "object",
+  fields: {
+    ...operationFields,
+    names: { t: "names" },
+    // Default arguments, under the FUNCTION's name (NAMES.md §7). `args` is the same untyped bag it
+    // is on an operation, so only the explicit `{"$ref"}` form counts inside it (§3.1).
+    functions: { t: "object", rest: { t: "object", fields: { args: { t: "object", rest: anyJson } } } },
+  },
+};
 
 /** A transition list, in the one shape both the state level and a child mount write it. */
 const transitions: Shape = { t: "array", of: { t: "object", fields: { to: scalar, when: scalar } } };
@@ -101,7 +141,7 @@ const child: Shape = {
     async: scalar,
     // Per-mount defaults, written in the same shape as any other environment — so a `$ref` inside one
     // transcludes exactly as it does at state level.
-    environment: operation,
+    environment,
     // Considered when this child finishes, before the state's own. `to` is a plain scalar here for
     // the same reason it is there: a transition target is a CHILD KEY, not a state path, so it is
     // never resolved as a reference.
@@ -121,7 +161,7 @@ export const STATE_SHAPE: Shape = {
     inputs: slotMap,
     outputs: slotMap,
     operation,
-    environment: operation,
+    environment,
     children: { t: "object", rest: child },
     sequence: { t: "array", of: scalar },
     transitions,

@@ -103,6 +103,40 @@ export type Expr =
   | { type: "object"; entries: { key: string; value: Expr }[] };
 
 /**
+ * The two call spellings that ARE another call (NAMES.md §8), rewritten to it — so everything
+ * downstream sees one AST, as it does for `xs[i]` and `at(xs, i)`:
+ *
+ *  - `map(xs, 'key')` — a STRING where `map` takes an operation plucks that property off each
+ *    element. `map`'s second position names what to apply, and a quoted word there names a property;
+ *  - `indexOf(xs, max)` — an OPERATION where `indexOf` takes an item means `indexOf(xs, max(xs))`:
+ *    where the operation's answer over the list sits in it. Only a built-in is recognizable here;
+ *    lowering does the same for an operation the search path resolves.
+ */
+export function applySugar(op: string, args: Argument[]): Expr & { type: "apply" } {
+  const [first, second] = args;
+  if (op === "map" && args.length === 2 && second !== undefined && second.type === "lit" && typeof second.value === "string") {
+    return { type: "apply", op: "pluck", args };
+  }
+  if (op === "indexOf" && args.length === 2 && first !== undefined && second !== undefined && second.type === "ident" && Object.hasOwn(BUILTINS, second.name)) {
+    return { type: "apply", op, args: [first, { type: "apply", op: second.name, args: [first] }] };
+  }
+  return { type: "apply", op: OPERATION_ALIASES[op] ?? op, args };
+}
+
+/**
+ * `recv.name(args)` where `recv` is a RUNTIME value — a leading-dot read, or the result of a call —
+ * taken apart. `undefined` for anything else: a bare `confidence.score(…)` never reaches a `call`
+ * node at all (its callee is a path, so the parser names it), and `(a ? f : g)(x)` has no name.
+ *
+ * Whether it IS a receiver call is not decided here. That takes the receiver's type — see the two
+ * callers, which ask the same question with what each has in hand.
+ */
+export function receiverCallOf(expr: Expr & { type: "call" }): { recv: Expr; name: string } | undefined {
+  const callee = expr.callee;
+  return callee.type === "member" ? { recv: callee.obj, name: callee.prop } : undefined;
+}
+
+/**
  * One argument at a call site: an ordinary expression bound by POSITION, or a SPREAD bound by NAME.
  *
  * A spread is not an expression — it has no value of its own, it says how a value fills a callee's
@@ -474,7 +508,7 @@ class Parser {
         e =
           callee === undefined
             ? { type: "call", callee: e, args: this.args() }
-            : { type: "apply", op: OPERATION_ALIASES[callee] ?? callee, args: this.args() };
+            : applySugar(callee, this.args());
         reference = undefined;
         continue;
       }

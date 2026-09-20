@@ -94,17 +94,17 @@ import type {
 import { bindElement, bindInputs, embeddedOpsOf, higherOrderEdgesOf, higherOrderOf, isResolvedValue, isResolveError, resolveEmbedded, resolveInputs, resolveOperationInputs, resolveRef, type ResolutionScope, type Resolved } from "./resolve.js";
 import { isByteStream, materialize, MaterializeError } from "./materialize.js";
 import {
-  RUN_RESOURCE_KEY,
   isSessionExpr,
   publishedSession,
   resolveSession,
   sessionFromExpr,
-  sessionKeyOf,
   type NormalizedSession,
   type PublishedSession,
   type SessionBinding,
   type SessionExpr,
 } from "./session.js";
+import { addressPath, keyOfScopedName, NAME_KEY, type ScopedName } from "./scope.js";
+import { freshWorkspaceKey, isFreshWorkspace, RUN_RESOURCE_KEY, type NormalizedWorkspace } from "./workspace.js";
 import type { OperationNode } from "./operationNode.js";
 import { isFannedOut } from "./fanout.js";
 import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, type Persistence } from "./ports.js";
@@ -243,10 +243,12 @@ export interface EngineConfig {
     /** The host's own per-call narrowing — see `ExecPolicy.scopeOf`. */
     scopeOf?: ExecPolicy["scopeOf"];
   };
-  /** Per-session workspace resolver (DESIGN §5.1, "Sessions: the run-scoped resource bundle"): maps a `runtime.session` id to the
-   *  workspace that session's tools act within, so fan-out branches can isolate (e.g. per-worktree). Returns
-   *  `undefined` ⇒ fall back to the single run-level `services.workspace`. Absent ⇒ always the run-level one. */
-  workspaceFor?: (sessionId: string) => Workspace | undefined;
+  /** Per-BUNDLE workspace resolver (DESIGN §5.1, NAMES.md §10): maps a resource key — the `workspace` an author
+   *  named, as `name#<instance address>`, or the run's own — to the workspace its tools act within, so a subtree
+   *  or a fan-out element can isolate (e.g. per-worktree). `declared` is the name and what `environment.names`
+   *  configured it with; absent for the run's own bundle. Returns `undefined` ⇒ fall back to the single
+   *  run-level `services.workspace`. Absent ⇒ always the run-level one. */
+  workspaceFor?: (resourceKey: string, declared?: { name: string; configuration: JsonValue }) => Workspace | undefined;
   /**
    * Where a HOSTED fan-out's elements go (WORKFLOWS.md §6.3) — the seam `each: "task"` and
    * `each: "split"` hand their elements through. The engine resolves the elements exactly as it does
@@ -870,59 +872,51 @@ function enclosingInstance(from: Instance | undefined, stateId: string): Instanc
 }
 
 /**
- * How an anchoring instance is NAMED inside a session key — its address, as a path.
- *
- * Not the instance id, which would satisfy the semantics and fail everything else. `resourceKey`
- * reaches the host through `workspaceFor` (`EngineConfig`), so it has to be two things a UUIDv7 is
- * not: legible enough for a host to recognize which bundle it is being asked about, and the same in
- * two runs of one pinned definition — an id is minted fresh per run, so a worktree keyed on one
- * would be a different worktree every time the workflow ran.
- *
- * An address is both, and it keeps the property the anchor exists for: an occurrence counts entries
- * under one key, so a loop's second pass through a scope is a different address, while a scope ABOVE
- * the loop has the same address on every pass. The root is `/`, and each step reads `key` or
- * `key:occurrence` — the occurrence is elided at 0 so the common case stays short.
+ * The seam a scoped name's key resolves through (`keyOfScopedName`): the nearest enclosing instance
+ * of `stateId`, spelled as the address path a key carries — see `addressPath` for why an address and
+ * not an instance id.
  */
-function addressPath(address: InstanceAddress): string {
-  if (address.length === 0) return "/";
-  return address
-    .map((step) => {
-      const entry = step.occurrence === 0 ? step.childKey : `${step.childKey}:${step.occurrence}`;
-      // An element of a fan-out (§6.2) is `key[i]`: the elements of one entry share the occurrence
-      // and differ here, so a session scoped to the fanned-out state gets one bundle per element.
-      return step.element === undefined ? entry : `${entry}[${step.element}]`;
-    })
-    .join("/");
+function anchorPathOf(from: Instance | undefined, stateId: string): string | undefined {
+  const anchor = enclosingInstance(from, stateId);
+  return anchor === undefined ? undefined : addressPath(anchor.address);
 }
 
 /**
  * The resource bundle a new instance runs in: workspace, permission ledger, `"session"` approval scope.
  *
- * Keyed on the `(name, scope)` PAIR a declaration resolved to, never on the bare name — two subtrees
- * that each wrote `"main"` meaning different things must not share a worktree. `scopeSession` rather
- * than `environment.session` because the latter exists only on a state that declares an operation,
- * and declaring a session on a composite ROOT is the ordinary way to give a whole subtree one bundle.
+ * Keyed on the WORKSPACE the state resolves in (`workspace.ts`) — the `(name, scope)` pair, never the
+ * bare name, so two subtrees that each wrote `"main"` meaning different things do not share a
+ * worktree. It used to be keyed on the SESSION's name, which made one declaration answer two
+ * questions; a session now names a conversation and nothing else (NAMES.md §10).
+ * `scopeWorkspace` rather than `environment.workspace` because the latter exists only on a state
+ * that declares an operation, and naming a workspace on a composite ROOT is the ordinary way to give
+ * a whole subtree one bundle.
  *
- * A ref (`{ id }`) and `null` both fall through to the inherited key on purpose: a ref arrived through
- * data flow from an operation that may live anywhere, and `null` asks for a fresh CONVERSATION, not a
- * fresh workspace (DESIGN.md §5.1 — "forks share a worktree").
+ * `null` is a FRESH one private to this instance — and so to the subtree under it, which inherits
+ * it — whatever the chain named; ABSENT inherits the enclosing instance's. `named` records which
+ * name a key came from, so the host can be handed the name's
+ * configuration along with the key.
  */
-function resourceKeyFor(def: LoadedState, parent: Instance | undefined, selfAddress: InstanceAddress): string {
-  const declared = def.scopeSession;
-  if (declared !== null && declared !== undefined && "name" in declared) {
-    // `selfAddress` rather than a walk for the commonest case by far — a bare name, which scopes to
-    // the state that wrote it. The instance does not exist yet at the point this is called, so its
-    // own address is passed in; every other scope is an ANCESTOR and is found by walking.
-    const anchor = declared.in === def.id ? selfAddress : enclosingInstance(parent, declared.in)?.address;
-    // Falling back to the declared scope is unreachable for a loaded document — the loader checks
-    // that `in` names an ancestor — and degrades to a run-global key rather than to a private one,
-    // because silently isolating a conversation is the failure this whole module exists to prevent.
-    return sessionKeyOf(declared.name, anchor === undefined ? declared.in : addressPath(anchor));
-  }
-  return parent?.resourceKey ?? RUN_RESOURCE_KEY;
+function resourceKeyFor(def: LoadedState, parent: Instance | undefined, selfAddress: InstanceAddress, named: Map<string, ScopedName>): string {
+  const declared = def.scopeWorkspace;
+  if (declared === undefined) return parent?.resourceKey ?? RUN_RESOURCE_KEY;
+  // `selfAddress` rather than a walk for the commonest case by far — a declaration scoped to the
+  // state that wrote it. The instance does not exist yet at the point this is called, so its own
+  // address is passed in; every other scope is an ANCESTOR and is found by walking.
+  const anchorOf = (stateId: string): string | undefined => (stateId === def.id ? addressPath(selfAddress) : anchorPathOf(parent, stateId));
+  // A `null` has no name, and is anchored like one all the same: the state that WROTE it, so the
+  // subtree below shares the one fresh bundle rather than each state minting its own.
+  if (isFreshWorkspace(declared)) return freshWorkspaceKey(anchorOf(declared.$in) ?? declared.$in);
+  const key = keyOfScopedName(declared, anchorOf);
+  named.set(key, declared);
+  return key;
 }
 
 export class WorkflowEngine {
+  /** The name each resource key came from — what `workspaceFor` is told beside the key. */
+  private readonly workspaceNames = new Map<string, ScopedName>();
+  /** Choices that outlive the instance that made them, by what they are held for — see `choiceKey`. */
+  private readonly sessionChoices = new Map<string, Promise<{ value: ResolvedValue } | { failure: Failure }>>();
   private readonly validator: SyncOutputValidator;
   private readonly clock: Clock;
   private readonly newInstanceId: () => string;
@@ -1109,7 +1103,7 @@ export class WorkflowEngine {
       outputs: {},
       // Resolved once, on entry, from the parent's bundle and this state's own declaration — so a
       // subtree that declares nothing shares its enclosing bundle rather than minting one per state.
-      resourceKey: resourceKeyFor(def, parent, address),
+      resourceKey: resourceKeyFor(def, parent, address, this.workspaceNames),
       // Taken on the way in, for the reason the field documents: an occurrence is a count of entries
       // and there is nothing left to count once the entry is over. A root has no child key and
       // therefore no step, so the run itself is the empty address.
@@ -1221,7 +1215,7 @@ export class WorkflowEngine {
       parent,
       inputs: this.rehydrateArtifacts(loaded.inputs),
       outputs: {},
-      resourceKey: resourceKeyFor(def, parent, loadedAddress),
+      resourceKey: resourceKeyFor(def, parent, loadedAddress, this.workspaceNames),
       address: loadedAddress,
       entries,
       sites,
@@ -1261,6 +1255,13 @@ export class WorkflowEngine {
         this.rootAbort?.abort();
       } else {
         instance.def = materialized.def;
+      }
+      // A choice held for a SESSION is the session's, not this instance's: read it back so an
+      // instance entered after the load joins the conversation on the model it was started with,
+      // rather than choosing again (NAMES.md §6).
+      for (const field of def.fields ?? []) {
+        const key = values.has(field.path) ? this.choiceKey(instance, field) : undefined;
+        if (key !== undefined && !this.sessionChoices.has(key)) this.sessionChoices.set(key, Promise.resolve({ value: values.get(field.path) as ResolvedValue }));
       }
     }
     // The COMPLETED operation, fed through exactly the path a live settle takes — the node, then
@@ -2819,7 +2820,25 @@ export class WorkflowEngine {
         const turn = turns[message];
         return turn === undefined ? undefined : (turn as unknown as JsonValue);
       },
+      scopedName: (name, scope) => this.readName(instance, name, scope),
     };
+  }
+
+  /**
+   * What a scoped name in a VALUE position reads as, for this instance (NAMES.md §3, §4).
+   *
+   * The configuration was settled at load and sits on the state that scopes the name; what only an
+   * instance can add is WHICH one — the key, anchored at the nearest enclosing instance of that
+   * state exactly as a session's is. It travels beside the configuration as `$key`, a `$`-key
+   * because the state system put it there and it is visibly not the operation's payload: it is how
+   * a function keeps "the same merge request on every pass" without the format knowing what a merge
+   * request is.
+   */
+  private readName(instance: Instance, name: string, scope: string): Resolved {
+    const config = this.config.bundle.states[scope]?.names?.[name];
+    const key = keyOfScopedName({ $ref: name, $in: scope }, (stateId) => anchorPathOf(instance, stateId));
+    const block = config !== null && typeof config === "object" && !Array.isArray(config) ? config : {};
+    return { value: { ...block, [NAME_KEY]: key } as JsonValue };
   }
 
   /**
@@ -3070,6 +3089,48 @@ export class WorkflowEngine {
    * fallback beside it and the instance carries on (SPEC §5.3).
    */
   private async evaluateField(instance: Instance, field: LoadedField): Promise<{ value: ResolvedValue } | { failure: Failure }> {
+    // WHEN a choice is made belongs to the position (NAMES.md §6). A field held for the SESSION is
+    // computed by whichever instance reaches the conversation first; every later one takes that
+    // answer — journaled under its own id too, so each instance's record is complete on its own and
+    // a load needs no second place to look. A FAILED choice is not held: the next instance tries.
+    const key = this.choiceKey(instance, field);
+    if (key === undefined) return this.computeField(instance, field);
+    const held = this.sessionChoices.get(key);
+    if (held !== undefined) {
+      const outcome = await held;
+      if ("value" in outcome) {
+        this.emit({ type: "value.settled", instanceId: instance.id, stateId: instance.stateId, field: field.path, outcome: "value", value: outcome.value });
+        return outcome;
+      }
+    }
+    const made = this.computeField(instance, field);
+    this.sessionChoices.set(key, made);
+    const outcome = await made;
+    if ("failure" in outcome && this.sessionChoices.get(key) === made) this.sessionChoices.delete(key);
+    return outcome;
+  }
+
+  /**
+   * What a field's choice is HELD FOR, when that is more than the instance — the conversation it
+   * joins. `undefined` for every ordinary field, and for one whose session cannot be said yet (a
+   * `{ "$expr" }` over something unsettled): it is then chosen per instance, which is always safe.
+   *
+   * A fresh conversation's key is minted per instance, so "held for the session" and "held for the
+   * instance" are the same thing there without a case for it.
+   */
+  private choiceKey(instance: Instance, field: LoadedField): string | undefined {
+    if (field.lifetime !== "session") return undefined;
+    const session = this.sessionFor(instance);
+    if ("error" in session) return undefined;
+    // A session joined BY REF (`{ id }`, a `$expr` over a published session) arrives as a POSITION,
+    // `<conversation>@<seq>`, and the position moves with every call. The choice is the
+    // conversation's, so the key is the conversation: otherwise each call that continued a session
+    // by ref would pick again, which is exactly what "fixed when its session is created" rules out.
+    const conversation = publishedOfRef(session.id)?.end.id ?? session.id;
+    return `${conversation}\n${field.path}`;
+  }
+
+  private async computeField(instance: Instance, field: LoadedField): Promise<{ value: ResolvedValue } | { failure: Failure }> {
     const settled = (outcome: "value" | "error", value: ResolvedValue | undefined, error?: string, fallback?: boolean): void => {
       this.emit({
         type: "value.settled",
@@ -3724,7 +3785,7 @@ export class WorkflowEngine {
     environment?: ExecEnvironmentDecl,
   ): Promise<Resolved> {
     const env = environment ?? instance.def.environment ?? {};
-    const resourceKey = instance.resourceKey;
+    const resourceKey = this.bundleFor(instance, environment);
     // Its arguments are already bound into `op.input` as literals (`resolveEmbedded`), so this reads
     // them back out as values.
     const literal = resolveInputs(op.input, this.scopeFor(instance));
@@ -4325,7 +4386,13 @@ export class WorkflowEngine {
     // Keyed on the resource bundle rather than the conversation, deliberately: a conversation position
     // changes on every call, so keying a workspace on it would hand each operation its own worktree —
     // which §5.1 rules out: forking branches the CONVERSATION, not the filesystem.
-    const workspace = this.config.workspaceFor?.(resourceKey) ?? services.workspace;
+    //
+    // The position PROVIDES (NAMES.md §4): the engine says which workspace — the key, and what the
+    // author configured the name with (`names.impl: { "from": "main" }`) — and what a workspace IS
+    // stays the host's. The run's own bundle has no name, and so nothing beside its key.
+    const name = this.workspaceNames.get(resourceKey);
+    const declared = name === undefined ? undefined : { name: name.$ref, configuration: (this.config.bundle.states[name.$in]?.names?.[name.$ref] ?? {}) as JsonValue };
+    const workspace = this.config.workspaceFor?.(resourceKey, declared) ?? services.workspace;
     if (workspace !== services.workspace) services.workspace = workspace;
     if (tools !== undefined) services.tools = tools;
     // A registered async function's only channel to the caller is the ctx, so cancellation rides here.
@@ -4361,13 +4428,13 @@ export class WorkflowEngine {
     // is the case the origin-time normalization exists for: after the merge a root's declaration and
     // a leaf's are the same value, and only the loader could still tell them apart.
     let declared = env.session as NormalizedSession | undefined;
-    // The `{ expr }` spelling is the only one evaluated rather than read, and it has to be, because
+    // The `{ $expr }` spelling is the only one evaluated rather than read, and it has to be, because
     // a ref is a RUN-TIME value: `children.plan.operation.output.session` does not exist until
     // `plan` has run, so a static field could never carry one. Evaluated against THIS instance, so
     // a re-entered or looped state re-reads the position its own attempt should continue from.
     if (isSessionExpr(declared)) {
       const written = declared as SessionExpr;
-      const { expr } = written;
+      const expr = written.$expr;
       const resolved = resolveRef(this.exprRef(expr), this.scopeFor(instance));
       // PENDING means the producing operation is still in flight. That is a wiring mistake rather
       // than something to wait on here: the consumer's own dataflow join is what parks on a running
@@ -4380,16 +4447,26 @@ export class WorkflowEngine {
     }
     return resolveSession(declared, {
       instanceId: freshKey,
-      inheritedResourceKey: instance.resourceKey,
+      inheritedResourceKey: this.bundleFor(instance, environment),
       positionOf: () => undefined,
       // The scope seam: a name is qualified by a state, and the state resolves to the nearest
       // ENCLOSING INSTANCE of it. Starting at `instance` rather than its parent because the
       // commonest scope by far is the writer itself, which for a bare name is this very state.
-      anchorOf: (stateId) => {
-        const anchor = enclosingInstance(instance, stateId);
-        return anchor === undefined ? undefined : addressPath(anchor.address);
-      },
+      anchorOf: (stateId) => anchorPathOf(instance, stateId),
     });
+  }
+
+  /**
+   * The resource bundle one CALL runs in: the instance's, unless the binding that made the call wrote
+   * a `workspace` of its own (SPEC §4.2) — a layer over the state's, like the rest of its environment.
+   */
+  private bundleFor(instance: Instance, environment?: ExecEnvironmentDecl): string {
+    const declared = environment?.workspace as NormalizedWorkspace | undefined;
+    if (declared === undefined) return instance.resourceKey;
+    if (isFreshWorkspace(declared)) return freshWorkspaceKey(anchorPathOf(instance, declared.$in) ?? declared.$in);
+    const key = keyOfScopedName(declared, (stateId) => anchorPathOf(instance, stateId));
+    this.workspaceNames.set(key, declared);
+    return key;
   }
 
   /**

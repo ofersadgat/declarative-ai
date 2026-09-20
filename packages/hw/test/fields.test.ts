@@ -91,13 +91,13 @@ async function run(states: Record<string, unknown>, inputs: Record<string, Resol
 /** A root whose title is asked of a prompt, and whose model depends on the title. */
 const titled = {
   label: "Planning",
-  title: { binding: { expr: "title(.inputs.issue).title", environment: { session: null }, failureValue: "Untitled" } },
+  title: { binding: { $expr: "title(.inputs.issue).title", environment: { session: null }, failureValue: "Untitled" } },
   inputs: { issue: { kind: "text", schema: { type: "string" } } },
   outputs: { done: { schema: { type: "string" } } },
   operation: {
     kind: "prompt",
     prompt: "Work on {{.inputs.issue}}",
-    model: { expr: "startsWith(.title, 'Ship') ? 'fast' : 'slow'" },
+    model: { $expr: "startsWith(.title, 'Ship') ? 'fast' : 'slow'" },
   },
 };
 
@@ -126,7 +126,7 @@ describe("a computed title (SPEC §5.2)", () => {
 
   it("fails the instance when there is no failureValue to stand in", async () => {
     const { title: _t, ...rest } = titled;
-    const bare = { ...rest, title: { binding: { expr: "title(.inputs.issue).title" } } };
+    const bare = { ...rest, title: { binding: { $expr: "title(.inputs.issue).title" } } };
     const failing: Script = (call) => (modelOf(call) === "titler" ? { error: { classification: "permanent", reason: "no title today" }, metrics: { durationMs: 1, costUsd: 0, costSource: "unknown" } } : script(call));
     const { result, settled, calls } = await run({ "plan.json": bare }, { issue: "the docs" }, failing);
     expect(result.outcome).toBe("error");
@@ -159,16 +159,16 @@ describe("every value is a binding (SPEC §5.3)", () => {
     const { result, settled, calls } = await run(
       {
         "plan.json": {
-        label: { expr: "concat('Plan for ', .inputs.issue)" },
+        label: { $expr: "concat('Plan for ', .inputs.issue)" },
         inputs: { issue: { kind: "text", schema: { type: "string" } } },
         outputs: { done: { schema: { type: "string" } } },
-        limits: { max_iterations: { expr: "len(.inputs.issue)" } },
+        limits: { max_iterations: { $expr: "len(.inputs.issue)" } },
         operation: {
           kind: "prompt",
           prompt: "Work on {{.inputs.issue}}",
-          model: { expr: "'fast'" },
-          system: { expr: "concat(concat('Model: ', .operation.config.model), concat(' for ', .label))" },
-          providerOptions: { effort: { binding: { expr: ".limits.max_iterations" } } },
+          model: { $expr: "'fast'" },
+          system: { $expr: "concat(concat('Model: ', .operation.config.model), concat(' for ', .label))" },
+          providerOptions: { effort: { $binding: { $expr: ".limits.max_iterations" } } },
         },
         },
       },
@@ -196,11 +196,11 @@ describe("every value is a binding (SPEC §5.3)", () => {
         text: { kind: "text", schema: { type: "string" } },
       },
       outputs: { loud: { schema: { type: "string" } } },
-      operation: { kind: "function", function: { expr: ".inputs.fn" }, args: { text: { binding: ".inputs.text" } } },
+      operation: { kind: "function", function: { $expr: ".inputs.fn" }, args: { text: { $binding: ".inputs.text" } } },
     };
     const parent = {
       inputs: { issue: { kind: "text", schema: { type: "string" } } },
-      children: { child: { state: "plan/child", inputs: { fn: { expr: "wrap" }, text: ".inputs.issue" } } },
+      children: { child: { state: "plan/child", inputs: { fn: { $expr: "wrap" }, text: ".inputs.issue" } } },
       outputs: { loud: { schema: { type: "string" }, binding: ".children.child.output.loud" } },
     };
     const { result, settled } = await run({ "plan.json": parent, "plan/child.json": child }, { issue: "ship it" });
@@ -211,7 +211,7 @@ describe("every value is a binding (SPEC §5.3)", () => {
     const wrong = validateBundle(
       bundleFor({
         "plan.json": parent,
-        "plan/child.json": { ...child, operation: { ...child.operation, args: { nope: { binding: ".inputs.text" } } } },
+        "plan/child.json": { ...child, operation: { ...child.operation, args: { nope: { $binding: ".inputs.text" } } } },
       }),
     );
     expect(wrong.errors.map((e) => e.message).join("\n")).toMatch(/passes 'nope', which the bound callable does not accept/);
@@ -223,7 +223,7 @@ describe("every value is a binding (SPEC §5.3)", () => {
         "plan.json": {
           inputs: { issue: { kind: "text", schema: { type: "string" } } },
           outputs: { done: { schema: { type: "string" } } },
-          operation: { kind: "prompt", prompt: { expr: "concat('Please handle ', .inputs.issue)" }, model: "fast" },
+          operation: { kind: "prompt", prompt: { $expr: "concat('Please handle ', .inputs.issue)" }, model: "fast" },
         },
       },
       { issue: "the docs" },
@@ -235,14 +235,14 @@ describe("every value is a binding (SPEC §5.3)", () => {
   it("refuses a field that reads what does not exist at entry, and a cycle between fields", () => {
     const readsChild = validateBundle(
       bundleFor({
-        "plan.json": { label: { expr: ".children.c.output.x" }, children: { c: { state: "plan/c" } } },
+        "plan.json": { label: { $expr: ".children.c.output.x" }, children: { c: { state: "plan/c" } } },
         "plan/c.json": {},
       }),
     );
     expect(readsChild.errors.map((e) => e.message).join("\n")).toMatch(/evaluated at entry, before any child runs/);
-    const readsResult = validateBundle(bundleFor({ "plan.json": { label: { expr: ".operation.outcome" }, operation: { kind: "function", function: "wrap" } } }));
+    const readsResult = validateBundle(bundleFor({ "plan.json": { label: { $expr: ".operation.outcome" }, operation: { kind: "function", function: "wrap" } } }));
     expect(readsResult.errors.map((e) => e.message).join("\n")).toMatch(/before the operation runs/);
-    expect(() => bundleFor({ "plan.json": { label: { expr: ".description" }, description: { expr: ".label" } } })).toThrow(/fields form a cycle/);
+    expect(() => bundleFor({ "plan.json": { label: { $expr: ".description" }, description: { $expr: ".label" } } })).toThrow(/fields form a cycle/);
   });
 
   it("computes a slot's default at entry from the inputs that were provided, and an output's at termination", async () => {
@@ -251,12 +251,12 @@ describe("every value is a binding (SPEC §5.3)", () => {
         "plan.json": {
           inputs: {
             issue: { kind: "text", schema: { type: "string" } },
-            summary: { kind: "text", schema: { type: "string" }, default: { expr: "concat('About ', .inputs.issue)" } },
+            summary: { kind: "text", schema: { type: "string" }, default: { $expr: "concat('About ', .inputs.issue)" } },
           },
           outputs: {
             done: { schema: { type: "string" } },
             echo: { schema: { type: "string" }, binding: ".inputs.summary" },
-            fallback: { schema: { type: "string" }, default: { expr: "concat(.inputs.summary, '!')" } },
+            fallback: { schema: { type: "string" }, default: { $expr: "concat(.inputs.summary, '!')" } },
           },
           operation: { kind: "prompt", prompt: "Work on {{.inputs.summary}}", model: "fast" },
         },
@@ -267,7 +267,7 @@ describe("every value is a binding (SPEC §5.3)", () => {
     expect(result.outputs?.echo).toBe("About the docs");
     expect(result.outputs?.fallback).toBe("About the docs!");
     // An input's default resolves before any field settles, so it may not read one.
-    const readsField = validateBundle(bundleFor({ "plan.json": { label: { expr: "'x'" }, inputs: { a: { schema: { type: "string" }, default: { expr: ".label" } } } } }));
+    const readsField = validateBundle(bundleFor({ "plan.json": { label: { $expr: "'x'" }, inputs: { a: { schema: { type: "string" }, default: { $expr: ".label" } } } } }));
     expect(readsField.errors.map((e) => e.message).join("\n")).toMatch(/before the state's fields settle/);
   });
 
@@ -276,12 +276,12 @@ describe("every value is a binding (SPEC §5.3)", () => {
       {
         "plan.json": {
           inputs: { issue: { kind: "text", schema: { type: "string" } }, quick: { kind: "json", schema: { type: "boolean" }, default: true } },
-          title: { binding: { expr: "title(.inputs.issue).title", environment: { session: null } } },
+          title: { binding: { $expr: "title(.inputs.issue).title", environment: { session: null } } },
           outputs: { done: { schema: { type: "string" }, binding: ".children.work.output.done" } },
-          children: { work: { state: "plan/work", async: { expr: ".inputs.quick" }, inputs: { issue: ".inputs.issue", quick: ".inputs.quick" } } },
+          children: { work: { state: "plan/work", async: { $expr: ".inputs.quick" }, inputs: { issue: ".inputs.issue", quick: ".inputs.quick" } } },
           // An environment layer's expression is evaluated in the scope of the state whose operation
           // it ends up in — the child's — so it reads the CHILD's `quick`, wired from the parent's.
-          environment: { permissions: { profile: { expr: ".inputs.quick ? 'read-only' : 'full'" } } },
+          environment: { permissions: { profile: { $expr: ".inputs.quick ? 'read-only' : 'full'" } } },
         },
         "plan/work.json": {
           inputs: { issue: { kind: "text", schema: { type: "string" } }, quick: { kind: "json", schema: { type: "boolean" } } },
@@ -299,14 +299,14 @@ describe("every value is a binding (SPEC §5.3)", () => {
     const title = calls.find((c) => modelOf(c) === "titler")!;
     expect(title.ctx.session).toBeDefined();
     // A session NAME on a binding is refused at load.
-    const named = validateBundle(bundleFor({ "plan.json": { label: { expr: "'x'", environment: { session: "shared" } } } }));
+    const named = validateBundle(bundleFor({ "plan.json": { label: { $expr: "'x'", environment: { session: "shared" } } } }));
     expect(named.errors.map((e) => e.message).join("\n")).toMatch(/must be null .* or a ref expression/);
   });
 
   it("type-checks a field and its failureValue against the field's own type", () => {
-    const wrongType = validateBundle(bundleFor({ "plan.json": { limits: { max_iterations: { expr: "'three'" } } } }));
+    const wrongType = validateBundle(bundleFor({ "plan.json": { limits: { max_iterations: { $expr: "'three'" } } } }));
     expect(wrongType.errors.map((e) => e.message).join("\n")).toMatch(/not type-compatible/);
-    const wrongFallback = validateBundle(bundleFor({ "plan.json": { label: { expr: "'x'", failureValue: 3 } } }));
+    const wrongFallback = validateBundle(bundleFor({ "plan.json": { label: { $expr: "'x'", failureValue: 3 } } }));
     expect(wrongFallback.errors.map((e) => e.message).join("\n")).toMatch(/failureValue does not satisfy/);
   });
 });

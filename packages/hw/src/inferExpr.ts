@@ -18,7 +18,7 @@ import type { CallableSchema, InlineFamily, JsonSchema, JsonValue, Ref } from "@
 import { callablePositionalOrder, callableSchemaOf, isCallableSchema } from "@declarative-ai/exec";
 import { isSubschema, type Schema } from "@declarative-ai/validate";
 import { BUILTIN_PARAMS } from "./builtins.js";
-import { isSpread, pathOf, selfPathOf, type Expr } from "./expr.js";
+import { applySugar, isSpread, OPERATOR_PARAMS, pathOf, receiverCallOf, selfPathOf, type Expr } from "./expr.js";
 import { RESOLVER_REF_SET, RESOLVER_REFS } from "./format.js";
 import { applyArgumentNames, pathOfRef } from "./lowerExpr.js";
 
@@ -342,6 +342,28 @@ function infer(expr: Expr, scope: ExprScope, report: Report): JsonSchema {
       }
     }
     case "call": {
+      // `recv.name(args)` is `name(recv, args)` unless the receiver's TYPE has a property `name` —
+      // then it is what it always was, a call of a callable value (NAMES.md §8). Decided here by the
+      // inferred type, quietly: a property that is not there is not "an unresolved reference" when
+      // the word after the dot names an operation instead.
+      const receiver = receiverCallOf(expr);
+      if (receiver !== undefined) {
+        const recv = infer(receiver.recv, scope, newReport());
+        // The SAME question lowering asks (`declaresProperty`), so what is checked is what runs: a
+        // callable value is one a state's `inputs` DECLARE — a slot, or a property its schema names —
+        // and nothing else. A child's output that happens to have a property called `max` does not
+        // turn `.children.k.output.stats.max()` into a call of it: lowering cannot see that type, so
+        // it lowers the built-in, and reading the type here would check a program that never runs.
+        const declared = selfPathOf(receiver.recv)?.[0] === "inputs" && declaresOwn(recv, receiver.name);
+        // A built-in's name settles it outright. Any other word is an operation only if the search
+        // path says so, which inference cannot ask — so it is taken as one when the receiver's type
+        // is known and has no such property, and otherwise keeps the older reading and its "untyped
+        // callable" warning rather than vanishing into `any`.
+        const operation = OPERATOR_PARAMS[receiver.name] !== undefined || (!isUniversalSchema(recv) && projectProperty(recv, receiver.name) === undefined);
+        if (!declared && operation) {
+          return infer(applySugar(receiver.name, [receiver.recv, ...expr.args]), scope, report);
+        }
+      }
       // A call THROUGH a value: the callee's type comes from the scope — the declared signature of
       // the input or field it reads — and the same rule the lowered walk applies decides the rest.
       const callee = infer(expr.callee, scope, report);
@@ -411,7 +433,7 @@ export function builtinResult(name: string, args: readonly JsonSchema[]): JsonSc
     case "min": case "max": case "abs":
     case "sum": case "avg": case "dot":
       return NUMBER;
-    case "round": case "floor": case "ceil": case "len":
+    case "round": case "floor": case "ceil": case "len": case "indexOf":
       return INTEGER;
     case "isEmpty": case "startsWith": case "endsWith": case "contains":
     case "isArray": case "isNull": case "any": case "all":
@@ -475,6 +497,12 @@ function literalSchema(v: string | number | boolean | null): JsonSchema {
 }
 
 /** Project one property's schema off an object schema. `undefined` = the schema doesn't declare it. */
+/** Does a schema DECLARE this property — name it under `properties`? An open object declares nothing. */
+function declaresOwn(base: JsonSchema, prop: string): boolean {
+  const props = base.properties;
+  return props !== null && typeof props === "object" && !Array.isArray(props) && Object.hasOwn(props, prop);
+}
+
 function projectProperty(base: JsonSchema, prop: string): JsonSchema | undefined {
   // `.length` is the ONE property an array or a string exposes — the evaluator says so, and nothing
   // else about those types is readable in this DSL. Without a projection for it `inputs.items.length`

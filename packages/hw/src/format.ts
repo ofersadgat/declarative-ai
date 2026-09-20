@@ -27,6 +27,8 @@ import type { PermissionMode, PermissionProfile, ScopeDecl } from "@declarative-
 import { BUILTINS } from "./builtins.js";
 import { OPERATION_ENGINE_OUTPUT, OPERATION_METADATA_FIELDS } from "./operationNode.js";
 import type { NormalizedSession, SessionDecl } from "./session.js";
+import type { NameEntry } from "./names.js";
+import type { NormalizedWorkspace, WorkspaceDecl } from "./workspace.js";
 
 // The op vocabulary is hw's format vocabulary — re-exported so authors and consumers import
 // one set of names.
@@ -78,6 +80,14 @@ export const RESOLVER_REFS = {
   // analysis: a dependency is a leaf of the tree, which the fan-out planner and the validator
   // already walk. The set is a registry rather than a grammar, so a user-defined pure function is
   // indistinguishable from `eq`.
+  /**
+   * Read a SCOPED NAME (NAMES.md §3) — what a `{ "$ref": name }` in a value position lowers to.
+   *
+   * A resolver, because the answer belongs to the INSTANCE asking: the identity is `(name, scope)`
+   * and the scope resolves to the nearest enclosing instance, so the same edge reads one key above a
+   * loop and a new one per pass inside it. The configuration it returns was settled at load.
+   */
+  name: "name.get",
   /** One root of the expression context by name (`inputs`, `children`, `run`, …). */
   context: "context.get",
   /** Property access, with implicit optional chaining — distinct from `select`, which REFUSES a
@@ -160,7 +170,7 @@ export type BindingDecl =
    *  string above says the same thing; this spelling is emphasis, for a value a reader would
    *  otherwise have to squint at to see is computed. */
   | {
-      expr: string;
+      $expr: string;
       /**
        * An `environment` layer for every CALL this expression makes (SPEC §4.2) — merged nearest-wins
        * ABOVE the state's own, so `{ "session": null }` here gives a title-generating prompt a fresh
@@ -216,7 +226,29 @@ export type BindingDecl =
        * started by the host, since this run is waiting on it.
        */
       start?: "manual" | "when_ready";
-    };
+    }
+  /**
+   * A SCOPED NAME in a value position (NAMES.md §1, §3) — `{ "$ref": "review" }`, normalized by the
+   * loader so `$in` is the concrete state that scopes it. It reads, for the instance asking, as the
+   * identity's configuration with its key beside it (`$key`), or as what `$pick` chose.
+   */
+  | { $ref: string; $in?: string }
+  /**
+   * ALTERNATIVES, and the rule for choosing (NAMES.md §6). `$pick` is an expression whose value IS
+   * the value used; it reads the alternatives as `.any`. Absent, the first usable alternative wins.
+   *
+   * WHEN the pick runs is not written here, because it is not the author's to say: it belongs to the
+   * position. A `model` is fixed when its session is created; anything else is fixed when the
+   * instance that reads it is entered. Either way it is evaluated once and journaled, so a resumed
+   * run reads the choice back instead of making it again.
+   */
+  | { $any: JsonValue[]; $pick?: string }
+  /**
+   * A LITERAL with computed parts inside it — what the loader makes of an argument such as
+   * `{ "options": { "remote": { "$ref": "review" } } }`. Never authored as such: an author writes the
+   * literal, and `liftWrappedArgs` marks it so that lowering assembles it instead of reading it.
+   */
+  | { $literal: JsonValue };
 
 /**
  * What an element of a fan-out becomes (WORKFLOWS.md §6.3) — a place: in this run, under it, or
@@ -242,8 +274,14 @@ export interface SpawnFields {
 /** The defaults a hosted fan-out's wire fills in when it names none. */
 export const SPAWN_DEFAULTS: Readonly<SpawnFields> = { id: "id", title: "title", requires: "requires", start: "when_ready" };
 
-/** Every key that tags an authored binding form — the base `Ref` cases plus the sugar. */
-const BINDING_TAGS: readonly string[] = ["text", "json", "result", "refs", "op", "expr"];
+/**
+ * Every key that tags an authored binding form — the base `Ref` cases plus the sugar.
+ *
+ * `$ref` is here because of WHEN this is asked: after expansion. Every `$ref` that named a file has
+ * been spliced away by then, so one still standing is a SCOPED NAME in a value position (NAMES.md
+ * §1) — read, per instance, like any other computed value.
+ */
+const BINDING_TAGS: readonly string[] = ["text", "json", "result", "refs", "op", "$expr", "$ref", "$any"];
 
 /**
  * True when a value is spelled as a BINDING rather than as data.
@@ -263,20 +301,68 @@ export function isBindingDecl(value: unknown): boolean {
   return BINDING_TAGS.some((k) => k in o) || o.kind === "prompt" || o.kind === "function";
 }
 
+/** A scoped name standing in a value position — `{ "$ref": name }`, `$in` filled in by the loader. */
+export function isNameUse(value: unknown): value is { $ref: string; $in?: string } {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && typeof (value as { $ref?: unknown }).$ref === "string";
+}
+
 /**
- * The WRAPPED binding form — `{ "binding": … }` — for the value positions where a bare binding could
+ * True when a literal has something COMPUTED inside it — a scoped name, alternatives, or a wrapped
+ * binding, at any depth. Such a literal is a special object by the ordinary rule (NAMES.md §1): its
+ * `$`-keyed nodes instruct and everything around them is payload, so it is assembled per instance
+ * rather than handed over as written.
+ */
+export function hasComputedPart(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  if (isNameUse(value) || isPick(value) || isWrappedBinding(value)) return true;
+  return (Array.isArray(value) ? value : Object.values(value)).some(hasComputedPart);
+}
+
+/** Alternatives with a rule for choosing — `{ "$any": […], "$pick": "…" }` (NAMES.md §6). */
+export function isPick(value: unknown): value is { $any: JsonValue[]; $pick?: string } {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && (value as { $any?: unknown }).$any !== undefined;
+}
+
+/**
+ * The WRAPPED binding form — `{ "$binding": … }` — for the value positions where a bare binding could
  * not be told from data (SPEC §5.3).
  *
- * Inside `config` and `args` a value is opaque JSON handed to an executor, so `{ "expr": "…" }`
- * there might be a literal object with an `expr` key. The wrapper is the slot form outputs and
- * `title` already use, and a `binding` key is one no executor's configuration legitimately contains,
- * so a wrapped object is never an accident. Exactly one key: a wrapper carrying anything else is a
- * slot declaration, which those positions do not take.
+ * Inside `config` and `args` a value is opaque JSON handed to an executor, so an object there is
+ * payload unless something says otherwise — and what says otherwise is a `$`-key (NAMES.md §2): a key
+ * the state system acts on is visibly not the operation's. Exactly one key: a wrapper carrying
+ * anything else is a slot declaration, which those positions do not take.
  */
-export function isWrappedBinding(value: unknown): value is { binding: BindingDecl } {
+export const WRAPPED_BINDING_KEY = "$binding";
+
+/**
+ * The spellings `$expr` and `$binding` had before instructions were `$`-keys — refused by name.
+ *
+ * Refused rather than accepted beside the new ones, for the reason `sessionId` is (`refuseSynonyms`):
+ * a second spelling costs a rule about which one wins, and here it would cost more than that, because
+ * the old spelling is exactly what a LITERAL looks like. `{ "expr": … }` in an argument bag now means
+ * an object with an `expr` key, so a document that still says it would hand a function its own
+ * expression source as data and report success.
+ *
+ * Returns the complaint, or `undefined`. `wrapped` asks about the `{ "binding": … }` wrapper, which
+ * is only a mistake where a wrapper was legal — a slot's own `binding` key is structure and stays bare.
+ */
+export function refusedBindingSpelling(value: unknown, wrapped = false): string | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const o = value as Record<string, unknown>;
+  if (typeof o.expr === "string" && o.$expr === undefined) return `'expr' is spelled '$expr' — write { "$expr": ${JSON.stringify(o.expr)} }`;
+  if (wrapped) {
+    const keys = Object.keys(o);
+    if (keys.length === 1 && keys[0] === "binding" && (isBindingDecl(o.binding) || refusedBindingSpelling(o.binding) !== undefined)) {
+      return `the '{ "binding": … }' wrapper is spelled '{ "$binding": … }'`;
+    }
+  }
+  return undefined;
+}
+
+export function isWrappedBinding(value: unknown): value is { $binding: BindingDecl } {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const keys = Object.keys(value);
-  return keys.length === 1 && keys[0] === "binding" && isBindingDecl((value as { binding: unknown }).binding);
+  return keys.length === 1 && keys[0] === WRAPPED_BINDING_KEY && isBindingDecl((value as { $binding: unknown }).$binding);
 }
 
 /**
@@ -393,6 +479,17 @@ export interface ExecEnvironmentDecl {
    * which one wins — all to save an author one rename.
    */
   session?: SessionDecl;
+  /**
+   * The RESOURCE BUNDLE this operation runs in (NAMES.md §10, `workspace.ts`): the directory its tools
+   * act within, the permission ledger, the scope a `"session"` approval covers. A scoped name —
+   * `"impl"`, `{ "$ref": "impl", "$in": "parent" }`, `{ "$join": "nearest" }` — or `null` for a fresh
+   * one private to this instance and its subtree. Its configuration, when the host needs any (`{ "from": "main" }`), is the name's
+   * `environment.names` entry.
+   *
+   * Separate from `session` on purpose: many sessions may share one workspace, and one session may
+   * cross several. ABSENT inherits — from the chain, then from the enclosing instance, then the run.
+   */
+  workspace?: WorkspaceDecl | NormalizedWorkspace;
   /** Logical names of tools the operation may call mid-loop — resolved through `registry.tools`.
    *  A value (SPEC §5.3), so a binding may stand in for the whole list. */
   tools?: Bindable<string[]>;
@@ -555,6 +652,30 @@ export interface OperationFields extends ExecEnvironmentDecl {
    * references too).
    */
   path?: readonly string[];
+  /**
+   * Configuration for the scoped names of this subtree (NAMES.md §4) — legal on an `environment`
+   * only, since a name's scope is a state and an operation is one call.
+   *
+   * The one key here that does NOT deep-merge down the tree: the nearest entry for a name wins
+   * WHOLE, and extending the enclosing one is said out loud with `{ "$ref": "<same name>", … }`.
+   * Per key it would be impossible to write a new `impl` that simply lacks a key the outer one has.
+   * AUTHORED as a plain block per name; after load every entry also carries `$in`, the state that
+   * scopes it ({@link NameEntry}, stamped by `normalizeNames`), which is how the chain stays a plain
+   * nearest-wins merge and still knows who wrote what.
+   */
+  names?: Record<string, NameEntry | Readonly<Record<string, JsonValue>>>;
+  /**
+   * A function's DEFAULT ARGUMENTS for this subtree, under the function's name (NAMES.md §7) — legal
+   * on an `environment` only.
+   *
+   * Under the function's name is what keeps them typed: the block is checked against that function's
+   * parameters, which a root-level `args` could never be — it would be handed to every function in
+   * the subtree. And it is what keeps them ALIVE: `args` is kind-specific, so a layer that changes
+   * the kind drops an inherited one, whereas this is not the operation's `args` and never meets that
+   * rule. Precedence: the state's own `args`, then the nearest block here (merged per key down the
+   * tree), then the function's own default.
+   */
+  functions?: Record<string, FunctionDefaults>;
 
   // --- The LlmConfiguration surface, inline on a prompt operation (REFERENCES.md §7.2) ----------
   //
@@ -584,6 +705,11 @@ export interface OperationFields extends ExecEnvironmentDecl {
    *  surface does — `xhigh` included, because a delegated agent has such a tier and an author must be
    *  able to write it here or the level cannot be requested at all. */
   reasoning?: Bindable<{ effort?: "low" | "medium" | "high" | "xhigh"; budgetTokens?: number }>;
+}
+
+/** What an `environment` may say about one function — see {@link OperationFields.functions}. */
+export interface FunctionDefaults {
+  args?: Record<string, JsonValue>;
 }
 
 /**
@@ -655,7 +781,10 @@ export const OPERATION_OWN_FIELDS: ReadonlySet<string> = new Set([
   "output",
   "outputs",
   "path",
+  "names",
+  "functions",
   "session",
+  "workspace",
   "sessionId",
   "fork",
   "tools",
@@ -904,7 +1033,18 @@ export interface StateDef {
  * inputs and the operation are in, which is what lets a title read `.inputs.issue` and a model
  * choice read `.title`.
  */
+/**
+ * How long a computed value stays chosen — a property of the POSITION (NAMES.md §6).
+ *
+ * `instance`, the default, is every field's: evaluated at entry, once. `session` is the model's: a
+ * model is fixed when its session is created, so every call that joins the conversation runs on the
+ * model the first one chose, and the next session chooses afresh.
+ */
+export type FieldLifetime = "instance" | "session";
+
 export interface LoadedField {
+  /** See {@link FieldLifetime}. Absent means `instance`. */
+  lifetime?: FieldLifetime;
   /**
    * WHERE the value goes, in AUTHORED terms — `title`, `label`, `limits.max_iterations`,
    * `operation.prompt`, `operation.function`, `operation.config.model`, `environment.tools`. The
@@ -971,6 +1111,13 @@ export interface LoadedState
    * not the bare word, which two unrelated subtrees could each have written meaning different things.
    */
   scopeSession?: NormalizedSession;
+  /**
+   * The workspace this state's SUBTREE resolves in, recorded apart from `environment` for the reason
+   * `scopeSession` is: a composite has no `environment`, and naming a workspace on a composite root is
+   * the ordinary way to give a whole subtree one bundle. The engine keys an instance's resource
+   * bundle on this; absent, the instance inherits its parent's.
+   */
+  scopeWorkspace?: NormalizedWorkspace;
   children?: Record<string, LoadedChild>;
   /**
    * Why this state's `operation` could not be built — an incomplete merge (§5), reported by the
@@ -994,6 +1141,28 @@ export interface LoadedState
    * line the author wrote is the whole value of reporting it at the origin instead of downstream.
    */
   sessionError?: { path: string; message: string };
+  /**
+   * The names this state SCOPES, each with the configuration the whole tree gave it (NAMES.md §4):
+   * its entry, every `{ "$in": … }` contribution, and the plain keys beside each use's `$ref`,
+   * merged once the closure is loaded. Keyed here because the scope IS this state — a use carries
+   * `(name, this id)` and reads its configuration off the state it names, with no lookup.
+   */
+  names?: Record<string, JsonValue>;
+  /** What is wrong with this state's names — conflicting configuration, a name bound as two types. */
+  nameErrors?: Array<{ path: string; message: string }>;
+  /**
+   * Where each identity was FIRST put into a position by this state (NAMES.md §5) — the bind point a
+   * name's type is answerable at. A `session` or `workspace` bind is held to what the HOST says that
+   * position's configuration is (`ValidationEnvironment.positions`); a `value` bind is typed like any
+   * other binding, where it is read.
+   */
+  nameBinds?: Array<{ path: string; name: string; in: string; kind: "session" | "workspace" | "value" }>;
+  /**
+   * Every `functions` block this state WROTE — its own `environment`'s and each child mount layer's,
+   * not what it inherited — kept so the validator can check each default against the function it is
+   * for, at the line that wrote it.
+   */
+  functionDefaults?: Array<{ path: string; functions: Record<string, FunctionDefaults> }>;
   /** Unexpanded `prefix*` outputs, pending the child's slots — expanded by `loadBundle` (§3.4). */
   outputSpreads?: OutputSpread[];
   /** Always present when the state has children: the authored order, or declaration order (§6). */

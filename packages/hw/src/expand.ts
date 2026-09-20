@@ -11,6 +11,18 @@
  *
  * A RUNTIME reference (`.children.critique.output.outcome`) is left alone here. It sits in a
  * binding, it addresses this instance's data, and the desugarer lowers it like any other binding.
+ *
+ * ## The second reading of a variable string (NAMES.md §1)
+ *
+ * A mismatch marks a VARIABLE STRING, and a variable string is read two ways. Starting with `$` it
+ * is a reference, resolved here, and it never walks scopes. Anything else is a SCOPED NAME first —
+ * if an enclosing scope declares it (`environment.names`), or the position itself provides what a
+ * name is bound to (`session`) — and a path off the default root only after that (§6's order).
+ *
+ * A scoped name is NOT resolved here, and cannot be: its identity is an instance's address and its
+ * configuration is collected from the whole tree. Expansion's whole job for one is to recognize it,
+ * leave it in the one canonical spelling — `{ "$ref": name, …overrides }` — and keep its hands off,
+ * so the loader finds every use by shape without knowing which positions could have held one.
  */
 import { mergeOperationFields } from "./merge.js";
 import { bindingForDocument } from "./format.js";
@@ -42,6 +54,17 @@ export interface ExpandOptions {
   onRead?: (file: string) => void;
   /** Whether shadowing across path entries is reported — see `ReferenceOptions.shadowing`. */
   shadowing?: "warn" | "override";
+  /**
+   * The `names` entries ENCLOSING this state — what its ancestors' environments declared, by name.
+   * With the state's own, which expansion reads off the document itself, these are the names a bare
+   * string may mean before it means a file (NAMES.md §6). Only the keys are read.
+   */
+  enclosing?: Readonly<Record<string, unknown>>;
+}
+
+/** Expansion's own state: the options, plus the names visible at the node being walked. */
+interface Walk extends ExpandOptions {
+  visible: ReadonlySet<string>;
 }
 
 /** The key that spells a reference where a plain string is expected. */
@@ -56,7 +79,72 @@ export const REF_KEY = "$ref";
  * stays a template.
  */
 export function expandReferences(document: unknown, options: ExpandOptions): unknown {
-  return expandNode(document, STATE_SHAPE, options, [], new Set());
+  const walk: Walk = { ...options, visible: new Set(Object.keys(options.enclosing ?? {})) };
+  if (!isPlainObject(document) || document.environment === undefined) return expandNode(document, STATE_SHAPE, walk, [], new Set());
+  // The state's OWN names are visible to its whole document, so they have to be known before any of
+  // it is expanded.
+  const own: Walk = { ...walk, visible: new Set([...walk.visible, ...peekNames(document.environment, walk)]) };
+  return expandNode(document, STATE_SHAPE, own, [], new Set());
+}
+
+/**
+ * The names an `environment` block declares, read WITHOUT expanding it.
+ *
+ * Expansion needs a block's own names before it can expand the block — a use beside the entry
+ * (`"model": { "$ref": "plan" }` next to `names.plan`) must not be tried as a file — so this follows
+ * only the top-level transclusion, of the block and of its `names`, and reads keys. Anything it
+ * cannot read it skips: the real expansion is about to meet the same problem and report it properly.
+ */
+function peekNames(environment: unknown, walk: Walk): string[] {
+  const follow = (value: unknown, at: Walk, depth: number): unknown => {
+    const reference = typeof value === "string" ? value : isPlainObject(value) && typeof value[REF_KEY] === "string" ? value[REF_KEY] : undefined;
+    if (reference === undefined || !reference.startsWith("$") || depth > 8) return value;
+    try {
+      const resolved = resolveReference(reference, refOptions(at));
+      const target = follow(loadReferenced(resolved, reference, at, undefined), resolved.local ? at : { ...at, from: resolved.id ?? at.from }, depth + 1);
+      return isPlainObject(value) && isPlainObject(target) ? { ...target, ...value } : target;
+    } catch {
+      return undefined;
+    }
+  };
+  const block = follow(environment, walk, 0);
+  const names = isPlainObject(block) ? follow(block.names, walk, 0) : undefined;
+  return isPlainObject(names) ? Object.keys(names) : [];
+}
+
+/**
+ * Is this variable string a SCOPED NAME rather than a reference (NAMES.md §1, §6)?
+ *
+ * `$…` never is — a reference starts at its root and does not walk scopes. Otherwise it is one when
+ * the position provides (there is nothing else it could be), or when an enclosing scope declares it:
+ * scopes are searched before the position's default root, so declaring a name shadows a file of the
+ * same spelling, visibly, in the environment that declared it.
+ *
+ * "First USABLE match wins" (§6), and a name is usable only where a VALUE is read: it reads per
+ * instance, so it cannot stand for structure the loader needs before any instance exists — a slot
+ * map, a child mount, an operation. There a declared name is passed over and the string means what
+ * it always did, a path off the default root. Reading it as the name would hand the loader
+ * `{ "$ref" }` as though it were the slots themselves.
+ */
+function isScopedName(reference: string, shape: Shape, walk: Walk): boolean {
+  if (reference.startsWith("$")) return false;
+  if (shape.t === "name") return true;
+  if (!walk.visible.has(reference)) return false;
+  return (shape.t !== "object" && shape.t !== "array") || shape.value === true;
+}
+
+/** A bare word that is neither a usable name nor a file is, to its author, an undefined name. */
+function asUndefinedName<T>(reference: string, path: readonly string[], walk: Walk, resolve: () => T): T {
+  try {
+    return resolve();
+  } catch (e) {
+    if (!(e instanceof ReferenceError) || /[/.$]/.test(reference)) throw e;
+    throw new ReferenceError(
+      walk.visible.has(reference)
+        ? `${path.join(".")}: '${reference}' is a declared name, but this position holds structure rather than a value, so a name cannot stand here — a name goes where a value is read (a binding, an argument, a call setting). Read as a file instead: ${e.message}`
+        : `${path.join(".")}: '${reference}' is not a name any enclosing scope declares (environment.names), and this position cannot provide one — ${e.message}`,
+    );
+  }
 }
 
 function refOptions(options: ExpandOptions): ReferenceOptions {
@@ -95,7 +183,7 @@ function loadReferenced(resolved: ResolvedReference, reference: string, options:
 function expandReferenced(
   reference: string,
   shape: Shape,
-  options: ExpandOptions,
+  options: Walk,
   path: string[],
   active: Set<string>,
   self: unknown,
@@ -106,7 +194,7 @@ function expandReferenced(
     throw new ReferenceError(`reference cycle: ${[...active, key].join(" → ")}`);
   }
   const value = loadReferenced(resolved, reference, options, self);
-  const nested: ExpandOptions = resolved.local ? options : { ...options, from: resolved.id ?? options.from };
+  const nested: Walk = resolved.local ? options : { ...options, from: resolved.id ?? options.from };
   // Text is a leaf: there is nothing inside a prompt file to expand.
   if (typeof value === "string") return value;
   return expandNode(value, shape, nested, path, new Set([...active, key]));
@@ -130,12 +218,12 @@ function expandReferenced(
  * unrecognized object typed inline is a misspelled binding tag, and should still be the error it
  * has always been.
  */
-function expandBinding(reference: string, shape: Shape, options: ExpandOptions, path: string[], active: Set<string>): unknown {
+function expandBinding(reference: string, shape: Shape, options: Walk, path: string[], active: Set<string>): unknown {
   const resolved = expandReferenced(reference, shape, options, path, active, undefined);
   return bindingForDocument(resolved, isDataFile(resolveReference(reference, refOptions(options)).file));
 }
 
-function expandNode(value: unknown, shape: Shape, options: ExpandOptions, path: string[], active: Set<string>): unknown {
+function expandNode(value: unknown, shape: Shape, options: Walk, path: string[], active: Set<string>): unknown {
   // A reference-typed string is a path we RESOLVE elsewhere (naming a state), never transcluded.
   if (shape.t === "ref") return value;
 
@@ -143,7 +231,11 @@ function expandNode(value: unknown, shape: Shape, options: ExpandOptions, path: 
   // references there are the bare-string form, which JSON Schema has no use for.
   if (shape.t === "schema") return expandSchema(value, options, path, active);
 
+  if (shape.t === "names") return expandNames(value, options, path, active);
+
   if (typeof value === "string") {
+    // A position that PROVIDES takes a name as written; only a `$…` string there is a reference.
+    if (shape.t === "name") return isScopedName(value, shape, options) ? value : expandReferenced(value, shape, options, path, active, undefined);
     // A binding string is one of three things, and the two predicates below are the whole rule:
     //
     //  - a RUNTIME reference (`.inputs.issue`) — this instance's data, which the desugarer lowers;
@@ -160,7 +252,10 @@ function expandNode(value: unknown, shape: Shape, options: ExpandOptions, path: 
     }
     // A string where an object or array belongs IS a reference (§3).
     if (shape.t === "object" || shape.t === "array") {
-      return expandReferenced(value, shape, options, path, active, undefined);
+      // …unless an enclosing scope declares it and a name is USABLE here, in which case it is that
+      // NAME (NAMES.md §6).
+      if (isScopedName(value, shape, options)) return { [REF_KEY]: value };
+      return asUndefinedName(value, path, options, () => expandReferenced(value, shape, options, path, active, undefined));
     }
     return value;
   }
@@ -176,9 +271,14 @@ function expandNode(value: unknown, shape: Shape, options: ExpandOptions, path: 
   // the expected type is a string or unknown.
   if (typeof value[REF_KEY] === "string") {
     const reference = value[REF_KEY];
-    const resolved = expandReferenced(reference, shape, options, path, active, undefined);
     const overrides = { ...value };
     delete overrides[REF_KEY];
+    // A scoped name stays a use. Its sibling keys configure the NAME rather than override this
+    // position, so they are expanded as the untyped block a `names` entry is, not by this shape.
+    if (isScopedName(reference, shape, options)) {
+      return { [REF_KEY]: reference, ...(expandNode(overrides, { t: "any" }, options, path, active) as Record<string, unknown>) };
+    }
+    const resolved = asUndefinedName(reference, path, options, () => expandReferenced(reference, shape, options, path, active, undefined));
     if (Object.keys(overrides).length === 0) return resolved;
     if (typeof resolved === "string" || !isPlainObject(resolved)) {
       throw new ReferenceError(
@@ -191,10 +291,95 @@ function expandNode(value: unknown, shape: Shape, options: ExpandOptions, path: 
     return mergeOperationFields(resolved as never, expandedOverrides as never) as unknown;
   }
 
+  // ALTERNATIVES (NAMES.md §6): one that references something and finds nothing is not USABLE.
+  if (Array.isArray(value[ANY_KEY])) {
+    const rest: Record<string, unknown> = { ...value };
+    delete rest[ANY_KEY];
+    return {
+      ...(expandNode(rest, shape, options, path, active) as Record<string, unknown>),
+      [ANY_KEY]: expandAlternatives(value[ANY_KEY], options, [...path, ANY_KEY], active),
+    };
+  }
+
+  // An `environment` block's own names are visible inside it. At state level `expandReferences` has
+  // already said so for the whole document; this is the child MOUNT's layer, whose names reach that
+  // child and nothing beside it.
+  const within: Walk =
+    shape.t === "object" && shape.fields?.names?.t === "names" && value.names !== undefined
+      ? { ...options, visible: new Set([...options.visible, ...peekNames(value, options)]) }
+      : options;
   const out: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(value)) {
     const childShape = fieldShape(shape, key) ?? { t: "any" as const };
-    out[key] = expandNode(child, childShape, options, [...path, key], active);
+    out[key] = expandNode(child, childShape, within, [...path, key], active);
+  }
+  return out;
+}
+
+/** The key that lists alternatives. */
+const ANY_KEY = "$any";
+
+/**
+ * Expand the alternatives of a `$any`, dropping the ones that are not USABLE (NAMES.md §6).
+ *
+ * "First usable alternative wins" needs a meaning for usable, and the only one a load can decide is
+ * whether the alternative is THERE: one written as a reference that resolves to nothing — no file on
+ * any layer — is skipped, with a warning, where anywhere else it would be a load error. That is the
+ * point of listing alternatives across layers: `[{ "$ref": "$/roles.plan" }, { "model": "…" }]`
+ * reads the project's role where there is one and falls through where there is not. Anything that
+ * goes wrong INSIDE a target that was found — a cycle, a reference of its own that matches nothing —
+ * is still an error: that is a mistake, not an absence. So is a list with nothing left in it.
+ * `null` is a value, never an absence: it is kept.
+ */
+function expandAlternatives(alternatives: unknown[], options: Walk, path: string[], active: Set<string>): unknown[] {
+  const usable: unknown[] = [];
+  alternatives.forEach((alternative, i) => {
+    const at = [...path, String(i)];
+    // ABSENCE is asked of the alternative's OWN reference and of nothing below it: a role file that
+    // is there and itself points at something missing is a mistake in that file, and skipping it
+    // would turn a typo into a silent change of model.
+    if (isPlainObject(alternative) && typeof alternative[REF_KEY] === "string" && alternative[REF_KEY].startsWith("$")) {
+      const reference = alternative[REF_KEY];
+      try {
+        loadReferenced(resolveReference(reference, refOptions(options)), reference, options, undefined);
+      } catch (e) {
+        if (!(e instanceof ReferenceError)) throw e;
+        options.onWarn?.(`${at.join(".")}: alternative skipped — ${e.message}`);
+        return;
+      }
+    }
+    usable.push(expandNode(alternative, { t: "any" }, options, at, active));
+  });
+  if (usable.length === 0) throw new ReferenceError(`${path.join(".")}: no alternative is usable — every one references something that is not there`);
+  return usable;
+}
+
+/**
+ * Expand a `names` block (NAMES.md §4).
+ *
+ * An entry is an untyped block, so inside one only the explicit `{ "$ref" }` form counts — with the
+ * one reading that belongs to this position: a `$ref` to a NAME pastes that name's enclosing entry,
+ * and the entry's own name always means the enclosing one. That is what lets `"impl": { "$ref":
+ * "impl", "from": "dev" }` say "theirs, with this changed" without being a cycle.
+ *
+ * The paste itself is the loader's (`normalizeNames`), which holds the enclosing blocks; here the
+ * entry is only kept out of file resolution, with its override keys expanded like any other block.
+ */
+function expandNames(value: unknown, options: Walk, path: string[], active: Set<string>): unknown {
+  if (typeof value === "string") return expandReferenced(value, { t: "names" }, options, path, active, undefined);
+  if (!isPlainObject(value)) return value;
+  if (typeof value[REF_KEY] === "string") return expandNode(value, { t: "object", rest: { t: "any" } }, options, path, active);
+  const out: Record<string, unknown> = {};
+  for (const [name, entry] of Object.entries(value)) {
+    const reference = typeof entry === "string" ? entry : isPlainObject(entry) && typeof entry[REF_KEY] === "string" ? entry[REF_KEY] : undefined;
+    const at = [...path, name];
+    if (reference === undefined || reference.startsWith("$") || (reference !== name && options.enclosing?.[reference] === undefined)) {
+      out[name] = expandNode(entry, typeof entry === "string" ? { t: "object", rest: { t: "any" } } : { t: "any" }, options, at, active);
+      continue;
+    }
+    const overrides = isPlainObject(entry) ? { ...entry } : {};
+    delete overrides[REF_KEY];
+    out[name] = { [REF_KEY]: reference, ...(expandNode(overrides, { t: "any" }, options, at, active) as Record<string, unknown>) };
   }
   return out;
 }
@@ -206,7 +391,7 @@ function expandNode(value: unknown, shape: Shape, options: ExpandOptions, path: 
  * "$/types/markdown"}}` composes, where linking whole schemas would not. A bare string is never
  * valid JSON Schema, so the two vocabularies cannot collide.
  */
-function expandSchema(value: unknown, options: ExpandOptions, path: string[], active: Set<string>): unknown {
+function expandSchema(value: unknown, options: Walk, path: string[], active: Set<string>): unknown {
   if (typeof value === "string") {
     return expandReferenced(value, { t: "schema" }, options, path, active, undefined);
   }

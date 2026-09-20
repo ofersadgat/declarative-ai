@@ -61,7 +61,7 @@ describe("counters under a park", () => {
               {
                 to: "a",
                 when: ".run.iteration < .limits.max_iterations",
-                inputs: { why: { expr: ".children.slow.output.n" } },
+                inputs: { why: { $expr: ".children.slow.output.n" } },
               },
             ],
           },
@@ -103,9 +103,9 @@ describe("counters under a park", () => {
           a: { state: "root/a" },
           b: {
             state: "root/b",
-            inputs: { count: { expr: ".children.a.length" } },
+            inputs: { count: { $expr: ".children.a.length" } },
             transitions: [
-              { to: "a", when: ".run.iteration < .limits.max_iterations", inputs: { why: { expr: ".children.slow.output.n" } } },
+              { to: "a", when: ".run.iteration < .limits.max_iterations", inputs: { why: { $expr: ".children.slow.output.n" } } },
             ],
           },
         },
@@ -244,7 +244,7 @@ describe("what a pass boundary does to the cursor", () => {
         children: {
           only: {
             state: "root/only",
-            inputs: { count: { expr: ".children.only.length" } },
+            inputs: { count: { $expr: ".children.only.length" } },
             transitions: [{ to: "only", when: ".run.iteration < .limits.max_iterations" }],
           },
         },
@@ -280,7 +280,7 @@ describe("limits still bound a loop that carries values", () => {
               {
                 to: "work",
                 when: ".run.iteration < .limits.max_iterations",
-                inputs: { all: { expr: "concat(.children.work.output.all, .children.judge.output.found)" } },
+                inputs: { all: { $expr: "concat(.children.work.output.all, .children.judge.output.found)" } },
               },
             ],
           },
@@ -363,7 +363,7 @@ describe("a child outside the sequence that a RULE names", () => {
     const seen: unknown[] = [];
     const f = files();
     (f["root"]!.children as Record<string, { inputs?: unknown }>)["review"]!.inputs = {
-      fixed: { expr: ".children.repair.output.n" },
+      fixed: { $expr: ".children.repair.output.n" },
     };
     f["root/review"] = leaf("review", { n: str }, { fixed: { ...str, optional: true } });
     const registry = harness({
@@ -387,7 +387,7 @@ describe("a child outside the sequence that a RULE names", () => {
     f["root"]!.limits = { max_iterations: 1 };
     (f["root"]!.children as Record<string, { transitions?: unknown; inputs?: unknown }>)["review"] = {
       state: "root/review",
-      inputs: { fixed: { expr: ".children.repair.output.n" } },
+      inputs: { fixed: { $expr: ".children.repair.output.n" } },
       transitions: [{ to: "implement", when: ".run.iteration < .limits.max_iterations" }],
     } as never;
     f["root/review"] = leaf("review", { n: str }, { fixed: { ...str, optional: true } });

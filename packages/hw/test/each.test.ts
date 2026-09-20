@@ -83,7 +83,7 @@ const COMPONENT: StateDef = {
     kind: "function",
     function: "build",
     input: {
-      name: { kind: "json", binding: { expr: ".inputs.component.name" } },
+      name: { kind: "json", binding: { $expr: ".inputs.component.name" } },
       flow: { kind: "json", binding: ".inputs.flow" },
       position: { kind: "json", binding: ".inputs.position" },
     },
@@ -106,7 +106,7 @@ const FAN: Record<string, StateDef> = {
       component: {
         state: "root/component",
         inputs: {
-          component: { expr: ".inputs.components", each: true },
+          component: { $expr: ".inputs.components", each: true },
           flow: ".inputs.flows[.each.index]",
           position: ".each.axis.component",
         },
@@ -183,7 +183,7 @@ describe("a mount with `each: true` on a wire", () => {
       ...FAN,
       root: {
         ...FAN.root!,
-        children: { component: { state: "root/component", inputs: { component: { expr: ".inputs.components.length", each: true } } } },
+        children: { component: { state: "root/component", inputs: { component: { $expr: ".inputs.components.length", each: true } } } },
       },
     };
     const { outcome, reason, events } = await run(files, "root", { inputs: { components: THREE } });
@@ -226,9 +226,9 @@ describe("several `each` wires on one mount", () => {
         pair: {
           state: "root/pair",
           inputs: {
-            component: { expr: ".inputs.components", each: true },
-            theme: { expr: ".inputs.themes", each: true },
-            position: { expr: "{ index: .each.index, c: .each.axis.component, t: .each.axis.theme }" },
+            component: { $expr: ".inputs.components", each: true },
+            theme: { $expr: ".inputs.themes", each: true },
+            position: { $expr: "{ index: .each.index, c: .each.axis.component, t: .each.axis.theme }" },
           },
         },
       },
@@ -277,7 +277,7 @@ describe("what the loader and validator say about `each`", () => {
       root: {
         label: "Root",
         inputs: { items: { schema: { type: "array" } } },
-        outputs: { first: { schema: {}, binding: { expr: ".inputs.items", each: true } as never } },
+        outputs: { first: { schema: {}, binding: { $expr: ".inputs.items", each: true } as never } },
         operation: { kind: "prompt", model: "m", prompt: "go" },
       },
     };
@@ -433,7 +433,7 @@ describe("a fan-out fed by a sibling child", () => {
         outputs: { docs: { schema: { type: "array", items: { type: "string" } }, binding: ".children.component.output.doc" } },
         children: {
           plan: { state: "root/plan", inputs: {} },
-          component: { state: "root/component", inputs: { component: { expr: ".children.plan.output.components", each: true } } },
+          component: { state: "root/component", inputs: { component: { $expr: ".children.plan.output.components", each: true } } },
         },
         sequence: ["plan", "component"],
       },
@@ -456,7 +456,7 @@ describe("a fan-out fed by a sibling child", () => {
         outputs: { docs: { schema: { type: "array" }, binding: ".children.component.output.doc" } },
         children: {
           plan: { state: "root/plan", inputs: {}, async: true },
-          component: { state: "root/component", inputs: { component: { expr: ".children.plan.output.components", each: true } } },
+          component: { state: "root/component", inputs: { component: { $expr: ".children.plan.output.components", each: true } } },
         },
         sequence: ["plan", "component"],
       },
@@ -476,7 +476,7 @@ describe("a fan-out fed by a sibling child", () => {
    */
   describe("when the sibling is itself a fan-out", () => {
     const seeds = { seeds: { schema: { type: "array", items: { type: "string" } } } };
-    const planMount = { state: "root/plan", inputs: { seed: { expr: ".inputs.seeds", each: true } } };
+    const planMount = { state: "root/plan", inputs: { seed: { $expr: ".inputs.seeds", each: true } } };
 
     it("reads the sibling's output as an array of arrays, which the validator refuses to fan out over directly", () => {
       const files: Record<string, StateDef> = {
@@ -486,7 +486,7 @@ describe("a fan-out fed by a sibling child", () => {
           outputs: { docs: { schema: { type: "array" }, binding: ".children.component.output.doc" } },
           children: {
             plan: planMount,
-            component: { state: "root/component", inputs: { component: { expr: ".children.plan.output.components", each: true } } },
+            component: { state: "root/component", inputs: { component: { $expr: ".children.plan.output.components", each: true } } },
           },
           sequence: ["plan", "component"],
         },
@@ -511,7 +511,7 @@ describe("a fan-out fed by a sibling child", () => {
           children: {
             plan: planMount,
             gather: { state: "root/gather", inputs: { groups: ".children.plan.output.components" } },
-            component: { state: "root/component", inputs: { component: { expr: ".children.gather.output.components", each: true } } },
+            component: { state: "root/component", inputs: { component: { $expr: ".children.gather.output.components", each: true } } },
           },
           sequence: ["plan", "gather", "component"],
         },

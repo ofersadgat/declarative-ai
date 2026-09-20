@@ -28,10 +28,10 @@
  * tool; a unioning merge would leave no way to take one away.
  */
 import type { JsonValue } from "@declarative-ai/exec";
-import { inferredKind, OPERATION_OWN_FIELDS, type NamedParameterDecl, type OperationFields, type ParameterDecl, type PermissionsDecl } from "./format.js";
+import { inferredKind, OPERATION_OWN_FIELDS, type FunctionDefaults, type NamedParameterDecl, type OperationFields, type ParameterDecl, type PermissionsDecl } from "./format.js";
 
 /** Fields with a merge rule of their own — everything else is nearest-wins, wholesale. */
-const MERGED_FIELDS: ReadonlySet<string> = new Set(["args", "input", "output", "conversation", "permissions", "tools", "path"]);
+const MERGED_FIELDS: ReadonlySet<string> = new Set(["args", "input", "output", "conversation", "permissions", "tools", "path", "names", "functions"]);
 
 /** The `path` entry that expands to whatever the environment chain supplied (EXPRESSIONS.md §4.2). */
 export const INHERITED_PATH = "$INHERITED";
@@ -57,13 +57,34 @@ function isPlainObject(value: unknown): value is Record<string, JsonValue> {
  */
 const FORBIDDEN_KEYS: ReadonlySet<string> = new Set(["__proto__"]);
 
-/** Per-key merge of two plain objects; arrays and scalars in `over` replace. Used for `config`. */
-function mergeJson(base: Record<string, JsonValue>, over: Record<string, JsonValue>): Record<string, JsonValue> {
+/** Per-key merge of two plain objects; arrays and scalars in `over` replace. Used for `args`, and for a pasted `names` entry. */
+export function mergeJson(base: Record<string, JsonValue>, over: Record<string, JsonValue>): Record<string, JsonValue> {
   const out: Record<string, JsonValue> = { ...base };
   for (const [key, value] of Object.entries(over)) {
     if (FORBIDDEN_KEYS.has(key)) continue;
     const prior = out[key];
     out[key] = isPlainObject(prior) && isPlainObject(value) ? (mergeJson(prior, value) as JsonValue) : value;
+  }
+  return out;
+}
+
+/**
+ * Merge two argument bags: per key, deep for literal maps — and WHOLE wherever either side is an
+ * instruction rather than a literal (`{ "$ref" }`, `{ "$binding" }`, `{ "$expr" }`). A scoped name
+ * deep-merged under a literal would come out as the name with a stray key, configuring an identity
+ * the author never mentioned; a nearer value that is one thing replaces a farther one that is another.
+ *
+ * Asked at EVERY depth, by recursing through this function rather than `mergeJson`: a name may sit
+ * inside a literal argument (`{ "opts": { "remote": { "$ref": "review" } } }`), and a nearer
+ * `{ "opts": { "remote": { "draft": true } } }` replaces that name exactly as it would at the top.
+ */
+export function mergeArgs(base: Record<string, JsonValue> | undefined, over: Record<string, JsonValue> | undefined): Record<string, JsonValue> {
+  const instructs = (value: JsonValue | undefined): boolean => isPlainObject(value) && Object.keys(value).some((key) => key.startsWith("$"));
+  const out: Record<string, JsonValue> = { ...base };
+  for (const [key, value] of Object.entries(over ?? {})) {
+    if (FORBIDDEN_KEYS.has(key)) continue;
+    const prior = out[key];
+    out[key] = isPlainObject(prior) && isPlainObject(value) && !instructs(prior) && !instructs(value) ? (mergeArgs(prior, value) as JsonValue) : value;
   }
   return out;
 }
@@ -123,7 +144,7 @@ export function refuseSynonyms<T extends OperationFields>(fields: T): T {
     // is about (DESIGN.md §1.6), which also makes the whole declaration replace as one value.
     throw new Error(
       "operation declares 'fork' beside 'session'; fork is a property OF the session — write "
-      + '{"session": {"name": "…", "fork": true}} (or {"join": …, "fork": true})',
+      + '{"session": {"$ref": "…", "$fork": true}} (or {"$join": …, "$fork": true})',
     );
   }
   return fields;
@@ -169,7 +190,24 @@ export function mergeOperationFields(base: OperationFields, over: OperationField
     out.path = over.path.flatMap((entry) => (entry === INHERITED_PATH ? (base.path ?? []) : [entry]));
   }
 
-  if (over.args !== undefined) out.args = base.args ? mergeJson(base.args, over.args) : over.args;
+  if (over.args !== undefined) out.args = base.args ? mergeArgs(base.args, over.args) : over.args;
+
+  // `names` merges per NAME and no deeper: the nearest entry wins whole (NAMES.md §4). A new `impl`
+  // is a new identity, scoped where it was written, and inheriting the outer one's keys would make
+  // it impossible to write one that lacks them. Extension is explicit — `{ "$ref": "impl", … }`.
+  if (over.names !== undefined) out.names = { ...base.names, ...over.names };
+
+  // A function's default arguments merge per FUNCTION and then per key, exactly as `args` does —
+  // a root defaulting `remote` and a subtree defaulting `draft` leave a gate below with both.
+  if (over.functions !== undefined) {
+    const functions: Record<string, FunctionDefaults> = { ...base.functions };
+    for (const [name, defaults] of Object.entries(over.functions)) {
+      if (FORBIDDEN_KEYS.has(name)) continue;
+      const prior = functions[name];
+      functions[name] = { ...prior, ...defaults, ...(prior?.args !== undefined || defaults.args !== undefined ? { args: mergeArgs(prior?.args, defaults.args) } : {}) };
+    }
+    out.functions = functions;
+  }
 
   const input = mergeSlotMap(base.input, over.input);
   if (input !== undefined) out.input = input;
@@ -182,7 +220,7 @@ export function mergeOperationFields(base: OperationFields, over: OperationField
     const priorPerms = base.permissions;
     // A BOUND block (SPEC §5.3) on either side replaces wholesale: a binding has no keys to merge per
     // key, and spreading one would scatter its `expr` into a literal that means nothing.
-    const bound = (p: unknown): boolean => typeof p === "string" || (p !== null && typeof p === "object" && !Array.isArray(p) && ("expr" in (p as object) || "binding" in (p as object)));
+    const bound = (p: unknown): boolean => typeof p === "string" || (p !== null && typeof p === "object" && !Array.isArray(p) && ("$expr" in (p as object) || "$binding" in (p as object)));
     if (priorPerms && !bound(priorPerms) && !bound(over.permissions)) {
       const prior = priorPerms as PermissionsDecl;
       const next = over.permissions as PermissionsDecl;
@@ -227,7 +265,7 @@ export function mergeOperationChain(layers: ReadonlyArray<OperationFields | unde
 }
 
 /** The fields `LoadedState.environment` keeps — the execution environment, split off after merging. */
-export const EXEC_ENVIRONMENT_FIELDS = ["session", "tools", "conversation", "permissions"] as const;
+export const EXEC_ENVIRONMENT_FIELDS = ["session", "workspace", "tools", "conversation", "permissions"] as const;
 
 /**
  * A stable identity for one merged environment, so the loader can tell whether a state mounted under

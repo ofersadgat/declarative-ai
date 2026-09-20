@@ -24,7 +24,7 @@ import { WorkflowEngine } from "../src/engine.js";
 import type { StateDef } from "../src/format.js";
 import { loadBundle } from "../src/loader.js";
 import { InMemoryPersistence } from "../src/ports.js";
-import { sessionKeyOf } from "../src/session.js";
+import { scopedKeyOf } from "../src/scope.js";
 import { FakePromptExecutor, newRegistry, ok, promptOf, toolNamesOf, type FakeCall, type Script } from "./fakes.js";
 
 /**
@@ -35,7 +35,7 @@ import { FakePromptExecutor, newRegistry, ok, promptOf, toolNamesOf, type FakeCa
  * The scope is spelled as the anchoring instance's ADDRESS, so the run root is `/` and a name written
  * on the child mounted at `r` anchors at `r`.
  */
-const CHAT = sessionKeyOf("chat", "/");
+const CHAT = scopedKeyOf("chat", "/");
 
 /**
  * The session stack as a host composes it: resolve the position, claim it, record what ran. Without
@@ -351,9 +351,9 @@ describe("which conversation a call joins", () => {
   it("a session name of its own isolates it", async () => {
     // Written on `reader`, so it is `reader`'s name — a different scope, and therefore a different
     // stream, even if it had been spelled `chat`.
-    expect(await secondSessionUnder({ session: "other" })).toBe(`${sessionKeyOf("other", "r")}@0`);
+    expect(await secondSessionUnder({ session: "other" })).toBe(`${scopedKeyOf("other", "r")}@0`);
     // Even spelled `chat`, it is a DIFFERENT stream: same word, a different scope.
-    expect(await secondSessionUnder({ session: "chat" })).toBe(`${sessionKeyOf("chat", "r")}@0`);
+    expect(await secondSessionUnder({ session: "chat" })).toBe(`${scopedKeyOf("chat", "r")}@0`);
   });
 
   it("a null session starts a fresh stream, beating the inherited name", async () => {
@@ -363,7 +363,7 @@ describe("which conversation a call joins", () => {
   it("a fork branches rather than continuing, and still reads the prefix", async () => {
     // `fork` rides ON the session now, so it can no longer arrive from a different layer than the
     // name it is about.
-    const { engine, fake, sessions } = makeEngine(pair({ session: { join: "parent", fork: true } }), "root", () => ok({ r: "A" }));
+    const { engine, fake, sessions } = makeEngine(pair({ session: { $join: "parent", $fork: true } }), "root", () => ok({ r: "A" }));
     expect((await engine.run({ inputs: {} })).outcome).toBe("success");
     const at = fake.calls[1]!.ctx.session!;
     expect(at.mode).toBe("fork");

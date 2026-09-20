@@ -12,17 +12,17 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  RUN_RESOURCE_KEY,
   freshSessionKey,
   isSessionRef,
   normalizeSession,
   resolveSession,
   sessionFromExpr,
-  sessionKeyOf,
   validateSessionDecl,
   type SessionAncestor,
   type SessionScope,
 } from "../src/session.js";
+import { scopedKeyOf } from "../src/scope.js";
+import { RUN_RESOURCE_KEY } from "../src/workspace.js";
 import { mergeOperationFields, refuseSynonyms } from "../src/merge.js";
 import { loadBundle } from "../src/loader.js";
 import { validateBundle } from "../src/validate.js";
@@ -49,15 +49,15 @@ describe("what may be declared", () => {
   it("accepts a name, a ref, an expression and null", () => {
     expect(validateSessionDecl("planning")).toBeUndefined();
     expect(validateSessionDecl({ id: "ses_abc@14" })).toBeUndefined();
-    expect(validateSessionDecl({ expr: ".inputs.thread" })).toBeUndefined();
+    expect(validateSessionDecl({ $expr: ".inputs.thread" })).toBeUndefined();
     expect(validateSessionDecl(null)).toBeUndefined();
     expect(validateSessionDecl(undefined)).toBeUndefined();
   });
 
   it("accepts the scoped and joined spellings", () => {
-    expect(validateSessionDecl({ name: "review", in: "parent" })).toBeUndefined();
-    expect(validateSessionDecl({ name: "review", in: "batch", fork: true })).toBeUndefined();
-    expect(validateSessionDecl({ join: "nearest" })).toBeUndefined();
+    expect(validateSessionDecl({ $ref: "review", $in: "parent" })).toBeUndefined();
+    expect(validateSessionDecl({ $ref: "review", $in: "batch", $fork: true })).toBeUndefined();
+    expect(validateSessionDecl({ $join: "nearest" })).toBeUndefined();
   });
 
   it("rejects the empty string, and says to write null instead", () => {
@@ -72,25 +72,25 @@ describe("what may be declared", () => {
 
   it("rejects a name in the reserved space engine-minted sessions live in", () => {
     expect(validateSessionDecl("#i3")).toMatch(/reserved/);
-    expect(validateSessionDecl({ name: "#i3" })).toMatch(/reserved/);
+    expect(validateSessionDecl({ $ref: "#i3" })).toMatch(/reserved/);
   });
 
   /**
    * `in` qualifies a NAME. With no name there is nothing to qualify, and the session it would
    * produce is one nothing else can refer to — which is what `null` already says. Accepting it as a
-   * second spelling for "private" is what would make `{ in: "parent" }` look like a way for siblings
+   * second spelling for "private" is what would make `{ $in: "parent" }` look like a way for siblings
    * to rendezvous, so it is refused with the alternative named.
    */
   it("rejects `in` with no name, and points at null", () => {
-    expect(validateSessionDecl({ in: "parent" })).toMatch(/cannot be joined by anything/);
-    expect(validateSessionDecl({ in: "parent" })).toMatch(/write null/);
+    expect(validateSessionDecl({ $in: "parent" })).toMatch(/cannot be joined by anything/);
+    expect(validateSessionDecl({ $in: "parent" })).toMatch(/write null/);
   });
 
   it("rejects two addressing modes at once", () => {
     // A ref is an absolute address and a name is one relative to a scope; a declaration carrying
     // both is not a pair of coordinates, it is two different answers.
-    expect(validateSessionDecl({ name: "review", id: "ses_1" })).toMatch(/exactly one is meaningful/);
-    expect(validateSessionDecl({ join: "parent", in: "batch" })).toMatch(/nothing left for 'in' to qualify/);
+    expect(validateSessionDecl({ $ref: "review", id: "ses_1" })).toMatch(/exactly one is meaningful/);
+    expect(validateSessionDecl({ $join: "parent", $in: "batch" })).toMatch(/nothing left for '\$in' to qualify/);
   });
 
   it("rejects an empty object, and a shape that is neither", () => {
@@ -114,31 +114,31 @@ describe("what may be declared", () => {
  */
 describe("normalizing a declaration at its origin", () => {
   it("expands a bare name to the writer's own scope", () => {
-    expect(normalizeSession("review", writer("leaf"), [])).toEqual({ session: { name: "review", in: "leaf" } });
+    expect(normalizeSession("review", writer("leaf"), [])).toEqual({ session: { $ref: "review", $in: "leaf" } });
   });
 
   it("scopes to the parent on request, so siblings can share one name", () => {
     const ancestry = [ancestor("root"), ancestor("batch")];
-    expect(normalizeSession({ name: "review", in: "parent" }, writer("coder"), ancestry)).toEqual({
-      session: { name: "review", in: "batch" },
+    expect(normalizeSession({ $ref: "review", $in: "parent" }, writer("coder"), ancestry)).toEqual({
+      session: { $ref: "review", $in: "batch" },
     });
-    expect(normalizeSession({ name: "review", in: "parent" }, writer("reviewer"), ancestry)).toEqual({
-      session: { name: "review", in: "batch" },
+    expect(normalizeSession({ $ref: "review", $in: "parent" }, writer("reviewer"), ancestry)).toEqual({
+      session: { $ref: "review", $in: "batch" },
     });
   });
 
   it("scopes to a named ancestor, and refuses one that is not an ancestor", () => {
     const ancestry = [ancestor("root"), ancestor("batch")];
-    expect(normalizeSession({ name: "review", in: "root" }, writer("coder"), ancestry)).toEqual({
-      session: { name: "review", in: "root" },
+    expect(normalizeSession({ $ref: "review", $in: "root" }, writer("coder"), ancestry)).toEqual({
+      session: { $ref: "review", $in: "root" },
     });
-    expect(normalizeSession({ name: "review", in: "elsewhere" }, writer("coder"), ancestry)).toEqual({
+    expect(normalizeSession({ $ref: "review", $in: "elsewhere" }, writer("coder"), ancestry)).toEqual({
       error: expect.stringContaining("does not name an ancestor") as unknown as string,
     });
   });
 
-  it("refuses `in: parent` at the root, where there is no parent", () => {
-    const outcome = normalizeSession({ name: "review", in: "parent" }, writer("root"), []);
+  it("refuses `$in: parent` at the root, where there is no parent", () => {
+    const outcome = normalizeSession({ $ref: "review", $in: "parent" }, writer("root"), []);
     expect(outcome).toHaveProperty("error");
     expect((outcome as { error: string }).error).toMatch(/is the root/);
   });
@@ -158,7 +158,7 @@ describe("normalizing a declaration at its origin", () => {
   it("refuses `document`, which names no unit in this model", () => {
     // A state IS a file here (children are inferred from the directory listing), so a document's
     // root is the writer itself and the keyword would mean nothing `in` absent does not.
-    const outcome = normalizeSession({ name: "review", in: "document" }, writer("leaf"), [ancestor("root")]);
+    const outcome = normalizeSession({ $ref: "review", $in: "document" }, writer("leaf"), [ancestor("root")]);
     expect(outcome).toHaveProperty("error");
     expect((outcome as { error: string }).error).toMatch(/names no scope in this model/);
   });
@@ -170,21 +170,21 @@ describe("normalizing a declaration at its origin", () => {
  * is the author choosing how much structural change should break them.
  */
 describe("joining a session you cannot name", () => {
-  const root = ancestor("root", { name: "thread", in: "root" });
+  const root = ancestor("root", { $ref: "thread", $in: "root" });
   const wrapper = ancestor("wrapper");
-  const batch = ancestor("batch", { name: "work", in: "batch" });
+  const batch = ancestor("batch", { $ref: "work", $in: "batch" });
 
   it("`nearest` takes the closest writer", () => {
-    expect(normalizeSession({ join: "nearest" }, writer("leaf"), [root, batch])).toEqual({
-      session: { name: "work", in: "batch" },
+    expect(normalizeSession({ $join: "nearest" }, writer("leaf"), [root, batch])).toEqual({
+      session: { $ref: "work", $in: "batch" },
     });
   });
 
   it("`nearest` skips a state that only INHERITED a session", () => {
     // "Wrote" and "has" are different: after the merge every state appears to have one, and only the
     // loader still knows who actually declared it.
-    expect(normalizeSession({ join: "nearest" }, writer("leaf"), [root, wrapper])).toEqual({
-      session: { name: "thread", in: "root" },
+    expect(normalizeSession({ $join: "nearest" }, writer("leaf"), [root, wrapper])).toEqual({
+      session: { $ref: "thread", $in: "root" },
     });
   });
 
@@ -194,31 +194,31 @@ describe("joining a session you cannot name", () => {
    * different transcript with nothing to notice — while `parent` turns the tree edit into an error.
    */
   it("`parent` fails where `nearest` would silently retarget", () => {
-    expect(normalizeSession({ join: "parent" }, writer("leaf"), [root, batch])).toEqual({
-      session: { name: "work", in: "batch" },
+    expect(normalizeSession({ $join: "parent" }, writer("leaf"), [root, batch])).toEqual({
+      session: { $ref: "work", $in: "batch" },
     });
-    const throughWrapper = normalizeSession({ join: "parent" }, writer("leaf"), [root, wrapper]);
+    const throughWrapper = normalizeSession({ $join: "parent" }, writer("leaf"), [root, wrapper]);
     expect(throughWrapper).toHaveProperty("error");
-    expect((throughWrapper as { error: string }).error).toMatch(/'join: "nearest"' would follow/);
+    expect((throughWrapper as { error: string }).error).toMatch(/'\$join: "nearest"' would follow/);
   });
 
   it("`global` pins the run root", () => {
-    expect(normalizeSession({ join: "global" }, writer("leaf"), [root, batch])).toEqual({
-      session: { name: "thread", in: "root" },
+    expect(normalizeSession({ $join: "global" }, writer("leaf"), [root, batch])).toEqual({
+      session: { $ref: "thread", $in: "root" },
     });
   });
 
   it("names an ancestor directly, pinning that specific writer", () => {
-    expect(normalizeSession({ join: "root" }, writer("leaf"), [root, batch])).toEqual({
-      session: { name: "thread", in: "root" },
+    expect(normalizeSession({ $join: "root" }, writer("leaf"), [root, batch])).toEqual({
+      session: { $ref: "thread", $in: "root" },
     });
-    expect(normalizeSession({ join: "wrapper" }, writer("leaf"), [root, wrapper])).toEqual({
+    expect(normalizeSession({ $join: "wrapper" }, writer("leaf"), [root, wrapper])).toEqual({
       error: expect.stringContaining("declares none") as unknown as string,
     });
   });
 
   it("reports when nothing above declares anything at all", () => {
-    const outcome = normalizeSession({ join: "nearest" }, writer("leaf"), [wrapper]);
+    const outcome = normalizeSession({ $join: "nearest" }, writer("leaf"), [wrapper]);
     expect(outcome).toHaveProperty("error");
     expect((outcome as { error: string }).error).toMatch(/no ancestor declares one/);
   });
@@ -226,43 +226,40 @@ describe("joining a session you cannot name", () => {
   it("takes the writer's name but the JOINER's fork", () => {
     // `fork` is a statement about how this call will use the session, so it is the one thing the
     // joiner keeps; the name and the scope are taken verbatim, which is the whole point.
-    expect(normalizeSession({ join: "nearest", fork: true }, writer("leaf"), [batch])).toEqual({
-      session: { name: "work", in: "batch", fork: true },
+    expect(normalizeSession({ $join: "nearest", $fork: true }, writer("leaf"), [batch])).toEqual({
+      session: { $ref: "work", $in: "batch", $fork: true },
     });
   });
 
   it("joins a parent's explicitly FRESH session", () => {
     // `null` is a declaration, not an absence: the parent said "a fresh thread for me", and a child
     // joining it is saying "I am in that thread".
-    expect(normalizeSession({ join: "parent" }, writer("leaf"), [ancestor("batch", null)])).toEqual({ session: null });
+    expect(normalizeSession({ $join: "parent" }, writer("leaf"), [ancestor("batch", null)])).toEqual({ session: null });
   });
 });
 
 describe("resolution (§4)", () => {
-  it("a NAME keys both the stream and the resource bundle on the (name, scope) PAIR", () => {
-    const binding = resolveSession({ name: "planning", in: "root" }, scope());
-    expect(binding.id).toBe(sessionKeyOf("planning", "root"));
-    // The pair is what stays put while the conversation moves — which is what makes a worktree and
-    // its approvals survive a fork.
-    expect(binding.resourceKey).toBe(sessionKeyOf("planning", "root"));
+  it("a NAME keys the stream on the (name, scope) PAIR — and names no resource bundle", () => {
+    const binding = resolveSession({ $ref: "planning", $in: "root" }, scope());
+    expect(binding.id).toBe(scopedKeyOf("planning", "root"));
+    // The bundle is the WORKSPACE's to name (NAMES.md §10). A session used to name it too, which
+    // made "two conversations in one worktree" unsayable; it carries the one it runs in, unchanged.
+    expect(binding.resourceKey).toBe("enclosing");
   });
 
   it("keeps one name written in two scopes apart", () => {
-    const left = resolveSession({ name: "main", in: "featureA" }, scope());
-    const right = resolveSession({ name: "main", in: "featureB" }, scope());
+    const left = resolveSession({ $ref: "main", $in: "featureA" }, scope());
+    const right = resolveSession({ $ref: "main", $in: "featureB" }, scope());
     expect(left.id).not.toBe(right.id);
-    expect(left.resourceKey).not.toBe(right.resourceKey);
   });
 
   it("resolves a scope to the enclosing INSTANCE, so a loop's passes differ", () => {
-    // Anchor inside the loop and each pass is a new instance, so each gets its own conversation and
-    // its own bundle. Anchor above it and every pass finds the same instance — which is how §5.1's
-    // stability rule falls out instead of being a rule about loops.
-    const pass = (instance: string): string =>
-      resolveSession({ name: "review", in: "body" }, scope({ anchorOf: () => instance })).resourceKey;
+    // Anchor inside the loop and each pass is a new instance, so each gets its own conversation.
+    // Anchor above it and every pass finds the same instance — which is how §5.1's stability rule
+    // falls out instead of being a rule about loops.
+    const pass = (instance: string): string => resolveSession({ $ref: "review", $in: "body" }, scope({ anchorOf: () => instance })).id;
     expect(pass("i1")).not.toBe(pass("i2"));
-    const stable = (): string =>
-      resolveSession({ name: "review", in: "root" }, scope({ anchorOf: () => "rootInstance" })).resourceKey;
+    const stable = (): string => resolveSession({ $ref: "review", $in: "root" }, scope({ anchorOf: () => "rootInstance" })).id;
     expect(stable()).toBe(stable());
   });
 
@@ -295,7 +292,7 @@ describe("resolution (§4)", () => {
     // The instance-scoped invariant (§4). A restarted state re-resolves to the position it started
     // from, so the append the failed attempt made turns the retry into a fork from the right place
     // instead of stacking it on top of the failure.
-    const named = { name: "planning", in: "root" } as const;
+    const named = { $ref: "planning", $in: "root" } as const;
     const atFourteen = resolveSession(named, scope({ positionOf: () => "ses_abc@14" }));
     const atTwenty = resolveSession(named, scope({ positionOf: () => "ses_abc@20" }));
     expect(atFourteen.id).toBe("ses_abc@14");
@@ -305,9 +302,9 @@ describe("resolution (§4)", () => {
   });
 
   it("carries `fork` off the declaration it belongs to", () => {
-    expect(resolveSession({ name: "planning", in: "root", fork: true }, scope()).fork).toBe(true);
-    expect(resolveSession({ name: "planning", in: "root" }, scope()).fork).toBe(false);
-    expect(resolveSession({ id: "ses_1", fork: true }, scope()).fork).toBe(true);
+    expect(resolveSession({ $ref: "planning", $in: "root", $fork: true }, scope()).fork).toBe(true);
+    expect(resolveSession({ $ref: "planning", $in: "root" }, scope()).fork).toBe(false);
+    expect(resolveSession({ id: "ses_1", $fork: true }, scope()).fork).toBe(true);
   });
 });
 
@@ -325,8 +322,8 @@ describe("the environment merge", () => {
   });
 
   it("replaces a session WHOLE, so fork cannot arrive from a different layer than the name", () => {
-    const merged = mergeOperationFields({ session: { name: "a", fork: true } }, { session: { name: "b" } });
-    expect(merged.session).toEqual({ name: "b" });
+    const merged = mergeOperationFields({ session: { $ref: "a", $fork: true } }, { session: { $ref: "b" } });
+    expect(merged.session).toEqual({ $ref: "b" });
   });
 
   /**
@@ -394,8 +391,8 @@ describe("an inherited declaration keeps the scope of the state that WROTE it", 
 
   it("scopes at the root, so the whole subtree shares one conversation", () => {
     const bundle = loadBundle(files, "root");
-    expect(bundle.states["a"]?.environment?.session).toEqual({ name: "planning", in: "root" });
-    expect(bundle.states["b"]?.environment?.session).toEqual({ name: "planning", in: "root" });
+    expect(bundle.states["a"]?.environment?.session).toEqual({ $ref: "planning", $in: "root" });
+    expect(bundle.states["b"]?.environment?.session).toEqual({ $ref: "planning", $in: "root" });
   });
 
   it("scopes a leaf's OWN name to the leaf, which is what makes it private", () => {
@@ -404,9 +401,9 @@ describe("an inherited declaration keeps the scope of the state that WROTE it", 
       a: { ...files["a"]!, operation: { ...files["a"]!.operation, session: "planning" } as never },
     };
     const bundle = loadBundle(own, "root");
-    expect(bundle.states["a"]?.environment?.session).toEqual({ name: "planning", in: "a" });
+    expect(bundle.states["a"]?.environment?.session).toEqual({ $ref: "planning", $in: "a" });
     // Same word, two scopes: `a`'s own declaration does not join the root's thread.
-    expect(bundle.states["b"]?.environment?.session).toEqual({ name: "planning", in: "root" });
+    expect(bundle.states["b"]?.environment?.session).toEqual({ $ref: "planning", $in: "root" });
   });
 });
 
@@ -436,7 +433,7 @@ describe("the load-time lint", () => {
   it("says nothing about a well-formed one", () => {
     expect(sessionErrors("planning")).toEqual([]);
     expect(sessionErrors(null)).toEqual([]);
-    expect(sessionErrors({ name: "planning" })).toEqual([]);
+    expect(sessionErrors({ $ref: "planning" })).toEqual([]);
   });
 
   /**
@@ -470,7 +467,7 @@ describe("the load-time lint", () => {
     const files: Record<string, StateDef> = {
       root: { children: { leaf: { state: "leaf" } } },
       leaf: {
-        operation: { kind: "prompt", prompt: "hi", model: "m", session: { name: "x", in: "nowhere" } } as never,
+        operation: { kind: "prompt", prompt: "hi", model: "m", session: { $ref: "x", $in: "nowhere" } } as never,
         outputs: { answer: { schema: { type: "string" } } },
       },
     };
@@ -482,7 +479,7 @@ describe("the load-time lint", () => {
     const files: Record<string, StateDef> = {
       root: { children: { leaf: { state: "leaf" } } },
       leaf: {
-        operation: { kind: "prompt", prompt: "hi", model: "m", session: { join: "nearest" } } as never,
+        operation: { kind: "prompt", prompt: "hi", model: "m", session: { $join: "nearest" } } as never,
         outputs: { answer: { schema: { type: "string" } } },
       },
     };
@@ -494,30 +491,30 @@ describe("the load-time lint", () => {
     const files: Record<string, StateDef> = {
       root: { environment: { session: "thread" }, children: { leaf: { state: "leaf" } } },
       leaf: {
-        operation: { kind: "prompt", prompt: "hi", model: "m", session: { join: "nearest", fork: true } } as never,
+        operation: { kind: "prompt", prompt: "hi", model: "m", session: { $join: "nearest", $fork: true } } as never,
         outputs: { answer: { schema: { type: "string" } } },
       },
     };
     const bundle = loadBundle(files, "root");
-    expect(bundle.states["leaf"]?.environment?.session).toEqual({ name: "thread", in: "root", fork: true });
+    expect(bundle.states["leaf"]?.environment?.session).toEqual({ $ref: "thread", $in: "root", $fork: true });
   });
 });
 
 /**
- * What an evaluated `{ expr }` session is allowed to be.
+ * What an evaluated `{ $expr: expr }` session is allowed to be.
  *
  * The case worth naming is absence. "Then start fresh" is the tempting reading and the wrong one:
  * the author named a conversation to continue, so quietly running in a different one produces a
  * successful-looking run that has forgotten everything.
  */
 describe("an expression's resolved value", () => {
-  const at = (expr: string) => ({ expr, in: "leaf" });
+  const at = (expr: string) => ({ $expr: expr, $in: "leaf" });
 
   it("takes a ref, and a string as a name in the WRITER's scope", () => {
     expect(sessionFromExpr(at(".inputs.t"), { id: "ses_abc@14" })).toEqual({ session: { id: "ses_abc@14" } });
     // A computed name is scoped where a written one would have been — at the state that wrote the
     // expression — so the two spellings cannot mean different things in the same place.
-    expect(sessionFromExpr(at(".inputs.t"), "planning")).toEqual({ session: { name: "planning", in: "leaf" } });
+    expect(sessionFromExpr(at(".inputs.t"), "planning")).toEqual({ session: { $ref: "planning", $in: "leaf" } });
   });
 
   it("REFUSES nothing, naming the expression so the wiring is findable", () => {
@@ -534,7 +531,7 @@ describe("an expression's resolved value", () => {
   });
 
   it("REFUSES a computed `join`, which is answered against the document and not the data", () => {
-    const outcome = sessionFromExpr(at(".inputs.t"), { join: "nearest" });
+    const outcome = sessionFromExpr(at(".inputs.t"), { $join: "nearest" });
     expect(outcome).toHaveProperty("error");
     expect((outcome as { error: string }).error).toMatch(/resolved at load time/);
   });

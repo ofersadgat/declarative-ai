@@ -27,11 +27,15 @@ import { PENDING } from "./expr.js";
 import {
   BOUND_CALLEE,
   CONFIG_FIELD_SCHEMAS,
+  hasComputedPart,
   FIELD_NAMESPACES,
   isBindingDecl,
+  isNameUse,
+  isPick,
   isWrappedBinding,
   literalPermissions,
   OPERATION_OWN_FIELDS,
+  refusedBindingSpelling,
   type BindingDecl,
   type EnvironmentDecl,
   type ExecEnvironmentDecl,
@@ -43,7 +47,11 @@ import {
 } from "./format.js";
 import { referencePathsOf } from "./lowerExpr.js";
 import { OPERATION_METADATA_FIELDS } from "./operationNode.js";
+import { NAME_KEY } from "./scope.js";
 import { isOperationValue } from "./resolve.js";
+
+/** The authored path of a prompt operation's model — the position a session fixes. */
+const MODEL_FIELD = "operation.config.model";
 
 /** How the loader lowers one binding — `desugarBinding`, with the site already bound in. */
 export type LowerBinding = (binding: BindingDecl, where: string) => Ref<InlineFamily>;
@@ -68,6 +76,18 @@ const TOP_LEVEL: ReadonlyArray<{ path: string; schema: JsonSchema; kind: RefKind
   { path: "limits.max_iterations", schema: INTEGER, kind: "json" },
   { path: "limits.timeout", schema: NUMBER, kind: "json" },
 ];
+
+/**
+ * Refuse a value still written in a spelling that used to make it a binding (`refusedBindingSpelling`).
+ *
+ * Every position this module reads is one where the old spelling WAS a binding, so finding it means
+ * an unmigrated document rather than a literal — and passing it through as one would hand a model id
+ * of `{ "expr": … }` to the provider.
+ */
+function refuseOldSpelling(value: unknown, where: string, wrapped = false): void {
+  const complaint = refusedBindingSpelling(value, wrapped);
+  if (complaint !== undefined) throw new Error(`${where}: ${complaint}`);
+}
 
 function readPath(root: unknown, path: readonly string[]): unknown {
   let at: unknown = root;
@@ -115,6 +135,7 @@ export function extractTopLevelFields(def: StateDef): { def: StateDef; found: Ex
   for (const { path, schema, kind } of TOP_LEVEL) {
     const segments = path.split(".");
     const value = readPath(def, segments);
+    refuseOldSpelling(value, path);
     if (value === undefined || !isBindingDecl(value)) continue;
     // A bare string in one of these positions is the value, not a reference: `"label": "Planning"`
     // has always meant the words. Only the object forms are bindings here.
@@ -136,6 +157,7 @@ export function extractTopLevelFields(def: StateDef): { def: StateDef; found: Ex
 export function extractOperationFields(merged: OperationFields): { op: OperationFields; found: Extracted[] } {
   const found: Extracted[] = [];
   let op: OperationFields = { ...merged };
+  for (const key of ["prompt", "system", "function", "tools", "permissions"] as const) refuseOldSpelling(merged[key], `operation.${key}`);
 
   if (merged.prompt !== undefined && typeof merged.prompt !== "string") {
     // A prompt-kind value, or a template string computed at entry (SPEC §7.1). Typed by kind alone:
@@ -170,6 +192,7 @@ export function extractOperationFields(merged: OperationFields): { op: Operation
       const block = permissions as PermissionsDecl;
       for (const key of ["profile", "default", "other"] as const) {
         const value = block[key];
+        refuseOldSpelling(value, `operation.permissions.${key}`);
         if (value === undefined || typeof value === "string" || !isBindingDecl(value)) continue;
         found.push({ path: `environment.permissions.${key}`, binding: value as BindingDecl, schema: STRING, kind: "text" });
         op = deletePath(op, ["permissions", key]);
@@ -181,14 +204,29 @@ export function extractOperationFields(merged: OperationFields): { op: Operation
   for (const [key, value] of Object.entries(merged)) {
     if (OPERATION_OWN_FIELDS.has(key) || value === undefined) continue;
     const known = CONFIG_FIELD_SCHEMAS[key];
+    if (known !== undefined) refuseOldSpelling(value, `operation.${key}`);
     if (known !== undefined && isBindingDecl(value) && typeof value !== "string") {
-      found.push({ path: `operation.config.${key}`, binding: value as BindingDecl, schema: known, kind: "json" });
+      // A model ROLE is the one value here that is not its field's scalar: an alternative may be
+      // the id alone, or the id with the configuration that goes with it (`{ "model": "…",
+      // "reasoning": { … } }`, laid under the state's own by `writeField`). The subschema check has
+      // no unions to say "either" with, so a role goes unchecked here and is held to `model` being
+      // a string where it is finally read — at the call.
+      const role = key === "model" && (isPick(value) || isNameUse(value));
+      found.push({ path: `operation.config.${key}`, binding: value as BindingDecl, ...(role ? {} : { schema: known }), kind: "json" });
       op = deletePath(op, [key]);
       continue;
     }
     const walk = (at: unknown, path: string[]): void => {
+      refuseOldSpelling(at, `operation.${path.join(".")}`, true);
       if (isWrappedBinding(at)) {
-        found.push({ path: `operation.config.${path.join(".")}`, binding: at.binding, kind: "json" });
+        found.push({ path: `operation.config.${path.join(".")}`, binding: at.$binding, kind: "json" });
+        op = deletePath(op, path);
+        return;
+      }
+      // A scoped name needs no wrapper, nor do alternatives: `$ref` and `$any` are already keys no
+      // literal configuration carries.
+      if (isNameUse(at) || isPick(at)) {
+        found.push({ path: `operation.config.${path.join(".")}`, binding: at, kind: "json" });
         op = deletePath(op, path);
         return;
       }
@@ -213,14 +251,26 @@ export function liftWrappedArgs(decl: OperationFields): OperationFields {
   let input = decl.input;
   let moved = false;
   for (const [name, value] of Object.entries(decl.args)) {
-    if (!isWrappedBinding(value)) {
+    refuseOldSpelling(value, `operation.args.${name}`, true);
+    // A scoped name is a computed value too — read per instance — so it moves with the wrapped ones.
+    // So does a literal with one INSIDE it: an argument is one slot with one binding, and the binding
+    // of `{ "options": { "remote": { "$ref": "review" } } }` is the whole object, assembled around
+    // what the name reads as. Passing it through would hand the function `{ "$ref": … }` as data.
+    const binding: BindingDecl | undefined = isWrappedBinding(value)
+      ? value.$binding
+      : isNameUse(value) || isPick(value)
+        ? value
+        : hasComputedPart(value)
+          ? { $literal: value }
+          : undefined;
+    if (binding === undefined) {
       args[name] = value;
       continue;
     }
     moved = true;
     // An authored `input` slot of the same name wins, exactly as it does over a literal arg.
     if (input?.[name] !== undefined) continue;
-    input = { ...input, [name]: { binding: value.binding } };
+    input = { ...input, [name]: { binding } };
   }
   if (!moved) return decl;
   const out: OperationFields = { ...decl, args };
@@ -238,9 +288,13 @@ export function liftWrappedArgs(decl: OperationFields): OperationFields {
 export function lowerFields(found: readonly Extracted[], lower: LowerBinding, environment: ExecEnvironmentDecl | undefined): LoadedField[] {
   return found.map((f) => {
     const field: LoadedField = { path: f.path, ref: lower(f.binding, f.path) };
+    // The one position whose choice outlives the instance (NAMES.md §6). A literal or an ordinary
+    // expression is not a CHOICE — it reads this instance's own data — so only what is CHOSEN is
+    // held: a pick, and a name, whose binding time is the position's whatever it turns out to hold.
+    if (f.path === MODEL_FIELD && (isPick(f.binding) || isNameUse(f.binding))) field.lifetime = "session";
     if (f.schema !== undefined) field.schema = f.schema;
     if (f.kind !== undefined) field.kind = f.kind;
-    if (typeof f.binding === "object" && "expr" in f.binding) {
+    if (typeof f.binding === "object" && "$expr" in f.binding) {
       if (f.binding.failureValue !== undefined) field.failureValue = f.binding.failureValue;
       const own = f.binding.environment;
       if (own !== undefined) field.environment = mergeExecEnvironment(environment, own);
@@ -253,6 +307,7 @@ export function lowerFields(found: readonly Extracted[], lower: LowerBinding, en
 function mergeExecEnvironment(base: ExecEnvironmentDecl | undefined, over: EnvironmentDecl): ExecEnvironmentDecl {
   const out: ExecEnvironmentDecl = { ...base };
   if ("session" in over) out.session = over.session;
+  if ("workspace" in over) out.workspace = over.workspace;
   if (over.tools !== undefined && Array.isArray(over.tools)) out.tools = over.tools;
   const overPermissions = literalPermissions({ permissions: over.permissions });
   if (overPermissions !== undefined) {
@@ -361,7 +416,24 @@ export function materializeFields(def: LoadedState, values: ReadonlyMap<string, 
  */
 export type BindCallee = (callee: Operation<InlineFamily>, authored: Record<string, Parameter<InlineFamily>>) => Record<string, Parameter<InlineFamily>> | { error: string };
 
-function writeField(def: LoadedState, path: string, value: ResolvedValue | undefined, bindCallee: BindCallee): Materialized {
+/**
+ * A value as a TYPED position takes it: the one key the state system ADDED taken off. A scoped name
+ * reads with its key beside its configuration (`$key`), which is for a function that asked for an
+ * identity; a permissions block or a model's configuration is payload and nothing else.
+ *
+ * Only that key. Every other `$`-key in a computed value is the value's own — a response schema's
+ * `$schema` and `$defs` are JSON Schema's — and taking those off would hand the call a different
+ * document than the one the binding produced.
+ */
+function payloadOfValue(value: object): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([key]) => key !== NAME_KEY));
+}
+
+function writeField(def: LoadedState, path: string, authored: ResolvedValue | undefined, bindCallee: BindCallee): Materialized {
+  const value =
+    authored !== null && typeof authored === "object" && !Array.isArray(authored) && !isOperationValue(authored) && !(authored instanceof Uint8Array)
+      ? (payloadOfValue(authored) as ResolvedValue)
+      : authored;
   const segments = path.split(".");
   const [root, ...rest] = segments as [string, ...string[]];
   if (root === "operation") {
@@ -414,6 +486,11 @@ function writeField(def: LoadedState, path: string, value: ResolvedValue | undef
       case "config": {
         const config = (op as { config?: JsonValue }).config;
         const base = config !== null && typeof config === "object" && !Array.isArray(config) ? (config as Record<string, unknown>) : {};
+        // A model ROLE's alternative is an object: the id, and the configuration that goes with it.
+        // Laid UNDER the state's own, which is the more specific statement of the two.
+        if (path === MODEL_FIELD && value !== null && typeof value === "object" && !Array.isArray(value)) {
+          return { def: { ...def, operation: { ...op, config: { ...payloadOfValue(value), ...base } as JsonValue } as Operation<InlineFamily> } };
+        }
         return { def: { ...def, operation: { ...op, config: writePath(base, more, value) as JsonValue } as Operation<InlineFamily> } };
       }
       default:

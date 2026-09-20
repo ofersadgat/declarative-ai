@@ -16,6 +16,14 @@ export * from "./merge.js";
 // the conversation and the resource bundle the one string used to conflate. Exported because a host
 // wiring its own session store resolves the same declaration.
 export * from "./session.js";
+// Scoped names — the `(name, scope)` pair and the `name#<instance address>` key it resolves to. The
+// half of `session` that holds for any position; exported because a host is handed these keys
+// (`workspaceFor`) and should build and recognize them with the same function the engine does.
+export * from "./scope.js";
+// The `workspace` position — the resource bundle, declared apart from the session (NAMES.md §10).
+export * from "./workspace.js";
+// `environment.names`: what a scoped name is configured with, and the one type it has.
+export * from "./names.js";
 export * from "./load.js";
 // Durable id minting — the UUIDv7 every instance is named by. Exported because a host that mints
 // ids in the same space (derived instance ids, later assigned session/task ids) must share the shape.

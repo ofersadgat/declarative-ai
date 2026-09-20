@@ -1295,8 +1295,8 @@ Ready-made workspace tools ship in **[`@declarative-ai/tools`](#declarative-aito
 
 ```ts
 interface SessionRef { readonly id: string }                     // opaque; names a conversation AT a position
-type SessionDecl = string | null | SessionRef | { expr: string } // what an operation's `session` may hold.
-                                                                 // `{ expr }` is EVALUATED per instance: a ref
+type SessionDecl = string | null | SessionRef | { $expr: string } // what an operation's `session` may hold.
+                                                                 // `{ $expr }` is EVALUATED per instance: a ref
                                                                  // does not exist until its producer has run,
                                                                  // so a static field could never carry one
 interface SessionRequest { ref?: string; fork?: boolean; seed?: string; provider?: string }
@@ -2410,7 +2410,7 @@ Since the ops redesign a state's operation **is** an `Operation<InlineFamily>` a
 `Parameter` bindings. The `runtime`/`function` blocks and the `WiringValue` expression strings are gone;
 what an author writes is *sugar* the loader lowers to base `Ref<InlineFamily>` cases, so the checker,
 hasher, and engine only ever see literals and producer edges. The expression DSL survives exactly where
-control flow needs it: transition guards, `limits`, and the `{ expr }` binding leaf.
+control flow needs it: transition guards, `limits`, and the `{ $expr }` binding leaf.
 
 ### The workflow executor
 
@@ -2471,6 +2471,11 @@ interface ValidationEnvironment {
   functions?: Pick<FunctionRegistry<never>, "get" | "has">;  // the registry the bundle will run against
   strict?: boolean;      // an unregistered `functionRef` is an ERROR rather than a warning (lint/CI)
   interactive?: boolean; // assert a NON-interactive context: an interactive entry is then an error
+  // What a PROVIDING position's configuration is (SPEC §7.1): the engine hands a name's configuration to
+  // the host opaquely (`workspaceFor`), so only the host can type it. With a schema here, a name bound as
+  // that position — its `names` entry, contributions, and the plain keys beside each `$ref` — is held
+  // to it at the bind point. Absent ⇒ unchecked.
+  positions?: { session?: JsonSchema; workspace?: JsonSchema };
 }
 ```
 
@@ -2489,7 +2494,7 @@ wiring can be fully type-checked before anything runs. Three checks replace "the
 1. **Binding compatibility** — every producer's output schema must be an
    [`isSubschema`](#schema-subtyping) of the consuming slot's schema. Conservative: an unmodeled keyword or
    a union rejects with a precise reason, never a silent pass.
-2. **Expression typing** — every `{ expr }` leaf and every `when` guard is inferred; a guard that does not
+2. **Expression typing** — every `{ $expr }` leaf and every `when` guard is inferred; a guard that does not
    infer to `boolean` is an error (strict, no truthiness coercion), and a declared `schema` on an expr leaf
    is an *assertion* checked against the inferred type.
 3. **Reachability** — a reference to a producer not provably run on every path to its evaluation point is an
@@ -2563,7 +2568,7 @@ interface EngineConfig {
                   smart?: Record<string, SmartApprover>; profiles?: Record<string, ProfilePredicate> };
   // Per-session workspace resolver (DESIGN.md §5.1): a state's `operation.session` -> its
   // workspace, for fan-out isolation. undefined => the run-level `services.workspace`.
-  workspaceFor?: (sessionId: string) => Workspace | undefined;
+  workspaceFor?: (resourceKey: string, declared?: { name: string; configuration: JsonValue }) => Workspace | undefined;
 }
 interface WorkflowRunOptions { inputs: Record<string, unknown>; abortSignal?: AbortSignal; }
 interface WorkflowRunResult {
@@ -2605,8 +2610,8 @@ interface StateDef {
 
 **Every value is a binding** (SPEC §5.3). What stays authored is STRUCTURE — `id`, `children`,
 `sequence`, `transitions`, a slot's `schema`; every other value position takes a binding in place of the
-literal. A known field is written BARE (`"label": { "expr": "…" }`, `"model": { "expr": "…" }`,
-`"function": { "expr": ".inputs.reviewer" }`); inside `config` and `args`, whose values are opaque JSON, it
+literal. A known field is written BARE (`"label": { "$expr": "…" }`, `"model": { "$expr": "…" }`,
+`"function": { "$expr": ".inputs.reviewer" }`); inside `config` and `args`, whose values are opaque JSON, it
 is WRAPPED as `{ "binding": … }` (`isWrappedBinding`). The loader takes each out as a `LoadedField` and the
 engine evaluates them once at instance entry, in dependency order — see [The loaded form](#the-loaded-form).
 
@@ -2722,7 +2727,7 @@ const FIELD_NAMESPACES: readonly ["title", "label", "description", "environment"
 const BOUND_CALLEE = "$bound";  // the `functionRef` a bound `function` carries until the engine replaces the op
 interface SlotMeta {
   default?: JsonValue;
-  defaultRef?: Ref<InlineFamily>;   // a COMPUTED default (`"default": { "expr": … }`): an input's resolves at entry
+  defaultRef?: Ref<InlineFamily>;   // a COMPUTED default (`"default": { "$expr": … }`): an input's resolves at entry
                                     // in the state's own scope, an output's at termination. Either makes the slot optional.
   optional?: boolean; description?: string;
 }
@@ -2761,7 +2766,7 @@ so `inputs.fn.schema` on a loaded state is a self-describing `CallableSchema`.
 | `TerminationOutcome` | `"success" \| "error" \| "canceled" \| "timeout"`. |
 | `RunStatus` | the state-run status enum (SPEC §10.1). |
 | `TERMINATE_TARGETS` | the terminal transition targets (`terminate.success`, …). |
-| `REF_NAMESPACES` | `inputs`, `outputs`, `children`, `artifacts`, `conversations` — the **data** namespaces authored bindings address, and which `{ expr }` leaves may read. |
+| `REF_NAMESPACES` | `inputs`, `outputs`, `children`, `artifacts`, `conversations` — the **data** namespaces authored bindings address, and which `{ $expr }` leaves may read. |
 | `GUARD_NAMESPACES` | `run`, `limits` — control-flow scalars reachable from guards only, never from a reference binding. |
 | `FIELD_NAMESPACES` | `title`, `label`, `description`, `environment` — the state's own fields, read back under their authored names (SPEC §6.1); `operation.*` carries the authored fields (`prompt`, `system`, `function`, `config`) beside the call's result node, and `limits.*` was already a root. |
 | `CONTEXT_NAMESPACES` | `[...REF_NAMESPACES, ...GUARD_NAMESPACES, ...FIELD_NAMESPACES]`. The old `function.*` namespace is **gone**: a function state's result is an ordinary state output, so guards read `outputs.*` / `children.<key>.outputs.*` uniformly. |
@@ -2775,7 +2780,7 @@ What an author may write in a binding slot, and what the loader lowers it to. So
 type BindingDecl =
   | Ref<InlineFamily>                             // the base cases: {text} | {json} | {result} | {refs} | {op}
   | string                                        // a runtime reference (`.inputs.x`) or an expression
-  | { expr: string;
+  | { $expr: string;
       environment?: EnvironmentDecl;              // a layer for every CALL the expression makes (SPEC §4.2)
       failureValue?: JsonValue;                   // stands in when a FIELD binding fails (SPEC §5.3)
       each?: boolean };                           // fan out — a child mount's wire only
@@ -2807,7 +2812,7 @@ const RESOLVER_REF_VALUES: readonly string[];     // all of them, for registry s
 | `{ child: "plan" }` | `{ op: "plan" }` — a producer edge naming the declared child by its local key. |
 | `".children.plan.outputs.steps"` | that edge wrapped in a `select` projection (hw states lower to single-object-output ops, so a named output *is* a property select). |
 | `{ input: n }` | a `scope.get` producer — the model's by-name free-slot fill, made explicit. |
-| `{ expr: "…" }` | an `expr.eval` producer. Semantically an expression **is** a pure `FunctionOp` whose output schema is its inferred type, which is why binding type-checking applies to expr leaves with no special case. |
+| `{ $expr: "…" }` | an `expr.eval` producer. Semantically an expression **is** a pure `FunctionOp` whose output schema is its inferred type, which is why binding type-checking applies to expr leaves with no special case. |
 | `{ artifact: n }` / `{ conversation: s, message? }` | an `artifact.get` / `conversation.get` producer reading session-owned resources. |
 
 A `PromptOpDecl`'s render variables are authored directly as **bound input slots** (the operation's
@@ -2827,7 +2832,7 @@ Two more modules back the checker and the engine — `inferExpr.ts` and `resolve
 re-exported from the package root, because each is reusable against a custom engine or a lint surface:
 
 ```ts
-// inferExpr.ts — expression TYPE inference (what makes `{ expr }` not a typing hole)
+// inferExpr.ts — expression TYPE inference (what makes `{ $expr }` not a typing hole)
 type ExprScope = Record<string, JsonSchema>;                       // root name -> that namespace's schema
 interface InferResult {
   schema: JsonSchema;
@@ -2921,7 +2926,7 @@ round.
 `referencesOf` (AST) and `referencePathsOf` (tree) power the dataflow join — waiting on the inputs an
 expression reads, a call's arguments included.
 
-The DSL is no longer the wiring default — it is a *binding kind* (`{ expr }`) plus the guard language — and
+The DSL is no longer the wiring default — it is a *binding kind* (`{ $expr }`) plus the guard language — and
 it is type-checked, not merely parsed: see `inferExpression` under
 [Binding desugaring](#binding-desugaring).
 

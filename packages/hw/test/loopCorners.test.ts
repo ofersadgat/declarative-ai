@@ -82,7 +82,7 @@ describe("history under a plain loop", () => {
         return { n: "b" };
       },
     });
-    const { outcome } = await run(loop({ count: { expr: ".children.a.length" } }), registry);
+    const { outcome } = await run(loop({ count: { $expr: ".children.a.length" } }), registry);
     expect(outcome.outcome).toBe("success");
     expect(seen).toEqual([1, 2, 3]);
   });
@@ -114,8 +114,8 @@ describe("history under a plain loop", () => {
     let i = 0;
     const files = loop();
     files["root"]!.children!["b"]!.inputs = {
-      first: { expr: ".children.a[0].output.n" },
-      latest: { expr: ".children.a[-1].output.n" },
+      first: { $expr: ".children.a[0].output.n" },
+      latest: { $expr: ".children.a[-1].output.n" },
     };
     files["root/b"] = leaf("read", { n: str }, { first: { ...str, optional: true }, latest: { ...str, optional: true } });
     const { registry } = harness({
@@ -150,7 +150,7 @@ describe("history under a plain loop", () => {
           a: { state: "root/a" },
           b: {
             state: "root/b",
-            inputs: { count: { expr: ".children.helper.length" } },
+            inputs: { count: { $expr: ".children.helper.length" } },
             transitions: [{ to: "a", when: ".run.iteration < .limits.max_iterations" }],
           },
         },
@@ -192,7 +192,7 @@ describe("history when a pass does not complete cleanly", () => {
           work: { state: "root/work", transitions: [{ to: "check", when: ".children.work.outcome === 'error'" }, { to: "check" }] },
           check: {
             state: "root/check",
-            inputs: { last: { expr: ".children.work[-1].outcome" } },
+            inputs: { last: { $expr: ".children.work[-1].outcome" } },
             transitions: [{ to: "work", when: ".run.iteration < .limits.max_iterations" }],
           },
         },
@@ -228,7 +228,7 @@ describe("history when a pass does not complete cleanly", () => {
           slow: { state: "root/slow", async: true },
           fast: {
             state: "root/fast",
-            inputs: { count: { expr: ".children.slow.length" } },
+            inputs: { count: { $expr: ".children.slow.length" } },
             transitions: [{ to: "slow", when: ".run.iteration < .limits.max_iterations" }],
           },
         },
@@ -268,7 +268,7 @@ describe("nested loops each keep their own passes", () => {
           phase: { state: "root/phase" },
           judge: {
             state: "root/judge",
-            inputs: { count: { expr: ".children.phase.length" } },
+            inputs: { count: { $expr: ".children.phase.length" } },
             transitions: [{ to: "phase", when: ".run.iteration < .limits.max_iterations" }],
           },
         },
@@ -278,7 +278,7 @@ describe("nested loops each keep their own passes", () => {
         limits: { max_iterations: 2 },
         outputs: { n: { ...str, binding: ".children.step.output.n" } },
         children: {
-          step: { state: "root/phase/step", inputs: { count: { expr: ".children.step.length" } } },
+          step: { state: "root/phase/step", inputs: { count: { $expr: ".children.step.length" } } },
           gate: {
             state: "root/phase/gate",
             transitions: [{ to: "step", when: ".run.iteration < .limits.max_iterations" }],
@@ -378,7 +378,7 @@ describe("a rule's wiring, in the corners", () => {
               {
                 to: "work",
                 when: ".run.iteration < .limits.max_iterations",
-                inputs: { why: { expr: ".children.slow.output.n" } },
+                inputs: { why: { $expr: ".children.slow.output.n" } },
               },
             ],
           },
@@ -487,7 +487,7 @@ describe("a rule's wiring, in the corners", () => {
             when: ".run.iteration < .limits.max_iterations",
             // NOT `.outputs.pick`: a bound output resolves when the state finishes, so mid-run it
             // reads as absent. `.operation.output` is what this call actually returned.
-            inputs: { why: { expr: ".operation.output.pick" } },
+            inputs: { why: { $expr: ".operation.output.pick" } },
           },
         ],
       },
@@ -525,21 +525,21 @@ describe("the lint over history and rule wiring", () => {
 
   it("accepts an indexed read of a child's history", () => {
     const files = base();
-    files["root"]!.children!["work"]!.inputs = { why: { expr: ".children.b[-2].output.note" } };
+    files["root"]!.children!["work"]!.inputs = { why: { $expr: ".children.b[-2].output.note" } };
     expect(errorsFor(files)).toEqual([]);
   });
 
   it("type-checks an indexed read against the slot", () => {
     const files = base();
     // `note` is a string; the slot wants a string. Ask for the whole PASS instead and it is not.
-    files["root"]!.children!["work"]!.inputs = { why: { expr: ".children.b[-2].output" } };
+    files["root"]!.children!["work"]!.inputs = { why: { $expr: ".children.b[-2].output" } };
     expect(errorsFor(files).length).toBeGreaterThan(0);
   });
 
   it("refuses a rule that names an output the target does not publish", () => {
     const files = base();
     files["root"]!.children!["b"]!.transitions = [
-      { to: "work", when: ".run.iteration < .limits.max_iterations", inputs: { why: { expr: ".children.b.output.nope" } } },
+      { to: "work", when: ".run.iteration < .limits.max_iterations", inputs: { why: { $expr: ".children.b.output.nope" } } },
     ];
     expect(errorsFor(files).length).toBeGreaterThan(0);
   });

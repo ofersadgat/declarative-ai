@@ -62,7 +62,7 @@ function calleeOf(
   opts: { files?: Record<string, string>; path?: readonly string[]; onWarn?: (m: string) => void } = {},
 ): { op: Operation<InlineFamily>; parameters?: Record<string, unknown> } {
   const state: StateDef = {
-    outputs: { v: { binding: { expr } } },
+    outputs: { v: { binding: { $expr: expr } } },
     operation: { kind: "function", function: "plain" },
     // On `environment`, because the path a state RESOLVES against has to be known before its own
     // document is expanded — the loader reads it off the raw environment chain for that reason.
@@ -232,7 +232,7 @@ describe("a state's own operation resolves its callee the same way", () => {
  */
 describe("a call is checked against the callee's arity", () => {
   const load = (expr: string): void => {
-    loadBundle({ s: { outputs: { v: { binding: { expr } } }, operation: { kind: "function", function: "plain" } } } as unknown as Record<string, StateDef>, "s", {
+    loadBundle({ s: { outputs: { v: { binding: { $expr: expr } } }, operation: { kind: "function", function: "plain" } } } as unknown as Record<string, StateDef>, "s", {
       functions: entries(),
     });
   };

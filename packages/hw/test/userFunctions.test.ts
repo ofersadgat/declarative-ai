@@ -77,7 +77,7 @@ async function call(h: { userFunctions: UserFunctions }, ref: string, args: Reco
 }
 
 /**
- * The operation a lowered `{ expr }` output binding CALLS.
+ * The operation a lowered `{ $expr: expr }` output binding CALLS.
  *
  * A module symbol is named by an EXPRESSION — `confidence(.inputs.rank)` — rather than by
  * `operation.function`, which per §7.1 is a name in `registry.functions` and resolves nowhere near
@@ -101,7 +101,7 @@ describe("a state calling a module symbol by bare name", () => {
   const state = {
     root: {
       inputs: { rank: { schema: { type: "number" } }, iteration: { schema: { type: "number" } } },
-      outputs: { score: { binding: { expr: "confidence(.inputs.rank, .inputs.iteration)" } } },
+      outputs: { score: { binding: { $expr: "confidence(.inputs.rank, .inputs.iteration)" } } },
     },
   };
 
@@ -269,7 +269,7 @@ describe("what the loader refuses", () => {
     // Index but no `userFunctions`: the symbol is FOUND and cannot be typed, so the message says
     // that rather than "not an operation document" about a perfectly good file.
     expect(() =>
-      loadBundle({ root: { outputs: { n: { binding: { expr: "helper(1)" } } } } }, "root", {
+      loadBundle({ root: { outputs: { n: { binding: { $expr: "helper(1)" } } } } }, "root", {
         defaultRoot: FN,
         vfs,
         symbols,
@@ -289,7 +289,7 @@ describe("what the loader refuses", () => {
   it("surfaces an unrepresentable parameter type as a load failure", async () => {
     const files = { [`${FN}/bad.ts`]: "export function weigh(n: bigint) { return Number(n); }" };
     const h = await harness(files);
-    expect(() => load({ root: { outputs: { n: { binding: { expr: "weigh(1)" } } } } }, h)).toThrow(/bigint/);
+    expect(() => load({ root: { outputs: { n: { binding: { $expr: "weigh(1)" } } } } }, h)).toThrow(/bigint/);
   });
 });
 
@@ -302,7 +302,7 @@ describe("resolution is not execution", () => {
     };
     (globalThis as Record<string, unknown>).__loadRan = false;
     const h = await harness(files);
-    load({ root: { outputs: { n: { binding: { expr: "go(1)" } } } } }, h);
+    load({ root: { outputs: { n: { binding: { $expr: "go(1)" } } } } }, h);
     expect((globalThis as Record<string, unknown>).__loadRan).toBe(false);
 
     await h.userFunctions.prepare();
