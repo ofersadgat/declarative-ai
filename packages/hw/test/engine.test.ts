@@ -572,6 +572,28 @@ describe("timeout, cancellation, and unhandled child failures", () => {
     expect(result.failure?.reason).toMatch(/required input 'issue'/);
     expect(fake.calls).toHaveLength(0);
   });
+
+  it("inline string content in an artifact slot still answers to the rest of the slot's schema", async () => {
+    // An artifact slot used to accept ANY string without reading its schema, so `minLength: 1` on an
+    // issue typed into a form was enforced by the form and by nothing that ran.
+    const files: Record<string, StateDef> = {
+      root: {
+        label: "Root",
+        inputs: { issue: { schema: { type: "string", contentMediaType: "text/markdown", minLength: 1 } } },
+        outputs: {},
+        operation: { kind: "prompt", prompt: "go", model: "reviewer" },
+      } as StateDef,
+    };
+    const empty = makeEngine(files, "root", async () => ok({}));
+    const refused = await empty.engine.run({ inputs: { issue: "" } });
+    expect(refused.outcome).toBe("error");
+    expect(refused.failure?.reason).toMatch(/'issue' failed validation/);
+    expect(empty.fake.calls).toHaveLength(0);
+
+    const filled = makeEngine(files, "root", async () => ok({}));
+    const accepted = await filled.engine.run({ inputs: { issue: "A paused run comes back paused." } });
+    expect(accepted.outcome).toBe("success");
+  });
 });
 
 describe("what a prompt carries", () => {

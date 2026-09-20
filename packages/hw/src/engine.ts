@@ -3243,6 +3243,15 @@ export class WorkflowEngine {
       if (!isArtifactRef(value) && typeof value !== "string") {
         return `${label} expects an artifact (bytes, a byte stream, an artifact ref, or inline string content)`;
       }
+      // Inline string content IS a string, so it still answers to the rest of the schema. Bytes, a
+      // stream and a ref have no string to measure, but a `minLength: 1` on an issue typed into a
+      // form means an empty issue is refused here, not only by the form that typed it.
+      if (typeof value === "string") {
+        const schema = slot.schema;
+        if (schema === undefined || Object.keys(schema).length === 0) return undefined;
+        const res = this.validator.validateValue(schema, value);
+        return res.ok ? undefined : `${label} failed validation: ${res.errors ?? "invalid"}`;
+      }
       return undefined;
     }
     // NaN and the infinities are refused HERE, ahead of the schema and whether there is one.
