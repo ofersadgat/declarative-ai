@@ -125,11 +125,15 @@ export function finishedHandle<O, M extends ExecMetrics = ExecMetrics>(result: E
  */
 export function linkAbort(controller: AbortController, signal: AbortSignal | undefined): () => void {
   if (!signal) return (): void => {};
+  // The REASON travels with the abort. A bare `abort()` mints a fresh anonymous `AbortError`, so an
+  // implementation downstream could tell THAT it was cancelled and never WHY — and the why is
+  // sometimes the whole of what it needs: hw aborts a state a person skipped with a reason that
+  // says so (`SkipAbort`), and a host's parked question withdraws itself on that and on nothing else.
   if (signal.aborted) {
-    controller.abort();
+    controller.abort(signal.reason);
     return (): void => {};
   }
-  const onAbort = (): void => controller.abort();
+  const onAbort = (): void => controller.abort(signal.reason);
   signal.addEventListener("abort", onAbort, { once: true });
   return (): void => signal.removeEventListener("abort", onAbort);
 }

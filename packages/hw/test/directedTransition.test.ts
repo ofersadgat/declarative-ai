@@ -20,7 +20,7 @@ import { hostFunction, type ExecResult, type ExecServices, type FunctionInputs, 
 import type { JsonValue } from "@declarative-ai/json";
 import { SchemaValidator } from "@declarative-ai/validate";
 import { newRegistry, ok } from "./fakes.js";
-import { DirectedTransitions } from "../src/directed.js";
+import { DirectedTransitions, isSkipAbort } from "../src/directed.js";
 import { WorkflowEngine } from "../src/engine.js";
 import { loadBundle } from "../src/loader.js";
 import type { StateDef } from "../src/format.js";
@@ -56,6 +56,7 @@ function harness(files: Record<string, StateDef>, options: { hold?: string[] } =
   const dispatched: string[] = [];
   const held = new Set(options.hold ?? []);
   const gates = new Map<string, () => void>();
+  const toldSkipped: string[] = [];
   const waiters: Waiter[] = [];
   const registry = newRegistry();
   registry.functions.set(
@@ -66,7 +67,16 @@ function harness(files: Record<string, StateDef>, options: { hold?: string[] } =
       if (held.has(name)) {
         await new Promise<void>((resolve) => {
           gates.set(name, resolve);
-          ctx.abortSignal?.addEventListener("abort", () => resolve(), { once: true });
+          ctx.abortSignal?.addEventListener(
+            "abort",
+            () => {
+              // The REASON reaches the implementation through the executor stack — what lets a host's
+              // parked question withdraw itself on a skip and on nothing else.
+              if (isSkipAbort(ctx.abortSignal?.reason)) toldSkipped.push(name);
+              resolve();
+            },
+            { once: true },
+          );
         });
       }
       return ok({ answer: note ?? `from ${name}` }) as ExecResult<ResolvedValue, WorkflowMetrics>;
@@ -100,6 +110,7 @@ function harness(files: Record<string, StateDef>, options: { hold?: string[] } =
     registry,
     directed,
     dispatched,
+    toldSkipped,
     waiters,
     events,
     /** Let a held step finish on its own. */
@@ -181,6 +192,7 @@ describe("a directed transition, forward", () => {
     // `a`'s call came back a SUCCESS when it was aborted. Had the jump been decided after that
     // landed, the completion would have entered `b`.
     expect(h.dispatched).toEqual(["a", "c", "d"]);
+    expect(h.toldSkipped).toEqual(["a"]);
     expect(result.outputs).toMatchObject({ a_outcome: "skipped", b_outcome: "skipped", c_outcome: "success", d_outcome: "success" });
     expect(h.taken()).toMatchObject([{ to: "c", by: "person", skip: true }]);
     // One end per instance, and the source's is the skip — journaled at the decision, ahead of the
