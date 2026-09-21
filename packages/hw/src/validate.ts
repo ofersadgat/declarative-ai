@@ -1519,8 +1519,21 @@ function reachabilityOf(def: LoadedState): Reachability {
     ),
   ];
   let earliest = Number.POSITIVE_INFINITY;
+  // Which children are entered by a STANDING rule, and which by an ordinary one — see `enteredAt`.
+  const standingTargets = new Set<string>();
+  const ruleTargets = new Set<string>();
   for (const [list, floor] of lists) {
     for (const t of list ?? []) {
+      // A STANDING rule (§3.3) is outside the proof, both ways. It is an offer a person may take, and
+      // a run nobody moves follows the workflow as if the rule were not there — so it pre-empts
+      // nothing the sequence proves, exactly as the directed transition a host can inject into ANY
+      // workflow pre-empts nothing. What a move steps over is the mover's business, reported at the
+      // entry that then lacks an input, not a fault of every wire written before the rule existed.
+      if (t.standing === true) {
+        standingTargets.add(t.to);
+        continue;
+      }
+      ruleTargets.add(t.to);
       let blockedUntil = floor;
       if (t.when !== undefined) {
         let ast: Expr | undefined;
@@ -1554,6 +1567,14 @@ function reachabilityOf(def: LoadedState): Reachability {
    */
   const enteredAt = (key: string): Reachability => {
     const limit = indexOf.get(key);
+    // A child entered ONLY by a standing rule — off the spine, and no ordinary rule names it — is
+    // entered because a person sent the task there. Nothing precedes it provably and nothing has to:
+    // the host settles its inputs at the move, and a wire that still resolves to nothing blocks the
+    // entry with the input named. Its wires are therefore typed and not reachability-checked, the
+    // way a directed transition's target has always been entered.
+    if (limit === undefined && standingTargets.has(key) && !ruleTargets.has(key)) {
+      return { always: new Set(Object.keys(def.children ?? {})), enteredAt };
+    }
     const proven =
       limit === undefined ? new Set<string>() : new Set([...always].filter((k) => (indexOf.get(k) ?? Number.POSITIVE_INFINITY) < limit));
     return { always: proven, enteredAt };

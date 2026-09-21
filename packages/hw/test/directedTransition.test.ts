@@ -529,6 +529,42 @@ describe("a standing rule — what a host generates for `on_user_event('task_mov
       "transitions[1].to: a standing rule enters a child; it cannot terminate the state",
     ]);
   });
+
+  it("is outside the reachability proof: it pre-empts nothing the sequence proves, and its own target's wires are not held to it", () => {
+    const wiredLeaf = (name: string): StateDef => ({ ...leaf(name), inputs: { note: { schema: {} } } });
+    const files = (rules: StateDef["transitions"]): Record<string, StateDef> => ({
+      root: {
+        label: "Root",
+        children: {
+          a: { state: "root/a" },
+          // On the spine, wired from the member before it — proven before the rule existed, and still.
+          b: { state: "root/b", inputs: { note: ".children.a.output.answer" } },
+          // Off the spine, entered only because somebody sends the task there.
+          moved: { state: "root/moved", inputs: { note: ".children.b.output.answer" } },
+        },
+        sequence: ["a", "b"],
+        transitions: rules,
+      },
+      "root/a": leaf("a"),
+      "root/b": wiredLeaf("b"),
+      "root/moved": wiredLeaf("moved"),
+    });
+    const errorsOf = (rules: StateDef["transitions"]): string[] => {
+      const h = harness(files(rules));
+      return validateBundle(h.bundle, { functions: h.registry.functions }).errors.map((e) => e.path);
+    };
+    expect(errorsOf([{ to: "moved", when: "await_event('task_move', { to_state: 'moved' })", standing: true }])).toEqual([]);
+    // The same rule WITHOUT the mark is an ordinary conditional transition: it can fire before `a`
+    // ends, so nothing is proven, and its target is not proven to follow anything.
+    expect(errorsOf([{ to: "moved", when: "await_event('task_move', { to_state: 'moved' })" }])).toEqual(["children.b.inputs.note", "children.moved.inputs.note"]);
+    // And a child an ORDINARY rule also enters keeps the obligation, whatever else offers it.
+    expect(
+      errorsOf([
+        { to: "moved", when: ".children.b.output.answer === 'go'" },
+        { to: "moved", when: "await_event('task_move', { to_state: 'moved' })", standing: true },
+      ]),
+    ).toEqual(["children.moved.inputs.note"]);
+  });
 });
 
 describe("`skipped` in an expression", () => {

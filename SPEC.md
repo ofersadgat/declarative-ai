@@ -1308,6 +1308,12 @@ wiring it.
   may be *pending* at read time — and pending is a run-time park (the dataflow join, §10.4), not a
   permanently-missing value. The engine parks the consumer until the producer resolves.
 - A child reachable only through a conditional transition is **not** proven.
+- A **standing** rule (§3.3) is outside the proof, both ways. It pre-empts nothing: a run nobody moves
+  follows the workflow as if the rule were not there, so what `sequence` proved before the rule was
+  written it still proves. And a child entered *only* by standing rules — off the spine, named by no
+  ordinary rule — is entered because somebody sent the run there, so its wires are typed and not held
+  to the proof: the host settles its inputs at the move, and a wire that still resolves to nothing
+  blocks the entry with the input named, as it does for the target of any directed transition.
 - `optional: true` or a `default` on the *consuming* slot is the explicit opt-out: both declare
   that an absent value is acceptable here.
 
