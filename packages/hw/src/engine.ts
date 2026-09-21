@@ -115,6 +115,7 @@ import { hasDefault, literalPermissions, SPAWN_DEFAULTS, type HostedEachKind, ty
 import { isCallableKind, isCallableSchema } from "@declarative-ai/exec";
 import { isOperationValue } from "./resolve.js";
 import { uuidv7 } from "./ids.js";
+import { isSkipAbort, SkipAbort, type DirectedOutcome, type DirectedTarget, type DirectedTransition, type DirectedTransitions } from "./directed.js";
 
 /**
  * A round that cannot finish yet: a transition guard is waiting on a deferred call.
@@ -264,6 +265,12 @@ export interface EngineConfig {
    * list would fan out over its siblings.
    */
   split?: readonly SplitEntry[];
+  /**
+   * The port DIRECTED transitions arrive through (SPEC §3.3, `directed.ts`). The engine attaches
+   * itself for the length of the run; a move queued on the port before that — a finished run being
+   * reopened to take one — is claimed by the instance it names as the load builds it.
+   */
+  directed?: DirectedTransitions;
 }
 
 /**
@@ -502,6 +509,13 @@ interface ChildRecord {
    * they have to reproduce first.
    */
   failure?: Failure;
+  /**
+   * A directed transition stepped past this child while it was running (SPEC §3.3). Set — and the
+   * child's `instance.terminated` journaled — BEFORE its abort, so however the child's own run then
+   * ends (an interrupted operation may well complete), the record reads `skipped`, the completion
+   * answers nothing, and no round is owed for it.
+   */
+  skipped?: boolean;
   abort: AbortController;
   promise: Promise<void>;
 }
@@ -663,6 +677,17 @@ interface Instance {
   fieldValues: Map<string, ResolvedValue>;
   /** Fields not yet settled — read as PENDING by an expression, so a dependent parks. */
   unsettledFields: Set<string>;
+  /**
+   * The DIRECTED transition this instance has been handed and not yet taken (SPEC §3.3) — held
+   * while a sync child holds the cursor, unless it says `skip`. The latest one wins: a person who
+   * moves a card twice means the second place.
+   */
+  directed?: DirectedTransition;
+  /**
+   * An entry a LOADED instance owes: its stopped run journaled a directed transition and died
+   * before the target entered (`LoadedInstance.directed`). Made first, and not journaled again.
+   */
+  owedEntry?: { to: string; inputs?: Record<string, ResolvedValue> };
 }
 
 /**
@@ -694,6 +719,14 @@ interface DeferredCall {
   cancel: () => Promise<void>;
   /** Resolves when the call has settled and its result is in the cache. Never rejects. */
   settled: Promise<void>;
+  /**
+   * A taken transition CONSUMED this wait while it was in flight (`consumeDeferred`): it is being
+   * cancelled, and what it settles with is not an answer to anything. Without the mark the
+   * cancellation's own failure landed in the results AFTER the consume had cleared them, and a
+   * state that carried on — which a standing rule's always does — read its next round's guard
+   * against "the call was canceled" instead of registering a fresh wait.
+   */
+  withdrawn?: boolean;
 }
 
 class Notifier {
@@ -985,10 +1018,15 @@ export class WorkflowEngine {
     this.rootAbort = abort;
     const inputs = this.resolveRootInputs(rootDef, options.inputs);
     let record: TerminationRecord;
-    if ("error" in inputs) {
-      record = { outcome: "error", failure: { classification: "permanent", reason: inputs.error } };
-    } else {
-      record = await this.runInstance(this.config.bundle.rootId, rootDef, inputs.values, abort, undefined, undefined);
+    this.attachDirected();
+    try {
+      if ("error" in inputs) {
+        record = { outcome: "error", failure: { classification: "permanent", reason: inputs.error } };
+      } else {
+        record = await this.runInstance(this.config.bundle.rootId, rootDef, inputs.values, abort, undefined, undefined);
+      }
+    } finally {
+      this.config.directed?.detach(this);
     }
     if (this.fatal) {
       record = { outcome: "error", failure: this.fatal };
@@ -1040,7 +1078,12 @@ export class WorkflowEngine {
       // already completed never dispatches, so without this its `finish` (terminated history and the
       // live spine alike) would report a recorded success's conversation as not available.
       await this.seedTranscripts(loaded);
-      record = await this.resumeInstance(loaded, rootDef, abort, undefined);
+      this.attachDirected();
+      try {
+        record = await this.resumeInstance(loaded, rootDef, abort, undefined);
+      } finally {
+        this.config.directed?.detach(this);
+      }
     }
     if (this.fatal) {
       record = { outcome: "error", failure: this.fatal };
@@ -1131,6 +1174,7 @@ export class WorkflowEngine {
     // Pass 0, with `children` and `passes[0]` the same Map — the invariant every read depends on.
     instance.children = new Map();
     instance.passes.push(instance.children);
+    this.registerLive(instance);
     this.emit({
       type: "instance.entered",
       instanceId: instance.id,
@@ -1159,17 +1203,14 @@ export class WorkflowEngine {
       // Attached HERE, at the one place a record leaves this instance, rather than at each of the
       // dozen `{ outcome: … }` returns inside the loop — every one of which would otherwise have to
       // remember, and a forgotten one is a `children.<key>.operation` that is silently empty.
-      const record: TerminationRecord =
-        instance.operation !== undefined ? { ...loopRecord, operation: instance.operation } : loopRecord;
-      this.emit({
-        type: "instance.terminated",
-        instanceId: instance.id,
-        stateId,
-        outcome: record.outcome,
-        failure: record.failure,
-      });
+      const record: TerminationRecord = this.skippedOr(
+        instance,
+        instance.operation !== undefined ? { ...loopRecord, operation: instance.operation } : loopRecord,
+      );
+      this.emitTerminated(instance, record);
       return record;
     } finally {
+      this.liveInstances.delete(instance.id);
       if (timer !== undefined) clearTimeout(timer);
       await this.cancelRunningChildren(instance);
       // A wait outlives nothing. An instance that has terminated — succeeded, failed, been superseded
@@ -1343,18 +1384,49 @@ export class WorkflowEngine {
    */
   private async resumeInstance(loaded: LoadedInstance, def: LoadedState, abort: AbortController, parent: Instance | undefined): Promise<TerminationRecord> {
     const instance = this.buildLoadedInstance(loaded, def, abort, parent);
+    // Claimed BEFORE the children are looked at, because a skip decides which of them continue.
+    this.registerLive(instance);
+    if (loaded.directed !== undefined) instance.owedEntry = loaded.directed;
     const inputFailure = this.resolveInputBindings(instance);
+    // A SKIP waiting for this instance (a stopped run reopened to take a move) steps past the
+    // children it would have interrupted WITHOUT continuing them first: resuming a cut agent call
+    // only to abort it would spawn the agent to kill it.
+    const skipAtLoad = instance.directed?.skip === true ? instance.directed : undefined;
+    const steppedOver = (key: string): boolean => {
+      if (skipAtLoad === undefined) return false;
+      const decl = instance.def.children?.[key];
+      return (instance.def.sequence ?? []).includes(key) || (decl !== undefined && this.asyncOf(instance, decl) !== true);
+    };
 
     for (const group of groupLoadedChildren(loaded.children)) {
       const key = group.key;
       // A fan-out's elements come back together, under the one record the engine keeps per key.
       if (group.elements !== undefined) {
+        const decl = instance.def.children?.[key];
+        if (decl !== undefined && group.elements.some((element) => element.live) && steppedOver(key) && this.hostedKindOf(decl, group.elements.length) === undefined) {
+          for (const element of group.elements) {
+            if (element.live) this.emit({ type: "instance.terminated", instanceId: element.id, stateId: element.stateId, outcome: "skipped" });
+          }
+          const history = group.elements.map((element) => (element.live ? { ...element, live: false, outcome: "skipped" as const } : element));
+          const record = await this.loadTerminatedFanOut(instance, key, decl, history, abort);
+          instance.children.set(key, { ...record, outcome: "skipped", outputs: undefined, failure: undefined });
+          continue;
+        }
         await this.resumeFanOut(instance, key, group.elements, abort);
         continue;
       }
       const child = group.single;
       const childDef = this.config.bundle.states[child.stateId];
-      if (!child.live) {
+      if (child.live && steppedOver(key)) {
+        if (!childDef) continue;
+        this.emit({ type: "instance.terminated", instanceId: child.id, stateId: child.stateId, outcome: "skipped" });
+        instance.children.set(key, await this.loadTerminated({ ...child, live: false, outcome: "skipped" }, childDef, abort, instance));
+        continue;
+      }
+      // A TERMINATED child a waiting move names — itself, or something under it — is REOPENED to
+      // take it: continued exactly as a live one is, all the way down to the instance the move is
+      // for. Its `transition.taken` row is what says so in the journal.
+      if (!child.live && !this.awaitsDirected(child)) {
         if (!childDef) continue;
         instance.children.set(key, await this.loadTerminated(child, childDef, abort, instance));
         continue;
@@ -1362,8 +1434,8 @@ export class WorkflowEngine {
       // A live child continues exactly the way `enterChild` starts one: its own abort wired to the
       // parent's, its record stamped before its promise exists, its crash a failure and never a stall.
       const childAbort = new AbortController();
-      const onParentAbort = (): void => childAbort.abort();
-      if (instance.abort.signal.aborted) childAbort.abort();
+      const onParentAbort = (): void => childAbort.abort(instance.abort.signal.reason);
+      if (instance.abort.signal.aborted) childAbort.abort(instance.abort.signal.reason);
       else instance.abort.signal.addEventListener("abort", onParentAbort, { once: true });
       const record: ChildRecord = { instanceId: child.id, status: "running", abort: childAbort, promise: Promise.resolve() };
       const run = async (): Promise<void> => {
@@ -1374,12 +1446,13 @@ export class WorkflowEngine {
           term = await this.resumeInstance(child, childDef, childAbort, instance);
           term = await this.materializeFanOut(instance, key, term);
         }
+        if (record.skipped === true) term = { outcome: "skipped", ...(term.operation !== undefined ? { operation: term.operation } : {}) };
         record.status = "done";
         record.outcome = term.outcome;
         record.outputs = term.outputs;
         record.failure = term.failure;
         record.operation = term.operation;
-        if (instance.children.get(key) === record) {
+        if (instance.children.get(key) === record && record.skipped !== true) {
           if (!instance.justFinished.includes(key)) instance.justFinished.push(key);
           if (term.outcome === "error" || term.outcome === "timeout") instance.unhandledFailures.add(key);
         }
@@ -1395,11 +1468,11 @@ export class WorkflowEngine {
         record.outcome = "error";
         record.failure = failure;
         try {
-          this.emit({ type: "instance.terminated", instanceId: record.instanceId, stateId: child.stateId, outcome: "error", failure });
+          if (record.skipped !== true) this.emit({ type: "instance.terminated", instanceId: record.instanceId, stateId: child.stateId, outcome: "error", failure });
         } catch {
           // Nothing left to report it with.
         }
-        if (instance.children.get(key) === record) {
+        if (instance.children.get(key) === record && record.skipped !== true) {
           if (!instance.justFinished.includes(key)) instance.justFinished.push(key);
           instance.unhandledFailures.add(key);
         }
@@ -1428,17 +1501,14 @@ export class WorkflowEngine {
       const fieldFailure = inputFailure ?? (await this.evaluateFields(instance));
       timer = this.startTimer(instance);
       const loopRecord = fieldFailure !== undefined ? this.finish(instance, "error", fieldFailure) : await this.evaluationLoop(instance, initialEvaluation);
-      const record: TerminationRecord =
-        instance.operation !== undefined ? { ...loopRecord, operation: instance.operation } : loopRecord;
-      this.emit({
-        type: "instance.terminated",
-        instanceId: instance.id,
-        stateId: instance.stateId,
-        outcome: record.outcome,
-        failure: record.failure,
-      });
+      const record: TerminationRecord = this.skippedOr(
+        instance,
+        instance.operation !== undefined ? { ...loopRecord, operation: instance.operation } : loopRecord,
+      );
+      this.emitTerminated(instance, record);
       return record;
     } finally {
+      this.liveInstances.delete(instance.id);
       if (timer !== undefined) clearTimeout(timer);
       await this.cancelRunningChildren(instance);
       await this.cancelDeferredCalls(instance);
@@ -1457,7 +1527,30 @@ export class WorkflowEngine {
     let evaluationDue = initialEvaluation;
     for (;;) {
       if (instance.timedOut) return this.finish(instance, "timeout");
-      if (instance.abort.signal.aborted) return this.finish(instance, "canceled");
+      if (instance.abort.signal.aborted) return this.finish(instance, abortedOutcome(instance));
+
+      // An entry a loaded instance OWES (`LoadedInstance.directed`): its stopped run journaled a
+      // directed transition and died before the target entered. Made before anything else, and
+      // not journaled again — the row is already in the journal this instance was loaded from.
+      if (instance.owedEntry !== undefined) {
+        const owed = instance.owedEntry;
+        instance.owedEntry = undefined;
+        const entered = await this.enterDirected(instance, owed.to, owed.inputs);
+        if (typeof entered === "object") return this.finish(instance, "error", entered.failure);
+        evaluationDue = false;
+        continue;
+      }
+
+      // A DIRECTED transition (SPEC §3.3) is taken AHEAD of every rule: it is not a rule in the list
+      // but a person's instruction to the run, and a held one that lost to the authored rule its
+      // source's end happened to fire would be an instruction silently dropped.
+      if (instance.directed !== undefined && this.directedReady(instance, instance.directed)) {
+        const step = await this.takeDirected(instance, instance.directed);
+        if (typeof step === "object") return this.finish(instance, "error", step.failure);
+        instance.endedBySplit = false;
+        evaluationDue = false;
+        continue;
+      }
 
       // WHICH children this round answers for, fixed BEFORE anything is awaited.
       //
@@ -1484,7 +1577,12 @@ export class WorkflowEngine {
         evaluationDue = false;
         // Whatever the cursor was waiting on has resolved by the time an evaluation round runs; if
         // no transition handles it, the cursor is free to walk on from where it stopped.
-        instance.heldFor = undefined;
+        //
+        // "Resolved" is checked rather than assumed: a round can also be woken by something that is
+        // not a child ending — a standing rule's wait settling, a directed move arriving and being
+        // held — and releasing the cursor then would start the next member ALONGSIDE the sync child
+        // still running.
+        if (!this.cursorHeld(instance)) instance.heldFor = undefined;
         const step = await this.takeTransition(instance, eligible);
         if (typeof step === "object") return this.finish(instance, "error", step.failure);
         // A rule that cannot be evaluated ends the state. Carrying on would let the next rule answer
@@ -1717,7 +1815,7 @@ export class WorkflowEngine {
     instance.unhandledFailures.clear();
     if (taken.to.startsWith("terminate.")) {
       consumeEligibility();
-      return `terminated-${taken.to.slice("terminate.".length) as TerminationOutcome}` as const;
+      return `terminated-${taken.to.slice("terminate.".length) as Exclude<TerminationOutcome, "skipped">}` as const;
     }
     // The new pass opens BEFORE the entry, so the sequence reset inside `enterChild` clears members
     // out of the new map and leaves the old one whole. That is the whole mechanism: history survives
@@ -1744,6 +1842,218 @@ export class WorkflowEngine {
     }
     consumeEligibility();
     return "entered";
+  }
+
+  // --- directed transitions (SPEC §3.3, `directed.ts`) -----------------------
+
+  /** Live instances by durable id — what a directed transition is addressed to. */
+  private readonly liveInstances = new Map<string, Instance>();
+  /** The run's root instance, which a move naming no instance is for. */
+  private rootInstance: Instance | undefined;
+  /**
+   * Moves handed over before the instance they name existed: queued on the port before this engine
+   * attached. Each is claimed by its instance as the run builds it (`registerLive`) — which, for a
+   * LOADED run, is also what reopens a terminated instance to take one (`awaitsDirected`).
+   */
+  private pendingDirected: DirectedTransition[] = [];
+  /** Skipped children whose `instance.terminated` the PARENT already journaled, at the decision. */
+  private readonly skipJournaled = new Set<string>();
+
+  private attachDirected(): void {
+    const port = this.config.directed;
+    if (port !== undefined) this.pendingDirected.push(...port.attach(this));
+  }
+
+  /**
+   * Hand this run a directed transition (SPEC §3.3) — the {@link DirectedTarget} half of the port.
+   *
+   * Only RECORDS the move and wakes the instance; the instance's own loop takes it, at the one place
+   * a loop decides anything. The latest move wins: a second one replaces a held first.
+   */
+  direct(move: DirectedTransition): DirectedOutcome {
+    const instance = move.instanceId === undefined ? this.rootInstance : this.liveInstances.get(move.instanceId);
+    if (instance === undefined || !this.liveInstances.has(instance.id)) {
+      return { status: "refused", reason: move.instanceId === undefined ? "the run has no live root instance" : `no live instance '${move.instanceId}'` };
+    }
+    if (instance.def.children?.[move.to] === undefined) {
+      return { status: "refused", reason: `'${move.to}' is not a declared child of '${instance.stateId}'` };
+    }
+    instance.directed = move;
+    const status = this.directedReady(instance, move) ? "taking" : "held";
+    instance.notify.signal();
+    return { status };
+  }
+
+  /** An instance joins the run: addressable from here on, and handed any move that was waiting for it. */
+  private registerLive(instance: Instance): void {
+    this.liveInstances.set(instance.id, instance);
+    if (instance.parent === undefined) this.rootInstance = instance;
+    if (this.pendingDirected.length === 0) return;
+    const mine = (move: DirectedTransition): boolean => (move.instanceId === undefined ? instance.parent === undefined : move.instanceId === instance.id);
+    const claimed = this.pendingDirected.filter(mine);
+    if (claimed.length === 0) return;
+    this.pendingDirected = this.pendingDirected.filter((move) => !mine(move));
+    const move = claimed[claimed.length - 1]!;
+    // A move naming no child of this state is dropped here exactly as `direct` refuses it live; the
+    // host that queued it is expected to have checked against the same definition.
+    if (instance.def.children?.[move.to] !== undefined) instance.directed = move;
+  }
+
+  /** Whether a waiting move names this loaded instance or anything under it — the reopen test. */
+  private awaitsDirected(loaded: LoadedInstance): boolean {
+    if (this.pendingDirected.length === 0) return false;
+    const named = (node: LoadedInstance): boolean =>
+      this.pendingDirected.some((move) => move.instanceId === node.id) || (node.children ?? []).some(named);
+    return named(loaded);
+  }
+
+  /** Whether a SYNC child holds the cursor right now — it names one, and that one is still running. */
+  private cursorHeld(instance: Instance): boolean {
+    return instance.heldFor !== undefined && instance.children.get(instance.heldFor)?.status === "running";
+  }
+
+  /**
+   * Whether a handed move can be taken NOW. A state's own operation runs first — a move is between
+   * children, and the operation is not one. Past that: a `skip` never waits, and anything else
+   * waits for the sync child holding the cursor to end, which is what HELD means.
+   */
+  private directedReady(instance: Instance, move: DirectedTransition): boolean {
+    if (instance.def.operation !== undefined && !instance.opRun) return false;
+    return move.skip === true || !this.cursorHeld(instance);
+  }
+
+  /**
+   * Take a directed transition: journal it, record what it steps over, interrupt, enter.
+   *
+   * IN THAT ORDER, and the order is the point. Everything that decides where the run goes — the
+   * `skipped` marks, the `transition.taken` row, the rows for what was stepped over — happens
+   * synchronously before any child is aborted, because an interrupted operation may COMPLETE rather
+   * than fail, and a completion landing on an undecided parent is an ordinary evaluation round that
+   * walks the run into the next member. By the time the abort is issued the child's record is
+   * already `skipped`: its end is not a completion anyone answers.
+   */
+  private async takeDirected(instance: Instance, move: DirectedTransition): Promise<"entered" | { failure: Failure }> {
+    instance.directed = undefined;
+    const sequence = instance.def.sequence ?? [];
+    const target = sequence.indexOf(move.to);
+
+    // A STANDING rule to the same child states the wiring a generated move carries ("what this
+    // target takes when a person sends the task there"); the asker's own inputs win per name. A
+    // wire that has not resolved is left to the mount — a move does not park on a rule's wiring.
+    let handed: Record<string, ResolvedValue> = {};
+    const rule = (instance.def.transitions ?? []).find((t) => t.standing === true && t.to === move.to && t.whenError === undefined);
+    if (rule?.inputRefs !== undefined) {
+      const failure = await this.runEmbeddedOps(instance, this.wiresFor(rule.inputRefs, instance.def.children?.[move.to]?.state));
+      if (failure !== undefined) return { failure };
+      const resolved = this.resolveTransitionInputs(instance, rule.inputRefs);
+      if (resolved !== PENDING && resolved !== undefined) handed = resolved;
+    }
+    const inputs = { ...handed, ...(move.inputs ?? {}) };
+
+    // WHO is stepped over — fixed now, before anything is journaled or interrupted. A skip
+    // interrupts the running children the spine put there (sequence members, and whichever child
+    // holds the cursor); an author's async side-child outside the sequence is left to run. Going
+    // FORWARD, every member between the cursor and the target that was never entered is stepped
+    // over too — recorded, where an authored jump leaves them absent, because a person choosing to
+    // pass a state is a fact about the run and not a hole in it.
+    const isPass = this.isBackwardJump(instance, move.to);
+    const interrupted: Array<[string, ChildRecord]> = [];
+    if (move.skip === true) {
+      for (const [key, rec] of instance.children) {
+        if (rec.status === "running" && (sequence.includes(key) || key === instance.heldFor)) interrupted.push([key, rec]);
+      }
+    }
+    const unentered: string[] = [];
+    if (target >= 0 && !isPass) {
+      for (let i = instance.cursor; i < target; i++) {
+        const key = sequence[i]!;
+        if (!instance.children.has(key)) unentered.push(key);
+      }
+    }
+
+    instance.index++;
+    if (isPass) instance.iteration++;
+    // A taken transition cancels the waits it did not answer — a directed one included.
+    this.consumeDeferred(instance);
+    this.emit({
+      type: "transition.taken",
+      instanceId: instance.id,
+      stateId: instance.stateId,
+      to: move.to,
+      index: instance.index,
+      iteration: instance.iteration,
+      by: move.by,
+      ...(move.skip === true ? { skip: true } : {}),
+      ...(Object.keys(inputs).length > 0 ? { inputs: shallowRedactArtifacts(inputs) } : {}),
+    });
+    // The person's move answers for whatever had finished or failed and not been answered: they
+    // said where the run goes, which is the decision a rule naming the failure would have made.
+    instance.unhandledFailures.clear();
+    instance.justFinished = [];
+
+    for (const [key, rec] of interrupted) {
+      rec.skipped = true;
+      const decl = instance.def.children?.[key];
+      // A fan-out's record is not itself an entered instance; its elements report their own ends.
+      if (decl === undefined || (decl.each !== undefined && decl.each.length > 0)) continue;
+      this.skipJournaled.add(rec.instanceId);
+      this.emit({ type: "instance.terminated", instanceId: rec.instanceId, stateId: decl.state, outcome: "skipped" });
+    }
+    for (const key of unentered) {
+      const decl = instance.def.children?.[key];
+      if (decl === undefined) continue;
+      const id = this.newInstanceId();
+      // The entry is COUNTED: a skipped occurrence is an occurrence, so a later pass through this
+      // member lands on the address after it and a loaded run counts the same way the journal does.
+      addressOf(instance, key);
+      this.emit({ type: "instance.entered", instanceId: id, stateId: decl.state, childKey: key, parentInstanceId: instance.id, inputs: {} });
+      this.emit({ type: "instance.terminated", instanceId: id, stateId: decl.state, outcome: "skipped" });
+      instance.children.set(key, { instanceId: id, status: "done", outcome: "skipped", abort: new AbortController(), promise: Promise.resolve() });
+    }
+
+    // NOW the interrupt — and the drain: the target does not start beside a call still winding down
+    // in the workspace it is about to share.
+    for (const [, rec] of interrupted) rec.abort.abort(new SkipAbort());
+    await Promise.allSettled(interrupted.map(([, rec]) => rec.promise));
+    if (!this.cursorHeld(instance)) instance.heldFor = undefined;
+
+    // BACKWARD is the workflow's own machinery (decision: "the target is re-entered as the next
+    // occurrence and the usual backward reset applies"): a new pass opens, and `enterChild` resets.
+    if (isPass) {
+      instance.children = new Map(instance.children);
+      instance.passes.push(instance.children);
+    }
+    return this.enterDirected(instance, move.to, inputs);
+  }
+
+  /**
+   * Enter a directed transition's target, waiting out a PARK rather than rolling the move back: the
+   * transition is already journaled and what it stepped over already recorded, so a target whose
+   * wiring reads a still-running sibling is entered when that sibling resolves.
+   */
+  private async enterDirected(instance: Instance, to: string, inputs: Record<string, ResolvedValue> | undefined): Promise<"entered" | { failure: Failure }> {
+    const handed = inputs === undefined ? undefined : this.rehydrateArtifacts(inputs);
+    for (;;) {
+      if (instance.abort.signal.aborted) return "entered"; // the loop's next turn ends the instance
+      const entered = await this.enterChild(instance, to, handed);
+      if (typeof entered === "object") return entered;
+      if (entered === "started") return "entered";
+      if (!(await this.waitForAnyChild(instance))) {
+        return { failure: { classification: "permanent", reason: `directed transition to '${to}' parked on inputs nothing running can resolve (dataflow deadlock)` } };
+      }
+    }
+  }
+
+  /** A record leaving an instance a directed transition stepped past is `skipped`, however its loop ended. */
+  private skippedOr(instance: Instance, record: TerminationRecord): TerminationRecord {
+    if (!instance.abort.signal.aborted || !isSkipAbort(instance.abort.signal.reason) || record.outcome === "skipped") return record;
+    return { outcome: "skipped", ...(record.operation !== undefined ? { operation: record.operation } : {}) };
+  }
+
+  /** `instance.terminated` — once. A skipped child's was journaled by its parent, at the decision. */
+  private emitTerminated(instance: Instance, record: TerminationRecord): void {
+    if (this.skipJournaled.delete(instance.id)) return;
+    this.emit({ type: "instance.terminated", instanceId: instance.id, stateId: instance.stateId, outcome: record.outcome, failure: record.failure });
   }
 
   /**
@@ -1802,14 +2112,22 @@ export class WorkflowEngine {
      */
     const failed = instance.unhandledFailures;
     const answers = (t: LoadedTransition): boolean => failed.size === 0 || [...failed].every((key) => t.handles?.includes(key) === true);
+    // A STANDING rule that has come true is HELD while a sync child holds the cursor (SPEC §3.3): the
+    // move was asked for while its source was still running, and is taken when the source ends.
+    const held = this.cursorHeld(instance);
     const firstOf = (
       transitions: readonly LoadedTransition[] | undefined,
+      standing: boolean,
     ): { to: string } | typeof WAITING | typeof GUARD_FAILED | undefined => {
       for (const t of transitions ?? []) {
+        if ((t.standing === true) !== standing) continue;
         // A guard that failed to lower never fires: validation blocks the run, and reading it as
         // unconditional would be the worst possible interpretation of a typo.
         if (t.whenError !== undefined) continue;
         if (!answers(t)) continue;
+        // A standing rule with no guard offers nothing anyone could take up; validation refuses it,
+        // and firing it on every round would be the worst reading of the omission.
+        if (standing && t.whenRef === undefined) continue;
         if (t.whenRef === undefined) return { to: t.to, ...(t.inputRefs !== undefined ? { inputRefs: t.inputRefs } : {}) };
         deferred = false;
         const r = resolveRef(t.whenRef, scope);
@@ -1831,7 +2149,11 @@ export class WorkflowEngine {
            * So the round returns here, the eligibility is NOT consumed (`takeTransition`), and the
            * same list is walked again from the top when the call settles.
            */
-          if (deferred) return WAITING;
+          //
+          // A STANDING rule is the exception, and the whole of what `standing` means: its wait is an
+          // offer beside the state's progress, so it stops nothing — the rules behind it, the
+          // sequence and the state's own termination all carry on while it stands.
+          if (deferred && !standing) return WAITING;
           continue; // skipped this round (SPEC §6/§10.4)
         }
         // A guard that REFUSED stops the state; it does not quietly fail to match.
@@ -1852,15 +2174,24 @@ export class WorkflowEngine {
           };
           return GUARD_FAILED;
         }
-        if (isResolvedValue(r) && r.value) return { to: t.to, ...(t.inputRefs !== undefined ? { inputRefs: t.inputRefs } : {}) };
+        if (isResolvedValue(r) && r.value) {
+          if (standing && held) continue;
+          return { to: t.to, ...(t.inputRefs !== undefined ? { inputRefs: t.inputRefs } : {}) };
+        }
       }
       return undefined;
     };
-    for (const key of eligible) {
-      const taken = firstOf(instance.def.children?.[key]?.transitions);
+    // Every ordinary rule first, then every standing one — the order `orderedTransitions` states,
+    // and the two must agree (see there).
+    for (const standing of [false, true]) {
+      for (const key of eligible) {
+        const taken = firstOf(instance.def.children?.[key]?.transitions, standing);
+        if (taken) return taken;
+      }
+      const taken = firstOf(instance.def.transitions, standing);
       if (taken) return taken;
     }
-    return firstOf(instance.def.transitions);
+    return undefined;
   }
 
   /** The children eligible this round, in the order the state runs them — see the caller. */
@@ -1954,8 +2285,8 @@ export class WorkflowEngine {
      * because `run()` has two endings — its normal path and the `catch` that turns a crash into a
      * failed child — and a cleanup that only covers one of them is the same bug with better odds.
      */
-    const onParentAbort = (): void => childAbort.abort();
-    if (instance.abort.signal.aborted) childAbort.abort();
+    const onParentAbort = (): void => childAbort.abort(instance.abort.signal.reason);
+    if (instance.abort.signal.aborted) childAbort.abort(instance.abort.signal.reason);
     else instance.abort.signal.addEventListener("abort", onParentAbort, { once: true });
 
     const record: ChildRecord = {
@@ -2000,6 +2331,9 @@ export class WorkflowEngine {
         // rather than racing to read one stream. A single-consumer output is left a live stream to pipe.
         term = await this.materializeFanOut(instance, key, term);
       }
+      // Stepped past by a directed transition while it ran: whatever its own run came back with —
+      // an interrupted call may well have COMPLETED — the record is `skipped`, as already journaled.
+      if (record.skipped === true) term = { outcome: "skipped", ...(term.operation !== undefined ? { operation: term.operation } : {}) };
       record.status = "done";
       record.outcome = term.outcome;
       record.outputs = term.outputs;
@@ -2012,8 +2346,9 @@ export class WorkflowEngine {
       record.operation = term.operation;
       // Only while this record is still the live one: a superseded child's completion is not an event
       // its own transitions get to answer, for the same reason its failure is not one the state has to
-      // handle — the run has already moved past it.
-      if (instance.children.get(key) === record) {
+      // handle — the run has already moved past it. A SKIPPED one likewise: the move that stepped
+      // past it has already answered for it.
+      if (instance.children.get(key) === record && record.skipped !== true) {
         if (!instance.justFinished.includes(key)) instance.justFinished.push(key);
         if (term.outcome === "error" || term.outcome === "timeout") instance.unhandledFailures.add(key);
       }
@@ -2039,23 +2374,25 @@ export class WorkflowEngine {
         reason: `child '${key}' crashed: ${e instanceof Error ? e.message : String(e)}`,
       };
       record.status = "done";
-      record.outcome = "error";
-      record.failure = failure;
+      record.outcome = record.skipped === true ? "skipped" : "error";
+      record.failure = record.skipped === true ? undefined : failure;
       // Defensively, because the callback that writes the journal is itself a candidate for having
       // been what threw: the record above is what the parent actually reads, so losing this event
       // costs the trail, not the outcome.
       try {
-        this.emit({
-          type: "instance.terminated",
-          instanceId: record.instanceId,
-          stateId: decl.state,
-          outcome: "error",
-          failure,
-        });
+        if (record.skipped !== true) {
+          this.emit({
+            type: "instance.terminated",
+            instanceId: record.instanceId,
+            stateId: decl.state,
+            outcome: "error",
+            failure,
+          });
+        }
       } catch {
         // Nothing left to report it with.
       }
-      if (instance.children.get(key) === record) {
+      if (instance.children.get(key) === record && record.skipped !== true) {
         if (!instance.justFinished.includes(key)) instance.justFinished.push(key);
         instance.unhandledFailures.add(key);
       }
@@ -2160,8 +2497,8 @@ export class WorkflowEngine {
     isAsync: boolean,
   ): ChildRecord {
     const recordAbort = new AbortController();
-    const onParentAbort = (): void => recordAbort.abort();
-    if (instance.abort.signal.aborted) recordAbort.abort();
+    const onParentAbort = (): void => recordAbort.abort(instance.abort.signal.reason);
+    if (instance.abort.signal.aborted) recordAbort.abort(instance.abort.signal.reason);
     else instance.abort.signal.addEventListener("abort", onParentAbort, { once: true });
     const record: ChildRecord = { instanceId: this.newInstanceId(), status: "running", abort: recordAbort, promise: Promise.resolve() };
 
@@ -2369,16 +2706,16 @@ export class WorkflowEngine {
   private runFanOut(instance: Instance, key: string, decl: LoadedChild, occurrence: number, elements: readonly FanOutElement[]): ChildRecord {
     const childDef = this.config.bundle.states[decl.state];
     const recordAbort = new AbortController();
-    const onParentAbort = (): void => recordAbort.abort();
-    if (instance.abort.signal.aborted) recordAbort.abort();
+    const onParentAbort = (): void => recordAbort.abort(instance.abort.signal.reason);
+    if (instance.abort.signal.aborted) recordAbort.abort(instance.abort.signal.reason);
     else instance.abort.signal.addEventListener("abort", onParentAbort, { once: true });
     const record: ChildRecord = { instanceId: this.newInstanceId(), status: "running", abort: recordAbort, promise: Promise.resolve() };
 
     const runElement = async (index: number, element: FanOutElement): Promise<TerminationRecord> => {
       if (!childDef) return { outcome: "error", failure: { classification: "permanent", reason: `unknown state '${decl.state}'` } };
       const elementAbort = new AbortController();
-      const onRecordAbort = (): void => elementAbort.abort();
-      if (recordAbort.signal.aborted) elementAbort.abort();
+      const onRecordAbort = (): void => elementAbort.abort(recordAbort.signal.reason);
+      if (recordAbort.signal.aborted) elementAbort.abort(recordAbort.signal.reason);
       else recordAbort.signal.addEventListener("abort", onRecordAbort, { once: true });
       try {
         let term: TerminationRecord;
@@ -2410,12 +2747,12 @@ export class WorkflowEngine {
           if (term.outcome !== "success") break;
         }
       }
-      const term = settleBatch(key, decl, childDef, terms);
+      const term: TerminationRecord = record.skipped === true ? { outcome: "skipped" } : settleBatch(key, decl, childDef, terms);
       record.status = "done";
       record.outcome = term.outcome;
       record.outputs = term.outputs;
       record.failure = term.failure;
-      if (instance.children.get(key) === record) {
+      if (instance.children.get(key) === record && record.skipped !== true) {
         if (!instance.justFinished.includes(key)) instance.justFinished.push(key);
         if (term.outcome === "error" || term.outcome === "timeout") instance.unhandledFailures.add(key);
       }
@@ -2428,7 +2765,7 @@ export class WorkflowEngine {
       record.status = "done";
       record.outcome = "error";
       record.failure = { classification: "permanent", reason: `child '${key}' crashed: ${e instanceof Error ? e.message : String(e)}` };
-      if (instance.children.get(key) === record) {
+      if (instance.children.get(key) === record && record.skipped !== true) {
         if (!instance.justFinished.includes(key)) instance.justFinished.push(key);
         instance.unhandledFailures.add(key);
       }
@@ -3347,7 +3684,9 @@ export class WorkflowEngine {
     const out: LoadedTransition[] = [];
     for (const key of eligible) out.push(...(instance.def.children?.[key]?.transitions ?? []));
     out.push(...(instance.def.transitions ?? []));
-    return out;
+    // STANDING rules go LAST, behind every ordinary rule of the round, wherever they were written
+    // (SPEC §3.3): an offer that stands beside the workflow must never pre-empt a rule of it.
+    return [...out.filter((t) => t.standing !== true), ...out.filter((t) => t.standing === true)];
   }
 
   /** The dispatcher built when the host supplies no {@link EngineConfig.operations}. */
@@ -3563,9 +3902,12 @@ export class WorkflowEngine {
      * spin: no timer would fire, and the run would hang with the process pinned.
      */
     const started = new Set<string>();
+    const held = this.cursorHeld(instance);
     for (const transition of this.orderedTransitions(instance, eligible)) {
       // A guard that failed to lower never fires, so the evaluation skips it and so does this.
       if (transition.whenError !== undefined) continue;
+      // A standing rule with no guard never fires (`firstMatchingTransition`), so it ends nothing here.
+      if (transition.standing === true && transition.whenRef === undefined) continue;
       // Unconditional: it fires, and nothing behind it will be asked anything.
       if (transition.whenRef === undefined) return undefined;
       const binding = transition.whenRef;
@@ -3589,10 +3931,12 @@ export class WorkflowEngine {
           // deferred call HOLDS the round; pending on a running child is skipped, and the next rule
           // gets its turn.
           if (isPending(resolved)) {
-            if (waiting) return undefined;
+            // A STANDING rule's wait holds nothing, so the rules behind it are still prepared.
+            if (waiting && transition.standing !== true) return undefined;
             break;
           }
-          if (isResolvedValue(resolved) && resolved.value) return undefined; // it fires
+          // It fires — unless it is a standing rule held behind a running sync child.
+          if (isResolvedValue(resolved) && resolved.value && !(transition.standing === true && held)) return undefined;
           break; // false, or an error — the next rule gets its turn
         }
         for (const key of fresh.keys()) started.add(key);
@@ -3620,6 +3964,7 @@ export class WorkflowEngine {
 
     const callName = op.kind === "function" ? op.functionRef : "prompt";
     let cancel: () => Promise<void> = async () => {};
+    const call: DeferredCall = { instance, op, cancel: () => cancel(), settled: Promise.resolve() };
     const settled = (async () => {
       const outcome = await this.runEmbeddedOp(
         instance,
@@ -3630,8 +3975,11 @@ export class WorkflowEngine {
         key,
         env,
       );
-      this.deferredCalls.delete(key);
-      if (outcome !== PENDING) this.deferredResults.set(key, outcome);
+      // Only its OWN registration: a withdrawn call's key may already belong to the fresh wait the
+      // next round registered.
+      if (this.deferredCalls.get(key) === call) this.deferredCalls.delete(key);
+      this.withdrawnCalls.delete(call);
+      if (outcome !== PENDING && call.withdrawn !== true) this.deferredResults.set(key, outcome);
       this.emit({
         type: "call.settled",
         instanceId: instance.id,
@@ -3644,7 +3992,8 @@ export class WorkflowEngine {
       // `waitForProgress` holding a result nobody had been told about.
       instance.notify.signal();
     })();
-    this.deferredCalls.set(key, { instance, op, cancel: () => cancel(), settled });
+    call.settled = settled;
+    this.deferredCalls.set(key, call);
     instance.deferredKeys.add(key);
     this.emit({ type: "call.waiting", instanceId: instance.id, stateId: instance.stateId, call: callName, operationId: key });
     return PENDING;
@@ -3695,10 +4044,20 @@ export class WorkflowEngine {
       // Not awaited: cancellation settles the call, and its settle handler tidies up after itself.
       // Blocking a transition on the teardown of a question nobody is answering would be the wait all
       // over again.
-      if (inFlight?.instance === instance) void inFlight.cancel();
+      if (inFlight?.instance === instance) {
+        // Withdrawn NOW, not when the cancellation lands: the key is free for the fresh wait the
+        // next round registers, and whatever this one settles with is discarded (`withdrawn`).
+        inFlight.withdrawn = true;
+        this.deferredCalls.delete(key);
+        this.withdrawnCalls.add(inFlight);
+        void inFlight.cancel();
+      }
     }
     instance.deferredKeys.clear();
   }
+
+  /** Consumed waits still winding down — awaited with the rest when their instance terminates. */
+  private readonly withdrawnCalls = new Set<DeferredCall>();
 
   /**
    * Stop every deferred call this instance started, and wait for them to settle.
@@ -3707,7 +4066,7 @@ export class WorkflowEngine {
    * would keep a request on somebody's screen for a run that has ended.
    */
   private async cancelDeferredCalls(instance: Instance): Promise<void> {
-    const waiting = this.deferredFor(instance);
+    const waiting = [...this.deferredFor(instance), ...[...this.withdrawnCalls].filter((c) => c.instance === instance)];
     await Promise.allSettled(waiting.map(async (c) => c.cancel()));
     await Promise.allSettled(waiting.map((c) => c.settled));
   }
@@ -4870,10 +5229,16 @@ function asJsonRecord(values: Record<string, ResolvedValue>): Record<string, Jso
   return values as Record<string, JsonValue>;
 }
 
+/** How an ABORTED instance ended: `skipped` when a directed transition stepped past it (the reason
+ *  its signal carries — see `SkipAbort`), `canceled` for every other abort. */
+function abortedOutcome(instance: Instance): TerminationOutcome {
+  return isSkipAbort(instance.abort.signal.reason) ? "skipped" : "canceled";
+}
+
 /** The state failed while flagged canceled/timed-out? Loop top decides; here we always report error. */
 function failureOutcome(instance: Instance): TerminationOutcome {
   if (instance.timedOut) return "timeout";
-  if (instance.abort.signal.aborted) return "canceled";
+  if (instance.abort.signal.aborted) return abortedOutcome(instance);
   return "error";
 }
 

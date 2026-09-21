@@ -41,6 +41,7 @@ import {
   REF_NAMESPACES,
   RESOLVER_REFS,
   TERMINATE_TARGETS,
+  TERMINATION_OUTCOMES,
   type LoadedState,
   type LoadedTransition,
   type SlotMeta,
@@ -61,8 +62,9 @@ export interface ValidationReport {
 
 const NAMESPACES: ReadonlySet<string> = new Set([...REF_NAMESPACES, ...GUARD_NAMESPACES, ...FIELD_NAMESPACES]);
 const TERMINATES: ReadonlySet<string> = new Set(TERMINATE_TARGETS);
-/** The termination outcomes a child's `outcome` can carry (SPEC §3.6). */
-const TERMINATE_OUTCOMES = ["success", "error", "canceled", "timeout"] as const;
+/** The termination outcomes a child's `outcome` can carry (SPEC §3.6) — the four an author can
+ *  transition to, and `skipped`, which only a directed transition records (SPEC §3.3). */
+const TERMINATE_OUTCOMES = TERMINATION_OUTCOMES;
 /** Every legal slot kind — `blob` joined the set when binary data became a leaf kind (§7). */
 const SLOT_KINDS: ReadonlySet<string> = new Set<RefKind>(["text", "json", "blob", "prompt", "function"]);
 
@@ -344,6 +346,16 @@ function validateState(
     (list ?? []).forEach((t, i) => {
       if (!TERMINATES.has(t.to) && !childKeys.has(t.to)) {
         err(`${where}[${i}].to`, `'${t.to}' is neither a declared child nor a terminate.* outcome`);
+      }
+      // A STANDING rule (SPEC §3.3) is an offer somebody may take up, so it needs a guard that can
+      // come true and somewhere to go: with no `when` it could only fire always or never, and an
+      // offer to END the state is not a move.
+      if ((t as { standing?: unknown }).standing !== undefined && typeof (t as { standing?: unknown }).standing !== "boolean") {
+        err(`${where}[${i}].standing`, "`standing` must be true or false");
+      }
+      if (t.standing === true) {
+        if (t.when === undefined) err(`${where}[${i}].when`, "a standing rule needs a `when` — it is taken when its guard comes true, and has none");
+        if (TERMINATES.has(t.to)) err(`${where}[${i}].to`, "a standing rule enters a child; it cannot terminate the state");
       }
       // A transition's own wiring for the child it enters, checked exactly as the mount's is: same
       // scope, same reachability question, same "does the target declare this name" rule. Silence

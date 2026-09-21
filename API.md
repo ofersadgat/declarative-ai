@@ -2569,6 +2569,24 @@ interface EngineConfig {
   // Per-session workspace resolver (DESIGN.md §5.1): a state's `operation.session` -> its
   // workspace, for fan-out isolation. undefined => the run-level `services.workspace`.
   workspaceFor?: (resourceKey: string, declared?: { name: string; configuration: JsonValue }) => Workspace | undefined;
+  // The port DIRECTED transitions arrive through (SPEC.md §3.3, `directed.ts`). The engine attaches
+  // for the length of the run; a move queued before that is claimed by the instance it names as a
+  // loaded run builds it — which reopens a terminated instance to take it. Also on
+  // `WorkflowExecutorOptions`, since the executor builds the engine.
+  directed?: DirectedTransitions;
+}
+// A move the host injects on somebody's behalf. `instanceId` absent => the root instance; `to` is a
+// declared child of it. Held while a sync child holds the cursor unless `skip`, which interrupts —
+// the running child and every unentered member stepped over end `skipped`.
+interface DirectedTransition {
+  instanceId?: string; to: string; inputs?: Record<string, ResolvedValue>;
+  by: TransitionAsker;             // "person" | "control" — journaled on `transition.taken`
+  skip?: boolean;
+}
+type DirectedOutcome = { status: "queued" | "held" | "taking" } | { status: "refused"; reason: string };
+class DirectedTransitions {
+  direct(move: DirectedTransition): DirectedOutcome;   // never throws
+  queued(): readonly DirectedTransition[];
 }
 interface WorkflowRunOptions { inputs: Record<string, unknown>; abortSignal?: AbortSignal; }
 interface WorkflowRunResult {

@@ -342,6 +342,75 @@ it again" means that, rather than firing on the memory of the last time.
 A wait is recorded in the run journal as a `call.waiting`/`call.settled` pair, so
 a run parked on a person does not read as one that hung.
 
+**Standing rules.** A transition marked `"standing": true` is an OFFER that stands
+beside the state's ordinary progress, where an ordinary waiting rule is a decision
+the state parks on. It is what a host generates for "a person may move this task
+there":
+
+```json
+{ "when": "on_user_event('task_move', { to_state: 'ui' })", "to": "ui", "standing": true }
+```
+
+Its wait is started like any other, and it holds nothing:
+
+- it is evaluated LAST — behind every ordinary rule of the round, the state's and
+  the eligible children's alike, whatever position it was written in. An offer
+  must never pre-empt a rule of the workflow it stands beside;
+- while it waits, the rules behind it (other standing rules) still get their turn,
+  the sequence advances, and a state with nothing left to run TERMINATES — the
+  implicit "sequence ended → success" stays ahead of it, so a task nobody moves
+  finishes instead of parking on a move nobody asked of it. Termination withdraws
+  the offer like any other wait;
+- when its guard comes true while a sync child holds the cursor, it is HELD: not
+  taken, and not forgotten. The round that child's end triggers takes it — unless
+  an ordinary rule fires in that round first, which cancels the wait exactly as
+  any taken transition cancels the waits it did not answer.
+
+A standing rule needs a `when` and must enter a child; validation refuses one with
+no guard, or whose `to` is a `terminate.*` outcome.
+
+**Directed transitions.** Every transition above is taken because a rule fired. A
+DIRECTED transition is one the HOST injects on somebody's behalf — a person who
+dragged a card, or a conversation that holds the workflow as a tool and was told
+"go there". The host hands the run `{ instanceId?, to, inputs?, by, skip? }`
+through a `DirectedTransitions` port (`EngineConfig.directed`):
+
+- `to` is a declared child of the instance named (the run's root when none is).
+  `inputs` are handed to the target over the mount's wiring, per name, exactly as
+  a transition's own `inputs` are. Where a standing rule to the same child carries
+  `inputs`, a directed move takes that wiring too, the asker's values winning.
+- it is taken AHEAD of every rule, and it answers for whatever had finished or
+  failed and not yet been answered: the person said where the run goes.
+- without `skip` it is HELD while a sync child holds the cursor, and taken when
+  that child ends. The latest move handed over wins. A state's own operation
+  always runs first — a move is between children.
+- with `skip` the running sequence children (and the child holding the cursor)
+  are INTERRUPTED. **The jump is decided before the interrupt lands**: an
+  interrupted operation may well complete — an agent's turn cut short returns the
+  partial answer as a success — and a completion landing on an undecided parent is
+  an ordinary round that walks the run into the next member. So the children are
+  marked, the transition and every `skipped` row are journaled, and only then is
+  anything aborted; the interrupted child's own end, whatever it is, answers
+  nothing. The target is entered once the interrupted calls have wound down.
+- FORWARD, every sequence member between the cursor and the target that was never
+  entered is recorded too, as an `instance.entered`/`instance.terminated` pair with
+  outcome `skipped` — so it reads as `outcome: "skipped"` to an expression, live
+  and after a load, where a member an AUTHORED jump passes over stays absent.
+  BACKWARD is the workflow's own machinery: the target is re-entered as the next
+  occurrence, a new pass opens, and the usual reset applies.
+- it is journaled as `transition.taken` with `by` (`"person"` or `"control"`),
+  `skip` and the `inputs` handed over. A rule-taken transition has no `by`.
+
+A move handed to the port while no run is attached is QUEUED, and claimed by the
+instance it names when a loaded run builds it — which is how a FINISHED run takes
+a move: it is loaded with one waiting. The instance named, and every ancestor on
+the way down to it, is REOPENED — continued exactly as a live instance is — and
+its `transition.taken` row is what says so in the journal. A stopped run reopened
+with `skip` steps past the children it would have interrupted without continuing
+them first. `LoadedInstance.directed` carries a directed transition that was
+journaled and whose target never entered; the loaded instance makes that entry
+first, without journaling the transition again.
+
 ### 3.4 State Instances
 
 Entering a state — including re-entering it via a transition — creates a fresh
@@ -386,6 +455,13 @@ terminate.timeout
 Domain-level results such as "approved" or "needs changes" are ordinary
 schema-validated outputs. Parents branch on `children.<id>.outputs.*` for
 decisions and on `children.<id>.outcome` for failure handling.
+
+A fifth outcome, `skipped`, is one no author can transition to. It is what a
+directed transition (§3.3) records for the running child it interrupted and for
+every sequence member it stepped over without entering. `children.<id>.outcome`
+reads `"skipped"` for such a child — a fact about the run, where a child that
+never ran reads as absent — and a consumer of its outputs finds none. It is not a
+failure: nothing has to handle it, and a load never revives it.
 
 A child termination includes:
 

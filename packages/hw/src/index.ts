@@ -25,6 +25,9 @@ export * from "./workspace.js";
 // `environment.names`: what a scoped name is configured with, and the one type it has.
 export * from "./names.js";
 export * from "./load.js";
+// Directed transitions (SPEC §3.3): a move the host injects on a person's behalf, and the port it
+// is handed through.
+export * from "./directed.js";
 // Durable id minting — the UUIDv7 every instance is named by. Exported because a host that mints
 // ids in the same space (derived instance ids, later assigned session/task ids) must share the shape.
 export * from "./ids.js";

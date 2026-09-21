@@ -43,6 +43,7 @@ export function emptyWorkflowMetrics(): WorkflowMetrics {
   return { durationMs: 0, costUsd: 0, costSource: "unknown" };
 }
 import type { TerminationOutcome } from "./format.js";
+import type { TransitionAsker } from "./directed.js";
 
 /** An artifact value flowing through workflow inputs/outputs (SPEC §4.6). For
  *  llm-backed states the content travels inline; process units use paths.
@@ -191,8 +192,28 @@ export type EngineEvent =
       kind: "task" | "split";
       runs: Array<{ element: number; id?: string; runId: string; title: string }>;
     }
-  /** `index` counts every transition; `iteration` counts only the backward ones — the passes. */
-  | { type: "transition.taken"; instanceId: string; stateId: string; to: string; index: number; iteration: number }
+  /**
+   * `index` counts every transition; `iteration` counts only the backward ones — the passes.
+   *
+   * `by` is WHO ASKED, and is present exactly when the transition was DIRECTED (SPEC §3.3): injected
+   * by the host on somebody's behalf rather than taken because a rule fired. A directed transition
+   * onto an instance that had already terminated REOPENS it — the row is the reopening, and a reader
+   * folding the journal treats the instance as live again from here. `skip` says the running child
+   * was interrupted rather than waited for; `inputs` are what the asker handed the target (artifact
+   * content elided), kept so a run that died between this row and the target's entry can still make
+   * the entry it owes (`LoadedInstance.directed`).
+   */
+  | {
+      type: "transition.taken";
+      instanceId: string;
+      stateId: string;
+      to: string;
+      index: number;
+      iteration: number;
+      by?: TransitionAsker;
+      skip?: boolean;
+      inputs?: Record<string, ResolvedValue>;
+    }
   | { type: "child.superseded"; instanceId: string; stateId: string; childKey: string }
   | { type: "instance.terminated"; instanceId: string; stateId: string; outcome: TerminationOutcome; failure?: Failure };
 

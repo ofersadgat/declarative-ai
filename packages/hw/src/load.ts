@@ -92,6 +92,12 @@ export interface LoadedInstance {
    * restart. A field absent here (the run stopped mid-evaluation) is evaluated afresh.
    */
   fields?: Readonly<Record<string, ResolvedValue>>;
+  /**
+   * A DIRECTED transition this instance journaled as taken whose target was never entered — the run
+   * died between the two rows. The loaded instance owes that entry and makes it first, without
+   * journaling the transition again (`index`/`iteration` already count it).
+   */
+  directed?: { to: string; inputs?: Record<string, ResolvedValue> };
   /** In entry order. Superseded instances are omitted; their entries survive in `occurrence`. */
   children?: readonly LoadedInstance[];
 }

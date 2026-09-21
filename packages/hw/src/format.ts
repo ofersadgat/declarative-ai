@@ -34,8 +34,18 @@ import type { NormalizedWorkspace, WorkspaceDecl } from "./workspace.js";
 // one set of names.
 export type { FunctionOp, InlineFamily, NamedParameter, Operation, Parameter, PromptOp, Ref, RefKind };
 
-/** Termination outcomes (SPEC §3.6) — how a state finished, not what it decided. */
-export type TerminationOutcome = "success" | "error" | "canceled" | "timeout";
+/**
+ * Termination outcomes (SPEC §3.6) — how a state finished, not what it decided.
+ *
+ * `skipped` is the one an author cannot transition to: it is what a DIRECTED transition (SPEC §3.3,
+ * "Directed transitions") records for the running child it interrupted and for every sequence member
+ * it jumped over without entering. It reads as `outcome: "skipped"` to an expression — a child a
+ * person stepped past is a fact, where a child that never ran is an absence.
+ */
+export type TerminationOutcome = "success" | "error" | "canceled" | "timeout" | "skipped";
+
+/** Every outcome an expression may read off `.children.<key>.outcome` — `terminate.*` plus `skipped`. */
+export const TERMINATION_OUTCOMES = ["success", "error", "canceled", "timeout", "skipped"] as const;
 
 export const TERMINATE_TARGETS = [
   "terminate.success",
@@ -929,6 +939,24 @@ export interface TransitionDecl {
    * a transition restates only what it changes.
    */
   inputs?: Record<string, BindingDecl>;
+  /**
+   * A STANDING rule: an offer that stands beside the state's ordinary progress instead of a decision
+   * the state parks on (SPEC §3.3, "Standing rules").
+   *
+   * An ordinary rule waiting on a deferred call stops the list, holds the sequence and keeps the
+   * state from terminating — it is a question the state has asked and will not move without. A
+   * standing rule asks the same question and holds nothing: it is evaluated LAST, behind every
+   * other rule of the round whatever position it was written in; while it waits the rules behind it
+   * still get their turn, the sequence still advances, and a state with nothing left to do still
+   * terminates (withdrawing the offer). When its guard comes true while a sync child holds the
+   * cursor it is HELD, and taken in the round that child's end triggers — unless an authored rule
+   * fires first, which cancels the wait like any taken transition does.
+   *
+   * What a host GENERATES for "a person may move this task there" —
+   * `on_user_event('task_move', { to_state })` — is written with this, so a task nobody moves
+   * follows the workflow as if the rule were not there.
+   */
+  standing?: boolean;
 }
 
 /**

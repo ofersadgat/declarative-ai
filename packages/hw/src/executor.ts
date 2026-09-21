@@ -30,6 +30,7 @@ import { syncOnly } from "@declarative-ai/exec";
 import { WorkflowEngine, type CallResult, type FanOutHost, type SplitEntry } from "./engine.js";
 import type { WorkflowBundle } from "./format.js";
 import type { LoadedInstance } from "./load.js";
+import type { DirectedTransitions } from "./directed.js";
 import { isByteStream, materialize, MaterializeError } from "./materialize.js";
 import { snapshotHash } from "./loader.js";
 import type { Persistence, WorkflowMetrics } from "./ports.js";
@@ -93,6 +94,11 @@ export interface WorkflowExecutorOptions {
   fanOut?: FanOutHost;
   /** The lists this run is split on — see {@link EngineConfig.split}. Forwarded for the same reason. */
   split?: readonly SplitEntry[];
+  /**
+   * The port DIRECTED transitions reach the run through — see {@link EngineConfig.directed}. The
+   * host keeps the port and the engine attaches to it, because the engine itself is built in here.
+   */
+  directed?: DirectedTransitions;
 }
 
 const CAPABILITIES: Capabilities = {
@@ -236,6 +242,7 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
       ...(this.options.newInstanceId !== undefined ? { newInstanceId: this.options.newInstanceId } : {}),
       ...(this.options.fanOut !== undefined ? { fanOut: this.options.fanOut } : {}),
       ...(this.options.split !== undefined ? { split: this.options.split } : {}),
+      ...(this.options.directed !== undefined ? { directed: this.options.directed } : {}),
       services: ctx,
       clock: ctx.clock,
       onEvent: (event) => {
