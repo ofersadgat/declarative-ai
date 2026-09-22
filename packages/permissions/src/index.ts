@@ -5,7 +5,7 @@
  * package rather than 265 lines sitting in a core everything depends on. It DECLARES its own seams on
  * `ExecServices` (DESIGN §3.2) — `exec` therefore does not know that permissions exist.
  */
-import type { Approver, AskUser, ExecPolicy, ToolGate } from "./permissions.js";
+import type { Approver, AskUser, AuthoredPermissions, ExecPolicy, ToolGate } from "./permissions.js";
 
 export * from "./permissions.js";
 
@@ -31,6 +31,19 @@ declare module "@declarative-ai/exec" {
      * ungated — which is a wiring mistake, not a mode.
      */
     gate?: ToolGate;
+    /**
+     * The operation's own RESOLVED permission block — what its `environment.permissions` says after
+     * the chain merged, host keys included ({@link AuthoredPermissions}).
+     *
+     * The {@link gate} DECIDES through this block but cannot say what it holds: asked about a name it
+     * has no entry for, a gate answers `other` whether `other` was written or is the ledger's last
+     * resort, and a host key (which implementation serves a tool, which command subjects judge a
+     * shell line) reaches no answer at all. An executor that shapes its agent up front — which
+     * built-ins to remove, which to force through the callback — needs the statement as well as the
+     * decision. Published whenever the operation's environment carries a block, with or without an
+     * approver; absent when it carries none.
+     */
+    authored?: AuthoredPermissions;
     /**
      * Where a running agent's mid-run QUESTIONS go — `AskUserQuestion` and its kin.
      *

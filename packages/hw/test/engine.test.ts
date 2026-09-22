@@ -1065,6 +1065,91 @@ describe("tool permissions (DESIGN §5.1, \"Permissions: two orthogonal axes\")"
     expect(seen!.ctx.gate?.profile).toBe("read-only");
   });
 
+  it("publishes the operation's resolved block on `ctx.authored` — a written `other` and the HOST's keys included", async () => {
+    // A gate answers `other` for a name it has no entry for whether `other` was written or is the
+    // ledger's last resort, and a host key reaches no answer at all. An executor that shapes its agent
+    // up front needs the statement, so the block rides beside the gate, verbatim.
+    let seen: FakeCall | undefined;
+    const script: Script = (call) => {
+      seen = call;
+      return ok({ r: "done" });
+    };
+    const inner = new FakePromptExecutor(script);
+    const delegatedPrompt: Executor<ExecServices, WorkflowMetrics> = {
+      metrics: inner.metrics,
+      capabilities: { ...inner.capabilities, policyEnforcement: "callback" },
+      start: (o, c) => inner.start(o, c),
+    };
+    const narrowedWith: unknown[] = [];
+    const block = { other: "ask", tools: { write: "allow" }, subjects: { "git status": "allow" }, source: "inline", implementations: { write: "native" } };
+    const { engine } = makeEngine(invokeWriteFiles(block as never), "s", script, {
+      tools: { write: writeTool },
+      prompt: delegatedPrompt,
+      extra: {
+        services: {
+          approve: allowSession,
+          policy: {
+            scopeOf: (_tool: unknown, _input: unknown, authored: unknown) => {
+              narrowedWith.push(authored);
+              return undefined;
+            },
+          },
+        } as unknown as ExecServices,
+      },
+    });
+    expect((await engine.run({ inputs: {} })).outcome).toBe("success");
+    expect(seen!.ctx.authored).toEqual(block);
+    // The gate decides through the SAME block, and a host's narrowing is handed it whole.
+    await seen!.ctx.gate!.check({ name: "write" }, {});
+    expect(narrowedWith).toEqual([block]);
+  });
+
+  it("publishes the block with NO approver, and nothing for an environment that carries none", async () => {
+    let seen: FakeCall | undefined;
+    const script: Script = (call) => {
+      seen = call;
+      return ok({ r: "done" });
+    };
+    const bare = makeEngine(invokeWriteFiles({ other: "deny", subjects: { bash: "deny" } } as never), "s", script, { tools: { write: writeTool } });
+    expect((await bare.engine.run({ inputs: {} })).outcome).toBe("success");
+    expect(seen!.ctx.gate).toBeUndefined();
+    expect(seen!.ctx.authored).toEqual({ other: "deny", subjects: { bash: "deny" } });
+
+    const none = makeEngine(invokeWriteFiles(), "s", script, {
+      tools: { write: writeTool },
+      // A host bundle that already carries a block — a sub-workflow's copied ctx — is not this call's.
+      extra: { services: { authored: { other: "allow" } } as unknown as ExecServices },
+    });
+    expect((await none.engine.run({ inputs: {} })).outcome).toBe("success");
+    expect(seen!.ctx.authored).toBeUndefined();
+  });
+
+  it("a child's own host key REPLACES its parent's; only `tools` merges one level deeper", async () => {
+    const calls: FakeCall[] = [];
+    const script: Script = (call) => {
+      calls.push(call);
+      return ok({ r: "done" });
+    };
+    const files: Record<string, StateDef> = {
+      parent: {
+        inputs: {},
+        outputs: {},
+        environment: { permissions: { tools: { "host:mark": "allow" }, subjects: { bash: "ask", "git push": "allow" } } as never },
+        children: { kid: { state: "parent/kid", inputs: {} } },
+        sequence: ["kid"],
+      },
+      "parent/kid": {
+        inputs: {},
+        outputs: { r: { schema: { type: "string" } } },
+        operation: { kind: "prompt", prompt: "go", model: "reviewer" },
+        environment: { permissions: { tools: { write: "ask" }, subjects: { bash: "deny" } } as never },
+      },
+    };
+    const { engine } = makeEngine(files, "parent", script, { tools: { write: writeTool } });
+    expect((await engine.run({ inputs: {} })).outcome).toBe("success");
+    expect(calls[0]!.ctx.authored).toEqual({ tools: { "host:mark": "allow", write: "ask" }, subjects: { bash: "deny" } });
+  });
+
   it("routes a smart-mode tool through the engine-supplied smart policy (decides before the human)", async () => {
     let toolResult: JsonValue = null;
     const script: Script = async (call) => {

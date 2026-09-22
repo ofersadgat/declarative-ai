@@ -111,7 +111,7 @@ import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, 
 // Computed fields (SPEC §5.3): evaluated once at entry, written into a per-instance definition.
 import { fieldDependencies, fieldsView, materializeFields } from "./fields.js";
 import { bindIntoSlots } from "./loader.js";
-import { hasDefault, literalPermissions, SPAWN_DEFAULTS, type HostedEachKind, type LoadedField, type SpawnFields } from "./format.js";
+import { hasDefault, literalPermissions, SPAWN_DEFAULTS, type HostedEachKind, type LiteralPermissions, type LoadedField, type SpawnFields } from "./format.js";
 import { isCallableKind, isCallableSchema } from "@declarative-ai/exec";
 import { isOperationValue } from "./resolve.js";
 import { uuidv7 } from "./ids.js";
@@ -4204,7 +4204,7 @@ export class WorkflowEngine {
     try {
       const handle = this.operations.start(
         rendered,
-        await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, session, toolsOrFailure.gate, scope, op.kind),
+        await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, session, toolsOrFailure.gate, scope, op.kind, toolsOrFailure.authored),
       );
       onHandle?.(handle);
       outcome = await handle.result;
@@ -4277,7 +4277,7 @@ export class WorkflowEngine {
     if ("failure" in toolsOrFailure) return fail(toolsOrFailure.failure);
 
     const scope = this.stateOpScope(instance);
-    const services = await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, session, toolsOrFailure.gate, scope, "function");
+    const services = await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, session, toolsOrFailure.gate, scope, "function", toolsOrFailure.authored);
     // Errors are DATA (§4.2): the impl RESOLVES value-or-failure, so a 429 raised inside a registered
     // function keeps its classification instead of being reconstructed from `err.name` — which is what
     // made every non-`AbortError` permanently failed, retry machinery and all.
@@ -4428,7 +4428,7 @@ export class WorkflowEngine {
     // The gate rides along exactly as it does on the function path: inert for a composed transport,
     // and the ONLY carrier of authored modes and the session profile for a delegated one.
     const scope = this.stateOpScope(instance);
-    const services = await this.servicesFor(session.resourceKey, instance, tools, session, toolsOrFailure.gate, scope, "prompt");
+    const services = await this.servicesFor(session.resourceKey, instance, tools, session, toolsOrFailure.gate, scope, "prompt", toolsOrFailure.authored);
     // An authored `limits.timeout` reaches the call as CANCELLATION. It used to be published as
     // `services.timeoutMs`, which only an executor that knew to read it honoured — and which the llm
     // layer turned straight back into `AbortSignal.timeout(...)` anyway. Folding it into the signal
@@ -4526,7 +4526,7 @@ export class WorkflowEngine {
     env: ExecEnvironmentDecl,
     sessionId: string,
     delegatesPermissions: boolean,
-  ): { tools?: Record<string, Tool>; gate?: ToolGate } | { failure: Failure } {
+  ): { tools?: Record<string, Tool>; gate?: ToolGate; authored?: LiteralPermissions } | { failure: Failure } {
     const approve = this.config.permissions?.approve;
     /**
      * The GATE's escalation channel, falling back to the services seam.
@@ -4559,7 +4559,11 @@ export class WorkflowEngine {
       tools[name] = tool;
     }
     const some = Object.keys(tools).length > 0;
-    if (!escalate) return some ? { tools } : {};
+    // The block itself, beside whatever decides through it — see `ExecServices.authored`. Published
+    // with or without an approver: an executor shaping its agent up front needs the statement even
+    // where no gate is built.
+    const stated = permissions !== undefined ? { authored: permissions } : {};
+    if (!escalate) return some ? { tools, ...stated } : stated;
 
     /**
      * The gate, built for EVERY enforcement style rather than only the delegated one.
@@ -4590,12 +4594,12 @@ export class WorkflowEngine {
       ...(scopeOf !== undefined ? { scopeOf } : {}),
     });
 
-    if (delegatesPermissions) return { ...(some ? { tools } : {}), gate };
+    if (delegatesPermissions) return { ...(some ? { tools } : {}), gate, ...stated };
     // Composed, but the host wired no engine-level approver: the tools stay RAW — the documented
     // "without an approver, tools are handed over unguarded" rule, unchanged — and the gate still
     // travels for anything that reads only it.
-    if (!approve) return { ...(some ? { tools } : {}), gate };
-    if (!some) return { gate };
+    if (!approve) return { ...(some ? { tools } : {}), gate, ...stated };
+    if (!some) return { gate, ...stated };
     // OWN entries only. These are authored/host-supplied maps keyed by TOOL NAME, so a tool called
     // `constructor` or `toString` used to resolve its permission mode — and its smart-approval rule
     // — to a prototype member, handing a FUNCTION to a permission decision. Far-fetched input, but
@@ -4624,7 +4628,7 @@ export class WorkflowEngine {
     if (this.permissions.resolveProfile(sessionId) === "plan") {
       guarded["exit_plan"] = planExitTool({ ledger: this.permissions, sessionId, approve });
     }
-    return { tools: guarded, gate };
+    return { tools: guarded, gate, ...stated };
   }
 
   /** The services one operation runs with: its resource bundle's workspace, its tools, its cancellation. */
@@ -4703,9 +4707,15 @@ export class WorkflowEngine {
     /** The dispatch site this call is made from — with `opKind`, arms the record layer's seam. */
     scope?: OperationScope,
     opKind?: OperationKind,
+    /** The operation's resolved permission block, when its environment carries one — see {@link resolveTools}. */
+    authored?: LiteralPermissions,
   ): Promise<ExecServices> {
     const services = this.childServices();
     if (gate !== undefined) services.gate = gate;
+    // Set or CLEARED, for the reason the dispatch scope below is: for a sub-workflow the copied
+    // bundle IS the parent dispatch's ctx, and the parent's block is not this operation's statement.
+    if (authored !== undefined) services.authored = authored;
+    else delete services.authored;
     // The dispatch scope and its callback — set or CLEARED unconditionally, because `childServices`
     // copies the host-provided bundle, and for a sub-workflow that bundle IS the parent dispatch's
     // ctx: an inherited scope would stamp the parent's site onto every nested call.

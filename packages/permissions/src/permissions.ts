@@ -89,6 +89,28 @@ export interface ScopeDecl {
   default?: PermissionMode;
 }
 
+/**
+ * One operation's RESOLVED permission block — its `environment.permissions` after the environment
+ * chain has merged and every binding in it has been written in — as the engine hands it to an
+ * executor (`ExecServices.authored`) and to a host's narrowing ({@link ScopeNarrowing}).
+ *
+ * The five keys this package reads are typed. Every OTHER key is the host's: a host that lowers its
+ * own vocabulary into the block (command subjects, which toolset a block came from, whose code
+ * serves a tool) gets those keys back verbatim, because the decisions a host makes about a call and
+ * a delegated executor makes about its agent's built-ins need them, and nothing in this package can
+ * interpret them. A key's value is whatever the nearest layer of the chain wrote: `permissions`
+ * merges per key, and only `tools` merges one level deeper.
+ */
+export interface AuthoredPermissions {
+  profile?: PermissionProfile;
+  default?: PermissionMode;
+  other?: PermissionMode;
+  tools?: Record<string, PermissionMode>;
+  scopes?: ScopeDecl[];
+  /** A host's own key, passed through untouched. */
+  readonly [host: string]: unknown;
+}
+
 /** Either form. A predicate is the older, narrower statement; a table is the complete one. */
 export type ProfileRule = ProfilePredicate | ProfileTable;
 

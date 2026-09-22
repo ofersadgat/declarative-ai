@@ -529,14 +529,26 @@ export interface PermissionsDecl {
     scopes?: ScopeDecl[];
 }
 
-/** A permission field as a LITERAL — what a materialized definition holds (SPEC §5.3). */
+/**
+ * A permission field as a LITERAL — what a materialized definition holds (SPEC §5.3).
+ *
+ * The five keys the engine reads, plus every key it does not: a host that lowers its own vocabulary
+ * into `permissions` (command subjects, the toolset a block came from, whose code serves a tool)
+ * gets it back verbatim on the gate's `authored`, the narrowing's `authored` and
+ * `ExecServices.authored`. The engine interprets none of them, and materializes none of them.
+ */
 export interface LiteralPermissions {
   profile?: PermissionProfile;
   default?: PermissionMode;
   tools?: Record<string, PermissionMode>;
   other?: PermissionMode;
   scopes?: ScopeDecl[];
+  /** A host's own key, passed through untouched. */
+  readonly [host: string]: unknown;
 }
+
+/** The keys of a permissions block the engine itself reads; any other key is the host's. */
+const ENGINE_PERMISSION_KEYS: ReadonlySet<string> = new Set(["profile", "default", "tools", "other", "scopes"]);
 
 /**
  * The permissions block an engine reads — every binding in it written in by materialization. A
@@ -548,7 +560,13 @@ export function literalPermissions(env: ExecEnvironmentDecl | undefined): Litera
   if (declared === undefined || isBindingDecl(declared)) return undefined;
   const p = declared as PermissionsDecl;
   const literal = <T>(v: Bindable<T> | undefined): T | undefined => (v === undefined || (typeof v !== "string" && isBindingDecl(v)) ? undefined : (v as T));
-  const out: LiteralPermissions = {};
+  // The host's keys first, verbatim and in their authored order; the engine's own are written over
+  // them below, so a host key can never stand in for one the engine reads.
+  const host: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(p as Record<string, unknown>)) {
+    if (!ENGINE_PERMISSION_KEYS.has(key) && key !== "__proto__" && value !== undefined) host[key] = value;
+  }
+  const out: { -readonly [K in keyof LiteralPermissions]: LiteralPermissions[K] } = host;
   const profile = literal<PermissionProfile>(p.profile);
   if (profile !== undefined) out.profile = profile;
   const mode = literal<PermissionMode>(p.default);
