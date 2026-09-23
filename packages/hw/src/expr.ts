@@ -837,6 +837,15 @@ function applyOperator(expr: Expr & { type: "apply" }, context: Record<string, u
       return t ? arg(1) : arg(2);
     }
     default: {
+      // `coalesce(a, b)` is `a ?? b`: the fourth lazy form, `b` evaluated only when `a` is absent.
+      // Written positionally it is lazy here as it is in the resolver; a spread names both at once
+      // and takes the strict path below.
+      if (expr.op === "coalesce" && !expr.args.some(isSpread)) {
+        const a = expr.args.length > 0 ? arg(0) : undefined;
+        if (isPending(a)) return PENDING;
+        if (a !== null && a !== undefined) return a;
+        return expr.args.length > 1 ? arg(1) : undefined;
+      }
       // A BUILT-IN is pure, total and non-mutating by contract (§3), which is exactly what this
       // interpreter needs: no callee to resolve, no filesystem, no scope beyond its arguments. The
       // refusal below is for a DOCUMENT reference — `classify(x)` — which has all three and genuinely

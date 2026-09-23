@@ -92,7 +92,7 @@ import type {
   TerminationOutcome,
   WorkflowBundle,
 } from "./format.js";
-import { bindElement, bindInputs, embeddedOpsOf, higherOrderEdgesOf, higherOrderOf, isResolvedValue, isResolveError, resolveEmbedded, resolveInputs, resolveOperationInputs, resolveRef, type ResolutionScope, type Resolved } from "./resolve.js";
+import { bindElement, bindInputs, higherOrderEdgesOf, higherOrderOf, isResolvedValue, isResolveError, resolveInputs, resolveOperationInputs, resolveRef, type ResolutionScope, type Resolved } from "./resolve.js";
 import { isByteStream, materialize, MaterializeError } from "./materialize.js";
 import {
   isSessionExpr,
@@ -3641,11 +3641,13 @@ export class WorkflowEngine {
    * Run the calls a binding DEMANDS until it demands none — the resolution-driven loop a guard's
    * calls already run under, for a binding that is not a rule.
    *
-   * A static walk (`embeddedOpsOf`) sees every call whose callee is NAMED. A call THROUGH A VALUE
-   * (`op.apply`, SPEC §6.2) names nothing until the value resolves, so it can only be found by
-   * resolving: the resolver reports the operation it needs, this runs it, and resolution is tried
-   * again, because one answer can unlock the next demand. `waiting` says a demanded call is a
-   * DEFERRED one still in flight, which is the caller's to wait on.
+   * The one way a binding's calls are run. A static walk (`embeddedOpsOf`) would see every call whose
+   * callee is NAMED, but it sees them on both sides of every operator, so it runs the branch of a
+   * `?:` that is not taken; and a call THROUGH A VALUE (`op.apply`, SPEC §6.2) names nothing until
+   * the value resolves. Resolving finds exactly the calls evaluation reaches: the resolver reports
+   * the operation it needs, this runs it, and resolution is tried again, because one answer can
+   * unlock the next demand. `waiting` says a demanded call is a DEFERRED one still in flight, which
+   * is the caller's to wait on.
    */
   private async runDemanded(
     instance: Instance,
@@ -3655,6 +3657,11 @@ export class WorkflowEngine {
     env?: ExecEnvironmentDecl,
     /** The consuming slot's kind, so an uncalled operation feeding a callable slot is not run. */
     kind?: RefKind,
+    /**
+     * How a demanded call is made: `start` registers a DEFERRED callee as a wait (`startCall`), which
+     * a field and a guard know how to hold for; `inline` awaits every callee where it is made.
+     */
+    dispatch: "start" | "inline" = "start",
   ): Promise<{ waiting: boolean } | { failure: Failure }> {
     const started = new Set<string>();
     for (;;) {
@@ -3676,7 +3683,12 @@ export class WorkflowEngine {
       );
       if (fresh.size === 0) return { waiting };
       for (const key of fresh.keys()) started.add(key);
-      const results = await Promise.all([...fresh].map(async ([key, op]) => [key, await this.startCall(instance, op, env)] as const));
+      const results = await Promise.all(
+        [...fresh].map(
+          async ([key, op]) =>
+            [key, dispatch === "inline" ? await this.runEmbeddedOp(instance, op, undefined, key, env) : await this.startCall(instance, op, env)] as const,
+        ),
+      );
       for (const [key, outcome] of results) if (outcome !== PENDING) this.rememberAnswer(instance, key, outcome);
     }
   }
@@ -3939,31 +3951,21 @@ export class WorkflowEngine {
       if (isCallableKind(kind) && "op" in binding && typeof binding.op !== "string" && binding.parameters === undefined && binding.op.spread === undefined) {
         continue;
       }
-      // HIGHER-ORDER first (§3.5): one application per element, and how many there are is not known
-      // until the array resolves — so this cannot be a static walk like `embeddedOpsOf` is.
-      const higherFailure = await this.runHigherOrder(instance, binding, each);
-      if (higherFailure !== undefined) return higherFailure;
-      for (const { op, parameters } of embeddedOpsOf(binding)) {
-        const scope = this.scopeFor(instance, undefined, each);
-        // ONE definition of a call's identity, shared with resolution (`resolveEmbedded`): the op
-        // with its arguments bound in. Two copies of that rule would hash differently and the memo
-        // would never hit.
-        const resolved = resolveEmbedded(op, parameters, scope);
-        if (isPending(resolved)) {
-          return { classification: "permanent", reason: "a call's argument depends on a child that has not resolved" };
-        }
-        if ("error" in resolved) return { classification: "permanent", reason: resolved.error };
-
-        const key = hashOperation(resolved.op);
-        if (this.answerFor(instance, key) !== undefined) continue;
-        const outcome = await this.runEmbeddedOp(instance, resolved.op, undefined, key);
-        // PENDING is a scheduling state, not an answer — nothing to remember, and nothing a durable
-        // cache could serialize.
-        if (outcome !== PENDING) this.rememberAnswer(instance, key, outcome);
-      }
-      // Then whatever the static walk could not see — a call THROUGH A VALUE (§6.2), whose callee is
-      // known only once the value is. Demand-driven, exactly as a guard's calls are.
-      const demanded = await this.runDemanded(instance, binding, each, undefined, kind);
+      // DEMAND-DRIVEN, exactly as a guard's calls are: resolving the binding reports each call whose
+      // result is missing, those run, and it is resolved again. So a call runs only if evaluation
+      // reaches it — the branch of a `?:` not taken, the right of a `&&` whose left is false, of a
+      // `||` whose left is true, and the fallback of a `coalesce` whose first value is there, are
+      // never run and never recorded.
+      //
+      // This used to be a static walk (`embeddedOpsOf`) that ran every NAMED call in the tree before
+      // resolving any of it, whichever side of an operator it sat on — so `cond ? ask() : 'allow'`
+      // asked every time. The walk is still the right answer for a CHECK (the validator wants every
+      // call the binding could make); it was never the right answer for what to run.
+      //
+      // `inline`: a call here is awaited where it is made, as the walk awaited it, rather than
+      // registered as a wait a guard would hold the round for — a wire, an output or an operation's
+      // argument has no round to hold.
+      const demanded = await this.runDemanded(instance, binding, each, undefined, kind, "inline");
       if ("failure" in demanded) return demanded.failure;
     }
     return undefined;
@@ -4198,7 +4200,23 @@ export class WorkflowEngine {
    * data (§5) and the consuming slot decides what it means.
    */
   private async runHigherOrder(instance: Instance, binding: Ref<InlineFamily>, each?: EachContext): Promise<Failure | undefined> {
-    for (const node of higherOrderEdgesOf(binding)) {
+    // Only the edges evaluation REACHES (`higherOrderEdgesOf` with a scope): a `map` in the branch of
+    // a `?:` not taken, or past a `&&` already false, is not run. What is reachable can grow as this
+    // runs — a `?:` whose test is itself a `map` picks its branch only once that `map` has answered —
+    // so the walk is repeated until it finds nothing it has not already run.
+    const ran = new Set<Ref<InlineFamily>>();
+    for (;;) {
+      const reached = higherOrderEdgesOf(binding, this.scopeFor(instance, undefined, each)).filter((node) => !ran.has(node));
+      if (reached.length === 0) return undefined;
+      for (const node of reached) ran.add(node);
+      const failure = await this.runHigherOrderEdges(instance, reached, each);
+      if (failure !== undefined) return failure;
+    }
+  }
+
+  /** Run the per-element applications of these higher-order edges, in order. */
+  private async runHigherOrderEdges(instance: Instance, edges: readonly Ref<InlineFamily>[], each?: EachContext): Promise<Failure | undefined> {
+    for (const node of edges) {
       const higher = higherOrderOf(node);
       if (higher === undefined) continue;
       const source = resolveRef(higher.value, this.scopeFor(instance, undefined, each));

@@ -513,6 +513,17 @@ function runResolver(op: Operation<InlineFamily> & { kind: "function" }, scope: 
       }
       return { value: out };
     }
+    case "coalesce": {
+      // `coalesce(a, b)` is `a ?? b`, so it is the fourth lazy form: `b` is resolved only when `a`
+      // is absent. Strict in `b` as the built-in it was, and `coalesce(.inputs.given, ask())` asked
+      // every time. It holds the same PENDING rule as `&&`: a determinate `a` is the answer past a
+      // pending `b`, and a pending `a` is PENDING.
+      const a = operand("a");
+      if (a !== undefined && !isResolvedValue(a)) return a;
+      if (a !== undefined && a.value !== null && a.value !== undefined) return a;
+      const b = operand("b");
+      return b ?? { value: undefined as unknown as JsonValue };
+    }
     case RESOLVER_REFS.cond: {
       const t = operand("test");
       if (t === undefined) return { error: "cond producer is missing test" };
@@ -768,13 +779,70 @@ export function higherOrderOf(
   return { name: producer.functionRef, value, op: opArg.op };
 }
 
-/** Every higher-order edge in a binding tree, innermost first. */
-export function higherOrderEdgesOf(ref: Ref<InlineFamily>): Ref<InlineFamily>[] {
+/**
+ * The LAZY resolvers, and for each the operand evaluation always reaches first. The rest of a lazy
+ * node's operands are reached only as {@link reachedOperands} says.
+ */
+const LAZY_FIRST: Readonly<Record<string, string>> = {
+  [RESOLVER_REFS.cond]: "test",
+  [RESOLVER_REFS.and]: "left",
+  [RESOLVER_REFS.or]: "left",
+  coalesce: "a",
+};
+
+/**
+ * Which operands of a LAZY node (`?:`, `&&`, `||`, `coalesce`) evaluation reaches past the first,
+ * given what `scope` can read now — exactly the choice the resolver makes, so a walk that runs what
+ * a binding needs runs what evaluation will read and nothing in a branch it will not take.
+ *
+ * `undefined` for a node that is not lazy (every operand is reached). An empty list for a first
+ * operand that is not determinate yet — PENDING, an error, or a call that has not run: nothing past
+ * it is reached until it is.
+ */
+export function reachedOperands(producer: Operation<InlineFamily>, scope: ResolutionScope): string[] | undefined {
+  if (producer.kind !== "function") return undefined;
+  const first = LAZY_FIRST[producer.functionRef];
+  if (first === undefined) return undefined;
+  const binding = producer.input[first]?.binding;
+  const r = binding === undefined ? undefined : resolveRef(binding, scope);
+  if (r === undefined || !isResolvedValue(r) || isPending(r.value)) return [];
+  const v = r.value;
+  switch (producer.functionRef) {
+    case RESOLVER_REFS.cond:
+      return [v ? "then" : "else"];
+    case RESOLVER_REFS.and:
+      return v ? ["right"] : [];
+    case RESOLVER_REFS.or:
+      return v ? [] : ["right"];
+    default:
+      return v === null || v === undefined ? ["b"] : [];
+  }
+}
+
+/**
+ * Every higher-order edge in a binding tree, innermost first.
+ *
+ * With a `scope`, only the edges EVALUATION REACHES: a lazy node's first operand is walked, and its
+ * other operands only as far as {@link reachedOperands} says with what the scope can read now. So a
+ * `map` in the branch of a `?:` not taken is never run. Without one, every edge — what a static
+ * check wants.
+ */
+export function higherOrderEdgesOf(ref: Ref<InlineFamily>, scope?: ResolutionScope): Ref<InlineFamily>[] {
   const out: Ref<InlineFamily>[] = [];
   const walk = (node: Ref<InlineFamily>): void => {
     if (!("op" in node)) return;
     const producer = node.op;
     if (typeof producer === "string" || producer.kind !== "function") return;
+    const lazyFirst = scope !== undefined ? LAZY_FIRST[producer.functionRef] : undefined;
+    if (lazyFirst !== undefined) {
+      const firstBinding = producer.input[lazyFirst]?.binding;
+      if (firstBinding) walk(firstBinding);
+      for (const name of reachedOperands(producer, scope!) ?? []) {
+        const b = producer.input[name]?.binding;
+        if (b) walk(b);
+      }
+      return;
+    }
     for (const [name, p] of Object.entries(producer.input)) {
       // Not the `op` position: that is a DEFINITION to apply, not an edge to run.
       if (name === "op" && higherOrderOf(node) !== undefined) continue;

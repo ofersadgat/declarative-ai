@@ -1081,6 +1081,16 @@ A call may also WAIT (§3.3, "A guard that WAITS stops the list"). The expressio
 synchronous: it resolves to `PENDING` and is re-resolved in a later round, which is the same
 protocol a reference to a running child already follows. Nothing in the language awaits anything.
 
+**A call runs only if evaluation reaches it.** `?:` evaluates its test and then ONE branch; `&&`
+evaluates its right side only when the left is truthy, `||` only when the left is falsy, and
+`coalesce(a, b)` (the language's `??`) evaluates `b` only when `a` is `null` or `undefined`. That
+holds for what the engine RUNS, not only for the value it computes: in a guard, a wire, an output, a
+field or an operation's argument, a call — or a `map`/`filter`/`flatMap`/`reduce` application — in
+a branch not taken is never dispatched and never recorded, so `.inputs.risky ?
+confirm(.inputs.request) : 'allow'` asks only when `.inputs.risky` holds. Static checks
+(§6.2) still read every branch: a call in a branch not taken is checked against its callee all the
+same.
+
 A callee may also be a **user's own js/ts module** (§7.5), which genuinely does step outside the
 closure above: it can import, mutate, and reach the filesystem. That is not an exception smuggled
 into this section but a different guarantee, made elsewhere and by different means. The language
