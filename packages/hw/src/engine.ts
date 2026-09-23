@@ -2821,9 +2821,12 @@ export class WorkflowEngine {
       try {
         let term: TerminationRecord;
         if (element.loaded !== undefined) {
+          // A recorded element is read under the state ITS row names, as a single child is
+          // (`loadTerminated`) — a host's stand-in for one element among run ones included.
+          const elementDef = this.config.bundle.states[element.loaded.stateId] ?? childDef;
           term = element.loaded.live
-            ? await this.resumeInstance(element.loaded, childDef, elementAbort, instance)
-            : termOf(await this.loadTerminated(element.loaded, childDef, elementAbort, instance));
+            ? await this.resumeInstance(element.loaded, elementDef, elementAbort, instance)
+            : termOf(await this.loadTerminated(element.loaded, elementDef, elementAbort, instance));
         } else {
           term = await this.runInstance(decl.state, childDef, element.inputs, elementAbort, key, instance, this.newInstanceId(), {
             childKey: key,
@@ -2929,8 +2932,11 @@ export class WorkflowEngine {
    * resumed — and the elements it never reached, entered fresh.
    *
    * How many there SHOULD be is re-read from the axes, which resolve against the loaded siblings
-   * exactly as they did the first time. Where that read cannot be made — an axis reading a sibling
-   * that is itself still live — the recorded elements are taken as the whole. A fan-out every element
+   * exactly as they did the first time — when an element is live, and when the parent still owes the
+   * batch its answer and every recorded element succeeded, so a batch recorded only in part runs the
+   * rest (an element recorded past the list's end stays one of it). Where that read cannot be made —
+   * an axis reading a sibling that is itself still live — the recorded elements are taken as the
+   * whole. Each recorded element is read under the state its own row names. A fan-out every element
    * of which has terminated is HISTORY, built without touching `justFinished`: a completion the
    * parent answered before the stop must not be answered again on load, or the mount's rules fire a
    * second time for the same batch (`unanswered` seeds the round it still owes, as for any child).
@@ -2955,9 +2961,16 @@ export class WorkflowEngine {
     }
     const byElement = new Map<number, LoadedInstance>(loaded.map((element) => [element.element ?? 0, element]));
     const anyLive = loaded.some((element) => element.live);
-    const resolved = anyLive || byElement.size === 0 ? await this.resolveFanOut(instance, key, decl) : undefined;
+    // A batch the parent has not answered yet, every recorded element of which SUCCEEDED, may be
+    // short of its list: a sequential run cut between two elements, or a host that recorded some
+    // elements itself and left the rest to run (an element adopted from elsewhere). Its list is
+    // re-read too. A batch the parent answered is history as recorded, and one an element ended
+    // badly is the end the sequence stopped at — neither is re-read.
+    const owed = instance.justFinished.includes(key) && loaded.every((element) => element.outcome === "success");
+    const resolved = anyLive || owed || byElement.size === 0 ? await this.resolveFanOut(instance, key, decl) : undefined;
     const fresh = resolved !== undefined && typeof resolved === "object" && "elements" in resolved ? resolved.elements : undefined;
-    const count = fresh !== undefined ? fresh.length : Math.max(-1, ...byElement.keys()) + 1;
+    // Never fewer than were recorded: an element recorded past the list's end is still one of the batch.
+    const count = Math.max(fresh?.length ?? 0, Math.max(-1, ...byElement.keys()) + 1);
 
     const elements: FanOutElement[] = [];
     for (let index = 0; index < count; index++) {
@@ -3033,7 +3046,10 @@ export class WorkflowEngine {
     const terms: TerminationRecord[] = [];
     if (childDef !== undefined) {
       for (const element of [...loaded].sort((a, b) => (a.element ?? 0) - (b.element ?? 0))) {
-        terms.push(termOf(await this.loadTerminated(element, childDef, abort, instance)));
+        // Under the state the element's row names, as a single child is read (`loadTerminated`):
+        // a host may load one element of a batch under a stand-in of its own.
+        const elementDef = this.config.bundle.states[element.stateId] ?? childDef;
+        terms.push(termOf(await this.loadTerminated(element, elementDef, abort, instance)));
       }
     }
     const term = settleBatch(key, decl, childDef, terms);

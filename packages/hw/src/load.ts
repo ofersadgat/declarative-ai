@@ -47,6 +47,12 @@ export interface LoadedOperation {
 export interface LoadedInstance {
   /** The DURABLE id the journal minted — kept, which is the whole point of loading. */
   id: string;
+  /**
+   * The state this instance is read under. A child — a single one, or one ELEMENT of a fan-out — is
+   * loaded under the bundle's state of this id, falling back to the mounted state when the bundle has
+   * none; so a host may name a state of its own for one recorded instance (a stand-in whose outputs
+   * are given rather than recomputed) without touching the rest of its batch.
+   */
   stateId: string;
   childKey?: string;
   /** Which entry under `(parent, childKey)` this was — the address's occurrence half. Default 0. */

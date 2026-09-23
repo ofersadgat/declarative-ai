@@ -37,7 +37,14 @@ interface Outcome {
 async function run(
   files: Record<string, StateDef>,
   rootId: string,
-  options: { inputs?: Record<string, ResolvedValue>; loaded?: LoadedInstance; fail?: string; delayMs?: Record<string, number> } = {},
+  options: {
+    inputs?: Record<string, ResolvedValue>;
+    loaded?: LoadedInstance;
+    fail?: string;
+    delayMs?: Record<string, number>;
+    /** States the HOST adds to the bundle it hands the engine — a stand-in no workflow mounts. */
+    standIns?: Record<string, StateDef>;
+  } = {},
 ): Promise<Outcome> {
   const calls: Array<Record<string, unknown>> = [];
   const finished: string[] = [];
@@ -55,7 +62,10 @@ async function run(
     }, HOST),
   );
   const persistence = new InMemoryPersistence();
-  const engine = new WorkflowEngine({ bundle: loadBundle(files, rootId), registry, validator: new SchemaValidator(), persistence });
+  const loadedBundle = loadBundle(files, rootId);
+  const standIns = Object.fromEntries(Object.entries(options.standIns ?? {}).map(([id, def]) => [id, loadBundle({ [id]: def }, id).states[id]!]));
+  const bundle = { ...loadedBundle, states: { ...loadedBundle.states, ...standIns } };
+  const engine = new WorkflowEngine({ bundle, registry, validator: new SchemaValidator(), persistence });
   const result = options.loaded !== undefined ? await engine.loadRun(options.loaded, { inputs: options.inputs ?? {} }) : await engine.run({ inputs: options.inputs ?? {} });
   return {
     outcome: result.outcome,
@@ -379,6 +389,116 @@ describe("a stopped fan-out, loaded", () => {
     expect(outcome).toBe("success");
     expect(calls.map((c) => c.name)).toEqual(["badge", "toggle"]);
     expect(outputs?.docs).toEqual(["recorded divider", "doc for badge", "doc for toggle"]);
+  });
+});
+
+describe("a recorded element under a state of its own", () => {
+  /**
+   * A host's STAND-IN for one element — what a task that ran alone and was adopted into the batch
+   * loads as: an operation that is never dispatched, whose loaded value is the outputs as recorded.
+   * Its `size` has a default the mounted state lacks, which is what makes the state it was read under
+   * visible: the recorded value carries no `size`, and under the mounted state that is a missing
+   * required output.
+   */
+  const STAND_IN: StateDef = {
+    label: "Adopted component",
+    inputs: { component: { schema: COMPONENT_SCHEMA } },
+    outputs: { doc: { schema: { type: "string" } }, size: { schema: { type: "integer" }, optional: true, default: 99 } },
+    operation: { kind: "function", function: "adopted", input: {} },
+  };
+
+  const ran = (id: string, element: number, name: string): LoadedInstance => ({
+    id,
+    stateId: "root/component",
+    childKey: "component",
+    occurrence: 0,
+    element,
+    inputs: { component: { name } },
+    live: false,
+    outcome: "success",
+    operation: { value: { doc: `recorded ${name}`, size: name.length } as ResolvedValue },
+  });
+  const adopted = (id: string, element: number, name: string): LoadedInstance => ({
+    id,
+    stateId: "root/adopted",
+    childKey: "component",
+    occurrence: 0,
+    element,
+    inputs: { component: { name } },
+    live: false,
+    outcome: "success",
+    operation: { value: { doc: `adopted ${name}` } as ResolvedValue },
+  });
+  const root = (components: JsonValue[], children: LoadedInstance[], unanswered = ["component"]): LoadedInstance => ({
+    id: "i-root",
+    stateId: "root",
+    inputs: { components: components as ResolvedValue },
+    live: true,
+    cursor: 0,
+    unanswered,
+    children,
+  });
+
+  it("is read under that state, beside elements read under the mounted one", async () => {
+    const { outcome, calls, outputs, reason } = await run(FAN, "root", {
+      standIns: { "root/adopted": STAND_IN },
+      inputs: { components: THREE },
+      loaded: root(THREE, [ran("i-0", 0, "divider"), adopted("i-1", 1, "badge"), ran("i-2", 2, "toggle")]),
+    });
+    expect(outcome, reason).toBe("success");
+    expect(calls).toEqual([]);
+    expect(outputs).toEqual({ docs: ["recorded divider", "adopted badge", "recorded toggle"], sizes: [7, 99, 6] });
+  });
+
+  it("stands for its element while the batch runs the rest — a batch recorded only in part, owed its answer", async () => {
+    // Only element 1 is recorded; the parent owes the batch its answer and nothing recorded failed,
+    // so the list is re-read and elements 0 and 2 run, entered as elements of the same batch.
+    const { outcome, calls, outputs, events, reason } = await run(FAN, "root", {
+      standIns: { "root/adopted": STAND_IN },
+      inputs: { components: THREE },
+      loaded: root(THREE, [adopted("i-1", 1, "badge")]),
+    });
+    expect(outcome, reason).toBe("success");
+    expect(calls.map((c) => c.name)).toEqual(["divider", "toggle"]);
+    expect(calls.map((c) => c.position)).toEqual([0, 2]);
+    expect(outputs).toEqual({ docs: ["doc for divider", "adopted badge", "doc for toggle"], sizes: [7, 99, 6] });
+    const entered = events.filter((e): e is Extract<EngineEvent, { type: "instance.entered" }> => e.type === "instance.entered" && e.childKey === "component");
+    expect(entered.map((e) => [e.parentInstanceId, e.element])).toEqual([
+      ["i-root", 0],
+      ["i-root", 2],
+    ]);
+  });
+
+  it("stays one of the batch when it was recorded past the list's end", async () => {
+    const two = THREE.slice(0, 2);
+    const { outcome, calls, outputs, reason } = await run(FAN, "root", {
+      standIns: { "root/adopted": STAND_IN },
+      inputs: { components: two },
+      loaded: root(two, [ran("i-0", 0, "divider"), ran("i-1", 1, "badge"), adopted("i-2", 2, "toggle")]),
+    });
+    expect(outcome, reason).toBe("success");
+    expect(calls).toEqual([]);
+    expect(outputs?.docs).toEqual(["recorded divider", "recorded badge", "adopted toggle"]);
+  });
+
+  it("does not re-read a batch the parent already answered — that is history as recorded", async () => {
+    const { outcome, calls, outputs, reason } = await run(FAN, "root", {
+      standIns: { "root/adopted": STAND_IN },
+      inputs: { components: THREE },
+      loaded: root(THREE, [adopted("i-0", 0, "divider")], []),
+    });
+    expect(outcome, reason).toBe("success");
+    expect(calls).toEqual([]);
+    expect(outputs?.docs).toEqual(["adopted divider"]);
+  });
+
+  it("does not re-read a batch an element ended badly — that is where the sequence stopped", async () => {
+    const failed: LoadedInstance = { ...ran("i-0", 0, "divider"), outcome: "error", failure: { classification: "permanent", reason: "divider cannot be built" } };
+    const { outcome, calls, reason } = await run(FAN, "root", {
+      standIns: { "root/adopted": STAND_IN }, inputs: { components: THREE }, loaded: root(THREE, [failed]) });
+    expect(calls).toEqual([]);
+    expect(outcome).toBe("error");
+    expect(reason).toMatch(/divider cannot be built/);
   });
 });
 
