@@ -411,3 +411,47 @@ describe("reading a conversation back", () => {
     expect(seen).toEqual(["sess-abc"]);
   });
 });
+
+/**
+ * The function path's door for a host: what wraps a prompt ROUTE wraps a function call too, so one
+ * agent reached two ways is handed the same thing.
+ */
+describe("wrapExecutor — a host's wrapper around the per-call executor", () => {
+  it("hands the wrapper the executor this call built, and runs the op and services it passes on", async () => {
+    let seen: AgentQueryOptions | undefined;
+    const query: AgentQuery = async function* (opts) {
+      seen = opts;
+      yield { type: "result", result: { text: "wrapped" } };
+    };
+    const wrapped: string[] = [];
+    const fn = createClaudeCodeFunction({
+      query,
+      wrapExecutor: (executor) => ({
+        start: (op, ctx) => {
+          wrapped.push(executor.constructor.name);
+          // What a host writes on the way in — here an ask rule in the agent's own settings, which a
+          // function call built from its inputs had nowhere to carry.
+          const config = { providerOptions: { claudeCode: { settings: { permissions: { ask: ["Read"] } } } } };
+          return executor.start({ ...op, config } as never, { ...ctx, tools: {} });
+        },
+      }),
+    });
+    const out = await runOrError(fn, inputs(), { tools: { read_file: tool() } });
+    expect(out.text).toBe("wrapped");
+    expect(wrapped).toEqual(["AgentExecutor"]);
+    expect(seen?.providerOptions).toEqual({ settings: { permissions: { ask: ["Read"] } } });
+    expect(seen?.mcpTools).toBeUndefined();
+  });
+
+  it("starts the executor directly with no wrapper, as it always did", async () => {
+    let seen: AgentQueryOptions | undefined;
+    const query: AgentQuery = async function* (opts) {
+      seen = opts;
+      yield { type: "result", result: { text: "plain" } };
+    };
+    const out = await runOrError(createClaudeCodeFunction({ query }), inputs(), { tools: { read_file: tool() } });
+    expect(out.text).toBe("plain");
+    expect(Object.keys(seen?.mcpTools ?? {})).toEqual(["read_file"]);
+    expect(seen?.providerOptions).toBeUndefined();
+  });
+});

@@ -32,11 +32,12 @@
  * `codex exec` has no `--permission-prompt-tool` analogue: there is no mid-run channel to ask a human
  * about a tool call, so this adapter's enforcement is `config` (see `./codexRuntime`), and anything
  * that would need a callback is REFUSED rather than dropped — the same rule `cliQuery` follows.
- * Refusing is not a downgrade of safety here: an adapter declaring `config` gets its injected tools
- * policy-WRAPPED by the engine, so those calls are still gated; it is codex's own built-ins that the
- * sandbox mode has to answer for.
+ * Refusing is not a downgrade of safety here: the executor puts every call to one of OUR tools to the
+ * host's gate at the bridge before it runs (`AgentExecutor`, for a transport with no approval
+ * callback), so those calls are gated exactly as a callback transport's are; it is codex's own
+ * built-ins that the sandbox mode has to answer for.
  */
-import type { AgentQuery, AgentQueryOptions, AgentResult, AgentStreamMessage } from "@declarative-ai/agents-api";
+import { ASK_USER_TOOL, type AgentQuery, type AgentQueryOptions, type AgentResult, type AgentStreamMessage } from "@declarative-ai/agents-api";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -69,6 +70,9 @@ export interface CodexAgentOptions {
    * question, and a workflow's blast radius must not depend on the contents of `~/.codex/config.toml`.
    */
   sandbox?: CodexSandbox;
+  /** How long codex waits for the bridge's handshake and for one call to it — see
+   *  {@link mcpServerOverride}. Absent ⇒ the defaults there. */
+  bridgeTimeouts?: CodexBridgeTimeouts;
 }
 
 /**
@@ -93,25 +97,59 @@ export function sandboxFor(mode: AgentQueryOptions["permissionMode"], fallback: 
   }
 }
 
+/** How long codex waits for our bridge's handshake before it refuses to start — see {@link mcpServerOverride}. */
+export const CODEX_BRIDGE_STARTUP_TIMEOUT_SEC = 30;
+
+/**
+ * How long codex waits on ONE call to our bridge — a day. The call is gated at the bridge (see
+ * `AgentExecutor`), and a gate that asks waits on a person; codex's own default gives up long before a
+ * person has read the question, and then answers the model with a timeout while the call is still
+ * parked.
+ */
+export const CODEX_BRIDGE_TOOL_TIMEOUT_SEC = 86_400;
+
+/** The knobs of {@link mcpServerOverride} a transport may set. */
+export interface CodexBridgeTimeouts {
+  /** Seconds codex waits for the bridge's handshake. Default {@link CODEX_BRIDGE_STARTUP_TIMEOUT_SEC}. */
+  startupTimeoutSec?: number;
+  /** Seconds codex waits on one tool call. Default {@link CODEX_BRIDGE_TOOL_TIMEOUT_SEC}. */
+  toolTimeoutSec?: number;
+}
+
 /**
  * The `-c` override that points codex at our bridge. TOML inline table; the URL carries the run's
  * secret, so this is also how the secret reaches the CLI — there is no second channel to keep in sync.
  *
- * ✅ OBSERVED, and the detail that makes injection work at all: each tool is declared
- * `approval_mode = "auto"` (the variants are `auto | prompt | writes | approve`). Without it codex
- * asks before calling an MCP tool, and a non-interactive `codex exec` has nobody to ask — so the call
- * came back as `user cancelled MCP tool call` and the agent answered with that instead of doing the
- * work.
+ * ✅ OBSERVED against `codex-cli 0.147.0` (a real `codex exec` against a real bridge), three keys, each
+ * load-bearing:
  *
- * Auto-approving is not a hole, it is where the gate MOVES to. These are OUR implementations, and an
- * adapter declaring `policyEnforcement: "config"` gets its tools policy-wrapped by the engine — so a
- * call reaches the host's approver in-process. Codex asking as well would be a second gate that
- * nothing can answer.
+ *  - **`approval_mode = "approve"` on each tool.** The variants are `auto | prompt | writes | approve`,
+ *    and `auto` is NOT "approve automatically": under it codex still decides to ask, a non-interactive
+ *    `codex exec` has nobody to ask, and every call came back `user cancelled MCP tool call` — which
+ *    the agent then reported as its answer. Under `approve` the call reaches the bridge. Approving here
+ *    is not a hole, it is where the gate MOVES to: these are OUR implementations, and every call is put
+ *    to the host's gate at the bridge before the tool runs. Codex asking as well would be a second
+ *    gate that nothing can answer.
+ *  - **`required = true`.** Codex does not wait for an MCP server by default: with the bridge's
+ *    handshake held back 8 s, the turn started at once, the model never saw the tools, and the run
+ *    exited 0 having answered without them — a success that did not do the work. Required, codex
+ *    blocks session creation until the server has listed its tools, and fails the run (`required MCP
+ *    servers failed to initialize`, exit 1) if it cannot within `startup_timeout_sec`. That closes the
+ *    handshake race the `claude` adapter closes by holding its prompt back — here codex holds itself.
+ *  - **`startup_timeout_sec` / `tool_timeout_sec`.** Both stated rather than inherited, because what
+ *    they bound is ours: our handshake, and a call that may be waiting on a person.
  */
-export function mcpServerOverride(url: string, tools: readonly string[] = [], server: string = MCP_SERVER_NAME): string {
-  const declarations = tools.map((tool) => `${JSON.stringify(tool)}={approval_mode="auto"}`).join(",");
+export function mcpServerOverride(
+  url: string,
+  tools: readonly string[] = [],
+  server: string = MCP_SERVER_NAME,
+  timeouts: CodexBridgeTimeouts = {},
+): string {
+  const declarations = tools.map((tool) => `${JSON.stringify(tool)}={approval_mode="approve"}`).join(",");
   const toolTable = declarations.length > 0 ? `,tools={${declarations}}` : "";
-  return `mcp_servers.${server}={url=${JSON.stringify(url)}${toolTable}}`;
+  const startup = timeouts.startupTimeoutSec ?? CODEX_BRIDGE_STARTUP_TIMEOUT_SEC;
+  const perCall = timeouts.toolTimeoutSec ?? CODEX_BRIDGE_TOOL_TIMEOUT_SEC;
+  return `mcp_servers.${server}={url=${JSON.stringify(url)},required=true,startup_timeout_sec=${startup},tool_timeout_sec=${perCall}${toolTable}}`;
 }
 
 /**
@@ -156,38 +194,36 @@ export function codexRefusal(opts: AgentQueryOptions): string | undefined {
   if (opts.resume !== undefined && opts.messages !== undefined) {
     return "codex cannot both resume a session and replay a transcript — that would duplicate the conversation";
   }
-  if (opts.disallowedTools !== undefined && opts.disallowedTools.length > 0) {
+  // A name codex does not have is denied to it already. `AskUserQuestion` is claude's question tool,
+  // which the executor withholds from every state that declares outputs; codex has no such tool, so
+  // the deny is honoured by its absence and refusing the run over it refused every codex state with
+  // an output schema.
+  const deniedHere = (opts.disallowedTools ?? []).filter((name) => !CODEX_ABSENT_TOOLS.has(name));
+  if (deniedHere.length > 0) {
     return (
-      `codex has no per-tool deny list, so [${opts.disallowedTools.join(", ")}] cannot be denied to it. ` +
+      `codex has no per-tool deny list, so [${deniedHere.join(", ")}] cannot be denied to it. ` +
       "Express the floor as a sandbox mode, or drive the agent through an adapter whose transport carries a deny channel"
     );
   }
-  if (opts.allowedTools !== undefined && opts.allowedTools.length > 0) {
+  // A pre-approval of one of OUR tools needs no flag: every call to one is approved on codex's side
+  // (`mcpServerOverride`) and decided by the host's gate at the bridge, where an `allow` runs it
+  // without asking. What codex cannot carry is a pre-approval of one of its OWN built-ins.
+  const served = new Set(Object.keys(opts.mcpTools ?? {}));
+  const nativeAllowed = (opts.allowedTools ?? []).filter((name) => !served.has(name));
+  if (nativeAllowed.length > 0) {
     return (
-      `codex has no native tool allow-list, so [${opts.allowedTools.join(", ")}] cannot be pre-approved or aliased to its built-ins. ` +
-      "Run the state with no tools — codex uses its own — or drive it through an adapter whose transport carries an allow-list"
+      `codex has no native tool allow-list, so [${nativeAllowed.join(", ")}] cannot be pre-approved or aliased to its built-ins. ` +
+      "Declare those tools so they are served over the bridge, or drive the agent through an adapter whose transport carries an allow-list"
     );
   }
-  if (Object.keys(opts.mcpTools ?? {}).length > 0) {
-    // ⚠️ OBSERVED, and the reason this is a refusal rather than a wiring bug left for later. The
-    // transport WORKS: codex connects to the bridge, sees the tool, and asks to call it. The call is
-    // then auto-DENIED, and the denial comes back as the literal text `user cancelled MCP tool call`
-    // — which the agent reports as its answer. Tried and ruled out: `approval_policy` (`never`, and
-    // unset), both sandbox modes, and `mcp_servers.<server>.tools.<tool>.approval_mode = "auto"`
-    // under every tool-name spelling (bare, `dai__x`, `mcp__dai__x`). The field and its variants
-    // (`auto|prompt|writes|approve`) are real — `--strict-config` accepts them — so what is missing
-    // is which key codex matches a streamable-HTTP server's tools on.
-    //
-    // Shipping it anyway would mean an agent that answers "user cancelled MCP tool call" INSTEAD of
-    // doing the work, and reports SUCCESS. A workflow cannot tell that from a review that found
-    // nothing. Refusing names the problem at the state that asked for it.
-    return (
-      `codex reaches our tool bridge but auto-denies the call, so [${Object.keys(opts.mcpTools ?? {}).join(", ")}] would never run. ` +
-      "Declare no tools on a codex state — it uses its own — or run that state on an adapter that can serve ours"
-    );
-  }
+  // Served tools are NOT refused. They were, while every call came back `user cancelled MCP tool
+  // call` under `approval_mode = "auto"`; `approve` is the key that lets the call through, measured
+  // against a real `codex exec` (see `mcpServerOverride`).
   return undefined;
 }
+
+/** Tool names the executor may deny that codex does not have at all — see {@link codexRefusal}. */
+const CODEX_ABSENT_TOOLS: ReadonlySet<string> = new Set([ASK_USER_TOOL]);
 
 /**
  * Build the argv for one run.
@@ -239,7 +275,9 @@ export function codexArgv(
     // rather than fail it.
     "-c",
     'approval_policy="never"',
-    ...(bridgeUrl !== undefined ? ["-c", mcpServerOverride(bridgeUrl, Object.keys(opts.mcpTools ?? {}))] : []),
+    ...(bridgeUrl !== undefined
+      ? ["-c", mcpServerOverride(bridgeUrl, Object.keys(opts.mcpTools ?? {}), MCP_SERVER_NAME, config.bridgeTimeouts)]
+      : []),
     // The model, when the caller named one. As a CONFIG OVERRIDE rather than `-m`, for the same reason
     // the sandbox is: `-m` exists on `codex exec` and NOT on `codex exec resume`, so a resumed run
     // built with the flag would fail argument parsing — and a resumed run is the common case once a

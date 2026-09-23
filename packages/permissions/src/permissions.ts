@@ -536,7 +536,7 @@ export function withPermission(
   opts: Omit<ToolDecisionOptions, "authoredMode"> & { toolName: string; authoredMode?: PermissionMode },
 ): Tool {
   const { toolName, ...decision } = opts;
-  return {
+  const wrapped: Tool = {
     description: tool.description,
     inputSchema: tool.inputSchema,
     readOnly: tool.readOnly,
@@ -546,6 +546,24 @@ export function withPermission(
       return tool.run(input, ctx);
     },
   };
+  PERMISSION_WRAPPED.add(wrapped);
+  return wrapped;
+}
+
+/** Every tool {@link withPermission} built — see {@link isPermissionWrapped}. Weak, so a finished run's
+ *  wrappers are not kept alive by the question. */
+const PERMISSION_WRAPPED = new WeakSet<Tool>();
+
+/**
+ * Was this tool built by {@link withPermission} — does every call already pass the permission ledger?
+ *
+ * The question a transport with no permission callback asks before gating an injected tool itself, at
+ * the point the agent calls it: the engine wraps a composed runtime's tools when it holds an
+ * engine-level approver, and a tool gated there and again at the bridge would put one `ask` to a person
+ * twice.
+ */
+export function isPermissionWrapped(tool: Tool): boolean {
+  return PERMISSION_WRAPPED.has(tool);
 }
 
 /**

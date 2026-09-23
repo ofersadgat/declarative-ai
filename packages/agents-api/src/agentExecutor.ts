@@ -64,7 +64,7 @@ import type { BudgetMeter, BudgetMetrics, ExecMetrics } from "@declarative-ai/ex
 // and `policy` on `ExecServices`, and this executor reads both. Without the import they are absent
 // from the type in every package that compiles this one — which is how a whole approval path can
 // typecheck as missing while the tests, running on the merged runtime shape, still pass.
-import type { Approver, PermissionMode, UserAnswers, UserQuestion } from "@declarative-ai/permissions";
+import { isPermissionWrapped, type Approver, type PermissionDenied, type PermissionMode, type UserAnswers, type UserQuestion } from "@declarative-ai/permissions";
 import { mcpToolName } from "./mcpTools.js";
 import { sdkAgentQuery } from "./sdkQuery.js";
 import { isRetriableAgentError } from "./streamMessages.js";
@@ -353,9 +353,10 @@ export interface AgentExecutorOptions extends PromptExecutorOptions {
    *
    * `false` states that this transport HAS no mid-run approval channel — codex is the case. Making it
    * an option rather than letting the query silently ignore an approver is the point: an executor
-   * constructed this way declares `policyEnforcement: "config"`, and the engine answers that by
-   * policy-WRAPPING its injected tools instead of handing them over raw, so the gate moves rather than
-   * disappearing.
+   * constructed this way declares `policyEnforcement: "config"`, and its injected tools are gated
+   * where the agent CALLS them instead: every call that crosses the bridge is put to `ctx.gate` before
+   * the tool runs (a tool the engine already wrapped with `withPermission` is not gated twice), so the
+   * gate moves rather than disappearing.
    */
   approvalCallback?: boolean;
   /** Reads a provider-side conversation back, for re-syncing after divergence (DESIGN.md §1.6). */
@@ -752,12 +753,37 @@ export class AgentExecutor extends PromptExecutor {
     // `canUseTool` → `ctx.approve`, so injected tools are not double-gated.
     const tools = (ctx.tools ?? this.options.tools) as Record<string, Tool> | undefined;
     const extraTools = this.agent.extraTools;
-    const bind = (tool: Tool): InjectedTool => ({
-      description: tool.description,
-      inputSchema: tool.inputSchema as JsonSchema,
-      // The call's id, when the transport said it, is the tool's `ctx.toolCallId` (see ExecServices).
-      run: (input, call) => tool.run(input, call?.toolCallId !== undefined ? { ...ctx, toolCallId: call.toolCallId } : ctx),
-    });
+    /**
+     * THE GATE AT THE BRIDGE, for a transport with no permission callback (codex).
+     *
+     * On a callback transport every call the agent makes — to our tools as to its own — is put to
+     * `canUseTool` first, and that is where the gate decides. A transport that cannot ask has no such
+     * moment; what it does have is the bridge, which every injected call must cross. So the gate is
+     * consulted there, with the same subject and the same input the callback would have handed it:
+     * `allow` runs the tool, `deny` answers the agent with the refusal and runs nothing, `ask` parks
+     * the call on a person, and `smart` reads the input — the whole decision, not a mode read off it.
+     *
+     * Skipped for a tool the ENGINE already wrapped (`isPermissionWrapped`): a composed runtime's
+     * tools are wrapped when the host wired an engine-level approver, and gating those twice would
+     * ask one question twice. With no gate published there is nothing to consult, exactly as the
+     * callback path falls back to nothing.
+     */
+    const gateAtBridge = !wantsApprovalCallback && ctx.gate !== undefined ? ctx.gate : undefined;
+    const bind = (tool: Tool, name: string): InjectedTool => {
+      const gated = gateAtBridge !== undefined && !isPermissionWrapped(tool) ? gateAtBridge : undefined;
+      return {
+        description: tool.description,
+        inputSchema: tool.inputSchema as JsonSchema,
+        // The call's id, when the transport said it, is the tool's `ctx.toolCallId` (see ExecServices).
+        run: async (input, call) => {
+          if (gated !== undefined) {
+            const verdict = await gated.check({ name, readOnly: tool.readOnly }, input);
+            if (!verdict.allow) return { denied: true, tool: name, reason: verdict.reason } satisfies PermissionDenied;
+          }
+          return tool.run(input, call?.toolCallId !== undefined ? { ...ctx, toolCallId: call.toolCallId } : ctx);
+        },
+      };
+    };
     let allowedTools: string[] | undefined;
     let mcpTools: Record<string, InjectedTool> | undefined;
     const native: string[] = [];
@@ -778,7 +804,7 @@ export class AgentExecutor extends PromptExecutor {
         // `deny` without anybody naming it.
         if (denySet.has(ref ? ref.native : name) || mode === "deny") continue;
         if (!inject || ref) native.push(ref ? ref.native : name);
-        else injected[name] = bind(tool);
+        else injected[name] = bind(tool, name);
         // ONLY an explicit `allow`. This list is a PRE-APPROVAL — a tool named here is never put to
         // the permission callback — so carrying every tool regardless of mode, as it used to, meant an
         // authored `ask` never asked and a `smart` policy never ran. `smart` is the sharper of the two:
@@ -800,7 +826,7 @@ export class AgentExecutor extends PromptExecutor {
     // switch could not express. The deny floor still applies — an extra tool is a tool.
     for (const [name, tool] of Object.entries(extraTools ?? {})) {
       if (denySet.has(nativeMap[name]?.native ?? name)) continue;
-      injected[name] = bind(tool);
+      injected[name] = bind(tool, name);
     }
     if (Object.keys(injected).length > 0) mcpTools = injected;
 

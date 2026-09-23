@@ -15,7 +15,7 @@ import { thinkingOfEntries, toolResultsOfEntries, toolUsesOfEntries } from "@dec
 import { isOk, sessionOutcomeOf, promptOp, resolveSessionRef, type ExecEvent, type ExecServices, type ResolvedSession, type Tool } from "@declarative-ai/exec";
 import type { LlmOutput, ModelMessage } from "@declarative-ai/llm";
 import { PromptExecutor } from "@declarative-ai/promptop";
-import { createToolGate, PermissionLedger, type Approver, type PermissionBaseline, type PermissionMode, type SmartApprover } from "@declarative-ai/permissions";
+import { createToolGate, PermissionLedger, withPermission, type Approver, type PermissionBaseline, type PermissionMode, type SmartApprover } from "@declarative-ai/permissions";
 import { AgentApiExecutor, AgentExecutor, DELEGATED_CAPS, UNREPORTED_MODEL } from "../src/index.js";
 import type { AgentQuery, AgentQueryOptions } from "../src/index.js";
 
@@ -1350,5 +1350,94 @@ describe("a narrowing profile reaches the agent up front", () => {
     // `full` excludes nothing, so there is nothing to fail to enforce — the same transport runs.
     const runs = await none.start(op(), gateWithProfile("full")).result;
     expect(isOk(runs)).toBe(true);
+  });
+});
+
+/**
+ * A transport with NO permission callback (codex) is served our tools over its bridge, and every call
+ * that crosses the bridge is put to the gate first — the moment a callback transport's `canUseTool`
+ * would have been asked about the same call, with the same subject and input.
+ */
+describe("the gate at the bridge, for a transport that cannot ask", () => {
+  const recorder = () => {
+    const ran: string[] = [];
+    const tool = (name: string): Tool => ({
+      description: name,
+      inputSchema: { type: "object" },
+      readOnly: false,
+      run: async (input) => {
+        ran.push(`${name}:${JSON.stringify(input)}`);
+        return `${name} ran`;
+      },
+    });
+    return { ran, tool };
+  };
+  const gated = (modes: Record<string, PermissionMode>, asked: string[], answer: "allow" | "deny" = "deny"): ExecServices => {
+    const approve: Approver = (req) => {
+      asked.push(req.tool);
+      return { decision: answer, scope: "once" };
+    };
+    return {
+      approve,
+      gate: createToolGate({
+        ledger: new PermissionLedger({ baseline: { tools: modes } }),
+        sessionId: "s1",
+        approve,
+        tools: { read_file: { readOnly: true }, write_file: { readOnly: false }, bash: { readOnly: false } },
+      }),
+    } as unknown as ExecServices;
+  };
+
+  it("runs an `allow`, refuses a `deny` WITHOUT running it, and puts an `ask` to a person", async () => {
+    const { ran, tool } = recorder();
+    const asked: string[] = [];
+    const ctx = { ...gated({ read_file: "allow", write_file: "ask", bash: "deny" }, asked), tools: { read_file: tool("read_file"), write_file: tool("write_file") } };
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query, approvalCallback: false }).start(op(), ctx as never).result;
+    const served = seen()!.mcpTools!;
+    expect(seen()!.canUseTool).toBeUndefined();
+    expect(await served["read_file"]!.run({ path: "a" })).toBe("read_file ran");
+    // `ask` → the approver, who says no: the tool never runs, and the agent reads the refusal.
+    expect(await served["write_file"]!.run({ path: "b" })).toMatchObject({ denied: true, tool: "write_file" });
+    expect(asked).toEqual(["write_file"]);
+    expect(ran).toEqual(['read_file:{"path":"a"}']);
+  });
+
+  it("runs what a person allows", async () => {
+    const { ran, tool } = recorder();
+    const asked: string[] = [];
+    const ctx = { ...gated({ write_file: "ask" }, asked, "allow"), tools: { write_file: tool("write_file") } };
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query, approvalCallback: false }).start(op(), ctx as never).result;
+    expect(await seen()!.mcpTools!["write_file"]!.run({ path: "b" })).toBe("write_file ran");
+    expect(asked).toEqual(["write_file"]);
+    expect(ran).toEqual(['write_file:{"path":"b"}']);
+  });
+
+  it("does not gate twice a tool the ENGINE already wrapped, and gates nothing at the bridge of a callback transport", async () => {
+    const { tool } = recorder();
+    const asked: string[] = [];
+    const ctx = gated({ write_file: "ask" }, asked, "allow");
+    const wrapped = withPermission(tool("write_file"), {
+      ledger: new PermissionLedger(),
+      sessionId: "s1",
+      toolName: "write_file",
+      approve: () => {
+        asked.push("engine");
+        return { decision: "allow", scope: "once" };
+      },
+      authoredMode: "ask",
+    });
+    const codex = capturing();
+    await new AgentExecutor({ query: codex.query, approvalCallback: false }).start(op(), { ...ctx, tools: { write_file: wrapped } } as never).result;
+    await codex.seen()!.mcpTools!["write_file"]!.run({ path: "b" });
+    expect(asked).toEqual(["engine"]);
+
+    // A callback transport decides at `canUseTool`; its bridge runs what the callback let through.
+    asked.length = 0;
+    const claude = capturing();
+    await new AgentExecutor({ query: claude.query }).start(op(), { ...ctx, tools: { write_file: tool("write_file") } } as never).result;
+    expect(await claude.seen()!.mcpTools!["write_file"]!.run({ path: "b" })).toBe("write_file ran");
+    expect(asked).toEqual([]);
   });
 });

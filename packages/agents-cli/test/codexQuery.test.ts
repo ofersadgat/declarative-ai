@@ -87,7 +87,9 @@ describe("codexArgv — the flags one run is configured with", () => {
     const argv = codexArgv({ prompt: "hi" }, {}, "http://127.0.0.1:9/mcp/tok");
     expect(argv).toContain(mcpServerOverride("http://127.0.0.1:9/mcp/tok"));
     // A TOML inline table, with the URL quoted — the secret rides in it, so it must survive verbatim.
-    expect(mcpServerOverride("http://127.0.0.1:9/mcp/tok")).toBe('mcp_servers.dai={url="http://127.0.0.1:9/mcp/tok"}');
+    expect(mcpServerOverride("http://127.0.0.1:9/mcp/tok")).toBe(
+      'mcp_servers.dai={url="http://127.0.0.1:9/mcp/tok",required=true,startup_timeout_sec=30,tool_timeout_sec=86400}',
+    );
   });
 
   it("falls back to the caller's default sandbox for an unknown mode", () => {
@@ -275,7 +277,7 @@ describe("createCodexAgentQuery — a subprocess speaking JSONL", () => {
   });
 });
 
-describe("the tool bridge — reachable, and refused all the same", () => {
+describe("the tool bridge — served, and gated at the bridge", () => {
   function fakeBridge() {
     const state = { started: 0, closed: 0 };
     const startBridge = async () => {
@@ -291,12 +293,11 @@ describe("the tool bridge — reachable, and refused all the same", () => {
   }
 
   /**
-   * ⚠️ The refusal is EVIDENCE-BASED, not caution. Against codex-cli 0.145.0 the bridge is reached and
-   * the tool is offered — and codex then auto-denies the call and hands the agent the string
-   * `user cancelled MCP tool call`, which it reports as its answer. A run like that SUCCEEDS while
-   * having done nothing, and a workflow cannot tell it from a review that found no problems.
+   * ✅ MEASURED against codex-cli 0.147.0: under `approval_mode = "auto"` every call came back `user
+   * cancelled MCP tool call` (which is why served tools used to be refused); under `"approve"` the call
+   * reaches the bridge and its answer reaches the model. The run is no longer refused.
    */
-  it("refuses injected tools — without spawning, and without standing a bridge up", async () => {
+  it("serves injected tools: stands the bridge up, points codex at it, and tears it down", async () => {
     const { spawn, argv } = fakeSpawn(answered("done"));
     const { startBridge, state } = fakeBridge();
     const seen = [];
@@ -304,13 +305,32 @@ describe("the tool bridge — reachable, and refused all the same", () => {
       prompt: "x",
       mcpTools: { grep: { inputSchema: {}, run: () => null } },
     })) seen.push(m);
-    expect(seen).toEqual([{ type: "other", error: expect.stringMatching(/auto-denies the call/) }]);
-    expect(state.started).toBe(0);
-    expect(argv).toHaveLength(0);
+    expect(seen.at(-1)).toMatchObject({ type: "result", result: { text: "done" } });
+    expect(state.started).toBe(1);
+    expect(state.closed).toBe(1);
+    expect(argv[0]).toContain(mcpServerOverride("http://127.0.0.1:9999/mcp/tok", ["grep"]));
   });
 
-  it("names the tools that would have been silently skipped", () => {
-    expect(codexRefusal({ prompt: "x", mcpTools: { grep: {} as never, write_file: {} as never } })).toMatch(/grep, write_file/);
+  it("refuses nothing for a tool it serves — and a pre-approval of one needs no flag", () => {
+    expect(codexRefusal({ prompt: "x", mcpTools: { grep: {} as never, write_file: {} as never } })).toBeUndefined();
+    // An `allow` on OUR tool is the gate's to answer at the bridge; one on a codex built-in is not.
+    expect(codexRefusal({ prompt: "x", mcpTools: { grep: {} as never }, allowedTools: ["grep"] })).toBeUndefined();
+    expect(codexRefusal({ prompt: "x", mcpTools: { grep: {} as never }, allowedTools: ["grep", "shell"] })).toMatch(/\[shell\]/);
+  });
+
+  it("does not refuse a deny of a tool codex does not have — the question tool a schema withholds", () => {
+    expect(codexRefusal({ prompt: "x", disallowedTools: ["AskUserQuestion"] })).toBeUndefined();
+    expect(codexRefusal({ prompt: "x", disallowedTools: ["AskUserQuestion", "shell"] })).toMatch(/\[shell\]/);
+  });
+
+  it("threads the bridge seam through the ROUTE executor, where it used to be dropped", async () => {
+    const { spawn, argv } = fakeSpawn(answered("done"));
+    const { startBridge, state } = fakeBridge();
+    const tool = { description: "g", inputSchema: { type: "object" }, readOnly: true, run: async () => "hit" };
+    const result = await new AgentCodexExecutor({ spawn, startBridge }).start(promptOp({ user: "x", output: { name: "answer", schema: { type: "string" } } }), { tools: { grep: tool } } as never).result;
+    expect(isOk(result)).toBe(true);
+    expect(state.started).toBe(1);
+    expect(argv[0]!.join(" ")).toContain("mcp_servers.dai=");
   });
 
   it("runs an ordinary tool-less state with no bridge at all", async () => {
@@ -321,12 +341,17 @@ describe("the tool bridge — reachable, and refused all the same", () => {
     expect(argv[0]!.join(" ")).not.toContain("mcp_servers");
   });
 
-  // The declaration the bridge WOULD carry, kept tested so the day the approval key is found the
-  // change is one refusal away. `approval_mode` and its variants are verified: `--strict-config`
-  // rejects an unknown field, and accepts this one.
-  it("declares each served tool auto-approved, since our own gate runs in-process", () => {
-    expect(mcpServerOverride("http://h/x", ["grep"])).toBe('mcp_servers.dai={url="http://h/x",tools={"grep"={approval_mode="auto"}}}');
-    expect(mcpServerOverride("http://h/x")).toBe('mcp_servers.dai={url="http://h/x"}');
+  // Each key measured against a real `codex exec` (0.147.0), and `--strict-config` accepts all of them:
+  // `approve` lets the call through where `auto` cancelled it; `required` makes codex wait for our
+  // handshake (and fail loudly past `startup_timeout_sec`) where it otherwise began the turn without
+  // the tools; `tool_timeout_sec` outlasts a call parked on a person at the gate.
+  it("approves each served tool on codex's side, since the gate runs at the bridge, and makes the bridge required", () => {
+    expect(mcpServerOverride("http://h/x", ["grep"])).toBe(
+      'mcp_servers.dai={url="http://h/x",required=true,startup_timeout_sec=30,tool_timeout_sec=86400,tools={"grep"={approval_mode="approve"}}}',
+    );
+    expect(mcpServerOverride("http://h/x", [], "dai", { startupTimeoutSec: 5, toolTimeoutSec: 60 })).toBe(
+      'mcp_servers.dai={url="http://h/x",required=true,startup_timeout_sec=5,tool_timeout_sec=60}',
+    );
   });
 });
 

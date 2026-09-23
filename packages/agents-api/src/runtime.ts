@@ -29,6 +29,7 @@ import {
   sessionOutcomeOf,
   promptOp,
   type FunctionResult,
+  type Executor,
   type ExecServices,
   type FunctionInputs,
   type InlineFamily,
@@ -103,7 +104,26 @@ export interface ClaudeCodeFunctionOptions {
   /** What this transport is CALLED in a failure reason. Defaults to `claude-code`, which is what this
    *  factory drives; a CLI sibling passes its own binary's name so a failure says which one produced it. */
   label?: string;
+  /**
+   * Wrap the per-call executor before the call starts — the seam a HOST uses to hand an agent reached
+   * as a FUNCTION exactly what it hands the same agent reached as a prompt ROUTE.
+   *
+   * A route is an executor, so a host holds it to its policy by wrapping it: rewriting the op (the
+   * agent's own settings in `providerOptions` — an ask rule for a built-in the state keeps) and the
+   * services (what is denied, which tools are served) on the way in. A function call had no such door:
+   * this adapter builds its op from the inputs, with no `providerOptions` at all, so nothing a host
+   * wrote into an op could reach it and the two ways into one agent behaved differently. The wrapper
+   * is handed the executor this call built and returns what starts the call — the same wrapper a host
+   * puts around its route.
+   *
+   * Absent ⇒ the executor is started directly, as it always was.
+   */
+  wrapExecutor?: (executor: AgentExecutor) => AgentCallExecutor;
 }
+
+/** What {@link ClaudeCodeFunctionOptions.wrapExecutor} returns: anything that starts an op the way an
+ *  executor does. */
+export type AgentCallExecutor = Pick<Executor, "start">;
 
 /** Thrown when the delegated agent fails or is canceled. The invoking executor classifies it (a
  *  cancellation carries `name: "AbortError"`, which `classifyError` maps to `canceled`). */
@@ -191,7 +211,7 @@ export function agentRuntimeEntry(
         ...(typeof inputs.sessionId === "string" ? { approvalScope: inputs.sessionId } : {}),
       });
       const op = promptOp({ user: prompt, output: { name: "result", schema: { type: "string" } } });
-      const result = await executor.start(op, ctx).result;
+      const result = await (options.wrapExecutor?.(executor) ?? executor).start(op, ctx).result;
       const metrics = result.metrics as AgentMetrics;
       if (!isOk(result)) return { error: result.error, metrics };
       // Read off the DECLARED channel rather than out of a record-mode payload.

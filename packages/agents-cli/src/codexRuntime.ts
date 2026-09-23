@@ -22,8 +22,10 @@ import { createCodexAgentQuery, type CodexAgentOptions } from "./codexQuery.js";
  *    `--sandbox`, and the fact that the only tools we hand it are ones we implement. Declaring
  *    `callback` here would tell the engine a gate exists that nothing implements — and the engine
  *    answers `callback` by handing over RAW tools, so the claim would open both gates at once. Under
- *    `config` it wraps them with `withPermission` instead, which is why refusing the approval callback
- *    moves the gate rather than removing it.
+ *    `config` the engine wraps them with `withPermission` where it holds an engine-level approver, and
+ *    otherwise hands them over raw with the gate beside them — which the executor then puts every
+ *    call to at the bridge, before the tool runs. Either way refusing the approval callback moves the
+ *    gate rather than removing it.
  *  - **`sessionFork: false`.** `codex exec resume <id>` appends server-side, so resume is real; there
  *    is no fork primitive anywhere in the CLI, so a branch is REPLAYED (SESSIONS.md §6). Splitting the
  *    two is what stops a fork inheriting the parent's handle and putting two branches in one session.
@@ -57,7 +59,7 @@ export interface CodexAgentFunctionOptions extends Omit<ClaudeCodeFunctionOption
  * entry whose declaration and behaviour disagree.
  */
 export function createCodexAgentFunction(options: CodexAgentFunctionOptions = {}): ReturnType<typeof createClaudeCodeFunction> {
-  const { command, args, spawn, startBridge, sandbox, ...rest } = options;
+  const { command, args, spawn, startBridge, sandbox, bridgeTimeouts, ...rest } = options;
   return createClaudeCodeFunction({
     label: "codex",
     ...rest,
@@ -69,6 +71,7 @@ export function createCodexAgentFunction(options: CodexAgentFunctionOptions = {}
       ...(spawn !== undefined ? { spawn } : {}),
       ...(startBridge !== undefined ? { startBridge } : {}),
       ...(sandbox !== undefined ? { sandbox } : {}),
+      ...(bridgeTimeouts !== undefined ? { bridgeTimeouts } : {}),
     }),
   });
 }
