@@ -472,7 +472,14 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
         }
         // A CLI-level `{"error": "..."}` line has no `type` we recognise, so it would otherwise pass
         // through opaquely. It is run-fatal and has to reach the adapter as such.
-        if (normalized.type === "provider_event" && typeof msg["error"] === "string") {
+        //
+        // A `system` line is NOT one, whatever it carries: it is the CLI narrating its own loop, and
+        // the verdict comes later, on the assistant turn and the result. ✅ OBSERVED (claude 2.1.142,
+        // expired OAuth token): two `{"type":"system","subtype":"api_retry","error_status":401,
+        // "error":"authentication_failed"}` lines before the turn that says why. Read as fatal, the
+        // first retry notice ended the run with the bare code as its reason — and a transient
+        // `server_error` retry would end a run the CLI was about to recover.
+        if (normalized.type === "provider_event" && msg["type"] !== "system" && typeof msg["error"] === "string") {
           yield { type: "other", error: msg["error"] };
           continue;
         }

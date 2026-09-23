@@ -96,11 +96,13 @@ export function failureOf(e: unknown, context?: string): Failure {
   const classification = name === "AbortError" ? "canceled" : classifyError(e);
   const reason = describeError(e);
   const wait = retryAfterMs(e);
+  const code = e !== null && typeof e === "object" ? (e as { code?: unknown }).code : undefined;
   return {
     classification,
     reason: context ? `${context}: ${reason}` : reason,
     ...(wait !== undefined ? { retryAfterMs: wait } : {}),
     ...(isRateLimit(e) ? { rateLimited: true } : {}),
+    ...(typeof code === "string" && code.length > 0 ? { code } : {}),
   };
 }
 

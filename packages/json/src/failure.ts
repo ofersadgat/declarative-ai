@@ -30,6 +30,15 @@ export interface Failure<D = never> {
   /** True iff this was a 429 rate-limit — feeds AIMD's multiplicative decrease. */
   rateLimited?: boolean;
   /**
+   * The failing party's OWN machine-readable code, verbatim, when it gave one — an agent's
+   * `authentication_failed`, a socket's `ECONNREFUSED`.
+   *
+   * `reason` is for a person and `classification` is for the retry loop; this is for a host that
+   * must act on WHICH failure it was (a refused sign-in marks that agent unusable) without reading
+   * prose to find out.
+   */
+  code?: string;
+  /**
    * Domain-specific detail, for a layer with more to say than the shared fields carry.
    *
    * Generic in the DETAIL only, and `classification` stays invariant on purpose. This type exists so
@@ -60,6 +69,7 @@ export const FAILURE_SCHEMA = {
     reason: { type: "string" },
     retryAfterMs: { type: "number" },
     rateLimited: { type: "boolean" },
+    code: { type: "string" },
     detail: {},
   },
   required: ["classification", "reason"],

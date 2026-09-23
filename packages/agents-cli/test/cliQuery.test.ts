@@ -721,6 +721,41 @@ describe("not logged in — the failure that looks exactly like a successful emp
 });
 
 /**
+ * A sign-in that has EXPIRED — the CLI retries before it gives up, and says so on `system` lines.
+ *
+ * VERBATIM from `claude 2.1.142` with an OAuth token past its expiry (usage blocks trimmed). The retry
+ * notices carry `error: "authentication_failed"` too, and they are narration, not the verdict: the
+ * run must end on the turn and the result, in the CLI's own words.
+ */
+describe("expired sign-in — retry notices are not the verdict", () => {
+  const EXPIRED = [
+    '{"type":"system","subtype":"init","cwd":"C:\\\\x","session_id":"cb63a5b6","claude_code_version":"2.1.142"}',
+    '{"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,"retry_delay_ms":513.3,"error_status":401,"error":"authentication_failed","session_id":"cb63a5b6","uuid":"bfa3bb6d"}',
+    '{"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,"retry_delay_ms":1119.4,"error_status":401,"error":"authentication_failed","session_id":"cb63a5b6","uuid":"548d1db3"}',
+    '{"type":"assistant","message":{"id":"1ae881ff","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","type":"message","content":[{"type":"text","text":"Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue."}]},"parent_tool_use_id":null,"session_id":"cb63a5b6","uuid":"8cfee357","error":"authentication_failed"}',
+    '{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"num_turns":1,"result":"Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.","stop_reason":"stop_sequence","session_id":"cb63a5b6","total_cost_usd":0,"terminal_reason":"completed"}',
+  ];
+
+  it("forwards a retry notice opaquely rather than ending the run on it", async () => {
+    const { spawn } = fakeSpawn(EXPIRED, 1);
+    const seen = [];
+    for await (const m of createCliAgentQuery({ spawn })({ prompt: "say hi" })) seen.push(m);
+    expect(seen[1]).toMatchObject({ type: "provider_event", event: { subtype: "api_retry" } });
+    expect(seen[1]?.error).toBeUndefined();
+    expect(seen[3]).toMatchObject({ type: "assistant", errorCode: "authentication_failed" });
+  });
+
+  it("fails with the CLI's words and its code, not with the code alone", async () => {
+    const { spawn } = fakeSpawn(EXPIRED, 1);
+    const result = await createCliAgentFunction({ spawn }).run(inputs(), {});
+    expect(isOk(result)).toBe(false);
+    expect(!isOk(result) && result.error.reason).toMatch(/OAuth access token has expired/);
+    expect(!isOk(result) && result.error.code).toBe("authentication_failed");
+    expect(!isOk(result) && result.error.classification).toBe("permanent");
+  });
+});
+
+/**
  * A binary that is NOT THERE — the other half of "is this agent usable".
  *
  * A spawn that never happened has no exit code, so it arrives as the sentinel `-1`. "agent CLI exited
