@@ -185,6 +185,21 @@ describe("serving a permission ask", () => {
     expect(decode(result)).toEqual({ behavior: "allow", updatedInput: { command: "ls" } });
   });
 
+  it("carries the CLI's `tool_use_id` to the approver", async () => {
+    let seen: unknown;
+    const spec = { approve: async (req: unknown) => ((seen = req), { allow: true as const }) };
+    await handleToolCall(spec, APPROVAL_TOOL, { tool_name: "AskUserQuestion", input: {}, tool_use_id: "toolu_a" });
+    expect(seen).toEqual({ toolName: "AskUserQuestion", input: {}, toolUseId: "toolu_a" });
+  });
+
+  it("hands an injected tool the tool-use id the request's `_meta` names", async () => {
+    const calls: unknown[] = [];
+    const spec = { tools: { t: { inputSchema: { type: "object" } as never, run: (_input: unknown, call: unknown) => (calls.push(call), "ok") } } };
+    await handleToolCall(spec, "t", {}, { "claudecode/toolUseId": "toolu_b" });
+    await handleToolCall(spec, "t", {});
+    expect(calls).toEqual([{ toolCallId: "toolu_b" }, {}]);
+  });
+
   it("returns the approver's denial with its reason", async () => {
     const result = await handleToolCall({ approve: approve(false, "not permitted") }, APPROVAL_TOOL, { tool_name: "Bash", input: {} });
     expect(decode(result)).toMatchObject({ behavior: "deny", message: "not permitted" });

@@ -139,7 +139,7 @@ export const defaultStartMcpBridge: StartMcpBridge = async (spec) => {
       return { tools: descriptors };
     });
     server.setRequestHandler(typesModule.CallToolRequestSchema, (request) =>
-      handleToolCall(spec, request.params.name, request.params.arguments),
+      handleToolCall(spec, request.params.name, request.params.arguments, (request.params as { _meta?: unknown })._meta),
     );
     return server;
   };

@@ -182,14 +182,16 @@ export function projectLlmOutput(op: PromptOp<InlineFamily>, output: LlmOutput |
 }
 
 /** Adapt core {@link Tool}s (`run(input, ctx)`) into llm {@link ToolExecutor}s (`(input, options)`),
- *  closing over the call ctx. The tool's `run` IS its `execute`; the SDK's per-call `options` are
- *  dropped (a v1 tool needs only its input + the shared services). */
+ *  closing over the call ctx. The tool's `run` IS its `execute`; of the SDK's per-call `options` only
+ *  the call's id is kept, as `ctx.toolCallId` (see {@link ExecServices.toolCallId}). */
 function adaptTools(tools: Record<string, Tool> | undefined, ctx: ExecServices): Record<string, ToolExecutor> | undefined {
   if (!tools) return undefined;
   const entries = Object.entries(tools);
   if (entries.length === 0) return undefined;
   const out: Record<string, ToolExecutor> = {};
-  for (const [name, tool] of entries) out[name] = (input) => tool.run(input, ctx);
+  for (const [name, tool] of entries) {
+    out[name] = (input, options) => tool.run(input, typeof options?.toolCallId === "string" ? { ...ctx, toolCallId: options.toolCallId } : ctx);
+  }
   return out;
 }
 

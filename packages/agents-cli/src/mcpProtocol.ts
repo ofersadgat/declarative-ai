@@ -39,6 +39,7 @@
  * if a future CLI rejects our decisions.
  */
 import {
+  injectedToolCallOf,
   injectedToolDescriptors,
   MCP_SERVER_NAME,
   mcpToolName,
@@ -247,6 +248,8 @@ export async function handleToolCall(
   },
   name: string,
   args: unknown,
+  /** The request's `_meta`, as the CLI sent it — where it names the call's tool-use id. */
+  meta?: unknown,
 ): Promise<McpToolResult> {
   // The reserved name is handled here and NEVER falls through to `spec.tools` — a host tool called
   // `approve` must not become callable just because no approver happens to be wired (`toolDescriptors`
@@ -257,7 +260,7 @@ export async function handleToolCall(
     if (!request) return textResult(malformedApprovalResponseText());
     let decision: AgentPermissionDecision;
     try {
-      decision = await spec.approve({ toolName: request.toolName, input: request.input });
+      decision = await spec.approve({ toolName: request.toolName, input: request.input, ...(request.toolUseId !== undefined ? { toolUseId: request.toolUseId } : {}) });
     } catch {
       // An approver that throws is not consent. Deny.
       return textResult(malformedApprovalResponseText());
@@ -267,5 +270,5 @@ export async function handleToolCall(
 
   // The low-level MCP `Server` advertises our schema and then hands the handler whatever arrived — it
   // validates NOTHING — so the boundary check on an injected tool's arguments lives in `runInjectedTool`.
-  return runInjectedTool(spec, name, args);
+  return runInjectedTool(spec, name, args, injectedToolCallOf(meta));
 }

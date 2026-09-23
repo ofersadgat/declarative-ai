@@ -8,6 +8,7 @@
 import { describe, expect, it } from "vitest";
 import type { SyncOutputValidator } from "@declarative-ai/exec";
 import { injectedToolDescriptors, mcpToolName, runInjectedTool, textResult } from "../src/mcpTools.js";
+import { injectedToolCallOf, TOOL_USE_ID_META } from "../src/seam.js";
 
 const schema = { type: "object", properties: { path: { type: "string" } }, required: ["path"] } as never;
 
@@ -45,6 +46,20 @@ describe("runInjectedTool — one call, whatever carried it", () => {
     );
     expect(seen).toEqual([{ path: "a.txt" }]);
     expect(result).toEqual(textResult("ZEPHYR"));
+  });
+
+  it("hands the impl what the transport said about the call — its tool-use id, when there is one", async () => {
+    const calls: unknown[] = [];
+    await runInjectedTool({ tools: { t: { inputSchema: schema, run: (_input, call) => (calls.push(call), "") } } }, "t", {}, { toolCallId: "toolu_1" });
+    await runInjectedTool({ tools: { t: { inputSchema: schema, run: (_input, call) => (calls.push(call), "") } } }, "t", {});
+    expect(calls).toEqual([{ toolCallId: "toolu_1" }, {}]);
+  });
+
+  it("reads the id off an MCP request's `_meta` under the key the Claude CLI sends it by", () => {
+    expect(TOOL_USE_ID_META).toBe("claudecode/toolUseId");
+    expect(injectedToolCallOf({ "claudecode/toolUseId": "toolu_9", other: 1 })).toEqual({ toolCallId: "toolu_9" });
+    expect(injectedToolCallOf(undefined)).toEqual({});
+    expect(injectedToolCallOf({ "claudecode/toolUseId": 7 })).toEqual({});
   });
 
   it("serializes a non-string value rather than stringifying it by coercion", async () => {

@@ -372,7 +372,7 @@ no guard, or whose `to` is a `terminate.*` outcome.
 **Directed transitions.** Every transition above is taken because a rule fired. A
 DIRECTED transition is one the HOST injects on somebody's behalf — a person who
 dragged a card, or a conversation that holds the workflow as a tool and was told
-"go there". The host hands the run `{ instanceId?, to, inputs?, by, skip? }`
+"go there". The host hands the run `{ instanceId?, to, path?, inputs?, by, skip? }`
 through a `DirectedTransitions` port (`EngineConfig.directed`):
 
 - `to` is a declared child of the instance named (the run's root when none is).
@@ -400,6 +400,15 @@ through a `DirectedTransitions` port (`EngineConfig.directed`):
   occurrence, a new pass opens, and the usual reset applies.
 - it is journaled as `transition.taken` with `by` (`"person"` or `"control"`),
   `skip` and the `inputs` handed over. A rule-taken transition has no `by`.
+- a NESTED target is a move with a `path`: the child keys beneath `to`, one per
+  level. A composite that has not been entered has no id to be named by, so the
+  engine takes the way down itself — the moment `to` is entered, `path[0]` is
+  directed at the instance it just made, with the same `by` and `skip`, and so on
+  to the end. The whole path is checked against the definition before the first
+  step is taken. `inputs` are the TARGET's (the end of the path); a composite on
+  the way is handed only what a standing rule wires. Each step is journaled on the
+  composite that takes it, its `transition.taken` carrying `descent` — the rest of
+  the way still to go and the target's inputs.
 
 A move handed to the port while no run is attached is QUEUED, and claimed by the
 instance it names when a loaded run builds it — which is how a FINISHED run takes
@@ -409,7 +418,12 @@ its `transition.taken` row is what says so in the journal. A stopped run reopene
 with `skip` steps past the children it would have interrupted without continuing
 them first. `LoadedInstance.directed` carries a directed transition that was
 journaled and whose target never entered; the loaded instance makes that entry
-first, without journaling the transition again.
+first, without journaling the transition again — and, where the row carried a
+`descent`, the way down continues from the instance it enters.
+`LoadedInstance.descent` is a step of a way down that an ENTERED instance still
+owes: the loaded instance takes it, journaled, before it walks its own spine, so a
+move to a nested target survives a restart part-way down. A move the port hands
+that instance is the later word and replaces it.
 
 ### 3.4 State Instances
 

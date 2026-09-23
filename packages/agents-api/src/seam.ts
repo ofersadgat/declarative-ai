@@ -19,6 +19,26 @@ export type AgentEffort = "low" | "medium" | "high" | "xhigh";
 export interface AgentToolRequest {
   toolName: string;
   input: FunctionInputs;
+  /** The agent's own id for the tool call being asked about, when the transport reports it (the SDK's
+   *  `toolUseID`, the CLI's `tool_use_id`). */
+  toolUseId?: string;
+}
+
+/** What a transport knows about the tool call an {@link InjectedTool} is answering. */
+export interface InjectedToolCall {
+  /** The agent's own id for the call — the CLI sends it on every MCP `tools/call` as
+   *  `_meta["claudecode/toolUseId"]`. Absent when the transport does not say. */
+  toolCallId?: string;
+}
+
+/** The `_meta` key the Claude CLI names a `tools/call`'s tool-use id under. */
+export const TOOL_USE_ID_META = "claudecode/toolUseId";
+
+/** The {@link InjectedToolCall} an MCP `tools/call`'s `_meta` describes. */
+export function injectedToolCallOf(meta: unknown): InjectedToolCall {
+  if (meta === null || typeof meta !== "object" || Array.isArray(meta)) return {};
+  const id = (meta as Record<string, unknown>)[TOOL_USE_ID_META];
+  return typeof id === "string" && id.length > 0 ? { toolCallId: id } : {};
 }
 
 /**
@@ -42,7 +62,8 @@ export type AgentPermissionCallback = (req: AgentToolRequest, opts: { signal: Ab
 export interface InjectedTool {
   description?: string;
   inputSchema: JsonSchema;
-  run: (input: FunctionInputs) => JsonValue | Promise<JsonValue>;
+  /** `call` is what the transport said about the tool call being answered — see {@link InjectedToolCall}. */
+  run: (input: FunctionInputs, call?: InjectedToolCall) => JsonValue | Promise<JsonValue>;
 }
 
 /** Options the adapter builds from the op inputs + ctx and hands to the query seam. */

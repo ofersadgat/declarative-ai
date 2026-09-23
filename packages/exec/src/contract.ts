@@ -442,6 +442,17 @@ export interface ExecServices {
    * survive each wrapper's `{ ...ctx }` spread for free.
    */
   onDispatch?: (dispatch: { id: string }) => void;
+  /**
+   * The id the MODEL gave the tool call a {@link Tool.run} is answering — set on the ctx a tool is
+   * run with, by whichever runtime executes it, when that runtime knows the id: the composed loop
+   * from its own tool-call record, a delegated agent from what its transport reports (the Claude CLI
+   * names it on every MCP `tools/call`). Absent on every other ctx, and on a tool call whose
+   * transport does not say.
+   *
+   * What a host tool needs to tie a side effect it records to the row that caused it in the
+   * conversation's transcript, which carries the same id.
+   */
+  toolCallId?: string;
   /** Cancellation for the operation in flight. */
   abortSignal?: AbortSignal;
 }

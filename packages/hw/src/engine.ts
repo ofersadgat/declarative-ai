@@ -72,6 +72,7 @@ import {
   planExitTool,
   withPermission,
   type Approver,
+  type AskUser,
   type PermissionBaseline,
   type PermissionMode,
   type ToolGate,
@@ -115,7 +116,17 @@ import { hasDefault, literalPermissions, SPAWN_DEFAULTS, type HostedEachKind, ty
 import { isCallableKind, isCallableSchema } from "@declarative-ai/exec";
 import { isOperationValue } from "./resolve.js";
 import { uuidv7 } from "./ids.js";
-import { isSkipAbort, SkipAbort, type DirectedOutcome, type DirectedTarget, type DirectedTransition, type DirectedTransitions } from "./directed.js";
+import {
+  descentOf,
+  isSkipAbort,
+  nextStepOf,
+  SkipAbort,
+  type DirectedDescent,
+  type DirectedOutcome,
+  type DirectedTarget,
+  type DirectedTransition,
+  type DirectedTransitions,
+} from "./directed.js";
 
 /**
  * A round that cannot finish yet: a transition guard is waiting on a deferred call.
@@ -153,6 +164,27 @@ function tryHashOperation(op: Operation<InlineFamily>): string | undefined {
  *  unhashable op folds the same `"unhashable"` sentinel the record layer's own fallback uses, so
  *  the event and the record row agree on the id even when the content has no identity: the scope
  *  is unique, and the join must survive a stream input. */
+/**
+ * The approver an operation of ONE instance is handed: the same one, with the asking instance on
+ * every request it makes (`PermissionRequest.instanceId`).
+ *
+ * The approver is placed once per run on the caller's services, so without this a host holding a
+ * parked request could not say whose it is — which is exactly what it needs when a directed skip
+ * interrupts one agent and not its `async` sibling. The INNERMOST stamp stands: a sub-workflow's
+ * engine wraps the approver its parent already wrapped, and the request is made by the deepest
+ * instance, so a stamp already present is kept rather than overwritten on the way out.
+ */
+function approverOf(approve: Approver | undefined, instanceId: string): Approver | undefined {
+  if (approve === undefined) return undefined;
+  return (req) => approve(req.instanceId !== undefined ? req : { ...req, instanceId });
+}
+
+/** {@link approverOf} for the question channel (`UserQuestionRequest.instanceId`). */
+function askerOf(askUser: AskUser | undefined, instanceId: string): AskUser | undefined {
+  if (askUser === undefined) return undefined;
+  return (req) => askUser(req.instanceId !== undefined ? req : { ...req, instanceId });
+}
+
 function tryScopedId(hash: string | undefined, scope: OperationScope): string {
   return scopedOperationId(hash ?? "unhashable", scope);
 }
@@ -687,7 +719,7 @@ interface Instance {
    * An entry a LOADED instance owes: its stopped run journaled a directed transition and died
    * before the target entered (`LoadedInstance.directed`). Made first, and not journaled again.
    */
-  owedEntry?: { to: string; inputs?: Record<string, ResolvedValue> };
+  owedEntry?: { to: string; inputs?: Record<string, ResolvedValue>; descent?: DirectedDescent };
 }
 
 /**
@@ -1387,6 +1419,13 @@ export class WorkflowEngine {
     // Claimed BEFORE the children are looked at, because a skip decides which of them continue.
     this.registerLive(instance);
     if (loaded.directed !== undefined) instance.owedEntry = loaded.directed;
+    // A step of a WAY DOWN this instance owes (`LoadedInstance.descent`): taken ahead of its spine, as
+    // it would have been had the run not stopped between its entry and the step. A move the port
+    // handed it since is the later word, and wins.
+    if (loaded.descent !== undefined && loaded.descent.path.length > 0 && instance.directed === undefined) {
+      const step = nextStepOf(instance.id, loaded.descent);
+      if (instance.def.children?.[step.to] !== undefined) instance.directed = step;
+    }
     const inputFailure = this.resolveInputBindings(instance);
     // A SKIP waiting for this instance (a stopped run reopened to take a move) steps past the
     // children it would have interrupted WITHOUT continuing them first: resuming a cut agent call
@@ -1535,7 +1574,7 @@ export class WorkflowEngine {
       if (instance.owedEntry !== undefined) {
         const owed = instance.owedEntry;
         instance.owedEntry = undefined;
-        const entered = await this.enterDirected(instance, owed.to, owed.inputs);
+        const entered = await this.enterDirected(instance, owed.to, owed.inputs, owed.descent);
         if (typeof entered === "object") return this.finish(instance, "error", entered.failure);
         evaluationDue = false;
         continue;
@@ -1878,16 +1917,57 @@ export class WorkflowEngine {
     if (instance.def.children?.[move.to] === undefined) {
       return { status: "refused", reason: `'${move.to}' is not a declared child of '${instance.stateId}'` };
     }
+    const wrongTurn = this.pathRefusal(instance.def, move);
+    if (wrongTurn !== undefined) return { status: "refused", reason: wrongTurn };
     instance.directed = move;
     const status = this.directedReady(instance, move) ? "taking" : "held";
     instance.notify.signal();
     return { status };
   }
 
+  /**
+   * Why a move's WAY DOWN cannot be walked, checked against the definition before anything is
+   * taken: each step must be a declared child of the state the step before it mounts. A refusal
+   * found halfway down, after the top of the move had been journaled, would leave the run standing
+   * in a composite nobody asked for.
+   */
+  private pathRefusal(def: LoadedState, move: DirectedTransition): string | undefined {
+    let state = this.config.bundle.states[def.children?.[move.to]?.state ?? ""];
+    let above = move.to;
+    for (const key of move.path ?? []) {
+      const child = state?.children?.[key];
+      if (state === undefined || child === undefined) return `'${key}' is not a declared child of '${above}' on the way down`;
+      above = key;
+      state = this.config.bundle.states[child.state];
+    }
+    return undefined;
+  }
+
+  /**
+   * The next step of a WAY DOWN, waiting for the composite it is taken in to be entered — keyed by
+   * that composite's parent and child key, because until it is entered it has no id to be named by.
+   * Claimed by `registerLive`, which runs before the entry is journaled and before the composite's
+   * loop starts, so the composite takes the step ahead of its own spine.
+   */
+  private readonly pendingDescents = new Map<string, DirectedDescent>();
+
+  private static descentKey(parentId: string, childKey: string): string {
+    return `${parentId}\u0000${childKey}`;
+  }
+
   /** An instance joins the run: addressable from here on, and handed any move that was waiting for it. */
   private registerLive(instance: Instance): void {
     this.liveInstances.set(instance.id, instance);
     if (instance.parent === undefined) this.rootInstance = instance;
+    if (instance.parent !== undefined && instance.childKey !== undefined && this.pendingDescents.size > 0) {
+      const key = WorkflowEngine.descentKey(instance.parent.id, instance.childKey);
+      const descent = this.pendingDescents.get(key);
+      if (descent !== undefined) {
+        this.pendingDescents.delete(key);
+        const step = nextStepOf(instance.id, descent);
+        if (instance.def.children?.[step.to] !== undefined) instance.directed = step;
+      }
+    }
     if (this.pendingDirected.length === 0) return;
     const mine = (move: DirectedTransition): boolean => (move.instanceId === undefined ? instance.parent === undefined : move.instanceId === instance.id);
     const claimed = this.pendingDirected.filter(mine);
@@ -1948,7 +2028,10 @@ export class WorkflowEngine {
       const resolved = this.resolveTransitionInputs(instance, rule.inputRefs);
       if (resolved !== PENDING && resolved !== undefined) handed = resolved;
     }
-    const inputs = { ...handed, ...(move.inputs ?? {}) };
+    // With a way down still to go, the asker's inputs are the TARGET's and travel with the descent:
+    // the composite entered here is handed only what a standing rule wires into it.
+    const descent = descentOf(move);
+    const inputs = descent !== undefined ? handed : { ...handed, ...(move.inputs ?? {}) };
 
     // WHO is stepped over — fixed now, before anything is journaled or interrupted. A skip
     // interrupts the running children the spine put there (sequence members, and whichever child
@@ -1985,6 +2068,9 @@ export class WorkflowEngine {
       by: move.by,
       ...(move.skip === true ? { skip: true } : {}),
       ...(Object.keys(inputs).length > 0 ? { inputs: shallowRedactArtifacts(inputs) } : {}),
+      ...(descent !== undefined
+        ? { descent: { ...descent, ...(descent.inputs !== undefined ? { inputs: shallowRedactArtifacts(descent.inputs) } : {}) } }
+        : {}),
     });
     // The person's move answers for whatever had finished or failed and not been answered: they
     // said where the run goes, which is the decision a rule naming the failure would have made.
@@ -2023,24 +2109,39 @@ export class WorkflowEngine {
       instance.children = new Map(instance.children);
       instance.passes.push(instance.children);
     }
-    return this.enterDirected(instance, move.to, inputs);
+    return this.enterDirected(instance, move.to, inputs, descent);
   }
 
   /**
    * Enter a directed transition's target, waiting out a PARK rather than rolling the move back: the
    * transition is already journaled and what it stepped over already recorded, so a target whose
    * wiring reads a still-running sibling is entered when that sibling resolves.
+   *
+   * With a `descent`, the target is one step of a way down: the next step waits for it to be entered
+   * (`pendingDescents`) and is directed at it the moment it is.
    */
-  private async enterDirected(instance: Instance, to: string, inputs: Record<string, ResolvedValue> | undefined): Promise<"entered" | { failure: Failure }> {
+  private async enterDirected(
+    instance: Instance,
+    to: string,
+    inputs: Record<string, ResolvedValue> | undefined,
+    descent?: DirectedDescent,
+  ): Promise<"entered" | { failure: Failure }> {
     const handed = inputs === undefined ? undefined : this.rehydrateArtifacts(inputs);
-    for (;;) {
-      if (instance.abort.signal.aborted) return "entered"; // the loop's next turn ends the instance
-      const entered = await this.enterChild(instance, to, handed);
-      if (typeof entered === "object") return entered;
-      if (entered === "started") return "entered";
-      if (!(await this.waitForAnyChild(instance))) {
-        return { failure: { classification: "permanent", reason: `directed transition to '${to}' parked on inputs nothing running can resolve (dataflow deadlock)` } };
+    const key = WorkflowEngine.descentKey(instance.id, to);
+    if (descent !== undefined && descent.path.length > 0) this.pendingDescents.set(key, descent);
+    try {
+      for (;;) {
+        if (instance.abort.signal.aborted) return "entered"; // the loop's next turn ends the instance
+        const entered = await this.enterChild(instance, to, handed);
+        if (typeof entered === "object") return entered;
+        if (entered === "started") return "entered";
+        if (!(await this.waitForAnyChild(instance))) {
+          return { failure: { classification: "permanent", reason: `directed transition to '${to}' parked on inputs nothing running can resolve (dataflow deadlock)` } };
+        }
       }
+    } finally {
+      // Claimed at the entry; anything left is a step whose composite was never entered.
+      this.pendingDescents.delete(key);
     }
   }
 
@@ -4185,7 +4286,7 @@ export class WorkflowEngine {
       op.kind === "prompt"
         ? this.delegatesPolicy(this.operations, op)
         : entry?.kind === "runtime" && entry.capabilities.policyEnforcement === "callback";
-    const toolsOrFailure = this.resolveTools(env, resourceKey, delegates);
+    const toolsOrFailure = this.resolveTools(env, resourceKey, delegates, instance.id);
     if ("failure" in toolsOrFailure) return { error: toolsOrFailure.failure.reason };
     const rendered = op.kind === "prompt" ? { ...op, user: this.renderTemplate(op.user, instance, literal.values) } : op;
     // A call gets a site of its own — sequence 0 is the state's operation, and a call written into a
@@ -4273,7 +4374,7 @@ export class WorkflowEngine {
     // it would cover exactly one operation (DESIGN.md §5.1). The two agree except when a session was
     // named by an EXPRESSION, where only the resolved binding knows the name it evaluated to.
     const resourceKey = session?.resourceKey ?? instance.resourceKey;
-    const toolsOrFailure = this.resolveTools(env, resourceKey, delegates);
+    const toolsOrFailure = this.resolveTools(env, resourceKey, delegates, instance.id);
     if ("failure" in toolsOrFailure) return fail(toolsOrFailure.failure);
 
     const scope = this.stateOpScope(instance);
@@ -4405,7 +4506,7 @@ export class WorkflowEngine {
     // gate), and — worse — the {@link ToolGate} was never published at all, so the state's authored
     // modes, its `permissions.profile` and the run's ledger were all invisible to the one enforcement
     // channel a delegated transport has. The agent ran under nothing but its own defaults.
-    const toolsOrFailure = this.resolveTools(env, session.resourceKey, this.delegatesPolicy(promptExecutor, op));
+    const toolsOrFailure = this.resolveTools(env, session.resourceKey, this.delegatesPolicy(promptExecutor, op), instance.id);
     if ("failure" in toolsOrFailure) return fail(toolsOrFailure.failure);
     const tools = toolsOrFailure.tools;
 
@@ -4526,8 +4627,10 @@ export class WorkflowEngine {
     env: ExecEnvironmentDecl,
     sessionId: string,
     delegatesPermissions: boolean,
+    /** The instance whose operation this is — stamped on every request its approver sees (`approverOf`). */
+    instanceId: string,
   ): { tools?: Record<string, Tool>; gate?: ToolGate; authored?: LiteralPermissions } | { failure: Failure } {
-    const approve = this.config.permissions?.approve;
+    const approve = approverOf(this.config.permissions?.approve, instanceId);
     /**
      * The GATE's escalation channel, falling back to the services seam.
      *
@@ -4542,7 +4645,7 @@ export class WorkflowEngine {
      * behaviour it always had (raw, self-gating where the tool chooses to), while the gate — which
      * only a delegated adapter consults — now exists to carry the profile and the modes across.
      */
-    const escalate = approve ?? this.config.services?.approve;
+    const escalate = approve ?? approverOf(this.config.services?.approve, instanceId);
     // Seeded whichever way the policy is enforced. It used to happen on the wrapping path only, so a
     // DELEGATED state authoring `profile: "read-only"` ran under `full` — the ledger's default —
     // before any of the rest of this had a chance to matter.
@@ -4710,7 +4813,7 @@ export class WorkflowEngine {
     /** The operation's resolved permission block, when its environment carries one — see {@link resolveTools}. */
     authored?: LiteralPermissions,
   ): Promise<ExecServices> {
-    const services = this.childServices();
+    const services = this.childServices(instance.id);
     if (gate !== undefined) services.gate = gate;
     // Set or CLEARED, for the reason the dispatch scope below is: for a sub-workflow the copied
     // bundle IS the parent dispatch's ctx, and the parent's block is not this operation's statement.
@@ -4883,16 +4986,20 @@ export class WorkflowEngine {
   /** The `ExecServices` operations run with: caller services + engine validator + the run's session
    *  store — the SAME store the built-in transcript uses, so `withSession` and the preamble share one
    *  source (states sharing a logical `sessionId` continue one conversation; an app store wins). */
-  private childServices(): ExecServices {
-    return {
+  private childServices(instanceId: string): ExecServices {
+    const askUser = askerOf(this.config.services?.askUser, instanceId);
+    const services: ExecServices = {
       ...this.config.services,
       validator: this.validator,
       // A delegated adapter reads this to route its native permission callback through our approval
       // UI; the engine wraps a composed runtime's tools directly, so this is inert for a prompt op.
       // `approve` is `@declarative-ai/permissions`' seam on `ExecServices` — `exec` does not know it
-      // exists (DESIGN §3.2).
-      approve: this.config.permissions?.approve ?? this.config.services?.approve,
+      // exists (DESIGN §3.2). Both it and `askUser` name the asking instance on what they are handed
+      // (`approverOf`), so a host can tell whose a parked request is.
+      approve: approverOf(this.config.permissions?.approve ?? this.config.services?.approve, instanceId),
     };
+    if (askUser !== undefined) services.askUser = askUser;
+    return services;
   }
 
   /**

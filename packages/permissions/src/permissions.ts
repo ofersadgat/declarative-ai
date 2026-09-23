@@ -168,6 +168,13 @@ export interface PermissionRequest {
    *  bytes (DESIGN §3.7), and an approver must be able to see what it is authorizing. */
   input: FunctionInputs;
   sessionId: string;
+  /**
+   * The workflow INSTANCE whose operation is asking, by durable id — stamped by the engine on the
+   * approver it hands each operation, so a host holding one approver for a whole run can still say
+   * whose a parked request is (and withdraw exactly the ones a skip interrupted). Absent for a call
+   * no workflow instance made.
+   */
+  instanceId?: string;
 }
 
 /** Collects a human decision for an `ask` — backed by an interactive `HostFunction` in the real system,
@@ -204,6 +211,13 @@ export interface UserQuestion {
 export interface UserQuestionRequest {
   questions: UserQuestion[];
   sessionId: string;
+  /** The workflow instance whose operation is asking — see {@link PermissionRequest.instanceId}. */
+  instanceId?: string;
+  /**
+   * The id of the agent's own tool call that asked (`AskUserQuestion`'s `tool_use` id), when the
+   * transport reports it — what joins a parked question to the call in the agent's transcript.
+   */
+  toolCallId?: string;
 }
 
 /**

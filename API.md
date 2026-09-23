@@ -1199,6 +1199,7 @@ interface ExecServices {
   workspace?: Workspace;              // { root, treeHash? } — a Session-owned resource
   scope?: OperationScope;             // the dispatch site: { instanceId, sequence } — folds into the record id
   onDispatch?: (d: { id: string }) => void; // fired by withRecord AFTER the row is inserted, BEFORE the call
+  toolCallId?: string;                // on the ctx a Tool.run gets: the model's id for the call it answers
   timeoutMs?: number;                 // per-call wall-clock budget
   maxCostUsd?: number;                // per-call cost ceiling
   abortSignal?: AbortSignal;          // cancellation for the operation in flight
@@ -1555,7 +1556,8 @@ type ProfilePredicate = (tool: { name: string; readOnly: boolean }) => boolean; 
 function inProfile(profile: PermissionProfile, tool: { name; readOnly }, custom?): boolean;
 
 type PermissionScope = "once" | "session" | "workflow-run" | "always";   // in-memory lifetimes, widening
-interface PermissionRequest { tool: string; input: JsonValue; sessionId: string; }
+interface PermissionRequest { tool: string; input: JsonValue; sessionId: string;
+  instanceId?: string; }        // the workflow instance whose operation asked — stamped by the engine
 interface PermissionDecision { decision: "allow" | "deny"; scope: PermissionScope; }
 type Approver = (req: PermissionRequest) => PermissionDecision | Promise<PermissionDecision>;
 type SmartVerdict = "allow" | "deny" | "ask";
@@ -1590,9 +1592,16 @@ interface ExecPolicy {
 
 // This package DECLARES its own seams — `exec` therefore does not know that permissions exist.
 declare module "@declarative-ai/exec" {
-  interface ExecServices { policy?: ExecPolicy; approve?: Approver }
+  interface ExecServices { policy?: ExecPolicy; approve?: Approver; askUser?: AskUser }
 }
+// A running agent's questions: `instanceId` stamped by the engine as for an approval; `toolCallId`
+// is the asking `AskUserQuestion` call's own id, when the transport reports it.
+interface UserQuestionRequest { questions: UserQuestion[]; sessionId: string; instanceId?: string; toolCallId?: string; }
 ```
+
+The engine hands each operation the run's `approve` and `askUser` WRAPPED, so every request names the
+instance that asked (`instanceId`) — the gate's escalation included. A stamp already present is kept:
+in a nested run the innermost instance is the one named.
 
 `ExecServices.policy` is this type, not an opaque blob. How it is enforced follows the executing entry's
 `policyEnforcement` capability: `"callback"` wraps each tool with `withPermission` and gates per call;
@@ -2579,10 +2588,16 @@ interface EngineConfig {
 // declared child of it. Held while a sync child holds the cursor unless `skip`, which interrupts —
 // the running child and every unentered member stepped over end `skipped`.
 interface DirectedTransition {
-  instanceId?: string; to: string; inputs?: Record<string, ResolvedValue>;
+  instanceId?: string; to: string;
+  path?: readonly string[];        // the way down beneath `to` — each step directed at the composite
+                                   // just entered; journaled per step as `transition.taken.descent`
+  inputs?: Record<string, ResolvedValue>;   // the TARGET's (the end of `path`)
   by: TransitionAsker;             // "person" | "control" — journaled on `transition.taken`
-  skip?: boolean;
+  skip?: boolean;                  // carried to every step of `path`
 }
+// The rest of a way down, on a `transition.taken` row and on a `LoadedInstance` (`descent`, and
+// `directed.descent` for an owed entry): taken by the loaded instance before its own spine.
+interface DirectedDescent { path: readonly string[]; inputs?: Record<string, ResolvedValue>; by: TransitionAsker; skip?: boolean; }
 type DirectedOutcome = { status: "queued" | "held" | "taking" } | { status: "refused"; reason: string };
 class DirectedTransitions {
   direct(move: DirectedTransition): DirectedOutcome;   // never throws

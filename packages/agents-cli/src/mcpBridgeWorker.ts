@@ -79,6 +79,8 @@ export interface CallMessage {
   token: string;
   name: string;
   args: unknown;
+  /** The request's `_meta` — where the CLI names the call's tool-use id. */
+  meta?: unknown;
 }
 export interface ClosedMessage {
   type: "closed";
@@ -152,11 +154,11 @@ function runFor(req: IncomingMessage): { token: string; run: Run } | undefined {
 }
 
 /** Forward a `tools/call` to the parent and wait for what its impl answered. */
-function forward(token: string, name: string, args: unknown): Promise<unknown> {
+function forward(token: string, name: string, args: unknown, meta: unknown): Promise<unknown> {
   return new Promise((resolve) => {
     const id = ++calls;
     pending.set(id, resolve);
-    post({ type: "call", id, token, name, args });
+    post({ type: "call", id, token, name, args, ...(meta !== undefined ? { meta } : {}) });
   });
 }
 
@@ -220,7 +222,7 @@ async function handle(sdk: SdkModules, req: IncomingMessage, res: ServerResponse
     }
     return { tools: run.descriptors };
   });
-  server.setRequestHandler(sdk.CallToolRequestSchema, (request) => forward(token, request.params.name, request.params.arguments));
+  server.setRequestHandler(sdk.CallToolRequestSchema, (request) => forward(token, request.params.name, request.params.arguments, (request.params as { _meta?: unknown })._meta));
   const transport = new sdk.StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   res.on("close", () => {
     void transport.close();

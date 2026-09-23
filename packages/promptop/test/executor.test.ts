@@ -141,6 +141,16 @@ describe("core — tools and blob outputs", () => {
     expect(await exec({ a: 1 }, {} as never)).toEqual({ sum: 2 });
   });
 
+  it("runs a tool with the model's call id as `ctx.toolCallId`, beside the services it closes over", async () => {
+    const { runner, calls } = fakeRunner([okOutcome()]);
+    const seen: Array<[string | undefined, unknown]> = [];
+    const tool: Tool = { inputSchema: { type: "object" }, readOnly: true, run: (_input, ctx) => (seen.push([ctx.toolCallId, ctx.workspace]), null) };
+    const ctx: ExecServices = { tools: { t: tool }, workspace: { root: "/w" } };
+    await createPromptExecutor({ runner }).start(promptOp(), ctx).result;
+    await calls[0]!.env.toolExecutors!.t!({}, { toolCallId: "call_1", messages: [] } as never);
+    expect(seen).toEqual([["call_1", { root: "/w" }]]);
+  });
+
   it("tools given at CONSTRUCTION are declared AND executable — the loop must not silently degrade", async () => {
     // The declarations came from `ctx.tools ?? options.tools` while the executors came from `ctx.tools`
     // alone, so a construction-time tool was announced to the model with nothing able to run it:

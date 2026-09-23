@@ -43,7 +43,7 @@ export function emptyWorkflowMetrics(): WorkflowMetrics {
   return { durationMs: 0, costUsd: 0, costSource: "unknown" };
 }
 import type { TerminationOutcome } from "./format.js";
-import type { TransitionAsker } from "./directed.js";
+import type { DirectedDescent, TransitionAsker } from "./directed.js";
 
 /** An artifact value flowing through workflow inputs/outputs (SPEC §4.6). For
  *  llm-backed states the content travels inline; process units use paths.
@@ -202,6 +202,12 @@ export type EngineEvent =
    * was interrupted rather than waited for; `inputs` are what the asker handed the target (artifact
    * content elided), kept so a run that died between this row and the target's entry can still make
    * the entry it owes (`LoadedInstance.directed`).
+   *
+   * `descent` is present on a directed step whose target is not the end of the move: the rest of the
+   * way down (`DirectedTransition.path`) beneath `to`, and what the last state on it is handed
+   * (artifact content elided). The target is entered with nothing but a standing rule's wiring and
+   * takes the next step as soon as it is entered; a run that died between the two is loaded with the
+   * step still owed (`LoadedInstance.descent`).
    */
   | {
       type: "transition.taken";
@@ -213,6 +219,7 @@ export type EngineEvent =
       by?: TransitionAsker;
       skip?: boolean;
       inputs?: Record<string, ResolvedValue>;
+      descent?: DirectedDescent;
     }
   | { type: "child.superseded"; instanceId: string; stateId: string; childKey: string }
   | { type: "instance.terminated"; instanceId: string; stateId: string; outcome: TerminationOutcome; failure?: Failure };

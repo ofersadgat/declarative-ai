@@ -587,3 +587,155 @@ describe("`skipped` in an expression", () => {
     expect(h.dispatched).toEqual(["a", "d", "noticed"]);
   });
 });
+
+describe("the way down — a move to a NESTED target (`path`)", () => {
+  /**
+   * Root → a, feat; feat → p, ux; ux → first, draft, last. What `draft` answers is carried up to the
+   * root, so the outputs say whether the move reached it and with what.
+   */
+  const DEEP: Record<string, StateDef> = {
+    root: {
+      label: "Root",
+      outputs: { ...outcomesOf(["a", "feat"]), got: { schema: {}, optional: true, binding: ".children.feat.output.got" } },
+      children: { a: { state: "root/a" }, feat: { state: "root/feat" } },
+      sequence: ["a", "feat"],
+    },
+    "root/a": leaf("a"),
+    "root/feat": {
+      label: "Feature",
+      outputs: { ...outcomesOf(["p"]), got: { schema: {}, optional: true, binding: ".children.ux.output.got" } },
+      children: { p: { state: "root/feat/p" }, ux: { state: "root/feat/ux" } },
+      sequence: ["p", "ux"],
+    },
+    "root/feat/p": leaf("p"),
+    "root/feat/ux": {
+      label: "UX",
+      outputs: { ...outcomesOf(["first"]), got: { schema: {}, optional: true, binding: ".children.draft.output.answer" } },
+      children: { first: { state: "root/feat/ux/first" }, draft: { state: "root/feat/ux/draft" }, last: { state: "root/feat/ux/last" } },
+      sequence: ["first", "draft", "last"],
+    },
+    "root/feat/ux/first": leaf("first"),
+    "root/feat/ux/draft": leaf("draft"),
+    "root/feat/ux/last": leaf("last"),
+  };
+  const done = (id: string, key: string, value: JsonValue): LoadedInstance => ({
+    id,
+    stateId: `root/${key}`,
+    childKey: key,
+    inputs: {},
+    live: false,
+    outcome: "success",
+    operation: { value: { answer: value } as ResolvedValue },
+  });
+
+  it("takes each step as the composite above it is entered, and hands the asker's inputs to the LAST state only", async () => {
+    const h = harness(DEEP, { hold: ["a"] });
+    const run = h.engine.run({ inputs: {} });
+    await settled();
+    expect(h.directed.direct({ to: "feat", path: ["ux", "draft"], by: "control", skip: true, inputs: { note: "deep" } })).toEqual({ status: "taking" });
+    const result = await run;
+    expect(result.outcome).toBe("success");
+    // Nothing before the target ran at either level below: the composites went straight down.
+    expect(h.dispatched).toEqual(["a", "draft", "last"]);
+    expect(result.outputs).toMatchObject({ a_outcome: "skipped", got: "deep" });
+    // One directed row per level, each on the composite that took it, with the rest of the way still
+    // to go — the inputs travel with the descent and are handed only at the bottom.
+    const taken = h.taken();
+    expect(taken.map((row) => [row.stateId, row.to, row.by, row.skip])).toEqual([
+      ["root", "feat", "control", true],
+      ["root/feat", "ux", "control", true],
+      ["root/feat/ux", "draft", "control", true],
+    ]);
+    expect(taken[0]).toMatchObject({ descent: { path: ["ux", "draft"], inputs: { note: "deep" }, by: "control", skip: true } });
+    expect(taken[0]).not.toHaveProperty("inputs");
+    expect(taken[1]).toMatchObject({ descent: { path: ["draft"], inputs: { note: "deep" } } });
+    expect(taken[2]).toMatchObject({ inputs: { note: "deep" } });
+    expect(taken[2]).not.toHaveProperty("descent");
+    // What each composite stepped over is recorded, as it is at the top.
+    expect(h.ended()).toEqual(expect.arrayContaining([["p", "skipped"], ["first", "skipped"]]));
+  });
+
+  it("a way down that is not there is refused before anything is taken", async () => {
+    const h = harness(DEEP, { hold: ["a"] });
+    const run = h.engine.run({ inputs: {} });
+    await settled();
+    expect(h.directed.direct({ to: "feat", path: ["ux", "nowhere"], by: "person" })).toEqual({
+      status: "refused",
+      reason: "'nowhere' is not a declared child of 'ux' on the way down",
+    });
+    h.release("a");
+    expect((await run).outcome).toBe("success");
+    expect(h.taken()).toEqual([]);
+  });
+
+  it("a run that stopped after entering a composite on the way down takes the next step when it is loaded", async () => {
+    const h = harness(DEEP);
+    const result = await h.engine.loadRun({
+      id: "i-root",
+      stateId: "root",
+      inputs: {},
+      live: true,
+      index: 1,
+      cursor: 1,
+      children: [
+        done("i-a", "a", "ra"),
+        // Entered by the root's directed step, and the process died before `feat` took its own.
+        { id: "i-feat", stateId: "root/feat", childKey: "feat", inputs: {}, live: true, descent: { path: ["ux", "draft"], inputs: { note: "after a restart" }, by: "person" } },
+      ],
+    });
+    expect(result.outcome).toBe("success");
+    // Not `p` first: the loaded composite goes straight down, as it would have had it not stopped.
+    expect(h.dispatched).toEqual(["draft", "last"]);
+    expect(result.outputs).toMatchObject({ got: "after a restart" });
+    expect(h.taken().map((row) => [row.instanceId, row.to])).toEqual([
+      ["i-feat", "ux"],
+      [expect.any(String), "draft"],
+    ]);
+    expect(h.taken()[0]).toMatchObject({ descent: { path: ["draft"], inputs: { note: "after a restart" } } });
+  });
+
+  it("an owed entry on the way down carries the rest of the way with it", async () => {
+    const h = harness(DEEP);
+    const result = await h.engine.loadRun({
+      id: "i-root",
+      stateId: "root",
+      inputs: {},
+      live: true,
+      index: 1,
+      cursor: 1,
+      // The root's step is in the journal; the process died before `feat` was entered.
+      directed: { to: "feat", descent: { path: ["ux", "draft"], inputs: { note: "owed" }, by: "person" } },
+      children: [done("i-a", "a", "ra")],
+    });
+    expect(result.outcome).toBe("success");
+    expect(h.dispatched).toEqual(["draft", "last"]);
+    expect(result.outputs).toMatchObject({ got: "owed" });
+    // The root's own row is not journaled again; the two below it are new.
+    expect(h.taken().map((row) => [row.stateId, row.to])).toEqual([
+      ["root/feat", "ux"],
+      ["root/feat/ux", "draft"],
+    ]);
+  });
+
+  it("a move the port hands a loaded composite is the later word over the step it owed", async () => {
+    const h = harness(DEEP);
+    h.directed.direct({ instanceId: "i-feat", to: "ux", by: "person" });
+    const result = await h.engine.loadRun({
+      id: "i-root",
+      stateId: "root",
+      inputs: {},
+      live: true,
+      index: 1,
+      cursor: 1,
+      children: [
+        done("i-a", "a", "ra"),
+        { id: "i-feat", stateId: "root/feat", childKey: "feat", inputs: {}, live: true, descent: { path: ["ux", "draft"], by: "person" } },
+      ],
+    });
+    expect(result.outcome).toBe("success");
+    // `ux` walked its own spine: the way down it owed was replaced, not taken as well.
+    expect(h.dispatched).toEqual(["first", "draft", "last"]);
+    expect(h.taken()[0]).toMatchObject({ instanceId: "i-feat", to: "ux" });
+    expect(h.taken()[0]).not.toHaveProperty("descent");
+  });
+});

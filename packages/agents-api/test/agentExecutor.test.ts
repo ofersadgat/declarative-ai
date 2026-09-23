@@ -617,6 +617,17 @@ describe("injectTools — displacing the natives, and adding to them", () => {
   const tool = (name: string): Tool => ({ description: name, readOnly: true, inputSchema: { type: "object" } as never, run: () => name });
   const ctxWith = (tools: Record<string, Tool>): ExecServices => ({ tools });
 
+  it("runs an injected tool with the call's id as `ctx.toolCallId`, when the transport said it", async () => {
+    const { query, seen } = capturing();
+    const ids: Array<string | undefined> = [];
+    const recording: Tool = { readOnly: true, inputSchema: { type: "object" } as never, run: (_input, ctx) => (ids.push(ctx.toolCallId), "ok") };
+    await new AgentExecutor({ query }).start(op(), ctxWith({ record: recording })).result;
+    const injected = seen()!.mcpTools!["record"]!;
+    await injected.run({}, { toolCallId: "toolu_5" });
+    await injected.run({});
+    expect(ids).toEqual(["toolu_5", undefined]);
+  });
+
   it("DISPLACES the built-in an injected tool stands in for, so the substitution is real", async () => {
     const { query, seen } = capturing();
     await new AgentExecutor({ query, replacesNative: { read_file: "Read" } }).start(op(), ctxWith({ read_file: tool("read_file") })).result;
@@ -1153,6 +1164,15 @@ describe("AskUserQuestion routes to ctx.askUser, never to the approval gate", ()
     expect(questioned).toEqual(["Which library?"]);
     // The approval gate never saw it — that is the whole point of the routing.
     expect(asked).toEqual([]);
+  });
+
+  it("names the asking call's tool-use id on the question, when the transport reported one", async () => {
+    const { query, seen } = capturing();
+    const requests: unknown[] = [];
+    const ctx = { askUser: async (req: unknown) => (requests.push(req), undefined), approve: () => ({ decision: "allow", scope: "once" }) } as unknown as ExecServices;
+    await new AgentExecutor({ query }).start(op(), ctx).result;
+    await seen()!.canUseTool!({ toolName: "AskUserQuestion", input: input as never, toolUseId: "toolu_q" }, signal());
+    expect(requests).toMatchObject([{ toolCallId: "toolu_q" }]);
   });
 
   it("tells the agent to use its own judgment when the question is dismissed", async () => {

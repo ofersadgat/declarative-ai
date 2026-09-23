@@ -755,7 +755,8 @@ export class AgentExecutor extends PromptExecutor {
     const bind = (tool: Tool): InjectedTool => ({
       description: tool.description,
       inputSchema: tool.inputSchema as JsonSchema,
-      run: (input) => tool.run(input, ctx),
+      // The call's id, when the transport said it, is the tool's `ctx.toolCallId` (see ExecServices).
+      run: (input, call) => tool.run(input, call?.toolCallId !== undefined ? { ...ctx, toolCallId: call.toolCallId } : ctx),
     });
     let allowedTools: string[] | undefined;
     let mcpTools: Record<string, InjectedTool> | undefined;
@@ -962,7 +963,7 @@ export class AgentExecutor extends PromptExecutor {
                 const questions = questionsOf(req.input);
                 let answers: UserAnswers | undefined;
                 if (ctx.askUser !== undefined && questions.length > 0) {
-                  answers = await ctx.askUser({ questions, sessionId: scope });
+                  answers = await ctx.askUser({ questions, sessionId: scope, ...(req.toolUseId !== undefined ? { toolCallId: req.toolUseId } : {}) });
                 }
                 return answers !== undefined
                   ? { allow: true, updatedInput: { ...req.input, answers: answers as never } }

@@ -19,7 +19,7 @@
  * given and validates nothing. Validation is therefore ours, and it is {@link runInjectedTool}'s.
  */
 import type { JsonValue, SchemaDocument, SyncOutputValidator } from "@declarative-ai/exec";
-import type { InjectedTool } from "./seam.js";
+import type { InjectedTool, InjectedToolCall } from "./seam.js";
 
 /** The MCP server name our injected tools are exposed under; the agent sees `mcp__dai__<tool>`. */
 export const MCP_SERVER_NAME = "dai";
@@ -95,14 +95,14 @@ export interface InjectedToolSpec {
  * A tool that THROWS becomes an `isError` result rather than a transport fault: a tool failure is
  * something the AGENT reads and reacts to (DESIGN §5.1, "Functions and tools"), not a failure of the run.
  */
-export async function runInjectedTool(spec: InjectedToolSpec, name: string, args: unknown): Promise<McpToolResult> {
+export async function runInjectedTool(spec: InjectedToolSpec, name: string, args: unknown, call: InjectedToolCall = {}): Promise<McpToolResult> {
   const tool = spec.tools?.[name];
   if (!tool) return textResult(`no tool '${name}' is available`, true);
   const input = args !== null && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, JsonValue>) : {};
   const invalid = validateToolInput(spec.validator, tool, input);
   if (invalid) return textResult(`tool '${name}' input is invalid: ${invalid}`, true);
   try {
-    const value = await tool.run(input);
+    const value = await tool.run(input, call);
     return textResult(typeof value === "string" ? value : JSON.stringify(value ?? null));
   } catch (e) {
     return textResult(`tool '${name}' failed: ${e instanceof Error ? e.message : String(e)}`, true);

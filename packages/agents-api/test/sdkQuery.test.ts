@@ -232,6 +232,17 @@ describe("sdkPermissionCallback — our approver in the SDK's calling convention
   // half could fail loudly: the SDK is an optional peer dependency, so nothing ever called it.
   const signal = new AbortController().signal;
 
+  it("carries the SDK's `toolUseID` onto the request, so a question can be joined to its call", async () => {
+    const ids: Array<string | undefined> = [];
+    const cb = sdkPermissionCallback(async (req) => {
+      ids.push(req.toolUseId);
+      return { allow: true };
+    }, signal);
+    await cb("AskUserQuestion", {}, { toolUseID: "toolu_7" });
+    await cb("Bash", {}, {});
+    expect(ids).toEqual(["toolu_7", undefined]);
+  });
+
   it("reads the tool name off the POSITIONAL argument, not off a request object", async () => {
     const asked: string[] = [];
     const cb = sdkPermissionCallback(async (req) => {
@@ -386,6 +397,19 @@ describe("sdkMcpServer — injected tools, without the Zod conversion that rejec
     await sdkMcpServer({ read_file: { ...tool, run: (input) => (seen.push(input), "ZEPHYR") } }, { deps: server.deps });
     expect(await server.call("read_file", { path: "a.txt" })).toEqual({ content: [{ type: "text", text: "ZEPHYR" }] });
     expect(seen).toEqual([{ path: "a.txt" }]);
+  });
+
+  it("hands our impl the tool-use id the request's `_meta` names", async () => {
+    const handlers = new Map<unknown, (req: unknown) => unknown>();
+    const deps: McpServerDeps = {
+      create: () => ({ setRequestHandler: (schema, handler) => void handlers.set(schema, handler as never) }),
+      listSchema: "tools/list",
+      callSchema: "tools/call",
+    };
+    const calls: unknown[] = [];
+    await sdkMcpServer({ read_file: { ...tool, run: (_input, call) => (calls.push(call), "ok") } }, { deps });
+    await handlers.get("tools/call")!({ params: { name: "read_file", arguments: {}, _meta: { "claudecode/toolUseId": "toolu_3" } } });
+    expect(calls).toEqual([{ toolCallId: "toolu_3" }]);
   });
 
   it("applies the input gate on the way through, since no MCP server validates for us", async () => {

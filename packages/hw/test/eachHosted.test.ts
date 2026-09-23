@@ -12,7 +12,7 @@ import { SchemaValidator } from "@declarative-ai/validate";
 import { newRegistry, ok } from "./fakes.js";
 import { combineElements, WorkflowEngine, type FanOutOutcome, type FanOutRequest, type SplitEntry } from "../src/engine.js";
 import { loadBundle, WorkflowLoadError } from "../src/loader.js";
-import type { StateDef } from "../src/format.js";
+import type { EachKind, StateDef } from "../src/format.js";
 import type { LoadedInstance } from "../src/load.js";
 import { InMemoryPersistence, type EngineEvent, type WorkflowMetrics } from "../src/ports.js";
 
@@ -96,7 +96,8 @@ const AFTER: StateDef = {
   operation: { kind: "function", function: "build" },
 };
 
-/** Root → `component` fanned out with the given kind, then `after` reading the gathered docs. */
+/** Root → `component` fanned out with the given kind, then `after` reading the gathered docs. `each` is
+ * `unknown` because some tests hand it nonsense on purpose; the loader is what judges it. */
 function fan(each: unknown, extra: Record<string, unknown> = {}, mount: Record<string, unknown> = {}): Record<string, StateDef> {
   return {
     root: {
@@ -109,7 +110,7 @@ function fan(each: unknown, extra: Record<string, unknown> = {}, mount: Record<s
         last: { schema: { type: "string" }, binding: ".children.after.output.doc", optional: true },
       },
       children: {
-        component: { state: "root/component", inputs: { component: { $expr: ".inputs.components", each, ...extra } }, ...mount },
+        component: { state: "root/component", inputs: { component: { $expr: ".inputs.components", each: each as EachKind, ...extra } }, ...mount },
         after: { state: "root/after", inputs: { docs: ".children.component.output.doc" } },
       },
       sequence: ["component", "after"],

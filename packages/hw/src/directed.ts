@@ -39,15 +39,69 @@ export interface DirectedTransition {
   instanceId?: string;
   /** A declared child key of that instance — never a `terminate.*` outcome. */
   to: string;
-  /** What the asker hands the target, over the mount's wiring per name — exactly a transition's `inputs`. */
+  /**
+   * The WAY DOWN from `to`, when the target is nested deeper: the child keys beneath it, one per
+   * level (`to: "ux", path: ["item", "draft"]` is `ux → item → draft`).
+   *
+   * A composite that has not been entered has no instance id, so no move can name it ahead of time.
+   * The engine takes the way down itself: the moment `to` is entered, the next step is directed at
+   * the instance it just made — `{ to: path[0], path: path.slice(1) }`, same `by` and `skip` — and so
+   * on to the end. Each step is its own directed transition, journaled on the composite that takes it
+   * with the rest of the way still to go (`transition.taken`'s `descent`), which is what lets a LOADED
+   * run pick the way down up where a stopped one left it (`LoadedInstance.descent`). What comes before
+   * the named child inside each composite is stepped over as it is at the top.
+   *
+   * Absent or empty ⇒ `to` is the target.
+   */
+  path?: readonly string[];
+  /**
+   * What the asker hands the TARGET, over the mount's wiring per name — exactly a transition's
+   * `inputs`. With a {@link path}, the target is the LAST state on the way down; the composites
+   * entered on the way are handed nothing but what a standing rule wires.
+   */
   inputs?: Record<string, ResolvedValue>;
   by: TransitionAsker;
   /**
    * Interrupt instead of wait. Absent/false ⇒ the move is HELD while a sync child holds the cursor and
    * taken when that child ends; true ⇒ the running sequence children are recorded `skipped` and
-   * aborted, and the move is taken at once.
+   * aborted, and the move is taken at once. Carried to every step of a {@link path}.
    */
   skip?: boolean;
+}
+
+/**
+ * The rest of a directed move's way down, as a journal row and a loaded instance carry it: the child
+ * keys still to go beneath the state just entered, and what the asker hands the last of them.
+ */
+export interface DirectedDescent {
+  path: readonly string[];
+  inputs?: Record<string, ResolvedValue>;
+  by: TransitionAsker;
+  skip?: boolean;
+}
+
+/** The step a descent takes next, directed at the instance that was just entered on the way down. */
+export function nextStepOf(instanceId: string, descent: DirectedDescent): DirectedTransition {
+  const [to, ...rest] = descent.path;
+  return {
+    instanceId,
+    to: to!,
+    ...(rest.length > 0 ? { path: rest } : {}),
+    ...(descent.inputs !== undefined ? { inputs: descent.inputs } : {}),
+    by: descent.by,
+    ...(descent.skip === true ? { skip: true } : {}),
+  };
+}
+
+/** The descent a move hands the state it enters — `undefined` when that state is the target. */
+export function descentOf(move: DirectedTransition): DirectedDescent | undefined {
+  if (move.path === undefined || move.path.length === 0) return undefined;
+  return {
+    path: [...move.path],
+    ...(move.inputs !== undefined ? { inputs: move.inputs } : {}),
+    by: move.by,
+    ...(move.skip === true ? { skip: true } : {}),
+  };
 }
 
 /**

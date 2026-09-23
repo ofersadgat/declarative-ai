@@ -37,7 +37,7 @@ import type { FunctionInputs, JsonValue } from "@declarative-ai/exec";
 import { defaultBinaryDeps, resolveAgentBinary, type BinaryDeps } from "./binary.js";
 import { injectedToolDescriptors, MCP_SERVER_NAME, runInjectedTool } from "./mcpTools.js";
 import { readAgentMessage } from "./streamMessages.js";
-import type { AgentPermissionCallback, AgentQuery, AgentQueryOptions, AgentRun, AgentStreamMessage, InjectedTool } from "./seam.js";
+import { injectedToolCallOf, type AgentPermissionCallback, type AgentQuery, type AgentQueryOptions, type AgentRun, type AgentStreamMessage, type InjectedTool } from "./seam.js";
 
 /** The minimal surface of the SDK we call — cast to, never imported (keeps the missing dep off the type graph). */
 interface SdkModule {
@@ -284,9 +284,10 @@ export const readSdkResult: (msg: Record<string, unknown>) => AgentStreamMessage
 export function sdkPermissionCallback(
   approve: AgentPermissionCallback,
   signal: AbortSignal,
-): (toolName: string, input: Record<string, unknown>, options: { signal?: AbortSignal }) => Promise<Record<string, unknown>> {
+): (toolName: string, input: Record<string, unknown>, options: { signal?: AbortSignal; toolUseID?: string }) => Promise<Record<string, unknown>> {
   return async (toolName, input, options) => {
-    const decision = await approve({ toolName, input: (input ?? {}) as FunctionInputs }, { signal: options?.signal ?? signal });
+    const toolUseId = typeof options?.toolUseID === "string" ? options.toolUseID : undefined;
+    const decision = await approve({ toolName, input: (input ?? {}) as FunctionInputs, ...(toolUseId !== undefined ? { toolUseId } : {}) }, { signal: options?.signal ?? signal });
     return decision.allow
       ? { behavior: "allow", updatedInput: (decision.updatedInput as Record<string, unknown> | undefined) ?? input ?? {} }
       : { behavior: "deny", message: decision.reason ?? "denied" };
@@ -316,7 +317,12 @@ export async function sdkMcpServer(
   const instance = deps.create();
   instance.setRequestHandler(deps.listSchema, () => ({ tools: descriptors }));
   instance.setRequestHandler(deps.callSchema, (request) =>
-    runInjectedTool({ tools, ...(spec.validator !== undefined ? { validator: spec.validator } : {}) }, request.params.name, request.params.arguments),
+    runInjectedTool(
+      { tools, ...(spec.validator !== undefined ? { validator: spec.validator } : {}) },
+      request.params.name,
+      request.params.arguments,
+      injectedToolCallOf((request.params as { _meta?: unknown })._meta),
+    ),
   );
   return { [server]: { type: "sdk", name: server, instance } };
 }

@@ -113,6 +113,16 @@ describe.skipIf(!sdkInstalled)("the persistent bridge host — one worker-thread
     await run.close();
   });
 
+  it("carries the call's `_meta` across the port, so the impl hears the CLI's tool-use id", async () => {
+    host = createMcpBridgeHost({ workerFile });
+    const calls: unknown[] = [];
+    const run = await host.start({ tools: { t: { inputSchema: { type: "object" } as never, run: (_i, call) => (calls.push(call), "ok") } } });
+    await rpc(run.url, "initialize", INITIALIZE);
+    await rpc(run.url, "tools/call", { name: "t", arguments: {}, _meta: { "claudecode/toolUseId": "toolu_w" } });
+    expect(calls).toEqual([{ toolCallId: "toolu_w" }]);
+    await run.close();
+  });
+
   it("advertises each run's own tools, and reports ready once a run's list has been served", async () => {
     host = createMcpBridgeHost({ workerFile });
     const run = await host.start({ ...allow, tools: { read_file: { inputSchema: { type: "object" } as never, run: () => null } } });

@@ -21,6 +21,7 @@
  * and the store REOPENS the interrupted record rather than inserting a second ask.
  */
 import type { Failure, ResolvedValue } from "@declarative-ai/exec";
+import type { DirectedDescent } from "./directed.js";
 import type { TerminationOutcome } from "./format.js";
 import type { WorkflowMetrics } from "./ports.js";
 
@@ -97,7 +98,19 @@ export interface LoadedInstance {
    * died between the two rows. The loaded instance owes that entry and makes it first, without
    * journaling the transition again (`index`/`iteration` already count it).
    */
-  directed?: { to: string; inputs?: Record<string, ResolvedValue> };
+  directed?: {
+    to: string;
+    inputs?: Record<string, ResolvedValue>;
+    /** The rest of the way down beneath `to`, as the row's `descent` said — taken once `to` is entered. */
+    descent?: DirectedDescent;
+  };
+  /**
+   * The next step of a directed move's WAY DOWN (`DirectedTransition.path`) that this instance owes:
+   * it was entered as one step of the move, and the run stopped before it took the next. The loaded
+   * instance takes `path[0]` as a directed transition — journaled, as a live one is — before it walks
+   * its own spine, which it would otherwise start from its first child with the move forgotten.
+   */
+  descent?: DirectedDescent;
   /** In entry order. Superseded instances are omitted; their entries survive in `occurrence`. */
   children?: readonly LoadedInstance[];
 }

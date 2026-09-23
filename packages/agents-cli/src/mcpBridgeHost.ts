@@ -95,20 +95,20 @@ export function createMcpBridgeHost(options: McpBridgeHostOptions = {}): McpBrid
         runs.get(message.token)?.markReady();
         return;
       case "call":
-        void answerCall(message.token, message.name, message.args).then((result) => worker?.postMessage({ type: "result", id: message.id, result } satisfies ToWorker));
+        void answerCall(message.token, message.name, message.args, message.meta).then((result) => worker?.postMessage({ type: "result", id: message.id, result } satisfies ToWorker));
         return;
       case "closed":
         return;
     }
   };
 
-  const answerCall = async (token: string, name: string, args: unknown): Promise<McpToolResult> => {
+  const answerCall = async (token: string, name: string, args: unknown, meta: unknown): Promise<McpToolResult> => {
     const run = runs.get(token);
     // A call for a run that has closed — its bridge was torn down between the agent's request and
     // this answer. Not a tool result the agent can act on, and above all not an allow.
     if (run === undefined) return textResult("the run this bridge served has ended", true);
     try {
-      return await handleToolCall(run.spec, name, args);
+      return await handleToolCall(run.spec, name, args, meta);
     } catch (e) {
       return textResult(`tool '${name}' failed: ${e instanceof Error ? e.message : String(e)}`, true);
     }
