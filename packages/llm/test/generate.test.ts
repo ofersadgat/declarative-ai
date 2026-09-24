@@ -201,6 +201,20 @@ describe("generateStructured (§5.1) — streaming structured call + metrics", (
     expect(errorOf(out)?.classification).toBe("network-retriable");
   });
 
+  it("classifies an empty balance as out-of-credits, with its code and route — even OpenAI's 429", async () => {
+    const out = await generateFlat({
+      model: throwingModel(Object.assign(new Error("You exceeded your current quota"), { status: 429, code: "insufficient_quota" })),
+      modelId: "openai/gpt-5.6-terra",
+      prompt: "x",
+      schema: flatSchema,
+    });
+    const failure = errorOf(out);
+    expect(failure?.classification).toBe("out-of-credits");
+    expect(failure?.code).toBe("credit_exhausted");
+    expect(failure?.rateLimited).toBeUndefined();
+    expect((failure?.detail as { route?: string } | undefined)?.route).toBe("openai");
+  });
+
   it("preserves the parsed value even when post-reconstruction validation fails (§4)", async () => {
     const out = await generateFlat({
       model: streamingModel([

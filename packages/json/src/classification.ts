@@ -143,6 +143,40 @@ export function isRateLimit(err: unknown): boolean {
   return statusOf(err as ErrorLike) === 429;
 }
 
+/**
+ * The `code` a refusal for an EMPTY PREPAID BALANCE carries, once {@link isCreditExhausted} has
+ * recognised one: classified `out-of-credits`, because retrying cannot succeed until somebody adds
+ * credit — and no provider says when that will be.
+ */
+export const CREDIT_EXHAUSTED_CODE = "credit_exhausted";
+
+/** What each provider says when the account's credit is gone, in its message or its body. */
+const CREDIT_WORDS = /credit balance is too low|insufficient_quota|exceeded your current quota|insufficient credits|requires more credits/i;
+
+/**
+ * Whether an error is a provider refusing because the account's prepaid credit is gone.
+ *
+ * Read off what each provider actually sends (checked 2026-09-24), walking the `cause` chain the AI
+ * SDK wraps them in:
+ *  - Anthropic: HTTP 400, `invalid_request_error`, "Your credit balance is too low to access the
+ *    Anthropic API…".
+ *  - OpenAI: HTTP 429 with code `insufficient_quota` — a 429 that is NOT a rate limit, which is why
+ *    this has to be asked before {@link isRateLimit}: retrying it only spends the retry budget.
+ *  - OpenRouter: HTTP 402, "Insufficient credits".
+ */
+export function isCreditExhausted(err: unknown): boolean {
+  let cur: unknown = err;
+  for (let depth = 0; cur != null && typeof cur === "object" && depth < 6; depth++) {
+    const e = cur as ErrorLike & { responseBody?: unknown; type?: unknown };
+    if (statusOf(e) === 402) return true;
+    for (const said of [e.code, e.type, e.message, e.responseBody]) {
+      if (typeof said === "string" && CREDIT_WORDS.test(said)) return true;
+    }
+    cur = e.cause;
+  }
+  return false;
+}
+
 export function isTimeoutOrAbort(err: unknown): boolean {
   if (err == null || typeof err !== "object") return false;
   const e = err as ErrorLike;

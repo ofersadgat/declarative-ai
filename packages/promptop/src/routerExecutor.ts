@@ -104,7 +104,22 @@ export class PromptRouterExecutor implements Executor<ExecServices, LlmMetrics, 
     // The op travels UNCHANGED, prefix included. Stripping it would hand the provider path an id its
     // own parser rejects, and would make the route invisible to anything downstream that reads the
     // model — a memo key, a price table, a diagnostic.
-    return target.start(op, ctx);
+    const handle = target.start(op, ctx);
+    // What the call COST, told to whoever keeps the money (`ctx.usage.spent`). Here because this is
+    // the one place that knows the route of every prompt call, agent or provider; the result is read
+    // once it settles and the events are left alone — the stream has one consumer, and it is not us.
+    const prefix = routePrefixOf(modelOf(op));
+    const spent = ctx.usage?.spent;
+    if (prefix !== undefined && spent !== undefined) {
+      void handle.result.then(
+        (r) => {
+          const cost = r.metrics?.costUsd;
+          if (typeof cost === "number" && Number.isFinite(cost) && cost > 0) spent.call(ctx.usage, prefix, cost);
+        },
+        () => undefined,
+      );
+    }
+    return handle;
   }
 
   private route(op: Operation<InlineFamily>): Executor<ExecServices, LlmMetrics, Operation<InlineFamily>, ResolvedValue> | undefined {

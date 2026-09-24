@@ -96,11 +96,33 @@ export interface UsageReporter {
   sent(route: string): void;
   /** A limit reading came back. */
   limits(reading: LimitReading): void;
+  /**
+   * A call on this route finished and cost this much (USD). For an API key the money IS the
+   * allowance, and most providers never say how much of it is left, so what was spent is the one
+   * figure a host can keep. Optional: a reporter that keeps no money leaves it out.
+   */
+  spent?(route: string, costUsd: number): void;
 }
 
-/** The reporter a session layer hands down: routes mapped to accounts, readings to the board. */
-export function boardReporter(board: LimitsBoard, accountOf: (route: string) => AccountKey | undefined): UsageReporter {
+/**
+ * The reporter a session layer hands down: routes mapped to accounts, readings to the board, and —
+ * when the host keeps money — what each call cost, to `onSpent`. The board holds percents, not
+ * dollars, so the money goes to whoever asked for it.
+ */
+export function boardReporter(
+  board: LimitsBoard,
+  accountOf: (route: string) => AccountKey | undefined,
+  onSpent?: (account: AccountKey, route: string, costUsd: number) => void,
+): UsageReporter {
   return {
+    ...(onSpent !== undefined
+      ? {
+          spent(route: string, costUsd: number) {
+            const account = accountOf(route);
+            if (account !== undefined) onSpent(account, route, costUsd);
+          },
+        }
+      : {}),
     sent(route) {
       const account = accountOf(route);
       if (account !== undefined) board.sent(account);

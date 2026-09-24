@@ -130,4 +130,15 @@ describe("the board", () => {
     expect(board.state("anthropic:me").lastSentAt).not.toBeNull();
     board.close();
   });
+
+  it("hands what a call cost to onSpent, by account, and offers no spent() without one", () => {
+    const board = createLimitsBoard();
+    const seen: Array<[string, string, number]> = [];
+    const usage = boardReporter(board, (route) => (route === "anthropic" ? "anthropic" : undefined), (a, r, c) => seen.push([a, r, c]));
+    usage.spent?.("anthropic", 0.25);
+    usage.spent?.("nowhere", 1);
+    expect(seen).toEqual([["anthropic", "anthropic", 0.25]]);
+    expect(boardReporter(board, () => "x").spent).toBeUndefined();
+    board.close();
+  });
 });

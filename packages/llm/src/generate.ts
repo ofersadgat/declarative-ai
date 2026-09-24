@@ -1,12 +1,31 @@
 import { Output, jsonSchema, streamText, type LanguageModel, type ModelMessage, type StopCondition, type SystemModelMessage, type ToolChoice, type ToolSet } from "ai";
 import { createLogger } from "@declarative-ai/log";
 import { ModelInfo } from "./model-catalog.js";
-import { classifyError, decodeWithSchema, describeError, isRateLimit, retryAfterMs as retryAfterMsOf, type JsonSchema, type JsonValue } from "@declarative-ai/json";
+import { CREDIT_EXHAUSTED_CODE, classifyError, decodeWithSchema, describeError, isCreditExhausted, isRateLimit, retryAfterMs as retryAfterMsOf, type JsonSchema, type JsonValue } from "@declarative-ai/json";
 import type { LlmCallResult, LlmFailure, LlmMetrics, LlmOutput, ReasoningSegment, TokenCounts, ToolCall, ToolResult } from "./output.js";
 import { entriesOfMessages, providerOf, type RawMessage } from "./entry.js";
 import type { GeneratedFile } from "./files.js";
 import type { LlmCallDefinition, SamplingConfiguration } from "./llmConfig.js";
 import { promptAsMessages, type CallPromptInput } from "./prompt.js";
+
+/**
+ * A provider error, classified. An empty prepaid balance is asked about FIRST: OpenAI sends it as a
+ * 429, which would otherwise read as a rate limit and be retried until the budget ran out, and none
+ * of the three providers says when credit will come back. It carries the route it was refused on
+ * (`detail.route`), so a host can tell which account ran dry.
+ */
+function callFailure(err: unknown, modelId: string): LlmFailure {
+  if (isCreditExhausted(err)) {
+    const slash = modelId.indexOf("/");
+    return {
+      classification: "out-of-credits",
+      reason: describeError(err),
+      code: CREDIT_EXHAUSTED_CODE,
+      ...(slash > 0 ? { detail: { route: modelId.slice(0, slash) } as never } : {}),
+    };
+  }
+  return { classification: classifyError(err), reason: describeError(err), retryAfterMs: retryAfterMsOf(err), rateLimited: isRateLimit(err) };
+}
 
 /**
  * The streaming structured-output call (§5/§5.1) + metrics. ONE LLM request; the §6.1
@@ -548,7 +567,7 @@ export async function generateStructured<T = JsonValue>(
     return build({
       finishReason: "error",
       tokens: streamTokens ?? salvage ?? {},
-      failure: { classification: classifyError(err), reason: describeError(err), retryAfterMs: retryAfterMsOf(err), rateLimited: isRateLimit(err) },
+      failure: callFailure(err, modelId),
     });
   }
 
@@ -563,7 +582,7 @@ export async function generateStructured<T = JsonValue>(
     return build({
       finishReason: "error",
       tokens: streamTokens ?? salvage ?? {},
-      failure: { classification: classifyError(errorPart), reason: describeError(errorPart), retryAfterMs: retryAfterMsOf(errorPart), rateLimited: isRateLimit(errorPart) },
+      failure: callFailure(errorPart, modelId),
     });
   }
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isCreditExhausted,
   classifyError,
   describeError,
   extractRateLimitInfo,
@@ -108,5 +109,23 @@ describe("error classification (§10.4)", () => {
     expect(desc).toContain("HTTP 429");
     expect(desc).toContain("rate limited");
     expect(desc).toContain("retry-after=5");
+  });
+});
+
+describe("isCreditExhausted", () => {
+  it("knows each provider's way of saying the credit is gone", () => {
+    // Anthropic: a 400, wrapped by the AI SDK.
+    expect(isCreditExhausted({ name: "AI_APICallError", statusCode: 400, isRetryable: false, message: "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits." })).toBe(true);
+    // OpenAI: a 429 that is not a rate limit — the code is in the body.
+    expect(isCreditExhausted({ statusCode: 429, message: "429", responseBody: JSON.stringify({ error: { code: "insufficient_quota", message: "You exceeded your current quota" } }) })).toBe(true);
+    // OpenRouter: a 402, however it is worded — and found under a cause.
+    expect(isCreditExhausted({ message: "wrapped", cause: { status: 402, message: "Payment required" } })).toBe(true);
+  });
+
+  it("leaves an ordinary rate limit, a server error and a bad request alone", () => {
+    expect(isCreditExhausted({ statusCode: 429, message: "Rate limit reached for requests" })).toBe(false);
+    expect(isCreditExhausted({ statusCode: 500, message: "overloaded" })).toBe(false);
+    expect(isCreditExhausted({ statusCode: 400, message: "max_tokens: must be positive" })).toBe(false);
+    expect(isCreditExhausted(undefined)).toBe(false);
   });
 });

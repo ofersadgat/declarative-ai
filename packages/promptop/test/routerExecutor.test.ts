@@ -31,6 +31,21 @@ function named(name: string, capabilities?: Partial<{ structuredOutput: boolean 
 }
 
 describe("PromptRouterExecutor", () => {
+  it("tells ctx.usage what each call cost, on the route it went to", async () => {
+    const priced: Executor<ExecServices, LlmMetrics, Operation<InlineFamily>, ResolvedValue> = {
+      ...named("provider").executor,
+      start: () => finishedHandle({ value: "x" as ResolvedValue, metrics: { durationMs: 0, costUsd: 0.12, costSource: "provider" } }) as never,
+    };
+    const router = new PromptRouterExecutor({ routes: { "claude-cli": named("cli").executor }, fallback: priced });
+    const seen: Array<[string, number]> = [];
+    const usage = { sent: () => undefined, limits: () => undefined, spent: (route: string, cost: number) => void seen.push([route, cost]) };
+    await router.start(op("openrouter/openai/gpt-5"), { usage }).result;
+    await router.start(op("claude-cli/sonnet"), { usage }).result;
+    await new Promise((r) => setTimeout(r, 0));
+    // The free call reports nothing: zero is not a spend worth a row.
+    expect(seen).toEqual([["openrouter", 0.12]]);
+  });
+
   it("sends each prefix to the executor wired for it", async () => {
     const cli = named("cli");
     const provider = named("provider");

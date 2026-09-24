@@ -409,6 +409,8 @@ type PositionSeams = { sessions: SessionStore };
 export interface PositionLimits {
   limits?: LimitsBoard;
   accountOf?: (route: string) => AccountKey | undefined;
+  /** What each call cost, per account (see `UsageReporter.spent`) — for a host that keeps money. */
+  spent?: (account: AccountKey, route: string, costUsd: number) => void;
 }
 
 /**
@@ -439,7 +441,7 @@ export function withSessionPosition<R = ExecServices, M extends ExecMetrics = Ex
 ): ExecutorWrapper<R, R, M> | Executor<R, M> {
   const config = (isExecutor(configOrInner) ? undefined : configOrInner) as (Partial<PositionSeams> & PositionLimits) | undefined;
   // ONE reporter for every call below: the board is account-wide, and so is what it is told.
-  const usage = config?.limits !== undefined && config.accountOf !== undefined ? boardReporter(config.limits, config.accountOf) : undefined;
+  const usage = config?.limits !== undefined && config.accountOf !== undefined ? boardReporter(config.limits, config.accountOf, config.spent) : undefined;
   const inner = (isExecutor(configOrInner) ? configOrInner : maybeInner) as Executor<R, M> | undefined;
   const wrap = ((innerExec: Executor): Executor => ({
     // A session layer resumes state, so a `withMemoize` above must refuse to cache — and the per-op
