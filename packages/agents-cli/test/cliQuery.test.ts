@@ -324,6 +324,19 @@ describe("the argv a permission-gated run actually receives", () => {
     expect(valueAfter(flags, "--permission-prompt-tool")).toBe(PERMISSION_PROMPT_TOOL);
   });
 
+  it("writes the host's own servers into that ONE document — and hands them over with no bridge at all", async () => {
+    const mcpServers = { figma: { url: "http://127.0.0.1:3845/mcp" } };
+    const gated = await flagsFor({ canUseTool: async () => ({ allow: true }), mcpServers });
+    expect(gated.filter((flag) => flag === "--mcp-config")).toHaveLength(1);
+    expect(JSON.parse(valueAfter(gated, "--mcp-config")!)).toEqual({
+      mcpServers: { figma: { type: "http", url: "http://127.0.0.1:3845/mcp" }, dai: { type: "http", url: "http://127.0.0.1:9999/mcp" } },
+    });
+    // Claude calls them itself, so nothing to call back for means no bridge.
+    const bare = await flagsFor({ mcpServers });
+    expect(JSON.parse(valueAfter(bare, "--mcp-config")!)).toEqual({ mcpServers: { figma: { type: "http", url: "http://127.0.0.1:3845/mcp" } } });
+    expect(bare).not.toContain("--permission-prompt-tool");
+  });
+
   // CHANGED DELIBERATELY. This used to assert that injected tools JOIN `--allowedTools`. That flag is
   // the CLI's PRE-APPROVAL list: a tool named there is never put to `--permission-prompt-tool`. So the
   // approver was wired, named on the command line, and never asked about the one set of tools this

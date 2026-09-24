@@ -68,7 +68,7 @@ import { isPermissionWrapped, type Approver, type PermissionDenied, type Permiss
 import { mcpToolName } from "./mcpTools.js";
 import { sdkAgentQuery } from "./sdkQuery.js";
 import { isRetriableAgentError } from "./streamMessages.js";
-import type { AgentPermissionMode, AgentQuery, AgentQueryOptions, AgentResult, AgentRun, AgentSessionReader, InjectedTool } from "./seam.js";
+import type { AgentPermissionMode, AgentQuery, AgentQueryOptions, AgentResult, AgentRun, AgentSessionReader, InjectedTool, McpServerSpec } from "./seam.js";
 
 /**
  * The per-call EVENT SINK, threaded on a shallow copy of `ctx`.
@@ -377,6 +377,16 @@ export interface AgentExecutorOptions extends PromptExecutorOptions {
    * accounts; this is only the channel it would travel on.
    */
   env?: NodeJS.ProcessEnv;
+  /**
+   * The host's OWN MCP servers the agent is handed (`AgentQueryOptions.mcpServers`), or how to read
+   * them off one call.
+   *
+   * A function because which servers a call is handed is the CALL's question as often as the
+   * transport's: a host that leaves out a server whose every tool the call's permissions refuse (so
+   * it is not started for nothing) answers it per call, and a record fixed at construction would need
+   * one executor per answer. Absent, or an empty answer ⇒ none.
+   */
+  mcpServers?: Record<string, McpServerSpec> | ((ctx: ExecServices) => Record<string, McpServerSpec> | undefined);
   /** The agent's NATIVE permission profile, when the caller pins one. */
   permissionMode?: AgentPermissionMode;
   /**
@@ -910,6 +920,21 @@ export class AgentExecutor extends PromptExecutor {
     const resume = definition.providerSessionId;
     const replayed = resume === undefined && session !== undefined ? definition.messages : undefined;
 
+    // The host's own servers for THIS call, and — on a transport that cannot ask — the gate each call
+    // to one of their tools crosses at the bridge. The subject is the one the callback path asks the
+    // gate about for the same call on claude (`gateSubject` passes an `mcp__<server>__<tool>` name
+    // through untouched, with no `readOnly`, since no tool of ours stands behind it), so a mode written
+    // for such a tool answers the same way on either transport.
+    const declaredServers = typeof this.agent.mcpServers === "function" ? this.agent.mcpServers(ctx) : this.agent.mcpServers;
+    const mcpServers = declaredServers !== undefined && Object.keys(declaredServers).length > 0 ? declaredServers : undefined;
+    const serverToolGate =
+      mcpServers !== undefined && gateAtBridge !== undefined
+        ? async (req: { toolName: string; input: FunctionInputs }) => {
+            const verdict = await gateAtBridge.check(gateSubject(req.toolName), req.input);
+            return verdict.allow ? { allow: true as const } : { allow: false as const, reason: verdict.reason };
+          }
+        : undefined;
+
     const queryOptions: AgentQueryOptions = {
       prompt: this.renderPrompt(definition),
       ...(this.agentModel(definition) !== undefined ? { model: this.agentModel(definition)! } : {}),
@@ -921,6 +946,8 @@ export class AgentExecutor extends PromptExecutor {
       allowedTools,
       ...(denied.length > 0 ? { disallowedTools: denied } : {}),
       mcpTools,
+      ...(mcpServers !== undefined ? { mcpServers } : {}),
+      ...(serverToolGate !== undefined ? { serverToolGate } : {}),
       // The injected-tool input gate is sync (`seam.ts`); the ctx seam is maybe-async — narrow
       // FAIL-CLOSED (json's `syncOnly`) rather than let an async validator read as a pass.
       ...(ctx.validator !== undefined ? { validator: syncOnly(ctx.validator) } : {}),

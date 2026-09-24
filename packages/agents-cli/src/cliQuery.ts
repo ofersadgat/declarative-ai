@@ -270,7 +270,10 @@ export function cliArgv(opts: AgentQueryOptions, config: CliAgentOptions = {}, b
             : []),
         ]
       : []),
-    ...(bridgeUrl !== undefined ? ["--mcp-config", mcpConfigJson(bridgeUrl)] : []),
+    // ONE document: the bridge, when one serves this run, and the host's own servers beside it. Claude
+    // calls those itself and asks `--permission-prompt-tool` about each call like any other tool's, so
+    // they need no bridge — a run with servers and nothing to call back for has none.
+    ...(bridgeUrl !== undefined || Object.keys(opts.mcpServers ?? {}).length > 0 ? ["--mcp-config", mcpConfigJson(bridgeUrl, opts.mcpServers)] : []),
     // Only when there is an approver to ask. With tools injected but no approver, the bridge exists to
     // SERVE those tools and the CLI keeps its own permission behaviour.
     ...(bridgeUrl !== undefined && opts.canUseTool !== undefined ? ["--permission-prompt-tool", PERMISSION_PROMPT_TOOL] : []),

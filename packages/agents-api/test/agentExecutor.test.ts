@@ -1440,4 +1440,37 @@ describe("the gate at the bridge, for a transport that cannot ask", () => {
     expect(await claude.seen()!.mcpTools!["write_file"]!.run({ path: "b" })).toBe("write_file ran");
     expect(asked).toEqual([]);
   });
+
+  /**
+   * The host's OWN servers: codex's bridge proxies them, and each call is put to the gate under the
+   * name the agent calls the tool by — the subject claude's callback reports for the same call.
+   */
+  it("hands the host's servers over, per call, with a gate that asks by `mcp__<server>__<tool>`", async () => {
+    const asked: string[] = [];
+    const ctx = gated({ mcp__figma__get_code: "allow", mcp__figma__delete: "deny", mcp__figma__whoami: "ask" }, asked);
+    const servers = { figma: { url: "http://127.0.0.1:3845/mcp" } };
+    const { query, seen } = capturing();
+    let readOff: unknown;
+    await new AgentExecutor({ query, approvalCallback: false, mcpServers: (c) => ((readOff = c), servers) }).start(op(), ctx as never).result;
+    expect(readOff).toBeDefined();
+    expect(seen()!.mcpServers).toEqual(servers);
+    const gate = seen()!.serverToolGate!;
+    expect(await gate({ toolName: "mcp__figma__get_code", input: {} })).toEqual({ allow: true });
+    expect(await gate({ toolName: "mcp__figma__delete", input: {} })).toMatchObject({ allow: false });
+    // `ask` → the approver, who says no.
+    expect(await gate({ toolName: "mcp__figma__whoami", input: {} })).toMatchObject({ allow: false });
+    expect(asked).toEqual(["mcp__figma__whoami"]);
+  });
+
+  it("builds no bridge gate for a callback transport, which asks about those calls itself, nor with no servers", async () => {
+    const ctx = gated({}, []);
+    const claude = capturing();
+    await new AgentExecutor({ query: claude.query, mcpServers: { pw: { command: "npx" } } }).start(op(), ctx as never).result;
+    expect(claude.seen()!.mcpServers).toEqual({ pw: { command: "npx" } });
+    expect(claude.seen()!.serverToolGate).toBeUndefined();
+    const codex = capturing();
+    await new AgentExecutor({ query: codex.query, approvalCallback: false, mcpServers: () => ({}) }).start(op(), ctx as never).result;
+    expect(codex.seen()!.mcpServers).toBeUndefined();
+    expect(codex.seen()!.serverToolGate).toBeUndefined();
+  });
 });

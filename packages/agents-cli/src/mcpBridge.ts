@@ -28,7 +28,7 @@
  *    automatically, so the engine-driven path is checked without anyone opting in.
  */
 import type { AgentPermissionDecision, AgentToolRequest, InjectedTool, SyncOutputValidator } from "./deps.js";
-import { bridgePath, handleToolCall, isAuthorizedBridgeRequest, newBridgeToken, toolDescriptors } from "./mcpProtocol.js";
+import { bridgePath, bridgeTargetOf, handleServerToolCall, handleToolCall, newBridgeToken, toolDescriptors, type ProxiedServers } from "./mcpProtocol.js";
 
 /** What a bridge exposes to the CLI. */
 export interface McpBridge {
@@ -50,8 +50,12 @@ export interface McpBridge {
   close(): Promise<void>;
 }
 
-/** What the bridge serves. */
-export interface McpBridgeSpec {
+/**
+ * What the bridge serves: our tools and the approval gate at the run's path, and — through
+ * {@link ProxiedServers} — each of the host's own servers a transport has it PROXY, at the run's path
+ * with the server's name after it (`bridgeServerPath`).
+ */
+export interface McpBridgeSpec extends ProxiedServers {
   /** Host-implemented tools the agent may call. */
   tools?: Record<string, InjectedTool>;
   /** The approver a permission ask routes to. Absent ⇒ no approval tool is exposed. */
@@ -132,14 +136,20 @@ export const defaultStartMcpBridge: StartMcpBridge = async (spec) => {
   const ready = new Promise<void>((resolve) => {
     markReady = resolve;
   });
-  const buildServer = (): SdkServer => {
-    const server = new serverModule.Server({ name: "declarative-ai", version: "0.1.0" }, { capabilities: { tools: {} } });
+  const proxied = Object.keys(spec.servers ?? {});
+  // One MCP server per request, answering for whichever of the run's servers the path named: ours, or
+  // a proxied one — whose tools are the real server's listing, and whose calls go through the gate to it.
+  const buildServer = (target: string | undefined): SdkServer => {
+    const server = new serverModule.Server({ name: target ?? "declarative-ai", version: "0.1.0" }, { capabilities: { tools: {} } });
     server.setRequestHandler(typesModule.ListToolsRequestSchema, () => {
+      if (target !== undefined) return { tools: spec.servers?.[target]?.tools ?? [] };
       markReady();
       return { tools: descriptors };
     });
     server.setRequestHandler(typesModule.CallToolRequestSchema, (request) =>
-      handleToolCall(spec, request.params.name, request.params.arguments, (request.params as { _meta?: unknown })._meta),
+      target !== undefined
+        ? handleServerToolCall(spec, target, request.params.name, request.params.arguments)
+        : handleToolCall(spec, request.params.name, request.params.arguments, (request.params as { _meta?: unknown })._meta),
     );
     return server;
   };
@@ -152,12 +162,13 @@ export const defaultStartMcpBridge: StartMcpBridge = async (spec) => {
     void (async () => {
       // FIRST, before a Server is built or a byte of body is read. An unauthenticated caller learns only
       // that there is nothing at this path.
-      if (!isAuthorizedBridgeRequest({ url: req.url, origin: req.headers.origin }, token)) {
+      const target = bridgeTargetOf({ url: req.url, origin: req.headers.origin }, token, proxied);
+      if (target === undefined) {
         res.writeHead(404).end();
         return;
       }
       // A fresh server AND transport per request — stateless mode forbids reusing either.
-      const server = buildServer();
+      const server = buildServer(target.server);
       const transport = new httpModule.StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       res.on("close", () => {
         void transport.close();

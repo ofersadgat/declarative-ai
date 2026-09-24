@@ -35,9 +35,18 @@
  */
 import type { FunctionInputs, JsonValue } from "@declarative-ai/exec";
 import { defaultBinaryDeps, resolveAgentBinary, type BinaryDeps } from "./binary.js";
-import { injectedToolDescriptors, MCP_SERVER_NAME, runInjectedTool } from "./mcpTools.js";
+import { injectedToolDescriptors, MCP_SERVER_NAME, mcpServersRefusal, runInjectedTool } from "./mcpTools.js";
 import { readAgentMessage } from "./streamMessages.js";
-import { injectedToolCallOf, type AgentPermissionCallback, type AgentQuery, type AgentQueryOptions, type AgentRun, type AgentStreamMessage, type InjectedTool } from "./seam.js";
+import {
+  injectedToolCallOf,
+  type AgentPermissionCallback,
+  type AgentQuery,
+  type AgentQueryOptions,
+  type AgentRun,
+  type AgentStreamMessage,
+  type InjectedTool,
+  type McpServerSpec,
+} from "./seam.js";
 
 /** The minimal surface of the SDK we call — cast to, never imported (keeps the missing dep off the type graph). */
 interface SdkModule {
@@ -152,7 +161,41 @@ export function claudeOptionsRefusal(opts: AgentQueryOptions): string | undefine
       `This transport understands ${CLAUDE_CODE_OPTION_KEYS.join(", ")} — a setting it does not recognise would be silently ignored`
     );
   }
+  const servers = mcpServersRefusal(opts.mcpServers);
+  if (servers !== undefined) return servers;
+  // Claude calls a host's servers ITSELF — they are in its MCP document, not behind the bridge — so a
+  // gate meant for the bridge has nothing to stand in front of. Its gate is the permission callback,
+  // which asks about those calls like any other; a run that carries the bridge's gate instead was
+  // built for a transport that cannot ask, and running it here would read as gated while nothing is.
+  if (opts.serverToolGate !== undefined && Object.keys(opts.mcpServers ?? {}).length > 0) {
+    return (
+      "claude calls a host's MCP servers itself, so a gate at the bridge (`serverToolGate`) cannot be put in front of those calls. " +
+      "Gate them through the permission callback (`approvalCallback: true`), which asks about them as it asks about any tool"
+    );
+  }
   return undefined;
+}
+
+/**
+ * A host's servers as the SDK's `mcpServers` entries — the same shapes the CLI sibling writes into its
+ * `--mcp-config` document (`type` stated, since the binary reads an entry without one as stdio). A
+ * stdio server's `cwd` has no place in claude's entry and is left out: the server starts where the
+ * agent does.
+ */
+export function sdkServerEntries(servers: Record<string, McpServerSpec> | undefined): Record<string, Record<string, unknown>> {
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const [name, spec] of Object.entries(servers ?? {})) {
+    out[name] =
+      "command" in spec
+        ? {
+            type: "stdio",
+            command: spec.command,
+            ...(spec.args !== undefined && spec.args.length > 0 ? { args: spec.args } : {}),
+            ...(spec.env !== undefined && Object.keys(spec.env).length > 0 ? { env: spec.env } : {}),
+          }
+        : { type: "http", url: spec.url, ...(spec.headers !== undefined && Object.keys(spec.headers).length > 0 ? { headers: spec.headers } : {}) };
+  }
+  return out;
 }
 
 /** The `Settings` bag, folded from the explicit key plus the two conveniences the escape hatch names
@@ -237,6 +280,10 @@ export function sdkOptions(opts: AgentQueryOptions, binaryPath: string | undefin
     ...(settings !== undefined ? { settings } : {}),
     ...(typeof po?.["maxBudgetUsd"] === "number" ? { maxBudgetUsd: po["maxBudgetUsd"] } : {}),
     ...(po?.["extraArgs"] !== undefined ? { extraArgs: po["extraArgs"] } : {}),
+    // The host's OWN servers. The in-process `dai` that serves injected tools is added beside them where
+    // the MCP SDK is in hand (`sdkMcpServer`); these need nothing but their shapes. Claude calls them
+    // itself and asks `canUseTool` about each call, as it asks about any tool.
+    ...(Object.keys(opts.mcpServers ?? {}).length > 0 ? { mcpServers: sdkServerEntries(opts.mcpServers) } : {}),
     // The SESSION. `resume` continues the conversation the SDK already holds; `resume` + `forkSession`
     // branches it into a new id seeded with the parent's history, leaving the parent untouched. The
     // pair is what makes this transport's declared `sessionResume`/`sessionFork` true rather than
@@ -508,11 +555,14 @@ async function* sdkMessages(
   // control requests exist only in streaming-input mode. Pushed before `query()` so it is already
   // buffered when the SDK first reads.
   input.push(opts.prompt);
+  const options = sdkOptions(opts, binaryPath);
+  // One map: the host's servers (already in `options`) and ours beside them.
+  const servers = { ...(options["mcpServers"] as Record<string, unknown> | undefined), ...mcpServers };
   const q = sdk.query({
     prompt: input.iterate(),
     options: {
-      ...sdkOptions(opts, binaryPath),
-      ...(mcpServers !== undefined ? { mcpServers } : {}),
+      ...options,
+      ...(Object.keys(servers).length > 0 ? { mcpServers: servers } : {}),
       ...(canUseTool ? { canUseTool } : {}),
       abortController: controller,
     },

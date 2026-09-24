@@ -44,11 +44,13 @@ import {
   MCP_SERVER_NAME,
   mcpToolName,
   runInjectedTool,
+  sdkServerEntries,
   textResult,
   type AgentPermissionDecision,
   type AgentToolRequest,
   type InjectedTool,
   type JsonValue,
+  type McpServerSpec,
   type McpToolDescriptor,
   type McpToolResult,
   type SyncOutputValidator,
@@ -79,12 +81,21 @@ export const APPROVAL_INPUT_SCHEMA = {
   required: ["tool_name", "input"],
 } as const;
 
-/** The `--mcp-config` document declaring our server. `type` is REQUIRED: the CLI reads an entry with a
- *  `url` but no `type` as a stdio server and errors out. The URL carries the run's {@link newBridgeToken}
- *  in its path, so handing the CLI this document is also how the secret reaches it — there is no second
- *  channel to keep in sync. */
-export function mcpConfigJson(url: string, server: string = MCP_SERVER_NAME): string {
-  return JSON.stringify({ mcpServers: { [server]: { type: "http", url } } });
+/**
+ * The ONE `--mcp-config` document a run is handed: our server, when a bridge serves this run, and the
+ * host's own servers beside it. `type` is REQUIRED on every entry: the CLI reads an entry with a `url`
+ * but no `type` as a stdio server and errors out. The bridge's URL carries the run's
+ * {@link newBridgeToken} in its path, so handing the CLI this document is also how the secret reaches
+ * it — there is no second channel to keep in sync.
+ *
+ * One document rather than one per party. The CLI does accumulate a repeated `--mcp-config` (a host
+ * measured two documents against claude 2.1.142 and `system/init` listed both), but a second flag is a
+ * second thing a host had to smuggle through `extraArgs`, and one document is what the agent is handed
+ * on every other transport. The host's entries are {@link sdkServerEntries}' — the shapes the SDK
+ * sibling hands the same binary — so the two claude transports cannot drift apart.
+ */
+export function mcpConfigJson(url: string | undefined, servers?: Record<string, McpServerSpec>): string {
+  return JSON.stringify({ mcpServers: { ...sdkServerEntries(servers), ...(url !== undefined ? { [MCP_SERVER_NAME]: { type: "http", url } } : {}) } });
 }
 
 // --- Bridge authentication ----------------------------------------------------
@@ -114,6 +125,16 @@ export function bridgePath(token: string): string {
   return `/mcp/${token}`;
 }
 
+/**
+ * Where the bridge serves one PROXIED server — the run's path with the server's name after it, so the
+ * same secret authorizes it and a server name (already refused unless it is `[A-Za-z0-9_-]`, see
+ * `mcpServerNameRefusal`) needs no escaping. Given the bridge's URL, it is that URL's too: the agent is
+ * pointed at `<bridge url>/<server>`.
+ */
+export function bridgeServerPath(base: string, server: string): string {
+  return `${base}/${server}`;
+}
+
 /** Length-independent, early-exit-free comparison — a token check that leaks its match prefix through
  *  timing is a token check an adjacent local process can walk. */
 function secretEquals(a: string, b: string): boolean {
@@ -123,22 +144,33 @@ function secretEquals(a: string, b: string): boolean {
   return diff === 0;
 }
 
+/** Which server of a run a request is for: ours (`server` absent), or one the bridge proxies. */
+export interface BridgeTarget {
+  server?: string;
+}
+
 /**
- * May this request be dispatched at all? Answered BEFORE any MCP handling, so an unauthenticated caller
- * never reaches `handleToolCall` — not the approval tool, and above all not a host tool impl.
+ * May this request be dispatched at all, and to which server? Answered BEFORE any MCP handling, so an
+ * unauthenticated caller never reaches `handleToolCall` — not the approval tool, not a host tool impl,
+ * and not a proxied server. `undefined` refuses.
  *
  * Two independent checks:
- *  - the path must carry the run's token, which is the actual authentication;
+ *  - the path must be the run's own ({@link bridgePath}) or one of its proxied servers'
+ *    ({@link bridgeServerPath}) — the token in it is the actual authentication. Every candidate is
+ *    compared, with no early exit, so the answer's timing says nothing about which came close;
  *  - a request carrying ANY `Origin` is refused, whatever the value. The CLI never sends one; a browser
  *    always does. That closes DNS rebinding, where a page resolves a hostname to 127.0.0.1 and posts to
  *    the port — it cannot read the reply cross-origin, but a tool call has already RUN by then.
  */
-export function isAuthorizedBridgeRequest(req: { url?: string; origin?: string | string[] }, token: string): boolean {
-  if (req.origin !== undefined) return false;
-  if (req.url === undefined) return false;
+export function bridgeTargetOf(req: { url?: string; origin?: string | string[] }, token: string, servers: readonly string[] = []): BridgeTarget | undefined {
+  if (req.origin !== undefined) return undefined;
+  if (req.url === undefined) return undefined;
   // Compare the PATH only: a query string is not part of the secret, and `?` is not a token character.
   const path = req.url.split("?")[0] ?? "";
-  return secretEquals(path, bridgePath(token));
+  const base = bridgePath(token);
+  let found: BridgeTarget | undefined = secretEquals(path, base) ? {} : undefined;
+  for (const server of servers) if (secretEquals(path, bridgeServerPath(base, server))) found = { server };
+  return found;
 }
 
 /** A permission request as the CLI sends it — snake_case, and `tool_use_id` optional. */
@@ -271,4 +303,71 @@ export async function handleToolCall(
   // The low-level MCP `Server` advertises our schema and then hands the handler whatever arrived — it
   // validates NOTHING — so the boundary check on an injected tool's arguments lives in `runInjectedTool`.
   return runInjectedTool(spec, name, args, injectedToolCallOf(meta));
+}
+
+// --- Proxied servers ------------------------------------------------------------
+
+/**
+ * One of the host's own MCP servers, CONNECTED — what a bridge serves under the server's name on behalf
+ * of an agent that cannot be asked about a call (codex). `./mcpProxy` builds one over the MCP SDK's
+ * client; a test builds one by hand.
+ */
+export interface McpProxy {
+  /** The server's tools as it listed them when it was connected — name, description, input schema and
+   *  annotations verbatim. Listed up front because codex fixes its per-tool approval table from them. */
+  tools: McpToolDescriptor[];
+  /**
+   * Forward one call and answer with what the server answered — its result VERBATIM (whatever content
+   * parts, structured content or `isError` it carries), or a throw carrying its JSON-RPC `code`,
+   * `message` and `data`, which the bridge's MCP server hands the agent as the same error.
+   */
+  call(tool: string, args: Record<string, JsonValue>): Promise<unknown>;
+  /** Close the connection — for a stdio server, end the process it started. */
+  close(): Promise<void>;
+}
+
+/** What a bridge needs to serve proxied servers: the connections, and the gate each call crosses. */
+export interface ProxiedServers {
+  servers?: Record<string, McpProxy>;
+  /** Put to every call before it is forwarded — see `AgentQueryOptions.serverToolGate`. Absent ⇒ the
+   *  host published no gate, and a call is forwarded as a served tool with no gate is run. */
+  serverToolGate?: (req: AgentToolRequest) => Promise<AgentPermissionDecision>;
+}
+
+/**
+ * The answer a gated call that was REFUSED gets: `PermissionDenied`, the shape the executor answers a
+ * refused injected tool with, so the agent reads one refusal whichever server the tool was on. Not an
+ * `isError` for the same reason: it is the policy's answer, not the tool's failure.
+ */
+export function deniedResult(tool: string, reason: string | undefined): McpToolResult {
+  return textResult(JSON.stringify({ denied: true, tool, ...(reason !== undefined ? { reason } : {}) }));
+}
+
+/**
+ * Serve one `tools/call` for a PROXIED server — the gate first, then the real server.
+ *
+ * The subject the gate is asked about is the name the agent calls the tool by, `mcp__<server>__<tool>`,
+ * which is also the name claude's permission callback reports for the same call — so a mode written
+ * for that tool answers the same way on either transport. The input is the call's own object, handed
+ * to the gate and then forwarded, so a host that keeps something against it (JaiRA notes the MCP call
+ * it really is) finds it on the way through.
+ *
+ * A tool the server did not list is refused without asking anybody or forwarding anything: the agent
+ * was never offered it. A gate that throws is not consent — the call is refused.
+ */
+export async function handleServerToolCall(spec: ProxiedServers, server: string, name: string, args: unknown): Promise<unknown> {
+  const proxy = spec.servers?.[server];
+  if (proxy === undefined || !proxy.tools.some((tool) => tool.name === name)) return textResult(`no tool '${name}' is available on '${server}'`, true);
+  const subject = mcpToolName(name, server);
+  const input = args !== null && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, JsonValue>) : {};
+  if (spec.serverToolGate !== undefined) {
+    let decision: AgentPermissionDecision;
+    try {
+      decision = await spec.serverToolGate({ toolName: subject, input });
+    } catch {
+      return deniedResult(subject, "the permission check failed; denying");
+    }
+    if (!decision.allow) return deniedResult(subject, decision.reason);
+  }
+  return proxy.call(name, input);
 }

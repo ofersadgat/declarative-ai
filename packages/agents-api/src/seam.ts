@@ -66,6 +66,19 @@ export interface InjectedTool {
   run: (input: FunctionInputs, call?: InjectedToolCall) => JsonValue | Promise<JsonValue>;
 }
 
+/**
+ * An MCP server of the HOST's own configuration — somebody else's server (a command to start, or an
+ * address to call) that the agent is handed beside the bridge's `dai`, and whose tools it addresses as
+ * `mcp__<name>__<tool>`.
+ *
+ * Resolved: every secret a value names has already been looked up by the host, so what is here is
+ * what the process is handed. `cwd` is for a stdio server's own working directory; a transport whose
+ * server entry has no place for it (claude's `--mcp-config`) leaves it out, and says so.
+ */
+export type McpServerSpec =
+  | { command: string; args?: string[]; env?: Record<string, string>; cwd?: string }
+  | { url: string; headers?: Record<string, string> };
+
 /** Options the adapter builds from the op inputs + ctx and hands to the query seam. */
 export interface AgentQueryOptions {
   prompt: string;
@@ -113,6 +126,36 @@ export interface AgentQueryOptions {
   disallowedTools?: string[];
   /** OUR tools to inject into the agent over MCP, keyed by logical name — the agent calls these impls. */
   mcpTools?: Record<string, InjectedTool>;
+  /**
+   * The host's OWN MCP servers, keyed by the name the agent addresses them by — the `<server>` in
+   * `mcp__<server>__<tool>`, which is also the name a permission line for one of their tools is
+   * written against.
+   *
+   * Every transport hands them over, each in its own way, and each keeps the tool names the agent
+   * sees the same: the `claude` transports write them into the one MCP document the bridge's `dai`
+   * is declared in, and claude calls them itself, asking through its permission callback as it asks
+   * about any tool; codex has no callback, so its bridge PROXIES each of them — codex is pointed at the
+   * bridge under the server's own name, and every call crosses the bridge, where it is put to
+   * {@link serverToolGate} before it is forwarded to the real server.
+   *
+   * `dai` is refused — it is the bridge's — and so is a name the subject could not carry
+   * (`mcpServerNameRefusal`): a transport that took one would hand the agent tools no permission line
+   * could name.
+   */
+  mcpServers?: Record<string, McpServerSpec>;
+  /**
+   * The gate a call to one of {@link mcpServers}' tools is put to where it crosses the bridge — the
+   * transport with no permission callback's half of the rule `AgentExecutor` follows for injected
+   * tools. Asked with the name the agent calls the tool by (`mcp__<server>__<tool>`) and the call's
+   * input, BEFORE the call is forwarded: an allow forwards it, anything else answers the agent with the
+   * refusal and the real server never hears of it.
+   *
+   * Set by the executor only for a transport that cannot ask (`approvalCallback: false`) and only when
+   * the host publishes a gate. A transport that hands the servers to an agent which calls them itself
+   * can put nothing in front of those calls, so it REFUSES a run that carries one rather than let the
+   * gate read as in force.
+   */
+  serverToolGate?: (req: AgentToolRequest) => Promise<AgentPermissionDecision>;
   permissionMode?: AgentPermissionMode;
   /**
    * How hard the agent should think, in the neutral vocabulary (`ReasoningSpec`, restated here for the

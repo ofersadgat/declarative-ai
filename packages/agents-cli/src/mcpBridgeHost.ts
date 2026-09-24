@@ -12,6 +12,9 @@
  * its tool impls, its validator) never crosses the port. The worker forwards each `tools/call` as a
  * message and this module answers it through the same `handleToolCall` the in-process bridge uses —
  * so the wire contract, the reserved-name rule and the argument gate have exactly one implementation.
+ * A PROXIED server's call comes back the same way and is answered through `handleServerToolCall`: the
+ * gate and the connection to the real server are the run's, so they stay here too, and the worker is
+ * handed only the listing it serves.
  *
  * `start` IS a {@link StartMcpBridge}, so a transport takes it through the seam it already has, and
  * the bridges it returns carry `ready` — the signal the adapter holds the prompt for. The worker is
@@ -23,7 +26,7 @@ import { Worker } from "node:worker_threads";
 import { textResult, type McpToolResult } from "./deps.js";
 import type { McpBridge, McpBridgeSpec, StartMcpBridge } from "./mcpBridge.js";
 import type { FromWorker, ToWorker } from "./mcpBridgeWorker.js";
-import { bridgePath, handleToolCall, newBridgeToken, toolDescriptors } from "./mcpProtocol.js";
+import { bridgePath, handleServerToolCall, handleToolCall, newBridgeToken, toolDescriptors } from "./mcpProtocol.js";
 
 export interface McpBridgeHostOptions {
   /**
@@ -95,22 +98,49 @@ export function createMcpBridgeHost(options: McpBridgeHostOptions = {}): McpBrid
         runs.get(message.token)?.markReady();
         return;
       case "call":
-        void answerCall(message.token, message.name, message.args, message.meta).then((result) => worker?.postMessage({ type: "result", id: message.id, result } satisfies ToWorker));
+        void answerCall(message.token, message.server, message.name, message.args, message.meta).then((answer) =>
+          worker?.postMessage({ type: "result", id: message.id, ...answer } satisfies ToWorker),
+        );
         return;
       case "closed":
         return;
     }
   };
 
-  const answerCall = async (token: string, name: string, args: unknown, meta: unknown): Promise<McpToolResult> => {
+  /**
+   * What one forwarded call answers: a result, or — for a proxied server only — the error the real
+   * server answered with, carried whole so the agent reads the server's own JSON-RPC error.
+   */
+  const answerCall = async (
+    token: string,
+    server: string | undefined,
+    name: string,
+    args: unknown,
+    meta: unknown,
+  ): Promise<{ result: unknown } | { error: { code?: number; message: string; data?: unknown } }> => {
     const run = runs.get(token);
     // A call for a run that has closed — its bridge was torn down between the agent's request and
     // this answer. Not a tool result the agent can act on, and above all not an allow.
-    if (run === undefined) return textResult("the run this bridge served has ended", true);
+    if (run === undefined) return { result: textResult("the run this bridge served has ended", true) satisfies McpToolResult };
+    if (server !== undefined) {
+      try {
+        return { result: await handleServerToolCall(run.spec, server, name, args) };
+      } catch (e) {
+        const code = (e as { code?: unknown }).code;
+        const data = (e as { data?: unknown }).data;
+        return {
+          error: {
+            message: e instanceof Error ? e.message : String(e),
+            ...(typeof code === "number" ? { code } : {}),
+            ...(data !== undefined ? { data } : {}),
+          },
+        };
+      }
+    }
     try {
-      return await handleToolCall(run.spec, name, args, meta);
+      return { result: await handleToolCall(run.spec, name, args, meta) };
     } catch (e) {
-      return textResult(`tool '${name}' failed: ${e instanceof Error ? e.message : String(e)}`, true);
+      return { result: textResult(`tool '${name}' failed: ${e instanceof Error ? e.message : String(e)}`, true) };
     }
   };
 
@@ -131,6 +161,8 @@ export function createMcpBridgeHost(options: McpBridgeHostOptions = {}): McpBrid
     // Computed HERE, before anything is registered: `toolDescriptors` is where a host tool named
     // `approve` is refused, and the in-process bridge refuses it at the same point.
     const descriptors = toolDescriptors(spec);
+    // Each proxied server's listing, which is all of it the worker needs: the connection stays here.
+    const servers = Object.fromEntries(Object.entries(spec.servers ?? {}).map(([name, proxy]) => [name, proxy.tools]));
     const token = newBridgeToken();
     const path = bridgePath(token);
     let markReady: () => void = () => undefined;
@@ -144,7 +176,7 @@ export function createMcpBridgeHost(options: McpBridgeHostOptions = {}): McpBrid
         registering.set(token, { resolve, reject });
         const w = spawn();
         retain();
-        w.postMessage({ type: "register", token, path, descriptors } satisfies ToWorker);
+        w.postMessage({ type: "register", token, path, descriptors, servers } satisfies ToWorker);
       });
     } catch (e) {
       runs.delete(token);

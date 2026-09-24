@@ -16,6 +16,7 @@ export * from "./codexRuntime.js";
 export * from "./mcpProtocol.js";
 export * from "./mcpBridge.js";
 export * from "./mcpBridgeHost.js";
+export * from "./mcpProxy.js";
 export * from "./process.js";
 export * from "./runtime.js";
 // The CLI agent as an `Executor` (DESIGN §4.4) — this package's half of the agent hierarchy, which is

@@ -27,9 +27,16 @@
  *
  * ## Messages
  *
- * parent → worker: `register {token, path, descriptors}`, `unregister {token}`, `result {id, result}`,
- * `close`. worker → parent: `registered {token, port}` | `failed {token, message}`, `ready {token}`
- * (the run's first `tools/list` was served), `call {id, token, name, args}`, `closed`.
+ * parent → worker: `register {token, path, descriptors, servers}`, `unregister {token}`,
+ * `result {id, result | error}`, `close`. worker → parent: `registered {token, port}` |
+ * `failed {token, message}`, `ready {token}` (the run's first `tools/list` was served),
+ * `call {id, token, server?, name, args}`, `closed`.
+ *
+ * A run's PROXIED servers (see `./mcpProxy`) are served here the same way ours are: each at the run's
+ * path with its name after it, answering `tools/list` from the descriptors the host listed off the real
+ * server, and forwarding every `tools/call` — named by server — to the host, where the gate and the
+ * connection to the real server live. What the host answered may be an ERROR (the real server's, with
+ * its JSON-RPC code), which is thrown here so the MCP server hands it on as one.
  */
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { parentPort } from "node:worker_threads";
@@ -43,6 +50,8 @@ export interface RegisterMessage {
   path: string;
   /** The `tools/list` entries, as the host computed them with `toolDescriptors`. */
   descriptors: unknown[];
+  /** Each proxied server's `tools/list` entries, by server name — served at `<path>/<server>`. */
+  servers: Record<string, unknown[]>;
 }
 export interface UnregisterMessage {
   type: "unregister";
@@ -51,8 +60,10 @@ export interface UnregisterMessage {
 export interface ResultMessage {
   type: "result";
   id: number;
-  /** An `McpToolResult` — what `handleToolCall` answered. */
-  result: unknown;
+  /** What the call answered — an `McpToolResult`, or a proxied server's own result verbatim. */
+  result?: unknown;
+  /** Or the error it answered with: a proxied server's JSON-RPC error, carried whole. */
+  error?: { code?: number; message: string; data?: unknown };
 }
 export interface CloseMessage {
   type: "close";
@@ -77,6 +88,8 @@ export interface CallMessage {
   type: "call";
   id: number;
   token: string;
+  /** The proxied server the call is for; absent for ours. */
+  server?: string;
   name: string;
   args: unknown;
   /** The request's `_meta` — where the CLI names the call's tool-use id. */
@@ -124,12 +137,13 @@ interface SdkModules {
 interface Run {
   path: string;
   descriptors: unknown[];
+  servers: Record<string, unknown[]>;
   /** `ready` is posted ONCE per run: the CLI may list tools again later, and that is not news. */
   readySent: boolean;
 }
 
 const runs = new Map<string, Run>();
-const pending = new Map<number, (result: unknown) => void>();
+const pending = new Map<number, { resolve: (result: unknown) => void; reject: (error: Error) => void }>();
 let calls = 0;
 let listener: HttpServer | undefined;
 let listening: Promise<number> | undefined;
@@ -139,26 +153,29 @@ if (port === null) throw new Error("mcpBridgeWorker must run as a worker thread"
 const post = (message: FromWorker): void => port.postMessage(message);
 
 /**
- * Which registered run a request is for, or none.
+ * Which registered run a request is for, and which of its servers, or none.
  *
- * The same two checks `isAuthorizedBridgeRequest` makes — any `Origin` refuses, and the path must
- * equal a run's — done over EVERY registered run without an early exit, so the answer's timing says
- * nothing about which token came close.
+ * The same two checks `bridgeTargetOf` makes — any `Origin` refuses, and the path must equal a run's
+ * own or one of its proxied servers' — done over EVERY registered run and every candidate path without
+ * an early exit, so the answer's timing says nothing about which token came close.
  */
-function runFor(req: IncomingMessage): { token: string; run: Run } | undefined {
+function runFor(req: IncomingMessage): { token: string; run: Run; server?: string } | undefined {
   if (req.headers.origin !== undefined || req.url === undefined) return undefined;
   const path = req.url.split("?")[0] ?? "";
-  let found: { token: string; run: Run } | undefined;
-  for (const [token, run] of runs) if (secretEquals(path, run.path)) found = { token, run };
+  let found: { token: string; run: Run; server?: string } | undefined;
+  for (const [token, run] of runs) {
+    if (secretEquals(path, run.path)) found = { token, run };
+    for (const server of Object.keys(run.servers)) if (secretEquals(path, `${run.path}/${server}`)) found = { token, run, server };
+  }
   return found;
 }
 
-/** Forward a `tools/call` to the parent and wait for what its impl answered. */
-function forward(token: string, name: string, args: unknown, meta: unknown): Promise<unknown> {
-  return new Promise((resolve) => {
+/** Forward a `tools/call` to the parent and wait for what its impl, or the proxied server, answered. */
+function forward(token: string, server: string | undefined, name: string, args: unknown, meta: unknown): Promise<unknown> {
+  return new Promise((resolve, reject) => {
     const id = ++calls;
-    pending.set(id, resolve);
-    post({ type: "call", id, token, name, args, ...(meta !== undefined ? { meta } : {}) });
+    pending.set(id, { resolve, reject });
+    post({ type: "call", id, token, ...(server !== undefined ? { server } : {}), name, args, ...(meta !== undefined ? { meta } : {}) });
   });
 }
 
@@ -212,17 +229,21 @@ async function handle(sdk: SdkModules, req: IncomingMessage, res: ServerResponse
     res.writeHead(404).end();
     return;
   }
-  const { token, run } = hit;
+  const { token, run, server: target } = hit;
   // A fresh server AND transport per request — stateless mode forbids reusing either.
-  const server = new sdk.Server({ name: "declarative-ai", version: "0.1.0" }, { capabilities: { tools: {} } });
+  const server = new sdk.Server({ name: target ?? "declarative-ai", version: "0.1.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler(sdk.ListToolsRequestSchema, () => {
+    // A proxied server's listing is not the handshake `ready` waits for — that is ours alone.
+    if (target !== undefined) return { tools: run.servers[target] ?? [] };
     if (!run.readySent) {
       run.readySent = true;
       post({ type: "ready", token });
     }
     return { tools: run.descriptors };
   });
-  server.setRequestHandler(sdk.CallToolRequestSchema, (request) => forward(token, request.params.name, request.params.arguments, (request.params as { _meta?: unknown })._meta));
+  server.setRequestHandler(sdk.CallToolRequestSchema, (request) =>
+    forward(token, target, request.params.name, request.params.arguments, (request.params as { _meta?: unknown })._meta),
+  );
   const transport = new sdk.StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   res.on("close", () => {
     void transport.close();
@@ -239,7 +260,7 @@ async function handle(sdk: SdkModules, req: IncomingMessage, res: ServerResponse
 port.on("message", (message: ToWorker) => {
   switch (message.type) {
     case "register": {
-      runs.set(message.token, { path: message.path, descriptors: message.descriptors, readySent: false });
+      runs.set(message.token, { path: message.path, descriptors: message.descriptors, servers: message.servers, readySent: false });
       listen().then(
         (p) => post({ type: "registered", token: message.token, port: p }),
         (e: unknown) => {
@@ -253,9 +274,15 @@ port.on("message", (message: ToWorker) => {
       runs.delete(message.token);
       return;
     case "result": {
-      const resolve = pending.get(message.id);
+      const waiting = pending.get(message.id);
       pending.delete(message.id);
-      resolve?.(message.result);
+      if (message.error === undefined) {
+        waiting?.resolve(message.result);
+        return;
+      }
+      // Thrown whole: the MCP server reads `code`, `message` and `data` off it to answer the agent.
+      const { code, data } = message.error;
+      waiting?.reject(Object.assign(new Error(message.error.message), { ...(code !== undefined ? { code } : {}), ...(data !== undefined ? { data } : {}) }));
       return;
     }
     case "close": {

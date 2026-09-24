@@ -14,10 +14,13 @@ import {
   approvalResponseText,
   assertNoReservedToolNames,
   bridgePath,
+  bridgeServerPath,
+  bridgeTargetOf,
+  handleServerToolCall,
   handleToolCall,
   injectedToolAllowEntries,
-  isAuthorizedBridgeRequest,
   mcpConfigJson,
+  type McpProxy,
   mcpToolName,
   newBridgeToken,
   parseApprovalRequest,
@@ -41,6 +44,22 @@ describe("naming and config", () => {
     });
   });
 
+  it("writes the host's own servers into the SAME document, each with its type, and with no bridge at all", () => {
+    const servers = {
+      figma: { url: "http://127.0.0.1:3845/mcp", headers: { Authorization: "Bearer k" } },
+      pw: { command: "npx", args: ["@playwright/mcp"], env: { K: "v" }, cwd: "C:/w" },
+    };
+    expect(JSON.parse(mcpConfigJson("http://127.0.0.1:1234/mcp", servers))).toEqual({
+      mcpServers: {
+        figma: { type: "http", url: "http://127.0.0.1:3845/mcp", headers: { Authorization: "Bearer k" } },
+        // `cwd` has no place in claude's entry, and is left out rather than guessed at.
+        pw: { type: "stdio", command: "npx", args: ["@playwright/mcp"], env: { K: "v" } },
+        dai: { type: "http", url: "http://127.0.0.1:1234/mcp" },
+      },
+    });
+    expect(JSON.parse(mcpConfigJson(undefined, { pw: { command: "npx" } }))).toEqual({ mcpServers: { pw: { type: "stdio", command: "npx" } } });
+  });
+
   it("allow-lists injected tools under their MCP-qualified names", () => {
     // The logical names alone would allow nothing — the agent only ever sees the qualified form.
     expect(injectedToolAllowEntries({ read_file: {} as never, bash: {} as never })).toEqual(["mcp__dai__read_file", "mcp__dai__bash"]);
@@ -61,9 +80,17 @@ describe("who may talk to the bridge at all", () => {
   });
 
   it("admits the run's own URL", () => {
-    expect(isAuthorizedBridgeRequest({ url: bridgePath(token) }, token)).toBe(true);
+    expect(bridgeTargetOf({ url: bridgePath(token) }, token)).toEqual({});
     // A query string is not part of the secret.
-    expect(isAuthorizedBridgeRequest({ url: `${bridgePath(token)}?x=1` }, token)).toBe(true);
+    expect(bridgeTargetOf({ url: `${bridgePath(token)}?x=1` }, token)).toEqual({});
+  });
+
+  it("admits a proxied server's URL under the same secret, and names the server", () => {
+    expect(bridgeTargetOf({ url: bridgeServerPath(bridgePath(token), "figma") }, token, ["figma", "pw"])).toEqual({ server: "figma" });
+    // A server the run does not proxy is nothing at all, as is a proxied one under another run's secret.
+    expect(bridgeTargetOf({ url: bridgeServerPath(bridgePath(token), "linear") }, token, ["figma"])).toBeUndefined();
+    expect(bridgeTargetOf({ url: bridgeServerPath(bridgePath(newBridgeToken()), "figma") }, token, ["figma"])).toBeUndefined();
+    expect(bridgeTargetOf({ url: bridgeServerPath(bridgePath(token), "figma"), origin: "null" }, token, ["figma"])).toBeUndefined();
   });
 
   it.each([
@@ -75,14 +102,95 @@ describe("who may talk to the bridge at all", () => {
     ["a nested path under the real token", `${bridgePath(token)}/../mcp`],
     ["no URL at all", undefined],
   ])("refuses %s", (_case, url) => {
-    expect(isAuthorizedBridgeRequest({ url }, token)).toBe(false);
+    expect(bridgeTargetOf({ url }, token, ["figma"])).toBeUndefined();
   });
 
   it("refuses a request carrying ANY Origin, even with the right token — DNS rebinding", () => {
     // A page that resolves a name to 127.0.0.1 cannot READ the reply cross-origin, but by then the tool
     // has already run. The CLI never sends an Origin; a browser always does.
-    expect(isAuthorizedBridgeRequest({ url: bridgePath(token), origin: "https://evil.example" }, token)).toBe(false);
-    expect(isAuthorizedBridgeRequest({ url: bridgePath(token), origin: "null" }, token)).toBe(false);
+    expect(bridgeTargetOf({ url: bridgePath(token), origin: "https://evil.example" }, token)).toBeUndefined();
+    expect(bridgeTargetOf({ url: bridgePath(token), origin: "null" }, token)).toBeUndefined();
+  });
+});
+
+describe("a proxied server's call — the gate first, then the real server", () => {
+  /** A server that records what reached it. */
+  const proxyOf = (answer: unknown = { content: [{ type: "image", data: "AA==", mimeType: "image/png" }], structuredContent: { ok: true } }) => {
+    const calls: Array<{ tool: string; args: unknown }> = [];
+    const proxy: McpProxy = {
+      tools: [{ name: "get_code", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } }],
+      call: async (tool, args) => {
+        calls.push({ tool, args });
+        return answer;
+      },
+      close: async () => undefined,
+    };
+    return { proxy, calls };
+  };
+
+  it("asks the gate by the name the agent calls the tool, with the call's own input, and forwards the result VERBATIM on an allow", async () => {
+    const { proxy, calls } = proxyOf();
+    const asked: unknown[] = [];
+    const args = { nodeId: "1:2" };
+    const result = await handleServerToolCall(
+      { servers: { figma: proxy }, serverToolGate: async (req) => (asked.push(req), { allow: true }) },
+      "figma",
+      "get_code",
+      args,
+    );
+    expect(asked).toEqual([{ toolName: "mcp__figma__get_code", input: args }]);
+    expect((asked[0] as { input: unknown }).input).toBe(args);
+    expect(calls).toEqual([{ tool: "get_code", args }]);
+    expect(result).toEqual({ content: [{ type: "image", data: "AA==", mimeType: "image/png" }], structuredContent: { ok: true } });
+  });
+
+  it("answers a refusal as PermissionDenied and never forwards the call", async () => {
+    const { proxy, calls } = proxyOf();
+    const result = (await handleServerToolCall({ servers: { figma: proxy }, serverToolGate: async () => ({ allow: false, reason: "no" }) }, "figma", "get_code", {})) as {
+      content: Array<{ text: string }>;
+      isError?: boolean;
+    };
+    expect(decode(result)).toEqual({ denied: true, tool: "mcp__figma__get_code", reason: "no" });
+    expect(result.isError).toBeUndefined();
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses when the gate THROWS — a failed check is not consent", async () => {
+    const { proxy, calls } = proxyOf();
+    const result = (await handleServerToolCall(
+      {
+        servers: { figma: proxy },
+        serverToolGate: async () => {
+          throw new Error("boom");
+        },
+      },
+      "figma",
+      "get_code",
+      {},
+    )) as { content: Array<{ text: string }> };
+    expect(decode(result)).toMatchObject({ denied: true });
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses a tool the server never listed without asking anybody, and a server the run does not proxy", async () => {
+    const { proxy, calls } = proxyOf();
+    let asked = 0;
+    const gate = async () => (asked++, { allow: true as const });
+    expect(await handleServerToolCall({ servers: { figma: proxy }, serverToolGate: gate }, "figma", "delete_file", {})).toMatchObject({ isError: true });
+    expect(await handleServerToolCall({ servers: { figma: proxy }, serverToolGate: gate }, "pw", "get_code", {})).toMatchObject({ isError: true });
+    expect(asked).toBe(0);
+    expect(calls).toEqual([]);
+  });
+
+  it("lets the real server's error through as a throw, for the bridge to answer with", async () => {
+    const proxy: McpProxy = {
+      tools: [{ name: "get_code", inputSchema: {} }],
+      call: async () => {
+        throw Object.assign(new Error("no such node"), { code: -32602 });
+      },
+      close: async () => undefined,
+    };
+    await expect(handleServerToolCall({ servers: { figma: proxy } }, "figma", "get_code", {})).rejects.toMatchObject({ message: "no such node", code: -32602 });
   });
 });
 

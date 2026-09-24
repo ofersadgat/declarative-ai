@@ -101,6 +101,9 @@ export interface ClaudeCodeFunctionOptions {
   binaryPath?: string;
   /** The environment the agent runs under. Absent ⇒ it inherits this process's. Forwarded verbatim. */
   env?: NodeJS.ProcessEnv;
+  /** The host's own MCP servers the agent is handed, or how to read them off one call — see
+   *  {@link AgentExecutorOptions.mcpServers}. A function call is handed them exactly as a route is. */
+  mcpServers?: AgentExecutorOptions["mcpServers"];
   /** What this transport is CALLED in a failure reason. Defaults to `claude-code`, which is what this
    *  factory drives; a CLI sibling passes its own binary's name so a failure says which one produced it. */
   label?: string;
@@ -206,6 +209,7 @@ export function agentRuntimeEntry(
         ...(options.readSession !== undefined ? { readSession: options.readSession } : {}),
         ...(options.binaryPath !== undefined ? { binaryPath: options.binaryPath } : {}),
         ...(options.env !== undefined ? { env: options.env } : {}),
+        ...(options.mcpServers !== undefined ? { mcpServers: options.mcpServers } : {}),
         ...(options.label !== undefined ? { label: options.label } : {}),
         ...(permissionModeOf(inputs) !== undefined ? { permissionMode: permissionModeOf(inputs) } : {}),
         ...(typeof inputs.sessionId === "string" ? { approvalScope: inputs.sessionId } : {}),

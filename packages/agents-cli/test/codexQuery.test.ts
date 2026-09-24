@@ -5,6 +5,8 @@ import { codexArgv, codexRefusal, createCodexAgentQuery, mcpServerOverride, read
 import { AgentCodexExecutor } from "../src/cliExecutor.js";
 import { CODEX_CAPS, createCodexAgentFunction } from "../src/codexRuntime.js";
 import type { AgentProcess, SpawnOptions, SpawnProcess } from "../src/process.js";
+import type { McpBridgeSpec } from "../src/mcpBridge.js";
+import type { ConnectMcpServer } from "../src/mcpProxy.js";
 
 /** A fake process that replays scripted stdout lines and records how it was launched. */
 function fakeSpawn(lines: string[], exitCode = 0): {
@@ -82,10 +84,13 @@ describe("codexArgv — the flags one run is configured with", () => {
     expect(argv.indexOf("resume")).toBeLessThan(argv.indexOf("--"));
   });
 
-  it("points codex at our bridge only when there is a bridge", () => {
-    expect(codexArgv({ prompt: "hi" }).join(" ")).not.toContain("mcp_servers");
-    const argv = codexArgv({ prompt: "hi" }, {}, "http://127.0.0.1:9/mcp/tok");
-    expect(argv).toContain(mcpServerOverride("http://127.0.0.1:9/mcp/tok"));
+  it("points codex at our bridge only when there is a bridge with tools of ours on it", () => {
+    const tools = { mcpTools: { grep: {} as never } };
+    expect(codexArgv({ prompt: "hi", ...tools }).join(" ")).not.toContain("mcp_servers");
+    const argv = codexArgv({ prompt: "hi", ...tools }, {}, "http://127.0.0.1:9/mcp/tok");
+    expect(argv).toContain(mcpServerOverride("http://127.0.0.1:9/mcp/tok", ["grep"]));
+    // A bridge standing up only to proxy the host's servers hands codex no empty `dai`.
+    expect(codexArgv({ prompt: "hi" }, {}, "http://127.0.0.1:9/mcp/tok").join(" ")).not.toContain("mcp_servers");
     // A TOML inline table, with the URL quoted — the secret rides in it, so it must survive verbatim.
     expect(mcpServerOverride("http://127.0.0.1:9/mcp/tok")).toBe(
       'mcp_servers.dai={url="http://127.0.0.1:9/mcp/tok",required=true,startup_timeout_sec=30,tool_timeout_sec=86400}',
@@ -352,6 +357,90 @@ describe("the tool bridge — served, and gated at the bridge", () => {
     expect(mcpServerOverride("http://h/x", [], "dai", { startupTimeoutSec: 5, toolTimeoutSec: 60 })).toBe(
       'mcp_servers.dai={url="http://h/x",required=true,startup_timeout_sec=5,tool_timeout_sec=60}',
     );
+  });
+});
+
+describe("the host's own servers — proxied through the bridge, so codex can be asked about them", () => {
+  /** A connection seam standing in for the MCP SDK's client: records what it connected and closed. */
+  function fakeConnect(fail?: string) {
+    const state = { connected: [] as string[], closed: [] as string[] };
+    const connect: ConnectMcpServer = async (name) => {
+      if (name === fail) throw new Error("spawn npx ENOENT");
+      state.connected.push(name);
+      return {
+        tools: [{ name: "get_code", inputSchema: { type: "object" } }, { name: "delete", inputSchema: { type: "object" }, annotations: { destructiveHint: true } }],
+        call: async () => ({ content: [] }),
+        close: async () => {
+          state.closed.push(name);
+        },
+      };
+    };
+    return { connect, state };
+  }
+  function recordingBridge() {
+    const specs: McpBridgeSpec[] = [];
+    let closed = 0;
+    const startBridge = async (spec: McpBridgeSpec) => {
+      specs.push(spec);
+      return { url: "http://127.0.0.1:9999/mcp/tok", close: async () => void closed++ };
+    };
+    return { startBridge, specs, closed: () => closed };
+  }
+
+  it("connects each server first, serves it at the bridge under its own name, points codex there, and closes it after", async () => {
+    const { spawn, argv } = fakeSpawn(answered("done"));
+    const { connect, state } = fakeConnect();
+    const bridge = recordingBridge();
+    const serverToolGate = async () => ({ allow: true as const });
+    const seen = [];
+    for await (const m of createCodexAgentQuery({ spawn, startBridge: bridge.startBridge, connectMcpServer: connect })({
+      prompt: "x",
+      mcpServers: { figma: { url: "http://127.0.0.1:3845/mcp" } },
+      serverToolGate,
+    })) seen.push(m);
+    expect(seen.at(-1)).toMatchObject({ type: "result" });
+    expect(state.connected).toEqual(["figma"]);
+    // The bridge is handed the live connection and the gate; codex is handed the bridge.
+    expect(Object.keys(bridge.specs[0]!.servers!)).toEqual(["figma"]);
+    expect(bridge.specs[0]!.serverToolGate).toBe(serverToolGate);
+    const flags = argv[0]!;
+    expect(flags).toContain(mcpServerOverride("http://127.0.0.1:9999/mcp/tok/figma", ["get_code", "delete"], "figma"));
+    expect(flags.join(" ")).toContain(
+      'mcp_servers.figma={url="http://127.0.0.1:9999/mcp/tok/figma",required=true,startup_timeout_sec=30,tool_timeout_sec=86400,tools={"get_code"={approval_mode="approve"},"delete"={approval_mode="approve"}}}',
+    );
+    // Nothing of ours to serve: no `dai` beside it.
+    expect(flags.join(" ")).not.toContain("mcp_servers.dai");
+    expect(bridge.closed()).toBe(1);
+    expect(state.closed).toEqual(["figma"]);
+  });
+
+  it("fails the run NAMING a server that cannot start, spawns nothing, and closes the ones that did", async () => {
+    const { spawn, argv } = fakeSpawn(answered("done"));
+    const { connect, state } = fakeConnect("pw");
+    const bridge = recordingBridge();
+    const seen = [];
+    for await (const m of createCodexAgentQuery({ spawn, startBridge: bridge.startBridge, connectMcpServer: connect })({
+      prompt: "x",
+      mcpServers: { figma: { url: "http://h/mcp" }, pw: { command: "npx" } },
+    })) seen.push(m);
+    expect(seen).toEqual([{ type: "other", error: "the MCP server 'pw' could not start: spawn npx ENOENT" }]);
+    expect(argv).toEqual([]);
+    expect(bridge.specs).toEqual([]);
+    expect(state.closed).toEqual(["figma"]);
+  });
+
+  it("fails a server that does not list its tools in time — codex's `required`, said by the bridge", async () => {
+    const { spawn } = fakeSpawn(answered("done"));
+    const seen = [];
+    const hang: ConnectMcpServer = () => new Promise(() => undefined);
+    for await (const m of createCodexAgentQuery({ spawn, connectMcpServer: hang, bridgeTimeouts: { startupTimeoutSec: 0.05 } })({ prompt: "x", mcpServers: { slow: { command: "x" } } })) seen.push(m);
+    expect(seen).toEqual([{ type: "other", error: "the MCP server 'slow' could not start: it did not list its tools within 50 ms" }]);
+  });
+
+  it("refuses a server named `dai`, or one whose name its tools could not carry", () => {
+    expect(codexRefusal({ prompt: "x", mcpServers: { dai: { command: "x" } } })).toMatch(/bridge's own/);
+    expect(codexRefusal({ prompt: "x", mcpServers: { "a__b": { command: "x" } } })).toMatch(/cannot be carried/);
+    expect(codexRefusal({ prompt: "x", mcpServers: { figma: { url: "http://h" } }, serverToolGate: async () => ({ allow: true }) })).toBeUndefined();
   });
 });
 

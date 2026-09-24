@@ -215,6 +215,23 @@ describe("what a delegated agent LOADS — decided, not inherited", () => {
     expect(claudeOptionsRefusal({ prompt: "x", providerOptions: { fastMode: true } })).toBeUndefined();
   });
 
+  it("hands the host's own MCP servers over as the SDK's entries, type stated and `cwd` left out", () => {
+    expect(
+      sdkOptions({ prompt: "x", mcpServers: { figma: { url: "http://h/mcp", headers: { A: "b" } }, pw: { command: "npx", args: ["@playwright/mcp"], env: {}, cwd: "C:/w" } } }),
+    ).toMatchObject({
+      mcpServers: { figma: { type: "http", url: "http://h/mcp", headers: { A: "b" } }, pw: { type: "stdio", command: "npx", args: ["@playwright/mcp"] } },
+    });
+    expect(sdkOptions({ prompt: "x", mcpServers: {} })).not.toHaveProperty("mcpServers");
+  });
+
+  it("REFUSES a server named `dai` or a name its tools' subject could not carry, and a bridge gate it cannot put in front of claude's own calls", () => {
+    expect(claudeOptionsRefusal({ prompt: "x", mcpServers: { dai: { command: "x" } } })).toMatch(/bridge's own/);
+    for (const name of ["a__b", "_a", "a_", "a.b", ""]) expect(claudeOptionsRefusal({ prompt: "x", mcpServers: { [name]: { command: "x" } } })).toMatch(/cannot be carried/);
+    expect(claudeOptionsRefusal({ prompt: "x", mcpServers: { a: { command: "x", url: "http://h" } as never } })).toMatch(/exactly one/);
+    expect(claudeOptionsRefusal({ prompt: "x", mcpServers: { "figma-dev_mode": { url: "http://h" } } })).toBeUndefined();
+    expect(claudeOptionsRefusal({ prompt: "x", mcpServers: { a: { command: "x" } }, serverToolGate: async () => ({ allow: true }) })).toMatch(/serverToolGate/);
+  });
+
   it("stops the real transport BEFORE it reaches a provider, not after", async () => {
     // The refusal is checked on the way in, so this drives the actual `sdkAgentQuery` and still costs
     // nothing: it returns before `query()` is ever called. Without that ordering a misconfigured run

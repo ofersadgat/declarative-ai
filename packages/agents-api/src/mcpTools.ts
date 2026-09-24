@@ -19,7 +19,7 @@
  * given and validates nothing. Validation is therefore ours, and it is {@link runInjectedTool}'s.
  */
 import type { JsonValue, SchemaDocument, SyncOutputValidator } from "@declarative-ai/exec";
-import type { InjectedTool, InjectedToolCall } from "./seam.js";
+import type { InjectedTool, InjectedToolCall, McpServerSpec } from "./seam.js";
 
 /** The MCP server name our injected tools are exposed under; the agent sees `mcp__dai__<tool>`. */
 export const MCP_SERVER_NAME = "dai";
@@ -35,6 +35,43 @@ export interface McpToolDescriptor {
   name: string;
   description?: string;
   inputSchema: JsonValue;
+  /** What the tool's own server says of it (`readOnlyHint`, `destructiveHint`, `title`, …) — carried
+   *  VERBATIM for a tool a bridge proxies, since a host judges a tool it has never seen by it. Our own
+   *  tools declare none. */
+  annotations?: JsonValue;
+}
+
+/**
+ * What a host's own MCP server may be called — the `<server>` in `mcp__<server>__<tool>`.
+ *
+ * The subject is split at the first `__` after `mcp__`, so a name holding `__`, or one that begins or
+ * ends with `_`, would split in the wrong place and a permission line written for its tool would name
+ * something else; anything outside `[A-Za-z0-9_-]` is also a key codex's TOML cannot take bare, and a
+ * path segment the bridge would have to escape. `dai` is the bridge's own, and a second server under
+ * it would shadow ours.
+ */
+export function mcpServerNameRefusal(name: string): string | undefined {
+  if (name === MCP_SERVER_NAME) return `an MCP server may not be named '${MCP_SERVER_NAME}': that name is the bridge's own — rename the server`;
+  if (!/^[A-Za-z0-9_-]+$/.test(name) || name.includes("__") || name.startsWith("_") || name.endsWith("_")) {
+    return `the MCP server name '${name}' cannot be carried in a tool's name (mcp__<server>__<tool>): use letters, digits, '-' and single '_' inside the name`;
+  }
+  return undefined;
+}
+
+/**
+ * What a transport refuses about a set of host servers, or `undefined` — a name
+ * {@link mcpServerNameRefusal} refuses, or an entry that is not exactly one of a command and an
+ * address. Shared by every transport that takes {@link McpServerSpec}s, so the rule has one home.
+ */
+export function mcpServersRefusal(servers: Record<string, McpServerSpec> | undefined): string | undefined {
+  for (const [name, spec] of Object.entries(servers ?? {})) {
+    const refused = mcpServerNameRefusal(name);
+    if (refused !== undefined) return refused;
+    const command = "command" in spec && typeof spec.command === "string" && spec.command.length > 0;
+    const url = "url" in spec && typeof spec.url === "string" && spec.url.length > 0;
+    if (command === url) return `the MCP server '${name}' must be exactly one of a command to start and an address to call`;
+  }
+  return undefined;
 }
 
 /** One MCP tool result. */

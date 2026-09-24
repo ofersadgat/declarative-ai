@@ -36,6 +36,16 @@
  * host's gate at the bridge before it runs (`AgentExecutor`, for a transport with no approval
  * callback), so those calls are gated exactly as a callback transport's are; it is codex's own
  * built-ins that the sandbox mode has to answer for.
+ *
+ * ## The host's own MCP servers go through the bridge too
+ *
+ * Handed a server as `-c mcp_servers.<name>={command=…}`, codex calls it ITSELF, and a call that never
+ * crosses the bridge can be put to nobody — so the most a host could do was approve a tool outright
+ * or take it away. Instead the bridge PROXIES each server in `AgentQueryOptions.mcpServers`
+ * (`./mcpProxy`): it connects to the real server and lists its tools before codex starts, codex is
+ * pointed at the bridge under the server's own name (so its tools are still `mcp__<name>__<tool>`), and
+ * every call is put to `serverToolGate` at the bridge and forwarded only once it allows — which is
+ * what lets a tool whose mode is `ask` be asked about on this transport at all.
  */
 import { ASK_USER_TOOL, type AgentQuery, type AgentQueryOptions, type AgentResult, type AgentStreamMessage } from "@declarative-ai/agents-api";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -43,8 +53,10 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { JsonValue } from "./deps.js";
 import { launchError } from "./cliQuery.js";
+import { mcpServersRefusal } from "./deps.js";
 import { defaultStartMcpBridge, type McpBridge, type StartMcpBridge } from "./mcpBridge.js";
-import { MCP_SERVER_NAME } from "./mcpProtocol.js";
+import { bridgeServerPath, MCP_SERVER_NAME, type McpProxy } from "./mcpProtocol.js";
+import { closeMcpProxies, connectMcpServers, defaultConnectMcpServer, type ConnectMcpServer } from "./mcpProxy.js";
 import { defaultSpawn, exitMessage, type SpawnProcess } from "./process.js";
 
 /** The executable this adapter drives. */
@@ -71,8 +83,12 @@ export interface CodexAgentOptions {
    */
   sandbox?: CodexSandbox;
   /** How long codex waits for the bridge's handshake and for one call to it — see
-   *  {@link mcpServerOverride}. Absent ⇒ the defaults there. */
+   *  {@link mcpServerOverride}. Absent ⇒ the defaults there. The same two bound the bridge's own wait
+   *  on a proxied server: its listing, and one forwarded call. */
   bridgeTimeouts?: CodexBridgeTimeouts;
+  /** How the bridge connects to one of the host's own MCP servers it proxies. Default:
+   *  {@link defaultConnectMcpServer}, the MCP SDK's client. Tests inject a fake. */
+  connectMcpServer?: ConnectMcpServer;
 }
 
 /**
@@ -194,6 +210,8 @@ export function codexRefusal(opts: AgentQueryOptions): string | undefined {
   if (opts.resume !== undefined && opts.messages !== undefined) {
     return "codex cannot both resume a session and replay a transcript — that would duplicate the conversation";
   }
+  const servers = mcpServersRefusal(opts.mcpServers);
+  if (servers !== undefined) return servers;
   // A name codex does not have is denied to it already. `AskUserQuestion` is claude's question tool,
   // which the executor withholds from every state that declares outputs; codex has no such tool, so
   // the deny is honoured by its absence and refusing the run over it refused every codex state with
@@ -257,6 +275,8 @@ export function codexArgv(
   config: CodexAgentOptions = {},
   bridgeUrl?: string,
   schemaFile?: string,
+  /** The servers the bridge proxies for this run, each with the tools it listed — see the header. */
+  proxied: Record<string, readonly string[]> = {},
 ): string[] {
   return [
     "exec",
@@ -275,8 +295,16 @@ export function codexArgv(
     // rather than fail it.
     "-c",
     'approval_policy="never"',
-    ...(bridgeUrl !== undefined
+    // Our server only when it has tools of ours to serve: a bridge standing up only to proxy the host's
+    // servers would otherwise hand codex a required `dai` with nothing on it.
+    ...(bridgeUrl !== undefined && Object.keys(opts.mcpTools ?? {}).length > 0
       ? ["-c", mcpServerOverride(bridgeUrl, Object.keys(opts.mcpTools ?? {}), MCP_SERVER_NAME, config.bridgeTimeouts)]
+      : []),
+    // Each proxied server, under its OWN name, at the bridge — required, bounded and approved on codex's
+    // side like ours, for the same three reasons (see {@link mcpServerOverride}): the call is gated at
+    // the bridge, where codex asking as well would be a second gate nobody can answer.
+    ...(bridgeUrl !== undefined
+      ? Object.entries(proxied).flatMap(([name, tools]) => ["-c", mcpServerOverride(bridgeServerPath(bridgeUrl, name), tools, name, config.bridgeTimeouts)])
       : []),
     // The model, when the caller named one. As a CONFIG OVERRIDE rather than `-m`, for the same reason
     // the sandbox is: `-m` exists on `codex exec` and NOT on `codex exec resume`, so a resumed run
@@ -450,27 +478,44 @@ export function createCodexAgentQuery(config: CodexAgentOptions = {}): AgentQuer
       return;
     }
 
-    // A bridge is worth standing up only when there is something for codex to call back FOR. Unlike
-    // the `claude` adapter, an approver is never such a reason — codex has no callback channel — so
-    // this is host-implemented tools alone.
-    let bridge: McpBridge | undefined;
-    if (Object.keys(opts.mcpTools ?? {}).length > 0) {
-      const start = config.startBridge ?? defaultStartMcpBridge;
+    // The host's own servers, CONNECTED before anything else: codex fixes its approval table from their
+    // tool lists, and a server that cannot start is a run that fails here, naming it — codex would mark
+    // it required and refuse to start anyway, with less to say about why.
+    const startupMs = (config.bridgeTimeouts?.startupTimeoutSec ?? CODEX_BRIDGE_STARTUP_TIMEOUT_SEC) * 1000;
+    const callMs = (config.bridgeTimeouts?.toolTimeoutSec ?? CODEX_BRIDGE_TOOL_TIMEOUT_SEC) * 1000;
+    let proxies: Record<string, McpProxy> = {};
+    if (Object.keys(opts.mcpServers ?? {}).length > 0) {
       try {
-        bridge = await start({
-          ...(opts.mcpTools !== undefined ? { tools: opts.mcpTools } : {}),
-          ...(opts.validator !== undefined ? { validator: opts.validator } : {}),
-        });
+        proxies = await connectMcpServers(opts.mcpServers!, config.connectMcpServer ?? defaultConnectMcpServer, { timeoutMs: startupMs, callTimeoutMs: callMs });
       } catch (e) {
-        yield { type: "other", error: `the agent's tool bridge could not start: ${e instanceof Error ? e.message : String(e)}` };
+        yield { type: "other", error: e instanceof Error ? e.message : String(e) };
         return;
       }
     }
 
+    let bridge: McpBridge | undefined;
     let child: ReturnType<SpawnProcess> | undefined;
     let onAbort: (() => void) | undefined;
     let schemaFile: string | undefined;
     try {
+      // A bridge is worth standing up only when there is something for codex to call back FOR. Unlike
+      // the `claude` adapter, an approver is never such a reason — codex has no callback channel — so
+      // this is host-implemented tools, and the host's servers the bridge proxies.
+      if (Object.keys(opts.mcpTools ?? {}).length > 0 || Object.keys(proxies).length > 0) {
+        const start = config.startBridge ?? defaultStartMcpBridge;
+        try {
+          bridge = await start({
+            ...(opts.mcpTools !== undefined ? { tools: opts.mcpTools } : {}),
+            ...(opts.validator !== undefined ? { validator: opts.validator } : {}),
+            ...(Object.keys(proxies).length > 0 ? { servers: proxies } : {}),
+            ...(opts.serverToolGate !== undefined ? { serverToolGate: opts.serverToolGate } : {}),
+          });
+        } catch (e) {
+          yield { type: "other", error: `the agent's tool bridge could not start: ${e instanceof Error ? e.message : String(e)}` };
+          return;
+        }
+      }
+
       const spawn = config.spawn ?? (await defaultSpawn());
       const preamble = opts.messages !== undefined ? replayPreamble(opts.messages) : "";
       // The call's `binaryPath` beats the transport's wired-in `command`, exactly as it does for the
@@ -484,7 +529,8 @@ export function createCodexAgentQuery(config: CodexAgentOptions = {}): AgentQuer
         schemaFile = join(await mkdtemp(join(tmpdir(), "codex-schema-")), "schema.json");
         await writeFile(schemaFile, JSON.stringify(opts.schema), "utf8");
       }
-      const c = spawn([opts.binaryPath ?? config.command ?? CODEX_COMMAND, ...codexArgv(opts, config, bridge?.url, schemaFile)], {
+      const proxied = Object.fromEntries(Object.entries(proxies).map(([name, proxy]) => [name, proxy.tools.map((tool) => tool.name)]));
+      const c = spawn([opts.binaryPath ?? config.command ?? CODEX_COMMAND, ...codexArgv(opts, config, bridge?.url, schemaFile, proxied)], {
         ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
         ...(opts.env !== undefined ? { env: opts.env } : {}),
         stdin: preamble.length > 0 ? `${preamble}\n${opts.prompt}` : opts.prompt,
@@ -552,6 +598,9 @@ export function createCodexAgentQuery(config: CodexAgentOptions = {}): AgentQuer
       // for a run that ended.
       child?.kill();
       await bridge?.close();
+      // After the bridge: nothing can reach a proxied server once the bridge has gone, and a stdio
+      // server's process ends with its connection.
+      await closeMcpProxies(proxies);
     }
   };
 }
