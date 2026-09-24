@@ -437,6 +437,25 @@ describe("the host's own servers — proxied through the bridge, so codex can be
     expect(seen).toEqual([{ type: "other", error: "the MCP server 'slow' could not start: it did not list its tools within 50 ms" }]);
   });
 
+  it("threads the connection seam and the servers through the route executor and the function entry", async () => {
+    for (const via of ["route", "function"] as const) {
+      const { spawn, argv } = fakeSpawn(answered("done"));
+      const { connect, state } = fakeConnect();
+      const bridge = recordingBridge();
+      const mcpServers = { figma: { url: "http://h/mcp" } };
+      if (via === "route") {
+        const op = promptOp({ user: "x", output: { name: "answer", schema: { type: "string" } } });
+        const result = await new AgentCodexExecutor({ spawn, startBridge: bridge.startBridge, connectMcpServer: connect, mcpServers }).start(op, {} as never).result;
+        expect(isOk(result)).toBe(true);
+      } else {
+        const fn = createCodexAgentFunction({ spawn, startBridge: bridge.startBridge, connectMcpServer: connect, mcpServers });
+        await fn.run(inputs(), {} as ExecServices);
+      }
+      expect(state.connected).toEqual(["figma"]);
+      expect(argv[0]!.join(" ")).toContain("mcp_servers.figma=");
+    }
+  });
+
   it("refuses a server named `dai`, or one whose name its tools could not carry", () => {
     expect(codexRefusal({ prompt: "x", mcpServers: { dai: { command: "x" } } })).toMatch(/bridge's own/);
     expect(codexRefusal({ prompt: "x", mcpServers: { "a__b": { command: "x" } } })).toMatch(/cannot be carried/);

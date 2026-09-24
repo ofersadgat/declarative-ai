@@ -59,7 +59,7 @@ export interface CodexAgentFunctionOptions extends Omit<ClaudeCodeFunctionOption
  * entry whose declaration and behaviour disagree.
  */
 export function createCodexAgentFunction(options: CodexAgentFunctionOptions = {}): ReturnType<typeof createClaudeCodeFunction> {
-  const { command, args, spawn, startBridge, sandbox, bridgeTimeouts, ...rest } = options;
+  const { command, args, spawn, startBridge, sandbox, bridgeTimeouts, connectMcpServer, ...rest } = options;
   return createClaudeCodeFunction({
     label: "codex",
     ...rest,
@@ -72,6 +72,7 @@ export function createCodexAgentFunction(options: CodexAgentFunctionOptions = {}
       ...(startBridge !== undefined ? { startBridge } : {}),
       ...(sandbox !== undefined ? { sandbox } : {}),
       ...(bridgeTimeouts !== undefined ? { bridgeTimeouts } : {}),
+      ...(connectMcpServer !== undefined ? { connectMcpServer } : {}),
     }),
   });
 }

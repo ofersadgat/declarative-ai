@@ -109,7 +109,7 @@ export class AgentCodexExecutor extends AgentExecutor {
     // `startBridge` travels too: the bridge is how codex is served the tools a state holds, and a host
     // that stands up its own (one listener on a worker thread) must reach it. It used to be dropped
     // here, so a route quietly stood up upstream's per-run bridge instead.
-    const { command, args, spawn, sandbox, startBridge, bridgeTimeouts } = this.cli;
-    return createCodexAgentQuery({ command, args, spawn, sandbox, startBridge, bridgeTimeouts });
+    const { command, args, spawn, sandbox, startBridge, bridgeTimeouts, connectMcpServer } = this.cli;
+    return createCodexAgentQuery({ command, args, spawn, sandbox, startBridge, bridgeTimeouts, connectMcpServer });
   }
 }
