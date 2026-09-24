@@ -20,3 +20,5 @@ export * from "./classification.js";
 export * from "./failure.js";
 export * from "./result.js";
 export * from "./encodedError.js";
+// Usage readings: how full a context is, how much of an allowance is spent (both halves carry them).
+export * from "./usage.js";

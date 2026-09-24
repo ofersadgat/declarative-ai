@@ -21,18 +21,21 @@
  */
 import type {
   Capabilities,
+  ContextReading,
   Failure,
   FunctionInputs,
   FunctionRegistry,
   InlineFamily,
   JsonSchema,
   JsonValue,
+  LimitReading,
   MetricsAlgebra,
   Operation,
   OutputValidator,
   ResolvedValue,
   ResultWithMetrics,
 } from "@declarative-ai/ops";
+import type { UsageReporter } from "./limits.js";
 
 // The op vocabulary is what flows through this contract — re-exported so a consumer that speaks
 // execution imports one name set.
@@ -141,16 +144,28 @@ export type ExecEvent =
    * A provider's own event, forwarded OPAQUELY.
    *
    * A delegated agent narrates a great deal that has no neutral home and should not be given one:
-   * session init, compaction boundaries, hook lifecycle, task progress, API retries, rate-limit
-   * windows, permission denials. Naming each in this union would teach `exec` one provider's
-   * vocabulary for the sake of events it cannot act on — and the list is open, so the next version
-   * would add to it.
+   * session init, compaction boundaries, hook lifecycle, task progress, API retries, permission
+   * denials. Naming each in this union would teach `exec` one provider's vocabulary for the sake of
+   * events it cannot act on — and the list is open, so the next version would add to it. (Rate-limit
+   * windows and context usage USED to be on that list; once something acted on them they earned the
+   * `limits` and `context` variants below, and their raw events still flow here beside them.)
    *
    * So the payload is JSON and nothing here interprets it. A host that wants to render a compaction
    * boundary can; a host that does not can ignore the whole variant. Same precedent as `rawUsage` and
    * `providerMetadata`: open by nature, JSON by construction (§2.2).
    */
   | { type: "provider_event"; payload: JsonValue }
+  /**
+   * How full the conversation is, read after a response ({@link ContextReading}). A meter draws it,
+   * and the record keeps it on the turn it follows (`MessageEntry.context`).
+   */
+  | { type: "context"; reading: ContextReading }
+  /**
+   * How much of an account's allowance is spent ({@link LimitReading}), as the adapter normalized
+   * it. The limits board ({@link LimitsBoard}) holds it per account; whatever chooses a model by the
+   * allowance it has left reads it there.
+   */
+  | { type: "limits"; reading: LimitReading }
   /**
    * Events were DROPPED because nothing was draining the stream — `count` of them, oldest first.
    *
@@ -395,6 +410,16 @@ export interface ExecServices {
    * exactly the messages it wrote.
    */
   session?: ResolvedSession;
+  /**
+   * Where a transport reports what it learns about ALLOWANCE — that it is about to send on a route,
+   * and every limit reading that comes back ({@link UsageReporter}).
+   *
+   * Set by the session layer ({@link withSessionPosition} with a `limits` board), which maps a route
+   * to its account; called by the transport directly rather than read off the event stream, because
+   * the stream has ONE consumer and it is often not the session layer — a host that narrates a run
+   * drains it first. Absent means nobody is keeping the board, and a transport says nothing.
+   */
+  usage?: UsageReporter;
   /** The workspace the current operation acts within — a Session-owned resource. */
   workspace?: Workspace;
   /**

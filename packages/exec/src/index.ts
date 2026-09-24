@@ -23,3 +23,5 @@ export * from "./retry.js";
 // Recording what ran (DESIGN.md §1.6) — the two-phase write, split out of the memo store where
 // findmyprompt fused it. A session IS the records sharing a `session.id`.
 export * from "./record.js";
+// The limits board: account-wide allowance, fed by the session layer (usage readings).
+export * from "./limits.js";

@@ -72,7 +72,7 @@ describe("the prompt waits for the bridge handshake", () => {
     const { spawn, written } = fakeSpawn(['{"type":"result","result":"done"}']);
     const { startBridge } = gatedBridge(); // never made ready
     const seen = [];
-    for await (const m of createCliAgentQuery({ spawn, startBridge, bridgeReadyTimeoutMs: 20 })({ prompt: "go", ...approver })) seen.push(m);
+    for await (const m of createCliAgentQuery({ spawn, startBridge, bridgeReadyTimeoutMs: 20, contextUsage: false })({ prompt: "go", ...approver })) seen.push(m);
     expect(written).toHaveLength(1);
     expect(seen.at(-1)).toMatchObject({ type: "result" });
   });
@@ -80,7 +80,7 @@ describe("the prompt waits for the bridge handshake", () => {
   it("does not gate a bridge that reports no readiness — the prompt goes in at spawn, as before", async () => {
     const { spawn, stdins, written } = fakeSpawn(['{"type":"result","result":"done"}']);
     const startBridge = async () => ({ url: "http://127.0.0.1:9999/mcp", close: async () => undefined });
-    for await (const _ of createCliAgentQuery({ spawn, startBridge })({ prompt: "go", ...approver })) void _;
+    for await (const _ of createCliAgentQuery({ spawn, startBridge, contextUsage: false })({ prompt: "go", ...approver })) void _;
     expect(JSON.parse(stdins[0]!)).toMatchObject({ message: { content: "go" } });
     expect(written).toEqual([]);
   });

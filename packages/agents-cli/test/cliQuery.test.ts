@@ -606,7 +606,7 @@ describe("the prompt channel", () => {
 describe("steering — ending a turn without ending the process", () => {
   it("sends a control_request the CLI understands, not the shape it silently ignores", async () => {
     const { spawn, written } = fakeSpawn(['{"type":"result","result":"done"}']);
-    const run = createCliAgentQuery({ spawn })({ prompt: "count to 400" });
+    const run = createCliAgentQuery({ spawn, contextUsage: false })({ prompt: "count to 400" });
     // Pull one message so the process exists — before that there is nothing to interrupt.
     const it0 = run[Symbol.asyncIterator]();
     await it0.next();
@@ -622,7 +622,7 @@ describe("steering — ending a turn without ending the process", () => {
 
   it("is idempotent, and says nothing at all when there is no process to say it to", async () => {
     const { spawn, written } = fakeSpawn(['{"type":"result","result":"done"}']);
-    const run = createCliAgentQuery({ spawn })({ prompt: "hi" });
+    const run = createCliAgentQuery({ spawn, contextUsage: false })({ prompt: "hi" });
     // Before the stream is pulled the generator has not run, so no child exists yet.
     await expect(run.interrupt!()).resolves.toBeUndefined();
     expect(written).toEqual([]);

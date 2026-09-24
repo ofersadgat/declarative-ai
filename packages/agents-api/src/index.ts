@@ -15,6 +15,7 @@ export * from "./mcpTools.js";
 // Reading an agent's stream — ONE mapping, shared by both transports because both carry the same
 // messages: the SDK drives the CLI as a subprocess and passes its lines through untouched.
 export * from "./streamMessages.js";
+export * from "./claudeUsage.js";
 export * from "./runtime.js";
 // The agent's OWN session file, read back — the concrete `AgentSessionReader` over
 // `~/.claude/projects`, and the fold that keeps what the stream never carried.

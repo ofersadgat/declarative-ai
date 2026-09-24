@@ -36,7 +36,7 @@
  * believes it is gated.
  */
 import type { AgentQuery, AgentQueryOptions, AgentRun, AgentStreamMessage, BinaryDeps } from "@declarative-ai/agents-api";
-import { claudeOptionsRefusal, DEFAULT_SETTING_SOURCES, defaultBinaryDeps, readAgentMessage, resolveAgentBinary } from "@declarative-ai/agents-api";
+import { claudeOptionsRefusal, contextDetailOfClaude, DEFAULT_SETTING_SOURCES, defaultBinaryDeps, readAgentMessage, resolveAgentBinary } from "@declarative-ai/agents-api";
 import { defaultStartMcpBridge, type McpBridge, type StartMcpBridge } from "./mcpBridge.js";
 import { mcpConfigJson, PERMISSION_PROMPT_TOOL } from "./mcpProtocol.js";
 import { defaultSpawn, exitMessage, type AgentProcess, type SpawnProcess } from "./process.js";
@@ -67,7 +67,23 @@ export interface CliAgentOptions {
    * readiness is waited for at all.
    */
   bridgeReadyTimeoutMs?: number;
+  /**
+   * Whether to ask the process how full its context is once the turn is over (`get_context_usage`,
+   * over the control channel, before the input closes) — which is where a reading's breakdown and the
+   * auto-compact point come from. Default `true`; a process seam that cannot write is never asked.
+   */
+  contextUsage?: boolean;
+  /** How long that answer may take before the run ends without it. Default {@link CONTEXT_USAGE_TIMEOUT_MS}. */
+  contextUsageTimeoutMs?: number;
 }
+
+/**
+ * How long a finished turn waits for the process to say how full its context is. The answer is
+ * computed from state the process already holds (MEASURED: claude 2.1.142 answers in well under a
+ * second), so the bound only matters for a process that never answers — which then settles exactly as
+ * it did before there was a question.
+ */
+export const CONTEXT_USAGE_TIMEOUT_MS = 3_000;
 
 /**
  * The default bound on the prompt's wait for the bridge handshake. A host loop measured at 1–3.7 s
@@ -446,6 +462,11 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
       }
 
       let sawResult = false;
+      // The finished turn's result, held while the process is asked how full its context is — the
+      // question has to be put BEFORE the input closes, and closing the input is what ends the process.
+      let held: AgentStreamMessage | undefined;
+      let asked: string | undefined;
+      let askTimer: ReturnType<typeof setTimeout> | undefined;
       for await (const line of c.lines) {
         if (line.trim().length === 0) continue;
         let msg: CliMessage;
@@ -453,6 +474,24 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
           msg = JSON.parse(line) as CliMessage;
         } catch {
           continue; // a non-JSON line is CLI chatter, never a message
+        }
+        // The answer to OUR question, and only ours: an interrupt's acknowledgement is another
+        // control response and still flows through as it did.
+        if (asked !== undefined && msg["type"] === "control_response") {
+          const response = msg["response"] as { request_id?: unknown; subtype?: unknown; response?: unknown } | undefined;
+          if (response?.request_id === asked) {
+            clearTimeout(askTimer);
+            asked = undefined;
+            const detail = response.subtype === "success" ? contextDetailOfClaude(response.response) : undefined;
+            if (detail !== undefined) yield { type: "reading", reading: { context: detail } };
+            if (held !== undefined) {
+              const result = held;
+              held = undefined;
+              yield result;
+            }
+            c.endInput?.();
+            continue;
+          }
         }
         // ONE mapping, shared with the SDK sibling (`readAgentMessage`): the Agent SDK drives THIS
         // binary as a subprocess and hands these same lines through untouched, so a second mapping here
@@ -468,6 +507,16 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
         const normalized = readAgentMessage(msg);
         if (normalized.type === "result") {
           sawResult = true;
+          // First, while the process still reads its input: how full is the context now. The answer
+          // comes back as a `control_response` and is handled above; the timer ends the run without it
+          // if it never comes.
+          if (c.write !== undefined && config.contextUsage !== false) {
+            asked = `ctx_${++controls}`;
+            c.write(`${JSON.stringify({ type: "control_request", request_id: asked, request: { subtype: "get_context_usage" } })}\n`);
+            held = normalized;
+            askTimer = setTimeout(() => c.endInput?.(), config.contextUsageTimeoutMs ?? CONTEXT_USAGE_TIMEOUT_MS);
+            continue;
+          }
           // CLOSE THE INPUT. Under streaming input the CLI waits for another message rather than
           // exiting when a turn finishes, so without this a completed run never settles and `c.exit`
           // never resolves. Measured: closing stdin exits 0.
@@ -488,6 +537,13 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
         }
         yield normalized;
         if (normalized.error !== undefined) return;
+      }
+      clearTimeout(askTimer);
+      // Unanswered (the process ended, or the bound passed): the result stands without a breakdown,
+      // and the input is closed as it would have been.
+      if (held !== undefined) {
+        c.endInput?.();
+        yield held;
       }
       const code = await c.exit;
       // A non-zero exit with NO `result` yet seen is the CLI's way of failing; surface it so the adapter

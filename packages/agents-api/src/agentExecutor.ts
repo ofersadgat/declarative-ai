@@ -34,6 +34,12 @@ import {
   type ResolvedSession,
   type ResolvedValue,
   type Tool,
+  type ContextReading,
+  type Failure,
+  type LimitReading,
+  limitStatusAt,
+  mergeLimitReadings,
+  tightestWindow,
 } from "@declarative-ai/exec";
 import type {
   CallDeps,
@@ -68,6 +74,7 @@ import { isPermissionWrapped, type Approver, type PermissionDenied, type Permiss
 import { mcpToolName } from "./mcpTools.js";
 import { sdkAgentQuery } from "./sdkQuery.js";
 import { isRetriableAgentError } from "./streamMessages.js";
+import { contextOfClaude, contextTokensOfUsage, contextWindowOf, limitReadingOfRateLimitEvent } from "./claudeUsage.js";
 import type { AgentPermissionMode, AgentQuery, AgentQueryOptions, AgentResult, AgentRun, AgentSessionReader, InjectedTool, McpServerSpec } from "./seam.js";
 
 /**
@@ -130,6 +137,41 @@ interface AgentTurn {
   sidechains: Map<string, ModelMessage[]>;
   /** Opaque provider events, each pinned to how many main-thread messages preceded it. */
   providerEvents: Array<{ index: number; event: JsonValue }>;
+  /** The last MAIN-thread response's size — what the conversation holds after it — and its model. */
+  held?: { used: number; model?: string };
+  /** What the transport added about the context (window, breakdown, auto-compact point). */
+  contextDetail?: Partial<ContextReading>;
+  /** How full the conversation was after the call, once the call is over. */
+  context?: ContextReading;
+  /** Every limit reading heard during the call, merged. */
+  limits?: LimitReading;
+}
+
+/**
+ * The code a usage-limit refusal carries: the account had nothing left to spend when the call was
+ * made. Distinct from `rate_limit` (a transient throttle worth a quick retry) because the wait here
+ * is until a WINDOW resets — hours, not seconds — which is a host's decision to make, not a retry
+ * loop's.
+ */
+export const USAGE_LIMIT_CODE = "usage_limit";
+
+/**
+ * Whether a prompt is an agent SLASH COMMAND (`/compact`, `/compact keep X`) rather than a message:
+ * a `/`, a command word, then a space or the end. A path (`/etc/hosts is broken`) is not one — the
+ * word runs into another `/` rather than a space.
+ */
+export function isSlashCommand(prompt: string): boolean {
+  return /^\/[A-Za-z][\w:-]*(\s|$)/.test(prompt);
+}
+
+/** A refusal made on a spent window: the reading that said so rides with it. */
+export class UsageLimitError extends Error {
+  readonly code = USAGE_LIMIT_CODE;
+  readonly retryable = false;
+  constructor(message: string, readonly limits: LimitReading, readonly resetsAt: string | null) {
+    super(message);
+    this.name = "UsageLimitError";
+  }
 }
 
 /** Delegated agents: they mutate the workspace, run their own non-deterministic loop (not memoizable),
@@ -535,6 +577,35 @@ export class AgentExecutor extends PromptExecutor {
     return super.lower(named ? op : { ...op, config: { ...inline, model: AGENT_DEFAULT_MODEL } as never }, tools);
   }
 
+  /**
+   * How full the conversation is after the call: the last main response's tokens against the window
+   * the agent reported, completed by whatever the transport read beside the stream. A transport that
+   * knows the figure better than the response (codex's session file) supplies `used` itself.
+   */
+  private contextAfter(turn: AgentTurn, result: AgentResult): ContextReading | undefined {
+    const detail = turn.contextDetail;
+    const used = turn.held?.used ?? detail?.used;
+    if (used === undefined) return undefined;
+    const model = detail?.model ?? turn.held?.model ?? turn.model ?? result.model ?? "unknown";
+    const modelUsage = (result.rawUsage as { modelUsage?: unknown } | undefined)?.modelUsage;
+    const window = contextWindowOf(modelUsage, model) ?? detail?.window ?? null;
+    return contextOfClaude(used, model, window, detail);
+  }
+
+  /**
+   * The error a failed call throws. A refusal made while the account's window was SPENT (a limit
+   * reading heard during the call says exhausted, and no extra usage is being drawn) is a
+   * {@link UsageLimitError}, carrying when it resets; anything else is an {@link AgentError} as before.
+   */
+  private failedCall(message: string, code: string | undefined, turn: AgentTurn): Error {
+    const limits = turn.limits;
+    if (limits !== undefined && limits.overage !== true && limitStatusAt(limits) === "exhausted") {
+      const window = tightestWindow(limits);
+      return new UsageLimitError(message, limits, window?.resetsAt ?? null);
+    }
+    return new AgentError(message, false, code);
+  }
+
   /** What this transport is called in a failure reason — see {@link AgentExecutorOptions.label}. */
   protected label(): string {
     return this.agent.label ?? "claude-code";
@@ -582,6 +653,17 @@ export class AgentExecutor extends PromptExecutor {
       // entry with no timestamp cannot be merged with a captured one later.
       const at = new Date().toISOString();
       const said = entriesOfMessages(turn.messages as RawMessage[], { provider: AGENT_PROVIDER, at });
+      // How full the conversation was after this call, ON the call's last answer — "the context at
+      // every turn" is a read of the record, not a second stream beside it.
+      if (turn.context !== undefined) {
+        for (let k = said.length - 1; k >= 0; k--) {
+          const entry = said[k]!;
+          if (entry.kind === "message" && entry.role === "assistant") {
+            said[k] = { ...entry, context: turn.context };
+            break;
+          }
+        }
+      }
       // The events, spliced back among the turns they arrived between.
       //
       // They were pinned by `index` — how many main turns preceded each — precisely so a reader could
@@ -646,6 +728,20 @@ export class AgentExecutor extends PromptExecutor {
       };
       return { value: output, metrics: this.agentMetrics(startMs, result) };
     } catch (e) {
+      // A refusal on a SPENT window is not a retry loop's to handle: the wait is until the window
+      // resets, which a host decides about (wait and try again, or not). `out-of-credits` is the
+      // classification no retry wrapper retries; `retryAfterMs` says how long until it would work.
+      if (e instanceof UsageLimitError) {
+        const resetsMs = e.resetsAt !== null ? Date.parse(e.resetsAt) - Date.now() : undefined;
+        const error: Failure = {
+          classification: "out-of-credits",
+          reason: e.message,
+          code: USAGE_LIMIT_CODE,
+          ...(resetsMs !== undefined && resetsMs > 0 ? { retryAfterMs: resetsMs } : {}),
+          detail: { resetsAt: e.resetsAt, limits: e.limits } as never,
+        };
+        return { error, value: { finishReason: "error" }, metrics: this.agentMetrics(startMs, undefined) };
+      }
       // CLASSIFIED, not flattened. An agent SDK is an exception-shaped world, and the exception still
       // carries what happened: a 429 raised inside the agent's own loop is retriable, an abort is a
       // cancellation, a `retry-after` is a wait. Reporting all of it as `permanent` would make a
@@ -1047,6 +1143,15 @@ export class AgentExecutor extends PromptExecutor {
     // The LIVE run, published to the handle before a single message is read — a caller pressing Stop
     // one tick into a five-minute turn must reach something.
     const run = this.query()(queryOptions);
+    // Stamped as the call goes out — rule 1 of the limits board ("sending, and nothing heard").
+    ctx.usage?.sent(this.label());
+    // A limit reading heard during the call: kept for the failure it may explain, told to the board,
+    // and streamed for anyone drawing a meter.
+    const heard = (reading: LimitReading): void => {
+      turn.limits = mergeLimitReadings(turn.limits, reading);
+      ctx.usage?.limits(reading);
+      events?.push({ type: "limits", reading });
+    };
     if (channel) {
       channel.run = run;
       // Replay whatever was asked for while the run was still being built — a Stop pressed one tick
@@ -1058,7 +1163,7 @@ export class AgentExecutor extends PromptExecutor {
     try {
       for await (const msg of run) {
         if (msg.errorCode !== undefined) errorCode = msg.errorCode;
-        if (msg.error) throw new AgentError(`${this.label()} agent error: ${msg.error}`, false, msg.errorCode ?? errorCode);
+        if (msg.error) throw this.failedCall(`${this.label()} agent error: ${msg.error}`, msg.errorCode ?? errorCode, turn);
         switch (msg.type) {
           case "result":
             if (msg.result) result = msg.result;
@@ -1080,6 +1185,8 @@ export class AgentExecutor extends PromptExecutor {
                 turn.model = event.model;
               }
               events?.push({ type: "provider_event", payload: msg.event });
+              const limits = limitReadingOfRateLimitEvent(msg.event, this.label());
+              if (limits !== undefined) heard(limits);
               // …and RECORDED, pinned to its place among the turns. The live view already showed it;
               // a replay that shows less than the person watching saw is a record telling a smaller
               // story than the run. Except delta bookkeeping: a `stream_event` is a fragment whose
@@ -1090,8 +1197,22 @@ export class AgentExecutor extends PromptExecutor {
               }
             }
             break;
+          case "reading":
+            // Normalized by the transport already — a control request's answer, a session file's.
+            if (msg.reading?.context !== undefined) turn.contextDetail = { ...turn.contextDetail, ...msg.reading.context };
+            if (msg.reading?.limits !== undefined) heard({ ...msg.reading.limits, route: this.label() });
+            break;
           case "assistant":
           case "user":
+            // What the conversation holds after this response: its input (cached and not) plus its
+            // output. Main thread only — a subagent's context is its own.
+            if (msg.type === "assistant" && msg.parentToolUseId === undefined) {
+              const inner = msg.message as { usage?: unknown; model?: unknown } | undefined;
+              const used = contextTokensOfUsage(inner?.usage);
+              if (used !== undefined && used > 0) {
+                turn.held = { used, ...(typeof inner?.model === "string" && inner.model !== "<synthetic>" ? { model: inner.model } : {}) };
+              }
+            }
             // The whole turn, live — the contract's declared `message` variant, which nothing emitted
             // until now. Deltas carry only the answer's text; the tool calls, their results and the
             // thinking blocks all ride on the finished turn objects, so a viewer that gets no
@@ -1152,12 +1273,17 @@ export class AgentExecutor extends PromptExecutor {
       }
     } catch (e) {
       if (signal.aborted) throw new AgentError("aborted", true);
-      if (e instanceof AgentError) throw e;
-      throw new AgentError(`${this.label()} query threw: ${(e as Error).message}`);
+      if (e instanceof AgentError || e instanceof UsageLimitError) throw e;
+      throw this.failedCall(`${this.label()} query threw: ${(e as Error).message}`, undefined, turn);
     }
     if (signal.aborted) throw new AgentError("aborted", true);
     if (!result) throw new AgentError(`${this.label()} produced no result message`);
     turn.result = result;
+    const context = this.contextAfter(turn, result);
+    if (context !== undefined) {
+      turn.context = context;
+      events?.push({ type: "context", reading: context });
+    }
     return turn;
   }
 
@@ -1293,6 +1419,10 @@ export class AgentExecutor extends PromptExecutor {
    * summary-seeded rather than as a native fork, and it is why the cheap paths avoid replay entirely.
    */
   protected renderPrompt(definition: LlmCallDefinition): string {
+    // A SLASH COMMAND is a command to the agent (`/compact keep the decision`), not a message: it
+    // works only as the first thing the agent reads, so the system text is not put in front of it —
+    // that would turn it into prose the model answers instead of a command the agent runs.
+    if (typeof definition.prompt === "string" && isSlashCommand(definition.prompt)) return definition.prompt;
     const system = definition.system !== undefined ? `${definition.system}\n\n` : "";
     if (typeof definition.prompt === "string") return `${system}${definition.prompt}`;
     const turns = definition.messages ?? definition.prompt ?? [];

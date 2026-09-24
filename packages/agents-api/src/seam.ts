@@ -5,7 +5,7 @@
  * this interface (not the SDK's) is what lets the whole package be built and tested without the SDK
  * installed and without an API key.
  */
-import type { FunctionInputs, JsonSchema, JsonValue, SyncOutputValidator } from "@declarative-ai/exec";
+import type { ContextReading, FunctionInputs, JsonSchema, JsonValue, LimitReading, SyncOutputValidator } from "@declarative-ai/exec";
 
 /** The permission mode handed to the delegated agent (its NATIVE profile control). */
 export type AgentPermissionMode = "default" | "plan" | "acceptEdits" | "bypassPermissions";
@@ -393,10 +393,19 @@ export interface AgentResult {
  *    contain reasoning — and a consumer that wants to SHOW thinking as it happens (the point of
  *    streaming a minutes-long turn) still needs the delta somewhere.
  *  - `provider_event` — everything with no neutral home, forwarded opaquely (see {@link event}).
+ *  - `reading` — what the transport learned about the context or the allowance, already
+ *    normalized (see {@link reading}). A transport that reads usage from somewhere other than the
+ *    stream — a control request, a session file — yields it here.
  *  - `other` — a message this mapping recognises and has nothing to say about.
  */
 export interface AgentStreamMessage {
-  type: "result" | "assistant" | "user" | "partial" | "thinking-partial" | "provider_event" | "other";
+  type: "result" | "assistant" | "user" | "partial" | "thinking-partial" | "provider_event" | "reading" | "other";
+  /**
+   * On a `reading`: the context detail (window, breakdown, auto-compact point, and the tokens held
+   * when the source knows them better than the response did) and/or a limit reading. Normalized by
+   * the transport that knows the provider's vocabulary, so the executor never has to.
+   */
+  reading?: { context?: Partial<ContextReading>; limits?: LimitReading };
   /** Present on the terminal `result` message. */
   result?: AgentResult;
   /** A run-fatal error the agent reported, as prose. */

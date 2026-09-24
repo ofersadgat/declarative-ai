@@ -37,6 +37,7 @@ import type { FunctionInputs, JsonValue } from "@declarative-ai/exec";
 import { defaultBinaryDeps, resolveAgentBinary, type BinaryDeps } from "./binary.js";
 import { injectedToolDescriptors, MCP_SERVER_NAME, mcpServersRefusal, runInjectedTool } from "./mcpTools.js";
 import { readAgentMessage } from "./streamMessages.js";
+import { contextDetailOfClaude } from "./claudeUsage.js";
 import {
   injectedToolCallOf,
   type AgentPermissionCallback,
@@ -58,7 +59,12 @@ interface SdkQuery extends AsyncIterable<Record<string, unknown>> {
   interrupt?(): Promise<unknown>;
   setPermissionMode?(mode: string): Promise<void>;
   setModel?(model?: string): Promise<void>;
+  /** How full the session's context is, by category — the `get_context_usage` control request. */
+  getContextUsage?(): Promise<unknown>;
 }
+
+/** How long a finished turn waits for {@link SdkQuery.getContextUsage} before settling without it. */
+const CONTEXT_USAGE_TIMEOUT_MS = 3_000;
 
 const SDK_SPECIFIER = "@anthropic-ai/claude-agent-sdk";
 
@@ -572,6 +578,25 @@ async function* sdkMessages(
   try {
     for await (const msg of q) {
       const next = readSdkResult(msg as Record<string, JsonValue>);
+      // Before the result goes out and the input closes: ask how full the context is now. Bounded —
+      // an SDK that never answers settles the turn exactly as it did before there was a question.
+      if (next.type === "result" && typeof q.getContextUsage === "function") {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const answer = await Promise.race([
+            q.getContextUsage(),
+            new Promise<undefined>((resolve) => {
+              timer = setTimeout(() => resolve(undefined), CONTEXT_USAGE_TIMEOUT_MS);
+            }),
+          ]);
+          const detail = answer === undefined ? undefined : contextDetailOfClaude(answer);
+          if (detail !== undefined) yield { type: "reading", reading: { context: detail } };
+        } catch {
+          // A question the SDK could not answer is not the run's failure.
+        } finally {
+          clearTimeout(timer);
+        }
+      }
       yield next;
       // A run the SDK itself reported as failed is terminal: the stream has nothing further to say, and
       // continuing would leave the consumer waiting on a result message that is never coming.

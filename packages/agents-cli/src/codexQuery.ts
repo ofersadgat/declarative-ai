@@ -58,6 +58,7 @@ import { defaultStartMcpBridge, type McpBridge, type StartMcpBridge } from "./mc
 import { bridgeServerPath, MCP_SERVER_NAME, type McpProxy } from "./mcpProtocol.js";
 import { closeMcpProxies, connectMcpServers, defaultConnectMcpServer, type ConnectMcpServer } from "./mcpProxy.js";
 import { defaultSpawn, exitMessage, type SpawnProcess } from "./process.js";
+import { codexHome, readCodexThreadReadings } from "./codexUsage.js";
 
 /** The executable this adapter drives. */
 export const CODEX_COMMAND = "codex";
@@ -72,6 +73,13 @@ export interface CodexAgentOptions {
   args?: string[];
   /** The process seam. Default: {@link defaultSpawn}. Tests inject a fake. */
   spawn?: SpawnProcess;
+  /**
+   * Read the thread's usage from codex's own session file when the run ends (how full the context is,
+   * how much of the account is left). Default `true`.
+   */
+  sessionFiles?: boolean;
+  /** Where codex keeps its sessions. Default {@link codexHome} (`$CODEX_HOME`, else `~/.codex`). */
+  codexHome?: string;
   /** The MCP-bridge seam — how codex reaches host-implemented tools. Tests inject a fake. */
   startBridge?: StartMcpBridge;
   /**
@@ -542,6 +550,24 @@ export function createCodexAgentQuery(config: CodexAgentOptions = {}): AgentQuer
       else opts.abortSignal?.addEventListener("abort", onAbort, { once: true });
 
       let run: CodexRun = {};
+      // The thread's usage, from its session file — see {@link readCodexThreadReadings}. Off when the
+      // transport was told not to read session files, and silent for a thread whose file is not found.
+      const sessionReadings = async (at: CodexRun): Promise<AgentStreamMessage | undefined> => {
+        if (config.sessionFiles === false || at.sessionId === undefined) return undefined;
+        try {
+          const r = await readCodexThreadReadings(at.sessionId, "codex-cli", config.codexHome ?? codexHome());
+          if (r.context === undefined && r.limits === undefined) return undefined;
+          return {
+            type: "reading",
+            reading: {
+              ...(r.context !== undefined ? { context: { ...r.context, ...(at.model !== undefined ? { model: at.model } : {}) } } : {}),
+              ...(r.limits !== undefined ? { limits: r.limits } : {}),
+            },
+          };
+        } catch {
+          return undefined;
+        }
+      };
       for await (const line of c.lines) {
         if (line.trim().length === 0) continue;
         let event: Record<string, unknown>;
@@ -555,6 +581,10 @@ export function createCodexAgentQuery(config: CodexAgentOptions = {}): AgentQuer
         // out of its `for await` on it, and the `finally` below kills the process.
         if (next.error !== undefined && next.error !== run.error) {
           run = next;
+          // What the session file says first: a run refused because a window ran out says so THERE
+          // (`rate_limit_reached_type`), and the adapter needs it in hand to report the refusal as one.
+          const readings = await sessionReadings(run);
+          if (readings !== undefined) yield readings;
           yield { type: "other", error: next.error };
           return;
         }
@@ -562,6 +592,10 @@ export function createCodexAgentQuery(config: CodexAgentOptions = {}): AgentQuer
         yield { type: "other" };
       }
       const code = await c.exit;
+      // How full the thread is and how much of the account is left — neither rides `exec --json`, both
+      // are in the thread's own session file, written by the time the process ends.
+      const readings = await sessionReadings(run);
+      if (readings !== undefined) yield readings;
       // The terminal message is assembled at the END rather than on a `result` event, because codex
       // has no single event that carries the answer: the text arrives as an item and the process
       // ending is what makes it final.

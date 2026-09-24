@@ -19,7 +19,7 @@
  * VERBATIM and is never interpreted. The rule for putting a field in the core is that a second
  * provider would have the same thing under a different name, not that this one has it.
  */
-import type { JsonValue } from "@declarative-ai/json";
+import type { ContextReading, JsonValue } from "@declarative-ai/json";
 
 /** What a conversation is made of: messages, and the session facts that happened around them. */
 export type Entry = MessageEntry | EventEntry;
@@ -107,6 +107,15 @@ export interface MessageEntry extends BaseEntry {
    * in this format is arranged around. {@link blocksOf} is where a reader gets one shape.
    */
   content: Block[] | string;
+  /**
+   * How full the conversation was AFTER this turn — set on the last assistant turn of a call, read
+   * from the response that produced it.
+   *
+   * On the entry and nowhere else: "the context at every turn" is then a read of the record, not a
+   * second stream to keep in step with it, and a rewind or a fork carries each turn's reading with
+   * the turn it describes.
+   */
+  context?: ContextReading;
 }
 
 export interface EventEntry extends BaseEntry {

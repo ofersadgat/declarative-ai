@@ -38,6 +38,7 @@ import { PositionTaken, isOk } from "./contract.js";
 import { canceledFailure, wrapHandle } from "./handles.js";
 import { curryOrApply, isExecutor } from "./wrappers.js";
 import { hashOperation } from "./memo.js";
+import { boardReporter, type AccountKey, type LimitsBoard } from "./limits.js";
 import { canonicalize, sha256Hex } from "@declarative-ai/ops";
 
 export { PositionTaken };
@@ -400,6 +401,17 @@ export function withRecord<R = ExecServices, M extends ExecMetrics = ExecMetrics
 type PositionSeams = { sessions: SessionStore };
 
 /**
+ * What else a session layer may be built with: the account-wide limits board, and how a route maps
+ * to the account it spends. With both, every call below gets `ctx.usage` — the transport reports
+ * what it sends and every limit reading it hears, and the board keeps it per account. Without them
+ * nothing is reported, which is an ordinary run.
+ */
+export interface PositionLimits {
+  limits?: LimitsBoard;
+  accountOf?: (route: string) => AccountKey | undefined;
+}
+
+/**
  * Resolve the conversation a call runs in, and fork when its position turns out to be taken.
  *
  * This is the POLICY half of the session split, and it lives in `exec` rather than in the llm layer
@@ -414,18 +426,20 @@ type PositionSeams = { sessions: SessionStore };
  * `hw` deliberately does not.
  */
 export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics>(inner: Executor<R, M>): Executor<R & PositionSeams, M>;
-export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<PositionSeams> = {}>(
+export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<PositionSeams> & PositionLimits = {}>(
   config?: P,
 ): ExecutorWrapper<R, R & Omit<PositionSeams, keyof P>, M>;
-export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<PositionSeams> = {}>(
+export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics, P extends Partial<PositionSeams> & PositionLimits = {}>(
   config: P,
   inner: Executor<R, M>,
 ): Executor<R & Omit<PositionSeams, keyof P>, M>;
 export function withSessionPosition<R = ExecServices, M extends ExecMetrics = ExecMetrics>(
-  configOrInner?: Partial<PositionSeams> | Executor<R, M>,
+  configOrInner?: (Partial<PositionSeams> & PositionLimits) | Executor<R, M>,
   maybeInner?: Executor<R, M>,
 ): ExecutorWrapper<R, R, M> | Executor<R, M> {
-  const config = (isExecutor(configOrInner) ? undefined : configOrInner) as Partial<PositionSeams> | undefined;
+  const config = (isExecutor(configOrInner) ? undefined : configOrInner) as (Partial<PositionSeams> & PositionLimits) | undefined;
+  // ONE reporter for every call below: the board is account-wide, and so is what it is told.
+  const usage = config?.limits !== undefined && config.accountOf !== undefined ? boardReporter(config.limits, config.accountOf) : undefined;
   const inner = (isExecutor(configOrInner) ? configOrInner : maybeInner) as Executor<R, M> | undefined;
   const wrap = ((innerExec: Executor): Executor => ({
     // A session layer resumes state, so a `withMemoize` above must refuse to cache — and the per-op
@@ -437,7 +451,10 @@ export function withSessionPosition<R = ExecServices, M extends ExecMetrics = Ex
       ...(innerExec.capabilitiesFor?.(op) ?? innerExec.capabilities),
       sessionResume: true,
     }),
-    start(op: Operation<InlineFamily>, ctx: ExecServices): ExecHandle<ResolvedValue> {
+    start(op: Operation<InlineFamily>, given: ExecServices): ExecHandle<ResolvedValue> {
+      // The allowance reporter rides on every call, sessioned or not — a one-off call spends the same
+      // account a conversation does. A reporter a caller supplied itself is left alone.
+      const ctx: ExecServices = usage !== undefined && given.usage === undefined ? { ...given, usage } : given;
       // CONSTRUCTION only: the store is what this wrapper FORKS with, and a caller composing it has
       // the store in hand. It was never something the executor below needed to make a call.
       const sessions = config?.sessions;
