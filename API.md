@@ -640,6 +640,8 @@ interface HostCapabilities {
   deferred?: boolean;   // the call WAITS: started by a round, read by a later one (SPEC §3.3)
   listens?: boolean;    // with deferred: a SUBSCRIPTION, not a question — its wait stops no rule list and
                         // is withdrawn only by the rule that read its answer (SPEC §3.3, "Listening waits")
+  callsModels?: boolean;  // makes model calls of its own — a user function whose module reaches the script
+                          // hooks' llm()/agent(); the validator warns when a guard calls it (SPEC §7.5.6)
 }
 interface RuntimeCapabilities extends HostCapabilities {
   structuredOutput: boolean; mutatesWorkspace: boolean;
@@ -2721,6 +2723,10 @@ interface ChildDecl {
   // ahead of the state's own list (SPEC §3.3). Guards resolve in the enclosing state's scope; taking
   // one HANDLES this child's error/timeout termination.
   transitions?: TransitionDecl[];
+  // A FAN-OUT's (`each`) value for an element that fails: the element reads as this and the batch
+  // carries on, as Claude's `parallel` turns a throw into `null`. Absent: a failed element fails the fan-out.
+  failureValue?: JsonValue;
+  called?: boolean;     // a state a compiled script CALLS (SCRIPTS.md §10) — see "Workflow scripts"
 }
 interface TransitionDecl {
   name?: string;        // a label, unique within its list — filtered by (`$ref` expressions, SPEC §5.4) and
@@ -3003,20 +3009,24 @@ A state machine written as code, compiled to states ([SCRIPTS.md](SCRIPTS.md)). 
 (the compiler), `scriptHooks.ts` (what a script calls), `scriptRun.ts` (the engine's half).
 
 ```ts
-type ScriptMode = "states" | "state" | "function";
+type ScriptMode = "function" | "state" | "phases" | "calls";   // coarsest to finest; "calls" is the default
 
 // Compile one script to the state documents it is — plain `StateDef`s `loadBundle` loads like any other.
 function compileScript(options: CompileScriptOptions): Promise<CompiledScript>;
 function compileScriptWith(context: SignatureContext, options: CompileScriptOptions): CompiledScript;   // sync
 interface CompileScriptOptions extends ModuleResolveOptions {
   file: string;                 // the script — where its imports resolve, and its provenance
-  stateId: string;              // the state it IS; phases compile to `<stateId>/<key>`
+  stateId: string;              // the state it IS; phases compile to `<stateId>/<key>`, calls under them
   source?: string;
   defaultMode?: ScriptMode;     // the location's default when `meta.compile` names none
   compilerOptions?: TS.CompilerOptions;
   stateIdOf?: (file: string) => string | undefined;   // how an imported state is named
 }
-interface CompiledScript { mode: ScriptMode; meta: ScriptMeta; documents: Record<string, StateDef>; warnings: string[]; generated: GeneratedProvenance }
+interface CompiledScript {
+  mode: ScriptMode; meta: ScriptMeta; documents: Record<string, StateDef>; warnings: string[]; generated: GeneratedProvenance;
+  sourceMap: Record<string, SourceAt>;   // every generated state → the script line that made it (also `generated.at`)
+}
+interface SourceAt { line: number; column: number }
 class ScriptCompileError extends Error { file: string; line?: number; column?: number }
 function hasScriptMeta(ts: typeof TS, file: string, source: string): boolean;   // `export const meta` first
 function generatedFiles(compiled: CompiledScript): Record<string, string>;      // `<id>.json` → text, for a host to write
@@ -3030,8 +3040,10 @@ function pipeline(items: readonly unknown[], ...stages: Stage[]): Promise<unknow
 function phase(title: string): void;
 function log(message: string): void;
 function workflow(ref: string | { scriptPath: string }, args?: unknown): Promise<unknown>;
-function now(): number;       // journaled — recorded once, replayed after
-function random(): number;
+function now(): number;       // non-deterministic calls: a state of their own in "calls" mode, recorded
+function random(): number;    //   in "state"/"phases" mode — asked afresh at every call, never memoized
+function call(ref: string, ...args: unknown[]): Promise<unknown>;       // a registered function (`$REGISTRY`)
+function recorded<T>(name: string, fn: () => T): Promise<Awaited<T>>;  // `with { as: "operation" }` code
 const budget: { readonly total: number | null; spent(): number; remaining(): number };  // USD, `limits.budget`
 interface ScriptHost { … }    // what the engine provides per instance, found through AsyncLocalStorage
 function loadScriptContext(): Promise<void>;
@@ -3049,16 +3061,28 @@ state's identity and its snapshot. The code returns a continuation (`SCRIPT_CONT
 gains `scriptDefaults` (the literal environment chain a script's `llm()` calls inherit); `StateDef` gains
 `generated` (provenance, and `whole` — the output holding a non-record return) and `whenToUse`;
 `LimitsDecl` gains `budget` (USD); `ChildDecl`/`LoadedChild` gain `called` — a mount a script calls, whose inputs
-each call hands over and the validator does not require wired.
+each call hands over and the validator does not require wired — and `failureValue` (above).
+
+In `"calls"` mode each non-deterministic call is a state of its own: `<machine>/call_<n>`, whose operation is
+the LIST `[the call, the code after it]` — a first-class prompt op when `llm()`'s options can be read at
+compile time (a computed option is a typed input of the state, `{ $expr: ".inputs.model_<n>" }`), else a
+`$script` call — a mount per called state (`<name>_<n>`, `called: true`), and a fan-out as an `each` mount
+of `<machine>/map_<n>` (`async`, `failureValue: null` for `parallel`/`pipeline`) followed by `after_<n>`. A
+rule that catches a call's failure reads what the failed state was handed and how it failed:
+`.children.<key>.inputs.<name>` and `.children.<key>.failure` join the ref vocabulary (SPEC §6.1).
 
 Journal: `script.call.settled { site, label?, phase?, outcome, value?, failure?, costUsd? }` for every
 call a script's code makes (`site` is `<content hash>#<ordinal>`), `script.log` and `script.phase` (both
 with a `site`), and `instance.entered.calledAt` on a state a script called. `LoadedInstance.scriptCalls`
-hands a live instance its settled rows back, in journal order; a host building a loaded run leaves an
-instance with `calledAt` out of its parent's children.
+hands a live instance its settled rows back, in journal order. A host lists an instance with `calledAt`
+among its caller's `children` as `LoadedInstance.calledAt`: it is no mount's record, and a re-run of the
+caller's code that reaches that site with no settled answer RE-ATTACHES it — continuing it when `live`,
+reading its end otherwise — instead of calling the state again.
 
-`loadBundleFromDir` compiles every `*.ts`/`*.js` under the directory (`"states"` by default), refuses a
+`loadBundleFromDir` compiles every `*.ts`/`*.js` under the directory (`"calls"` by default), refuses a
 JSON file and a script defining one state, and checks a GENERATED JSON file against its script.
+`createUserFunctions` marks an entry `callsModels` when its module, or anything it imports, imports
+`@declarative-ai/hw/script`.
 
 ---
 

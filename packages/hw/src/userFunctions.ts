@@ -33,7 +33,8 @@ import type { JsonSchema } from "@declarative-ai/json";
 import { synthesizeBodyWith, type SynthesizedBody } from "./functionBody.js";
 import type { ParameterDecl } from "./format.js";
 import { loadCompiler } from "./moduleExports.js";
-import { prepareModules, type LoadedModules, type PrepareOptions } from "./moduleLoader.js";
+import { dirOf, prepareModules, resolveSpecifier, type LoadedModules, type PrepareOptions } from "./moduleLoader.js";
+import { HOOK_MODULE } from "./scriptHooks.js";
 import { marshalIn, marshalOut } from "./marshal.js";
 import { extractSignatureWith, loadSignatureContext, type ExtractedSignature, type SignatureContext } from "./signature.js";
 import { selectProperty, type Vfs } from "./reference.js";
@@ -175,11 +176,38 @@ class Facade implements UserFunctions {
     for (const warning of signature.warnings) this.options.onWarn?.(warning);
 
     const operation = operationOf(ref, signature);
-    this.entries.set(ref, entryFor(ref, signature, this.implFor(file, property, signature)));
+    this.entries.set(ref, entryFor(ref, signature, this.implFor(file, property, signature), this.reachesHooks(file)));
 
     const result: ResolvedUserFunction = { ref, operation, signature, warnings: signature.warnings };
     this.resolved.set(ref, result);
     return result;
+  }
+
+  /**
+   * Whether a module — or anything it imports — imports the script hooks, and so may call `llm()` or
+   * `agent()` (SCRIPTS.md §11): a function that pays for a model call when it runs, which the
+   * validator warns about in a guard, re-evaluated every round (SPEC §7.5.6).
+   */
+  private reachesHooks(file: string): boolean {
+    const seen = new Set<string>();
+    const visit = (path: string): boolean => {
+      if (seen.has(path)) return false;
+      seen.add(path);
+      const text = this.options.sources?.[path] ?? this.synthetic[path] ?? this.options.vfs.read(path);
+      if (text === undefined) return false;
+      for (const imported of this.ts.preProcessFile(text, true, true).importedFiles) {
+        if (imported.fileName === HOOK_MODULE) return true;
+        let resolved: string | undefined;
+        try {
+          resolved = resolveSpecifier(imported.fileName, dirOf(path), this.options);
+        } catch {
+          resolved = undefined;
+        }
+        if (resolved !== undefined && visit(resolved)) return true;
+      }
+      return false;
+    };
+    return visit(file);
   }
 
   /**
@@ -260,8 +288,9 @@ function fingerprint(body: string): string {
  * for impls nobody lifted — going through it would classify by the same rules and lose the context
  * prefix naming which function raised, which is the whole of what a person reads first.
  */
-function entryFor(ref: string, signature: ExtractedSignature, impl: UserFunctionImpl): RegisteredFunction<unknown, never> {
-  return hostFunction<unknown, never>(liftThrowing((inputs: Record<string, unknown>) => impl(inputs), ref), USER_FUNCTION_CAPABILITIES, {
+function entryFor(ref: string, signature: ExtractedSignature, impl: UserFunctionImpl, callsModels: boolean): RegisteredFunction<unknown, never> {
+  const capabilities: HostCapabilities = callsModels ? { ...USER_FUNCTION_CAPABILITIES, callsModels } : USER_FUNCTION_CAPABILITIES;
+  return hostFunction<unknown, never>(liftThrowing((inputs: Record<string, unknown>) => impl(inputs), ref), capabilities, {
     signature: signatureOf(signature),
   });
 }

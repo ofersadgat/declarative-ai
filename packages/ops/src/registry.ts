@@ -162,6 +162,15 @@ export interface HostCapabilities {
    * field was.
    */
   listens?: boolean;
+  /**
+   * The function makes MODEL CALLS of its own — a user function whose module reaches the script
+   * hooks' `llm()`/`agent()` (SCRIPTS.md §11). It says what a call costs, not what it returns: a
+   * function called from a guard is called again every round (SPEC §7.5.6), and one that asks a
+   * model pays again each time, which is why the validator warns about it there.
+   *
+   * Absent means `false`.
+   */
+  callsModels?: boolean;
 }
 
 /**

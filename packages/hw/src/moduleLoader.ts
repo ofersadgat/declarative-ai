@@ -165,8 +165,12 @@ export interface PrepareOptions extends ModuleResolveOptions {
 export interface LoadedModules {
   /** Absolute file → emitted CommonJS. What SPEC §7.5.5's freeze copies. */
   readonly emitted: ReadonlyMap<string, string>;
-  /** Run a module and return its export namespace. Cached, so one module runs once. */
-  execute(file: string): Record<string, unknown>;
+  /**
+   * Run a module and return its export namespace. Cached, so one module runs once. `globals` are
+   * names every module in this execution sees in place of the realm's own — how a script's code, and
+   * the code it imports, get Claude's determinism bans (SCRIPTS.md §11).
+   */
+  execute(file: string, globals?: Readonly<Record<string, unknown>>): Record<string, unknown>;
 }
 
 /**
@@ -239,7 +243,7 @@ export async function prepareModules(entries: readonly string[], options: Prepar
     wiring.set(file, resolved);
   }
 
-  return { emitted, execute: (file) => execute(file, emitted, wiring) };
+  return { emitted, execute: (file, globals) => execute(file, emitted, wiring, new Map(), globals) };
 }
 
 /** Node's own modules, which resolve ahead of the require path and are never transpiled. */
@@ -291,6 +295,7 @@ function execute(
   emitted: ReadonlyMap<string, string>,
   wiring: ReadonlyMap<string, Map<string, string>>,
   loaded: Map<string, Record<string, unknown>> = new Map(),
+  globals: Readonly<Record<string, unknown>> = {},
 ): Record<string, unknown> {
   const cached = loaded.get(entry);
   if (cached !== undefined) return cached;
@@ -315,18 +320,20 @@ function execute(
     }
     const target = wiring.get(entry)?.get(specifier);
     if (target === undefined) throw new ModuleLoadError(`'${entry}' requires '${specifier}', which was not prepared`);
-    return execute(target, emitted, wiring, loaded);
+    return execute(target, emitted, wiring, loaded, globals);
   };
 
   // `//# sourceURL` is what puts the module's own path in a stack trace. Without it every failure
   // inside a user function is reported against `<anonymous>`, which is the difference between a
   // usable error and a shrug.
+  const globalNames = Object.keys(globals);
   const wrapper = new Function(
     "exports",
     "require",
     "module",
     "__filename",
     "__dirname",
+    ...globalNames,
     `${js}\n//# sourceURL=${entry}`,
   ) as (
     exports: Record<string, unknown>,
@@ -334,9 +341,10 @@ function execute(
     module: { exports: Record<string, unknown> },
     filename: string,
     dirname: string,
+    ...rest: unknown[]
   ) => void;
 
-  wrapper(exports, requireFrom, module, entry, dirOf(entry));
+  wrapper(exports, requireFrom, module, entry, dirOf(entry), ...globalNames.map((n) => globals[n]));
 
   // A module that REPLACED `module.exports` rather than adding to it — `module.exports = fn` — is
   // the CJS idiom, and the cache has to end up holding what the module actually produced.

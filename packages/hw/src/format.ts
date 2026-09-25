@@ -90,6 +90,8 @@ export interface GeneratedDecl {
    * what a caller of the state gets back from `workflow()` or an imported call (SCRIPTS.md §10).
    */
   whole?: string;
+  /** The line of the script this state comes from — the source map (SCRIPTS.md §12). */
+  at?: { line: number; column: number };
 }
 
 /** State run statuses (SPEC §10.1). */
@@ -913,6 +915,12 @@ export interface ChildDecl {
    * inputs are not wired here, and nothing requires them to be.
    */
   called?: true;
+  /**
+   * What a FAILED element of a fan-out reads as (WORKFLOWS.md §6.2): with it, an element that ends
+   * badly contributes this value for every output and the batch carries on — Claude's `parallel`,
+   * where a failed item is `null` (SCRIPTS.md §7). Without it the first bad element ends the batch.
+   */
+  failureValue?: JsonValue;
   /** Wiring into the child's declared inputs — the same authored binding sugar (§2.1). */
   inputs?: Record<string, BindingDecl>;
   /**
@@ -1404,6 +1412,8 @@ export interface LoadedChild {
   asyncRef?: Ref<InlineFamily>;
   /** Entered only by a compiled script's calls, which supply its inputs (SCRIPTS.md §10). */
   called?: true;
+  /** What a failed element reads as, when the mount says (see `ChildDecl.failureValue`). */
+  failureValue?: JsonValue;
   /** The per-mount defaults this child was declared with, carried through so the closure walk can
    *  fold them into the chain (and so a lint surface can see why a state loaded as two variants). */
   environment?: EnvironmentDecl;

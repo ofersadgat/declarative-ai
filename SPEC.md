@@ -1199,10 +1199,17 @@ inputs.*
 outputs.*
 children.<id>.outputs.*
 children.<id>.outcome
+children.<id>.inputs.*
+children.<id>.failure
 operation.*
 children.<id>.operation.*
 artifacts.*
 ```
+
+`children.<id>.inputs` is what the child was ENTERED with, and `children.<id>.failure` how it failed
+(`{ classification, reason }`, absent on success). A failed child publishes no outputs, so a rule that
+handles its failure and carries on — a compiled script's `catch` (§7.6) is the first — reads the state of
+things from what the child was handed rather than from what it never produced.
 
 `operation.*` is the state's **own** call as an addressable node, which is what makes engine metadata
 reachable without going through the events journal. It is a namespace rather than a child on purpose:
@@ -2537,6 +2544,39 @@ Three files sharing an unwritten contract over eight caller-declared inputs beco
 contract is its signature. `maxIterations` and the two margins carry defaults, so a caller with no
 exploration to report omits them rather than wiring a constant — and the `empty` seed that existed
 only because the expression grammar has no array literal has nowhere left to be.
+
+### 7.6 Workflow Scripts
+
+A state may be written as CODE: a `.ts`/`.js` file — a superset of the Claude Code workflow script —
+that COMPILES to ordinary state documents. [SCRIPTS.md](SCRIPTS.md) is the design; what follows is what
+the rest of this specification relies on.
+
+- **A script is a state.** Its `meta` (a pure literal, first after the imports) sets the standard
+  properties — label, title, description, environment, limits — and never the structure. Its inputs and
+  outputs are its exported function's signature (§7.5.2), or `args` in and its exports out when the body
+  is the function.
+- **Compiling is a mode** (`meta.compile`), coarsest to finest: `"function"` (a function module, as
+  §7.5, that may call `llm()`), `"state"` (one state whose operation is the whole body, Claude's
+  execution model), `"phases"` (a child state per `phase()`), and `"calls"`, the default under a
+  workflows root: a state per phase and, inside each, a state per NON-DETERMINISTIC call — `llm()`,
+  `agent()`, a called state, a registered function, `now()`, `random()`. No state makes more than one.
+- **The output is ordinary.** Control flow becomes rules (§3.3), a live variable becomes a wire, a
+  fan-out (`parallel`, `pipeline`, `Promise.all` over a map) becomes an `each` mount whose failed
+  elements read as the mount's `failureValue`, and code between calls is the operation `operation.script`
+  (`{ code, file }`), a call of the engine's own `$script` with the code as its input — so the code is
+  in the state's identity and its snapshot. The compiled tree is validated like an authored one.
+- **Non-deterministic calls are never memoized.** Each is asked afresh wherever the code makes it: two
+  `now()` calls are two readings, three identical skeptic calls three draws. A call's answer is
+  recorded — as a state's operation in `"calls"` mode, at a journaled site (`script.call.settled`) in
+  the coarser modes — so a restart re-reads what was answered and asks only what was not.
+  `Date.now()`, `Math.random()` and argless `new Date()` throw in a script and in the code it imports.
+- **A called state is a real instance** (`instance.entered.calledAt`) the calling code waits on: its
+  failure is thrown into the code, and two calls run side by side. On resume it is re-attached, not
+  called again.
+- **`llm<T>()`** converts `T` to the call's output schema with the §7.5.3 converter; a string `T` is
+  text. The call goes through route binding (§7.1) like any prompt operation.
+- **A function that calls `llm()` from a guard** is warned about: a guard is re-evaluated every round
+  and its completed calls are not memoized (§7.5.6), so it would ask, and pay, again each time.
 
 ## 8. Function States (Interactive UI)
 

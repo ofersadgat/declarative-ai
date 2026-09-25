@@ -514,7 +514,7 @@ export function desugarOperation(
   const decl = liftWrappedArgs(authored);
   // A compiled SCRIPT (SCRIPTS.md §6.2): a call of the engine's own `$script`, with the code as its
   // input — so the code is part of the operation's identity, and of the snapshot's.
-  if (decl.script !== undefined) return scriptOperation(decl, stateId);
+  if (decl.script !== undefined) return scriptOperation(decl, stateId, lower);
   const userFunctions = lower.userFunctions;
   // An EMBEDDED BODY (SPEC §7.5.1, form 2). The document declares its slots the way a state does and
   // supplies js/ts; the wrapper's parameters are those slots in `positionalOrder`, so a call binds
@@ -891,7 +891,7 @@ export function registryOperation(ref: string, entry: EntrySignature | undefined
 }
 
 /** `operation.script` as the function operation it is (SCRIPTS.md §6.2). */
-function scriptOperation(decl: OperationFields, stateId: string): Operation<InlineFamily> {
+function scriptOperation(decl: OperationFields, stateId: string, lower: LowerOptions = {}): Operation<InlineFamily> {
   const script = decl.script!;
   if (typeof script !== "object" || script === null || typeof script.code !== "string" || typeof script.file !== "string") {
     throw new WorkflowLoadError("operation.script must be { code, file } — the code a compiled script runs, and the script it came from", stateId);
@@ -904,6 +904,9 @@ function scriptOperation(decl: OperationFields, stateId: string): Operation<Inli
     kind: "function",
     functionRef: SCRIPT_FUNCTION,
     input: {
+      // What the code is handed besides the state's inputs — the result of the call before it, when
+      // the state is a call followed by its code (SCRIPTS.md §7).
+      ...Object.fromEntries(Object.entries(decl.input ?? {}).map(([name, p]) => [name, desugarParameter(p, `operation.input.${name}`, stateId, undefined, lower).param])),
       [SCRIPT_CODE_INPUT]: text(script.code, "operation.script.code"),
       [SCRIPT_FILE_INPUT]: text(script.file, "operation.script.file"),
     },
@@ -1392,6 +1395,7 @@ export function desugarState(
         state: resolveChildRef(child.state ?? `./${key}`, id, key, refs),
         ...(child.inputs ? { inputs: wired } : {}),
         ...(child.called === true ? { called: true as const } : {}),
+        ...("failureValue" in child ? { failureValue: child.failureValue as JsonValue } : {}),
         ...(each.length > 0 ? { each } : {}),
         ...(hosted ? { eachKind: eachKind as HostedEachKind, eachExprs, spawn: { ...SPAWN_DEFAULTS, ...spawn } } : {}),
         // A literal flag stays one; a BOUND one (SPEC §5.3) is lowered in this state's scope, to be
@@ -2240,7 +2244,7 @@ export async function loadBundleFromDir(dir: string, rootId: string, options: Lo
     for (const script of scripts) {
       const file = resolve(script).split("\\").join("/");
       const stateId = file.slice(root.length + 1).replace(/\.[^./]+$/, "");
-      const compiled = await compileScript({ file, stateId, vfs, requirePath: [root], ...(options.roots !== undefined ? { roots: options.roots } : {}), defaultMode: "states" });
+      const compiled = await compileScript({ file, stateId, vfs, requirePath: [root], ...(options.roots !== undefined ? { roots: options.roots } : {}), defaultMode: "calls" });
       for (const [id, document] of Object.entries(compiled.documents)) {
         const existing = byId.get(id);
         if (existing !== undefined) {

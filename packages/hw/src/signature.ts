@@ -350,7 +350,14 @@ function createProgram(
     resolveModuleNames: (moduleNames, containingFile) =>
       moduleNames.map((name) => {
         if (name === HOOK_MODULE) return { resolvedFileName: HOOK_MODULE_PATH, extension: ts.Extension.Dts, isExternalLibraryImport: false };
-        const resolved = resolveSpecifier(name, dirOf(containingFile), options);
+        let resolved: string | undefined;
+        try {
+          resolved = resolveSpecifier(name, dirOf(containingFile), options);
+        } catch {
+          // A specifier the resolver refuses — `$REGISTRY`, an unknown root — types as unresolved, as
+          // any import that finds nothing does; what it IS is the script compiler's business.
+          resolved = undefined;
+        }
         return resolved === undefined
           ? undefined
           : { resolvedFileName: resolved, extension: extensionOf(ts, resolved), isExternalLibraryImport: resolved.includes("/node_modules/") };

@@ -55,6 +55,19 @@ interface Context {
   /** Types currently being converted, so a recursive type terminates rather than recursing. */
   seen: Set<TS.Type>;
   where: string;
+  /**
+   * NAMED types as `$defs` entries, by name, when asked for — what an `llm<T>` output schema uses, so a
+   * type used twice is written once and a recursive one converts whole (SCRIPTS.md §9).
+   */
+  defs?: Map<string, { type: TS.Type; schema: JsonSchema | null }>;
+  /** How deep in the object being converted this is — the root is written out, named types below it are `$defs`. */
+  depth: number;
+}
+
+/** Options for {@link typeToWireSchema}. */
+export interface WireTypeOptions {
+  /** Put each named object type below the root in `$defs` and reference it by `$ref`. */
+  defs?: boolean;
 }
 
 /**
@@ -64,10 +77,33 @@ interface Context {
  * error, because "cannot represent Map" without "of parameter `index`" is a message that sends the
  * reader looking through a whole file.
  */
-export function typeToWireSchema(ts: typeof TS, checker: TS.TypeChecker, type: TS.Type, where: string): WireTypeResult {
-  const context: Context = { ts, checker, warnings: [], seen: new Set(), where };
+export function typeToWireSchema(ts: typeof TS, checker: TS.TypeChecker, type: TS.Type, where: string, options: WireTypeOptions = {}): WireTypeResult {
+  const context: Context = { ts, checker, warnings: [], seen: new Set(), where, depth: 0, ...(options.defs ? { defs: new Map() } : {}) };
   const schema = convert(type, context);
+  if (context.defs !== undefined && context.defs.size > 0) {
+    const defs: Record<string, JsonSchema> = {};
+    const text = JSON.stringify([schema, [...context.defs.values()].map((d) => d.schema)]);
+    for (const [name, def] of context.defs) {
+      // The root's own entry is kept only when something refers back to it — a recursive type.
+      if (def.schema === null) {
+        if (text.includes(`"#/$defs/${name}"`)) defs[name] = schema;
+        continue;
+      }
+      defs[name] = def.schema;
+    }
+    if (Object.keys(defs).length === 0) return { schema, warnings: context.warnings };
+    return { schema: { ...(schema as Record<string, unknown>), $defs: defs } as JsonSchema, warnings: context.warnings };
+  }
   return { schema, warnings: context.warnings };
+}
+
+/** The name a type is declared under — an interface, a type alias, a class — when it has one. */
+function declaredName(ts: typeof TS, type: TS.Type): string | undefined {
+  const symbol = type.aliasSymbol ?? type.getSymbol();
+  const declaration = symbol?.declarations?.[0];
+  if (symbol === undefined || declaration === undefined) return undefined;
+  if (!ts.isInterfaceDeclaration(declaration) && !ts.isTypeAliasDeclaration(declaration) && !ts.isClassDeclaration(declaration)) return undefined;
+  return symbol.getName();
 }
 
 function convert(type: TS.Type, context: Context): JsonSchema {
@@ -180,7 +216,32 @@ function convertObjectLike(type: TS.Type, context: Context): JsonSchema {
 }
 
 function convertObject(type: TS.Type, context: Context): JsonSchema {
+  const name = context.defs !== undefined && context.depth > 0 ? declaredName(context.ts, type) : undefined;
+  if (name !== undefined) {
+    // A named type below the root: a `$defs` entry, converted once, referenced by name.
+    let key = name;
+    for (let n = 2; context.defs!.has(key) && context.defs!.get(key)!.type !== type; n++) key = `${name}_${n}`;
+    if (!context.defs!.has(key)) {
+      context.defs!.set(key, { type, schema: null });
+      const inner = { ...context, seen: new Set<TS.Type>(), depth: context.depth };
+      context.defs!.set(key, { type, schema: convertObjectBody(type, inner) });
+    }
+    return { $ref: `#/$defs/${key}` } as JsonSchema;
+  }
+  if (context.defs !== undefined && context.depth === 0) {
+    const rootName = declaredName(context.ts, type);
+    if (rootName !== undefined && !context.defs.has(rootName)) context.defs.set(rootName, { type, schema: null });
+  }
+  return convertObjectBody(type, context);
+}
+
+function convertObjectBody(type: TS.Type, context: Context): JsonSchema {
   const { checker } = context;
+  // The root, reached again inside itself: a reference to its own `$defs` entry.
+  if (context.defs !== undefined && context.depth > 0) {
+    const rootEntry = [...context.defs].find(([, def]) => def.type === type && def.schema === null);
+    if (rootEntry !== undefined && context.seen.has(type)) return { $ref: `#/$defs/${rootEntry[0]}` } as JsonSchema;
+  }
   if (context.seen.has(type)) {
     // A recursive type: the cycle contributes nothing the outer pass has not already said, and the
     // universal schema is the honest answer rather than an infinite document. Same cut-off rule §6.2
@@ -197,7 +258,7 @@ function convertObject(type: TS.Type, context: Context): JsonSchema {
         ? checker.getTypeOfSymbolAtLocation(symbol, declaration)
         : checker.getDeclaredTypeOfSymbol(symbol);
       const name = symbol.getName();
-      const inner = { ...context, where: `${context.where}.${name}` };
+      const inner = { ...context, where: `${context.where}.${name}`, depth: context.depth + 1 };
       const { optional, schema } = stripAbsence(memberType, inner);
       properties[name] = schema;
       if (!optional && (symbol.flags & context.ts.SymbolFlags.Optional) === 0) required.push(name);
@@ -242,7 +303,7 @@ export function typeToWireSlot(
   type: TS.Type,
   where: string,
 ): WireTypeResult & { optional: boolean } {
-  const context: Context = { ts, checker, warnings: [], seen: new Set(), where };
+  const context: Context = { ts, checker, warnings: [], seen: new Set(), where, depth: 0 };
   const { optional, schema } = stripAbsence(type, context);
   return { optional, schema, warnings: context.warnings };
 }

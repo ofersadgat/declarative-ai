@@ -117,7 +117,8 @@ import { fieldDependencies, fieldsView, materializeFields } from "./fields.js";
 import { bindIntoSlots } from "./loader.js";
 import { EVENT_NAMESPACE, hasDefault, literalPermissions, SCRIPT_CODE_INPUT, SCRIPT_CONTROL, SCRIPT_FILE_INPUT, SCRIPT_FUNCTION, SPAWN_DEFAULTS, type HostedEachKind, type LiteralPermissions, type LoadedField, type SpawnFields } from "./format.js";
 import { hasScriptContext, loadScriptContext, runWithScriptHost, type AgentOptions, type LlmCall, type ScriptHost } from "./scriptHooks.js";
-import { agentCall, answerOf, lowerLlmCall, ScriptCallError, ScriptRunState, ScriptSegments, type ScriptModuleOptions } from "./scriptRun.js";
+import { agentCall, answerOf, lowerLlmCall, ScriptCallError, ScriptRunState, ScriptSegments, type LoweredCall, type ScriptModuleOptions } from "./scriptRun.js";
+import { desugarOperation } from "./loader.js";
 import { isCallableKind, isCallableSchema } from "@declarative-ai/exec";
 import { isOperationValue } from "./resolve.js";
 import { uuidv7 } from "./ids.js";
@@ -457,7 +458,8 @@ type LoadedChildGroup =
 function groupLoadedChildren(children: readonly LoadedInstance[] | undefined): LoadedChildGroup[] {
   const out: LoadedChildGroup[] = [];
   for (const child of children ?? []) {
-    if (child.childKey === undefined) continue;
+    // A state a script CALLED is no mount's record: the call re-attaches it (`Instance.called`).
+    if (child.childKey === undefined || child.calledAt !== undefined) continue;
     if (child.element === undefined) {
       out.push({ key: child.childKey, single: child });
       continue;
@@ -566,6 +568,14 @@ interface ChildRecord {
    */
   failure?: Failure;
   /**
+   * The inputs the child was ENTERED with — `children.<key>.inputs` (SPEC §6.1).
+   *
+   * Readable because a child that fails publishes no outputs, and a rule that recovers from the
+   * failure often has to carry on from exactly what the child was given: a compiled script's
+   * `catch` resumes with the variables as they stood before the call that failed (SCRIPTS.md §7).
+   */
+  inputs?: Record<string, ResolvedValue>;
+  /**
    * A directed transition stepped past this child while it was running (SPEC §3.3). Set — and the
    * child's `instance.terminated` journaled — BEFORE its abort, so however the child's own run then
    * ends (an interrupted operation may well complete), the record reads `skipped`, the completion
@@ -637,6 +647,13 @@ interface Instance {
    * the answers a re-run of its code is handed back instead of asking again (SCRIPTS.md §11).
    */
   scriptCalls?: readonly import("./load.js").ScriptCallRecord[];
+  /**
+   * The states this instance's script had CALLED when the run stopped, by call site
+   * (`LoadedInstance.calledAt`): a re-run of the code reaching that site with no settled answer
+   * re-attaches the instance — continuing a live one, reading a terminated one's end — rather than
+   * calling the state again (SCRIPTS.md §11). Taken out as it is re-attached.
+   */
+  called?: Map<string, import("./load.js").LoadedInstance>;
   /**
    * Transitions this instance has taken — EVERY one, forward jumps and the exit included.
    *
@@ -947,8 +964,14 @@ function passView(rec: ChildRecord | undefined): Record<string, unknown> | undef
   // IN FLIGHT is PENDING and not absence: a consumer of a running child WAITS, where a consumer of
   // one that never ran proceeds without it. Collapsing the two is what silently drops an optional
   // input instead of parking on it.
-  if (rec.status === "running") return { output: PENDING, outcome: PENDING, operation: PENDING };
-  return { output: rec.outputs ?? {}, outcome: rec.outcome, operation: rec.operation ?? {} };
+  if (rec.status === "running") return { output: PENDING, outcome: PENDING, operation: PENDING, inputs: rec.inputs ?? {} };
+  return {
+    output: rec.outputs ?? {},
+    outcome: rec.outcome,
+    operation: rec.operation ?? {},
+    inputs: rec.inputs ?? {},
+    ...(rec.failure !== undefined ? { failure: { classification: rec.failure.classification, reason: rec.failure.reason } } : {}),
+  };
 }
 
 /**
@@ -1362,7 +1385,7 @@ export class WorkflowEngine {
     // `run.cursor` reports the child most recently ENTERED, and the description's children are in
     // entry order — so the last one IS it. Without this a loaded loop reads `run.cursor` as nothing
     // and a guard written against it never fires again.
-    const entered = (loaded.children ?? []).at(-1)?.childKey;
+    const entered = (loaded.children ?? []).filter((c) => c.calledAt === undefined).at(-1)?.childKey;
     // Rebuilt from the record rather than counted, because a loaded run is not being walked: the
     // occurrence was decided when the entry originally happened and is stored, not re-derivable.
     const loadedAddress: InstanceAddress =
@@ -1402,6 +1425,9 @@ export class WorkflowEngine {
     instance.passes.push(instance.children);
     if (entered !== undefined) instance.entered = entered;
     if (loaded.scriptCalls !== undefined) instance.scriptCalls = loaded.scriptCalls;
+    for (const child of loaded.children ?? []) {
+      if (child.calledAt !== undefined) (instance.called ??= new Map()).set(child.calledAt, child);
+    }
     // The SETTLED fields the stopped run journaled (SPEC §5.3), written back verbatim: a loaded
     // instance does not pay for a title twice. A field the description lacks is evaluated by the
     // continuation (`resumeInstance`), which is the one case a run stopped mid-evaluation leaves.
@@ -1498,6 +1524,7 @@ export class WorkflowEngine {
       instanceId: loaded.id,
       status: "done",
       outcome: term.outcome,
+      inputs: loaded.inputs,
       ...(term.outputs !== undefined ? { outputs: term.outputs } : {}),
       ...(term.failure ?? loaded.failure ? { failure: term.failure ?? loaded.failure } : {}),
       ...(instance.operation !== undefined ? { operation: instance.operation } : {}),
@@ -1579,7 +1606,7 @@ export class WorkflowEngine {
       const onParentAbort = (): void => childAbort.abort(instance.abort.signal.reason);
       if (instance.abort.signal.aborted) childAbort.abort(instance.abort.signal.reason);
       else instance.abort.signal.addEventListener("abort", onParentAbort, { once: true });
-      const record: ChildRecord = { instanceId: child.id, status: "running", abort: childAbort, promise: Promise.resolve() };
+      const record: ChildRecord = { instanceId: child.id, status: "running", inputs: child.inputs, abort: childAbort, promise: Promise.resolve() };
       const run = async (): Promise<void> => {
         let term: TerminationRecord;
         if (!childDef) {
@@ -2590,6 +2617,7 @@ export class WorkflowEngine {
       // entered under — a child that crashes before assigning anything still has a name.
       instanceId: this.newInstanceId(),
       status: "running",
+      ...("values" in resolved && resolved.values !== undefined ? { inputs: resolved.values } : {}),
       abort: childAbort,
       promise: Promise.resolve(),
     };
@@ -3028,7 +3056,14 @@ export class WorkflowEngine {
             element: index,
           });
         }
-        return await this.materializeElement(instance, key, index, term);
+        term = await this.materializeElement(instance, key, index, term);
+        // A mount with a `failureValue` reads a failed element as that value and carries on (§6.2).
+        if ("failureValue" in decl && (term.outcome === "error" || term.outcome === "timeout")) {
+          const outputs: Record<string, ResolvedValue> = {};
+          for (const name of Object.keys(childDef.outputs ?? {})) outputs[name] = decl.failureValue as ResolvedValue;
+          term = { outcome: "success", outputs };
+        }
+        return term;
       } finally {
         recordAbort.signal.removeEventListener("abort", onRecordAbort);
       }
@@ -4791,7 +4826,8 @@ export class WorkflowEngine {
       for (const [key, v] of Object.entries(opInputs)) {
         if (key !== SCRIPT_CODE_INPUT && key !== SCRIPT_FILE_INPUT && key !== SCRIPT_CONTROL.entry) vars[key] = v;
       }
-      const entry = typeof opInputs[SCRIPT_CONTROL.entry] === "number" ? (opInputs[SCRIPT_CONTROL.entry] as number) : 0;
+      // A state with several entries is told which; one with a single entry starts at it by default.
+      const entry = typeof opInputs[SCRIPT_CONTROL.entry] === "number" ? (opInputs[SCRIPT_CONTROL.entry] as number) : undefined;
       value = await runWithScriptHost(this.scriptHost(instance, run), () => segment(vars, entry));
     } catch (e) {
       if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
@@ -4847,6 +4883,8 @@ export class WorkflowEngine {
       llm: (call, schema) => this.scriptCall(instance, run, call, schema),
       agent: (prompt, options, schema) => this.scriptCall(instance, run, agentCall(prompt, options as AgentOptions, this.segments.agentDefaults), schema),
       workflow: (ref, args) => this.scriptWorkflow(instance, run, ref, args),
+      call: (ref, args) => this.scriptRegistryCall(instance, run, ref, args),
+      recorded: (name, fn) => this.scriptRecorded(instance, run, name, fn),
       phase: (title) => {
         run.phase = title;
         recordOnce("phase", (site) => this.emit({ type: "script.phase", instanceId: instance.id, stateId: instance.stateId, site, title }));
@@ -4868,7 +4906,11 @@ export class WorkflowEngine {
    * otherwise dispatched through the same path any embedded call takes — then journaled.
    */
   private async scriptCall(instance: Instance, run: ScriptRunState, call: LlmCall, schema: JsonSchema | undefined): Promise<unknown> {
-    const lowered = lowerLlmCall(instance.stateId, instance.def.scriptDefaults, call, schema);
+    return this.scriptDispatch(instance, run, lowerLlmCall(instance.stateId, instance.def.scriptDefaults, call, schema));
+  }
+
+  /** One operation a script's code makes: sited, replayed from its record or dispatched, and journaled. */
+  private async scriptDispatch(instance: Instance, run: ScriptRunState, lowered: LoweredCall): Promise<unknown> {
     let key: string;
     try {
       key = hashOperation(lowered.op);
@@ -4920,6 +4962,42 @@ export class WorkflowEngine {
   }
 
   /**
+   * A REGISTERED function a script imported from `$REGISTRY` (SCRIPTS.md §10): a function operation
+   * with the call's one argument as its inputs by name, dispatched and recorded like any call.
+   */
+  private async scriptRegistryCall(instance: Instance, run: ScriptRunState, ref: string, args: readonly unknown[]): Promise<unknown> {
+    const named = args[0];
+    if (args.length > 1 || (named !== undefined && (named === null || typeof named !== "object" || Array.isArray(named)))) {
+      throw new ScriptCallError({ classification: "permanent", reason: `'${ref}' takes its arguments by name — call it with one object` });
+    }
+    const op = desugarOperation({ function: ref, args: (named ?? {}) as Record<string, JsonValue> }, instance.stateId);
+    return this.scriptDispatch(instance, run, { op, env: { ...(environmentOf(instance.def) ?? {}) }, unwrap: false, hasFailureValue: false, isolated: false, label: ref });
+  }
+
+  /**
+   * Code a script imported `with { as: "operation" }` (SCRIPTS.md §10): run where it is called, and
+   * RECORDED — so a re-run of the script's code reads the answer back rather than doing it again.
+   */
+  private async scriptRecorded(instance: Instance, run: ScriptRunState, name: string, fn: () => unknown): Promise<unknown> {
+    const site = run.site(`recorded:${name}`);
+    const recorded = run.recordAt(site);
+    if (recorded !== undefined) {
+      await run.release(site);
+      if (recorded.failure !== undefined) throw new ScriptCallError(recorded.failure);
+      return recorded.value;
+    }
+    try {
+      const value = await fn();
+      this.emit({ type: "script.call.settled", instanceId: instance.id, stateId: instance.stateId, site, label: name, outcome: "value", value: value as ResolvedValue });
+      return value;
+    } catch (e) {
+      const failure: Failure = { classification: "permanent", reason: (e as Error)?.message ?? String(e) };
+      this.emit({ type: "script.call.settled", instanceId: instance.id, stateId: instance.stateId, site, label: name, outcome: "error", failure });
+      throw e;
+    }
+  }
+
+  /**
    * A state CALLED from a script (SCRIPTS.md §10) — an imported state, or `workflow("…")`.
    *
    * It runs as a real instance under the calling one: journaled, on the board, resumable in its own
@@ -4961,9 +5039,23 @@ export class WorkflowEngine {
     const abort = new AbortController();
     const cancel = (): void => abort.abort();
     instance.abort.signal.addEventListener("abort", cancel, { once: true });
+    // The stopped run's instance for this call, when it had one and the answer never settled: a live
+    // one CONTINUES, and a terminated one (the run stopped between its end and the answer's row) is
+    // read — calling the state afresh would do its work twice.
+    const attached = instance.called?.get(site);
+    if (attached !== undefined) instance.called!.delete(site);
     let term: TerminationRecord;
     try {
-      term = await this.runInstance(stateId, def, inputs, abort, stateId.split("/").pop(), instance, this.newInstanceId(), undefined, site);
+      term =
+        attached === undefined
+          ? await this.runInstance(stateId, def, inputs, abort, stateId.split("/").pop(), instance, this.newInstanceId(), undefined, site)
+          : attached.live
+            ? await this.resumeInstance(attached, this.config.bundle.states[attached.stateId] ?? def, abort, instance)
+            : await this.loadTerminated(attached, this.config.bundle.states[attached.stateId] ?? def, abort, instance).then((r) => ({
+                outcome: r.outcome ?? "error",
+                ...(r.outputs !== undefined ? { outputs: r.outputs } : {}),
+                ...(r.failure !== undefined ? { failure: r.failure } : {}),
+              }));
     } finally {
       instance.abort.signal.removeEventListener("abort", cancel);
     }

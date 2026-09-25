@@ -284,6 +284,12 @@ function validateState(
       // A PROMPT callee needs no registry entry — it dispatches to the prompt executor.
       if (op.kind !== "function") continue;
       checkAgainstRegistry(op.functionRef, where, err, warn, env);
+      // A guard is re-evaluated every round and its completed calls are not memoized (SPEC §7.5.6):
+      // a function asking a model there asks, and pays, again each round.
+      const entry = env.functions?.get(op.functionRef);
+      if (where.endsWith(".when") && entry !== undefined && entry.kind !== "pure" && entry.capabilities.callsModels === true) {
+        warn(where, `'${op.functionRef}' makes model calls, and a guard calls it again every round it is evaluated — decide in an operation, and read its output here`);
+      }
       checkAgainstSignature(op, suppliedByCall(op, parameters, typed), where, err, env, typed);
     }
   }
@@ -1771,6 +1777,9 @@ function operationSchemaOf(def: LoadedState, authored: boolean): JsonSchema | un
  * {@link outputsObjectSchema}. It is threaded rather than reset because the recursion runs through
  * here: a child's untyped output is inferred in the CHILD's scope, which names its own children.
  */
+/** `children.<key>.failure` — why a child ended badly, as the engine hands it to an expression. */
+const FAILURE_SCHEMA: JsonValue = { type: "object", properties: { classification: { type: "string" }, reason: { type: "string" } } };
+
 function exprScopeOf(def: LoadedState, bundle: WorkflowBundle, seen: ReadonlySet<string> = EMPTY_STATE_SET): ExprScope {
   const objectOf = (slots: Record<string, { schema?: JsonSchema }> | undefined): JsonSchema => {
     const properties: Record<string, JsonValue> = {};
@@ -1799,9 +1808,13 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle, seen: ReadonlySet
     // `children.plan.operation.output.session` is checked against what `plan` actually runs, and
     // pointing it at a `ui` gate is a load-time error rather than a runtime undefined.
     const childOperation = childState ? operationSchemaOf(childState, false) : undefined;
+    // What the child was ENTERED with, and why it failed — the two things a rule recovering from a
+    // failed child reads, since a failed child publishes no outputs.
     const passProperties: Record<string, JsonValue> = {
       output: outputs as JsonValue,
       outcome: outcomeSchema,
+      inputs: (childState !== undefined ? objectOf(childState.inputs) : ANY_SCHEMA) as JsonValue,
+      failure: FAILURE_SCHEMA,
       ...(childOperation !== undefined ? { operation: childOperation as JsonValue } : {}),
     };
     childrenProps[key] = {

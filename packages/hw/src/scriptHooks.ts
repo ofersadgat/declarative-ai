@@ -43,6 +43,12 @@ export interface LlmCall {
   failureValue?: unknown;
   /** A display label for the call's record. Not part of its identity. */
   label?: string;
+  /**
+   * A prompt IMPORT's template, rendered with `inputs` — `{{.inputs.x}}` holes and all — where a plain
+   * `prompt` is text (SCRIPTS.md §10).
+   */
+  template?: string;
+  inputs?: Record<string, unknown>;
   [knob: string]: unknown;
 }
 
@@ -63,6 +69,10 @@ export interface ScriptHost {
   agent(prompt: string, options: AgentOptions, schema: JsonSchema | undefined): Promise<unknown>;
   /** A called state (SCRIPTS.md §10). */
   workflow(ref: unknown, args: unknown): Promise<unknown>;
+  /** A registered function a script imported from `$REGISTRY` (SCRIPTS.md §10). */
+  call(ref: string, args: readonly unknown[]): Promise<unknown>;
+  /** Code imported `with { as: "operation" }`: run once, recorded, read back on a replay. */
+  recorded(name: string, fn: () => unknown): Promise<unknown>;
   phase(title: string): void;
   log(message: string): void;
   /** Journaled: recorded the first time, replayed after. */
@@ -179,6 +189,14 @@ export function log(message: string): void {
 export function workflow(ref: unknown, args?: unknown): Promise<unknown> {
   return host("workflow").workflow(ref, args);
 }
+/** A registered function, by name — what `import { f } from "$REGISTRY"` compiles to. */
+export function call(ref: string, ...args: unknown[]): Promise<unknown> {
+  return host("call").call(ref, args);
+}
+/** A recorded call of imported code — what `with { as: "operation" }` compiles to. */
+export function recorded(name: string, fn: () => unknown): Promise<unknown> {
+  return host("recorded").recorded(name, fn);
+}
 export function now(): number {
   return host("now").now();
 }
@@ -204,6 +222,8 @@ export const hookModule: Readonly<Record<string, unknown>> = Object.freeze({
   phase,
   log,
   workflow,
+  call,
+  recorded,
   now,
   random,
   budget,

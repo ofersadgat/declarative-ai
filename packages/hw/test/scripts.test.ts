@@ -8,7 +8,7 @@
  * `parallel` and `pipeline` semantics, and a re-run of a phase's code answered from its record.
  */
 import { describe, expect, it } from "vitest";
-import { MapSessionStore, withRecord, withSessionPosition, type JsonValue } from "@declarative-ai/exec";
+import { hostFunction, MapSessionStore, withRecord, withSessionPosition, type JsonValue } from "@declarative-ai/exec";
 import { SchemaValidator } from "@declarative-ai/validate";
 import { WorkflowEngine } from "../src/engine.js";
 import { loadBundle } from "../src/loader.js";
@@ -34,7 +34,12 @@ async function compile(source: string, extra: Record<string, string> = {}, state
   return compileScript({ file, stateId, vfs: vfsOf(files), requirePath: [ROOT] });
 }
 
-async function run(source: string, inputs: Record<string, JsonValue>, script: Script, options: { extra?: Record<string, string>; loaded?: LoadedInstance } = {}) {
+async function run(
+  source: string,
+  inputs: Record<string, JsonValue>,
+  script: Script,
+  options: { extra?: Record<string, string>; loaded?: LoadedInstance; functions?: Record<string, (inputs: Record<string, unknown>) => JsonValue> } = {},
+) {
   const extra = options.extra ?? {};
   const compiled = await compile(source, extra);
   // The JSON states beside the script are the host's files, loaded with the compiled ones.
@@ -43,12 +48,19 @@ async function run(source: string, inputs: Record<string, JsonValue>, script: Sc
     if (path.endsWith(".json")) states[path.slice(ROOT.length + 1, -".json".length)] = JSON.parse(text) as StateDef;
   }
   const bundle = loadBundle(states, "s");
+  // Every bundle a script compiles to must validate as an authored one would.
+  const report = validateBundle(bundle, {} as never) as { errors: Array<{ stateId: string; path: string; message: string }> };
+  if (report.errors.length > 0) throw new Error(`the compiled bundle does not validate:\n${report.errors.map((e) => `${e.stateId} ${e.path}: ${e.message}`).join("\n")}`);
   const fake = new FakePromptExecutor(script);
+  const registry = newRegistry();
+  for (const [name, fn] of Object.entries(options.functions ?? {})) {
+    registry.functions.set(name, hostFunction(async (i: Record<string, unknown>) => ok(fn(i)) as never, { interactive: false, readOnly: true, memoizable: false }));
+  }
   const sessions = new MapSessionStore();
   const persistence = new InMemoryPersistence();
   const engine = new WorkflowEngine({
     bundle,
-    registry: newRegistry(),
+    registry,
     prompt: withSessionPosition({ sessions }, withRecord({ records: sessions as never }, fake as never)) as never,
     sessions,
     validator: new SchemaValidator(),
@@ -109,9 +121,13 @@ const sweepModel: Script = (call) => {
 };
 
 describe("compiling a script", () => {
-  it("makes the state the script IS, and one child state per phase", async () => {
+  it("makes the state the script IS, one child state per phase, and one state per call inside each", async () => {
     const { documents } = await compile(SWEEP);
-    expect(Object.keys(documents).sort()).toEqual(["s", "s/find", "s/triage", "s/verify"]);
+    expect(Object.keys(documents).filter((id) => id.split("/").length === 2).sort()).toEqual(["s/find", "s/triage", "s/verify"]);
+    // Find fans a call out over the dimensions: a mount with `each`, its element, the element's call, the state after.
+    expect(Object.keys(documents["s/find"]!.children ?? {}).sort()).toEqual(["after_0", "map_0"]);
+    expect(documents["s/find"]!.children!.map_0).toMatchObject({ state: "s/find/map_0", async: true, failureValue: null });
+    expect(documents["s/find/map_0/call_2"]!.operation).toMatchObject([{ prompt: "{{.inputs._call.prompt}}" }, { script: {} }]);
     const root = documents.s!;
     expect(root.label).toBe("Sweep review");
     expect(root.description).toMatch(/^Find until/);
@@ -132,6 +148,8 @@ describe("compiling a script", () => {
     expect(verify).toEqual(["_entry", "confirmed", "dimensions", "fresh", "ref", "round", "seen"]);
     const triage = Object.keys(documents["s/triage"]!.inputs ?? {}).sort();
     expect(triage).toEqual(["_entry", "confirmed"]);
+    // The element reads what it needs from outside it, and nothing it does not.
+    expect(Object.keys(documents["s/find/map_0"]!.inputs ?? {}).sort()).toEqual(["d", "ref", "seen"]);
   });
 
   it("types a crossing variable from its TypeScript type", async () => {
@@ -164,7 +182,7 @@ describe("compiling a script", () => {
   it("refuses a variable with no wire form that lives across a phase", async () => {
     await expect(
       compile(`export default async function f() { const m = new Map<string, number>(); phase("A"); phase("B"); return m.size; }`),
-    ).rejects.toThrow(/'m' lives across the phase 'A'.*Map/);
+    ).rejects.toThrow(/'m' lives across a cut.*Map/);
   });
 
   it("reports a compile error at the script's line", async () => {
@@ -179,11 +197,13 @@ describe("running a compiled script", () => {
     const { result, events } = await run(SWEEP, { ref: "main" }, sweepModel);
     expect(result.outcome).toBe("success");
     expect(result.outputs).toEqual({ confirmed: [{ id: "b1", claim: "null deref" }, { id: "p1", claim: "n^2 loop" }] });
-    expect(entered(events)).toEqual(["s", "s/find", "s/verify", "s/find", "s/triage"]);
+    expect(entered(events).filter((id) => id.split("/").length <= 2)).toEqual(["s", "s/find", "s/verify", "s/find", "s/triage"]);
+    // Every call was a state of its own: round 1 two reviews and three verifications, round 2 two reviews.
+    expect(entered(events).filter((id) => /call_\d+$/.test(id))).toHaveLength(7);
   });
 
-  it("journals every call at a site of its own, and every log line", async () => {
-    const { events } = await run(SWEEP, { ref: "main" }, sweepModel);
+  it("journals every call at a site of its own, and every log line (\"phases\" mode)", async () => {
+    const { events } = await run(SWEEP.replace('name: "Sweep review",', 'name: "Sweep review", compile: "phases",'), { ref: "main" }, sweepModel);
     const settled = events.filter((e): e is Extract<EngineEvent, { type: "script.call.settled" }> => e.type === "script.call.settled");
     // round 1: two reviews + three verifications; round 2: two reviews.
     expect(settled).toHaveLength(7);
@@ -248,7 +268,7 @@ return { fixes: fixes.filter(Boolean) }
     const { result, events } = await run(claude, { args: { repo: "r" } }, model);
     expect(result.outcome).toBe("success");
     expect(result.outputs).toEqual({ result: { fixes: ["fix a", "fix b"] } });
-    expect(entered(events)).toEqual(["s", "s/scan", "s/fix"]);
+    expect(entered(events).filter((id) => id.split("/").length <= 2)).toEqual(["s", "s/scan", "s/fix"]);
   });
 
   it("gives a body script its exports as outputs", async () => {
@@ -273,7 +293,7 @@ return { fixes: fixes.filter(Boolean) }
   });
 
   it("answers a re-run of a phase's code from its record, and asks only what it had not", async () => {
-    const source = `export default async function f() { const a = await llm("one"); const b = await llm("two"); return a + b; }`;
+    const source = `export const meta = { compile: "phases" };\nexport default async function f() { const a = await llm("one"); const b = await llm("two"); return a + b; }`;
     const first = await run(source, {}, (c) => ok(textOf(c)));
     const settled = first.events.filter((e): e is Extract<EngineEvent, { type: "script.call.settled" }> => e.type === "script.call.settled");
     const root = first.events.find((e) => e.type === "instance.entered")!;
@@ -291,7 +311,7 @@ return { fixes: fixes.filter(Boolean) }
   });
 
   it("makes three identical calls three draws — the ordinal keeps their sites apart", async () => {
-    const source = `export default async function f() { const votes = await parallel([0, 1, 2].map(() => () => llm<{ ok: boolean }>("vote"))); return votes.length; }`;
+    const source = `export const meta = { compile: "state" };\nexport default async function f() { const votes = await parallel([0, 1, 2].map(() => () => llm<{ ok: boolean }>("vote"))); return votes.length; }`;
     const { calls, events } = await run(source, {}, () => ok({ ok: true }));
     expect(calls).toHaveLength(3);
     const sites = events.filter((e) => e.type === "script.call.settled").map((e) => (e as { site: string }).site);
@@ -308,22 +328,34 @@ describe("calling states from a script", () => {
   it("runs an imported JSON state as a child instance and hands back its outputs", async () => {
     const source = `import triage from "./triage";\nexport default async function f(items: string[]) { const out = await Promise.all(items.map((finding) => triage({ finding }))); return { severities: out.map((o) => o.severity) }; }`;
     const { result, events, compiled } = await run(source, { items: ["crash on load", "typo"] }, () => ok(""), { extra: { [`${ROOT}/triage.json`]: TRIAGE } });
-    expect(compiled.documents.s!.children).toEqual({ triage: { state: "triage", called: true } });
+    // Called from a fan-out's element: the element mounts the state, once per call site.
+    expect(compiled.documents["s/map_0"]!.children!.triage_1).toMatchObject({ state: "triage", called: true });
     expect(result.failure?.reason).toBeUndefined();
     expect(result.outcome).toBe("success");
     expect(result.outputs).toEqual({ severities: ["high", "low"] });
     const calls = events.filter((e) => e.type === "instance.entered" && e.stateId === "triage");
-    // Two calls of one state run side by side — neither supersedes the other — each marked as a call.
+    // Two calls of one state run side by side — one per element of the fan-out — neither superseding the other.
+    expect(calls).toHaveLength(2);
+    expect(events.some((e) => e.type === "child.superseded")).toBe(false);
+  });
+
+  it("calls a state from a phase's code in \"phases\" mode, marking each entry as a call", async () => {
+    const source = `import triage from "./triage";
+export const meta = { compile: "phases" };
+export default async function f(items: string[]) { const out = await Promise.all(items.map((finding) => triage({ finding }))); return { severities: out.map((o) => o.severity) }; }`;
+    const { result, events } = await run(source, { items: ["crash", "typo"] }, () => ok(""), { extra: { [`${ROOT}/triage.json`]: TRIAGE } });
+    expect(result.outputs).toEqual({ severities: ["high", "low"] });
+    const calls = events.filter((e) => e.type === "instance.entered" && e.stateId === "triage");
     expect(calls).toHaveLength(2);
     expect(calls.every((e) => (e as { calledAt?: string }).calledAt !== undefined)).toBe(true);
-    expect(events.some((e) => e.type === "child.superseded")).toBe(false);
   });
 
   it("calls a state named in workflow() with a literal, and a script's whole return comes back whole", async () => {
     const child = `export const meta = { name: "child" };\nreturn { doubled: args.n * 2 };`;
     const source = `export const meta = { name: "parent" };\nconst r = await workflow("child", { n: 21 });\nreturn r.doubled;`;
-    const childDocs = await compileScript({ file: `${ROOT}/child.ts`, stateId: "child", vfs: vfsOf({ [`${ROOT}/child.ts`]: child }), requirePath: [ROOT] });
-    const parent = await compile(source);
+    const both = { [`${ROOT}/child.ts`]: child, [`${ROOT}/s.ts`]: source };
+    const childDocs = await compileScript({ file: `${ROOT}/child.ts`, stateId: "child", vfs: vfsOf(both), requirePath: [ROOT] });
+    const parent = await compile(source, { [`${ROOT}/child.ts`]: child });
     const bundle = loadBundle({ ...(parent.documents as Record<string, StateDef>), ...(childDocs.documents as Record<string, StateDef>) }, "s");
     const engine = new WorkflowEngine({ bundle, registry: newRegistry(), validator: new SchemaValidator(), persistence: new InMemoryPersistence() } as never);
     const result = await engine.run({ inputs: {} });
@@ -340,6 +372,28 @@ describe("calling states from a script", () => {
     expect(result.outputs).toEqual({ result: "caught" });
     // It ran, and failed — not a call that never reached a state.
     expect(events.some((e) => e.type === "instance.terminated" && e.stateId === "bad" && e.outcome === "error")).toBe(true);
+  });
+
+  it("re-attaches a state its code had called when the run stopped — continuing a live one, reading a finished one", async () => {
+    const source = `import triage from "./triage";
+export const meta = { compile: "state" };
+export default async function f() { const t = await triage({ finding: "crash here" }); return t.severity; }`;
+    const extra = { [`${ROOT}/triage.json`]: TRIAGE };
+    const first = await run(source, {}, echoing, { extra });
+    const entered = first.events.filter((e): e is Extract<EngineEvent, { type: "instance.entered" }> => e.type === "instance.entered");
+    const root = entered.find((e) => e.stateId === "s")!;
+    const called = entered.find((e) => e.stateId === "triage")!;
+    expect(called.calledAt).toMatch(/^workflow:triage:/);
+    for (const live of [true, false]) {
+      // The run stopped with the call made and its answer never settled: the instance is the caller's child, marked as called.
+      const child: LoadedInstance = { id: called.instanceId, stateId: "triage", childKey: "triage", calledAt: called.calledAt!, inputs: { finding: "crash here" }, live, ...(live ? {} : { outcome: "success" as const }) };
+      const loaded: LoadedInstance = { id: root.instanceId, stateId: "s", inputs: {}, live: true, children: [child] };
+      const resumed = await run(source, {}, echoing, { extra, loaded });
+      expect(resumed.result.outputs).toEqual({ result: "high" });
+      // Not called again: no instance of it was entered, and a live one ended under the id it had.
+      expect(resumed.events.some((e) => e.type === "instance.entered" && e.stateId === "triage")).toBe(false);
+      expect(resumed.events.some((e) => e.type === "instance.terminated" && e.instanceId === called.instanceId)).toBe(live);
+    }
   });
 
   it("refuses workflow() with a computed name", async () => {
@@ -391,6 +445,40 @@ describe("the other modes", () => {
     expect(settled).toHaveLength(1);
     expect(settled[0]!.site).toMatch(/^user:.*classify\.ts#default@0\//);
   });
+
+  it("warns about a function that calls llm() — itself or through what it imports — used in a guard, which runs every round", async () => {
+    const FN = "/fn";
+    const files = {
+      [`${FN}/helper.ts`]: `import { llm } from "@declarative-ai/hw/script";
+export async function ask(q: string): Promise<string> { return await llm(q); }`,
+      [`${FN}/is_bug.ts`]: `import { ask } from "./helper";
+export default async function is_bug(text: string): Promise<boolean> { return (await ask(text)) === "yes"; }`,
+      [`${FN}/is_short.ts`]: `export default function is_short(text: string): boolean { return text.length < 5; }`,
+    };
+    const vfs = vfsOf(files);
+    const { createSymbolIndex } = await import("../src/moduleIndex.js");
+    const { createUserFunctions } = await import("../src/userFunctions.js");
+    const { requirePathFor } = await import("../src/moduleLoader.js");
+    const symbols = await createSymbolIndex({ vfs });
+    const userFunctions = await createUserFunctions({ vfs, requirePath: requirePathFor([FN]) });
+    const bundle = loadBundle(
+      {
+        root: {
+          inputs: { text: { schema: { type: "string" } } },
+          transitions: [
+            { when: "is_bug(.inputs.text)", to: "terminate.success" },
+            { when: "is_short(.inputs.text)", to: "terminate.success" },
+          ],
+        },
+      },
+      "root",
+      { defaultRoot: FN, vfs, symbols, userFunctions, documentCache: new Map() },
+    );
+    const report = validateBundle(bundle, { functions: userFunctions.entries as never });
+    expect(report.errors).toEqual([]);
+    const warned = report.warnings.filter((w) => /makes model calls/.test(w.message));
+    expect(warned.map((w) => w.path)).toEqual(["transitions[0].when"]);
+  });
 });
 
 describe("scripts in a workflow directory", () => {
@@ -405,7 +493,7 @@ describe("scripts in a workflow directory", () => {
       await mkdir(join(dir, "review"));
       await writeFile(join(dir, "review", "sweep.ts"), SWEEP);
       const bundle = await loadBundleFromDir(dir, "review/sweep");
-      expect(Object.keys(bundle.states).sort()).toEqual(["review/sweep", "review/sweep/find", "review/sweep/triage", "review/sweep/verify"]);
+      expect(Object.keys(bundle.states).filter((id) => id.split("/").length === 3).sort()).toEqual(["review/sweep/find", "review/sweep/triage", "review/sweep/verify"]);
 
       // The host writes the generated files beside the script; a load checks them and uses the script.
       const root = dir.split("\\").join("/");
@@ -468,14 +556,235 @@ export default async function sweep(change: Change, dimensions: string[] = ["bug
       requirePath: [ROOT],
     });
     const root = compiled.documents["review/sweep"]!;
-    expect(Object.keys(root.children ?? {}).sort()).toEqual(["classify", "find", "triage", "verify"]);
-    expect(root.children!.classify).toEqual({ state: "review/triage", called: true });
+    expect(Object.keys(root.children ?? {}).sort()).toEqual(["find", "triage", "verify"]);
     expect(root.sequence).toEqual([]);
     const findRules = (root.children!.find as { transitions: Array<{ name: string; inputs?: Record<string, string> }> }).transitions;
     expect(findRules.map((r) => r.name).sort()).toEqual(["to_triage", "to_verify"]);
     expect(findRules.find((r) => r.name === "to_triage")!.inputs).toEqual({ _entry: ".children.find.output._entry", confirmed: ".children.find.output.confirmed" });
+    // `Promise.all(confirmed.map((f) => classify(…)))` in Triage: a fan-out whose element mounts the called state.
+    const elementId = Object.keys(compiled.documents).find((id) => /^review\/sweep\/triage\/map_\d+$/.test(id))!;
+    expect(Object.values(compiled.documents[elementId]!.children ?? {}).some((c) => (c as { state?: string }).state === "review/triage")).toBe(true);
     const states: Record<string, StateDef> = { ...(compiled.documents as Record<string, StateDef>), "review/triage": JSON.parse(triage) as StateDef };
     const report = validateBundle(loadBundle(states, "review/sweep"), {} as never) as { errors: unknown[] };
     expect(report.errors).toEqual([]);
+  });
+});
+
+/** A model that fails when the prompt says so, and otherwise echoes it. */
+const echoing: Script = (call) =>
+  textOf(call).startsWith("boom")
+    ? ({ error: { classification: "permanent", reason: textOf(call) }, metrics: { durationMs: 0, costUsd: 0, costSource: "unknown" } } as never)
+    : ok(`said ${textOf(call)}`);
+
+const callStates = (events: EngineEvent[]) => entered(events).filter((id) => /call_\d+$/.test(id));
+
+describe("one state per call (\"calls\" mode)", () => {
+  it("makes each call a state whose operation IS the call — literal options literal, computed ones read its inputs", async () => {
+    const source = `export default async function f(which: string) {
+  const a = await llm("first", { model: "anthropic/claude-sonnet-5", temperature: 0 });
+  const b = await llm({ prompt: "second " + a, model: which });
+  return b;
+}`;
+    const { documents } = await compile(source);
+    expect(documents["s/call_0"]!.operation).toMatchObject([{ prompt: "{{.inputs._call.prompt}}", model: "anthropic/claude-sonnet-5", temperature: 0 }, { script: {} }]);
+    expect((documents["s/call_1"]!.operation as unknown[])[0]).toMatchObject({ model: { $expr: ".inputs.model_1" } });
+    // A computed knob is an input of its own, typed as the option is, so the wiring checker reads it.
+    expect(documents["s/call_1"]!.inputs!.model_1).toMatchObject({ schema: { type: "string" } });
+    const { calls, result } = await run(source, { which: "openai/gpt-5.6" }, echoing);
+    expect(calls.map((c) => [textOf(c), c.name])).toEqual([["first", "anthropic/claude-sonnet-5"], ["second said first", "openai/gpt-5.6"]]);
+    expect(result.outputs).toEqual({ result: "said second said first" });
+  });
+
+  it("keeps evaluation order: what is evaluated before a call is evaluated before it, across the cut", async () => {
+    const source = `export default async function f() {
+  const order: string[] = [];
+  const mark = (s: string) => { order.push(s); return s; };
+  const x = mark("a") + (await llm(mark("b")));
+  mark("c");
+  return { order, x };
+}`;
+    const { result } = await run(source, {}, echoing);
+    expect(result.outputs).toEqual({ order: ["a", "b", "c"], x: "asaid b" });
+  });
+
+  it("lowers a call under &&, || and ?: to a branch — made only when JavaScript would make it", async () => {
+    const source = `export default async function f(flag: boolean) {
+  const a = flag && (await llm("and"));
+  const b = flag || (await llm<string>("or")); // untyped, TypeScript would infer T from 'flag': boolean
+  const c = flag ? await llm("then") : "skipped";
+  return { a, b, c };
+}`;
+    const on = await run(source, { flag: true }, echoing);
+    expect(on.calls.map(textOf)).toEqual(["and", "then"]);
+    expect(on.result.outputs).toEqual({ a: "said and", b: true, c: "said then" });
+    const off = await run(source, { flag: false }, echoing);
+    expect(off.calls.map(textOf)).toEqual(["or"]);
+    expect(off.result.outputs).toEqual({ a: false, b: "said or", c: "skipped" });
+  });
+
+  it("inlines a helper that makes a call, once per call of it — a generic one typed by its caller's T", async () => {
+    const source = `async function ask(q: string) { const a = await llm(q); return a.toUpperCase(); }
+async function typed<T>(q: string): Promise<T> { return await llm<T>(q); }
+export default async function f() {
+  const first = (await ask("x")) + (await ask("y"));
+  const verdict = await typed<{ ok: boolean }>("judge");
+  return { first, ok: verdict.ok };
+}`;
+    const { calls, result, events } = await run(source, {}, (c) => (textOf(c) === "judge" ? ok({ ok: true }) : echoing(c)));
+    expect(callStates(events)).toHaveLength(3);
+    expect(result.outputs).toEqual({ first: "SAID XSAID Y", ok: true });
+    expect(calls[2]!.op.output.schema).toMatchObject({ type: "object", properties: { ok: { type: "boolean" } } });
+  });
+
+  it("refuses a recursive helper that makes a call", async () => {
+    await expect(compile(`async function again(n: number): Promise<string> { return n > 0 ? await again(n - 1) : await llm("x"); }\nexport default async function f() { return await again(2); }`)).rejects.toThrow(/calls itself/);
+  });
+
+  it("catches a failed call in the state its catch compiled to, with the variables it had before the call", async () => {
+    const source = `export default async function f() {
+  let log = "start";
+  try {
+    const a = await llm("boom now");
+    log = "unreached " + a;
+  } catch (e) {
+    log = log + " / caught: " + (e as Error).message;
+  }
+  try {
+    await llm("fine");
+    throw new Error("thrown by the code");
+  } catch (e) {
+    log = log + " / " + (e as Error).message;
+  }
+  return log;
+}`;
+    const { result, documents } = { ...(await run(source, {}, echoing)), documents: (await compile(source)).documents };
+    expect(result.outputs).toEqual({ result: "start / caught: boom now / thrown by the code" });
+    // The failure rule reads the call's own inputs — `.children.<call>.inputs` — since a failed state publishes no outputs.
+    const rules = (documents.s!.children!.call_0 as { transitions: Array<{ name: string; inputs?: Record<string, string> }> }).transitions;
+    expect(rules.find((r) => r.name === "catch")!.inputs).toMatchObject({ log: ".children.call_0.inputs.log", _error: ".children.call_0.failure" });
+  });
+
+  it("lowers a switch around calls, falling through as JavaScript does", async () => {
+    const source = `export default async function f() {
+  const kind = await llm("kind");
+  let out = "";
+  switch (kind) {
+    case "said kind": out += await llm("matched");
+    case "other": out += "|fell";
+      break;
+    default: out = "default";
+  }
+  return out;
+}`;
+    const { result } = await run(source, {}, echoing);
+    expect(result.outputs).toEqual({ result: "said matched|fell" });
+  });
+
+  it("makes now() and random() calls like any other — each its own state, each asked afresh", async () => {
+    const source = `import { now, random } from "@declarative-ai/hw/script";
+export default async function f() { const t0 = now(); await llm("x"); const t1 = now(); const r = random(); return t1 >= t0 && r >= 0 && r < 1; }`;
+    const { result, events } = await run(source, {}, echoing);
+    expect(result.outputs).toEqual({ result: true });
+    expect(callStates(events)).toHaveLength(4);
+  });
+
+  it("fans a map out over an each mount — parallel's failed items read as null, Promise.all's fail the fan-out", async () => {
+    const parallelSource = `export default async function f(items: string[]) { return await parallel(items.map((x) => () => llm(x))); }`;
+    const tolerant = await run(parallelSource, { items: ["ok", "boom one", "fine"] }, echoing);
+    expect(tolerant.result.outputs).toEqual({ result: ["said ok", null, "said fine"] });
+    const strictSource = `export default async function f(items: string[]) { return await Promise.all(items.map(async (x) => await llm(x))); }`;
+    const strict = await run(strictSource, { items: ["ok", "boom one"] }, echoing);
+    expect(strict.result.outcome).toBe("error");
+  });
+
+  it("runs a list of calls side by side, and a pipeline's stages in order per item", async () => {
+    const fork = await run(`export default async function f() { return await Promise.all([llm("a"), llm("b")]); }`, {}, echoing);
+    expect(fork.result.outputs).toEqual({ result: ["said a", "said b"] });
+    const piped = await run(`export default async function f(xs: string[]) { return await pipeline(xs, (x) => llm("one " + x), (y) => llm("two " + y)); }`, { xs: ["p", "q"] }, echoing);
+    expect(piped.result.outputs).toEqual({ result: ["said two said one p", "said two said one q"] });
+  });
+
+  it("refuses an element that writes what lives outside it", async () => {
+    await expect(compile(`export default async function f(xs: string[]) { let n = 0; await parallel(xs.map((x) => async () => { n++; return await llm(x); })); return n; }`)).rejects.toThrow(/writes 'n', which lives outside it/);
+  });
+
+  it("lifts a branch on a call's result into the rules, where a person can read it", async () => {
+    const source = `export default async function f() {
+  const r = await llm<{ ok: boolean }>("judge");
+  if (r.ok) return await llm("yes");
+  return await llm("no");
+}`;
+    const { documents } = await compile(source);
+    const rules = (documents.s!.children!.call_0 as { transitions: Array<{ when: string; to: string }> }).transitions;
+    expect(rules.map((r) => [r.when, r.to])).toEqual([
+      [".children.call_0.output.r.ok", "call_1"],
+      ["!(.children.call_0.output.r.ok)", "call_2"],
+    ]);
+    const { calls } = await run(source, {}, (c) => (textOf(c) === "judge" ? ok({ ok: false }) : echoing(c)));
+    expect(calls.map(textOf)).toEqual(["judge", "no"]);
+  });
+
+  it("puts a named type used twice in $defs", async () => {
+    const source = `type Person = { name: string };\nexport default async function f() { return await llm<{ author: Person; reviewer: Person }>("who"); }`;
+    const { documents } = await compile(source);
+    const schema = ((documents["s/call_0"]!.operation as Array<{ output: { value: { schema: Record<string, unknown> } } }>)[0]!.output.value.schema) as { properties: Record<string, unknown>; $defs: Record<string, unknown> };
+    expect(schema.properties.author).toEqual({ $ref: "#/$defs/Person" });
+    expect(schema.$defs.Person).toMatchObject({ type: "object", properties: { name: { type: "string" } } });
+  });
+
+  it("maps every compiled state back to the script's line, and a failure in its code to the line that threw", async () => {
+    const source = `export default async function f() {\n  const a = await llm("x");\n  const b: any = undefined;\n  return b.missing + a;\n}`;
+    const compiled = await compile(source);
+    expect(compiled.sourceMap["s/call_0"]).toEqual({ line: 2, column: 1 });
+    expect(compiled.documents["s/call_0"]!.generated?.at).toEqual({ line: 2, column: 1 });
+    const { result } = await run(source, {}, echoing);
+    expect(result.outcome).toBe("error");
+    expect(JSON.stringify(result)).toMatch(/s\.ts:4: /);
+  });
+});
+
+describe("imports (SCRIPTS.md §10)", () => {
+  it("imports a prompt: the template is the call's operation, its holes the call's inputs", async () => {
+    const source = `import summarize from "./summarize.md";\nexport default async function f(topic: string) { return await summarize({ topic }); }`;
+    const { documents } = await compile(source, { [`${ROOT}/summarize.md`]: "Summarize {{.inputs.topic}} in one line." });
+    expect((documents["s/call_0"]!.operation as unknown[])[0]).toMatchObject({ prompt: "Summarize {{.inputs.topic}} in one line.", input: { topic: { binding: { $expr: ".inputs._call.topic" } } } });
+    const { calls } = await run(source, { topic: "tides" }, echoing, { extra: { [`${ROOT}/summarize.md`]: "Summarize {{.inputs.topic}} in one line." } });
+    expect(textOf(calls[0]!)).toBe("Summarize tides in one line.");
+  });
+
+  it("imports a registered function from $REGISTRY, and data with { type: \"json\" }", async () => {
+    const source = `import { shout } from "$REGISTRY";\nimport config from "./config.json" with { type: "json" };\nexport default async function f() { return await shout({ text: config.greeting }); }`;
+    const { result } = await run(source, {}, echoing, { extra: { [`${ROOT}/config.json`]: JSON.stringify({ greeting: "hi" }) }, functions: { shout: (i) => ({ loud: String(i.text).toUpperCase() }) } });
+    expect(result.outputs).toEqual({ result: { loud: "HI" } });
+  });
+
+  it("imports code as an operation: a call of its own in \"calls\" mode, recorded in \"phases\" mode", async () => {
+    const lib = `export function stamp(x: string): string { return "stamped " + x; }`;
+    const source = (mode: string) => `import { stamp } from "./lib" with { as: "operation" };\nexport const meta = { compile: "${mode}" };\nexport default async function f() { return stamp("a"); }`;
+    const calls = await run(source("calls"), {}, echoing, { extra: { [`${ROOT}/lib.ts`]: lib } });
+    expect(calls.result.outputs).toEqual({ result: "stamped a" });
+    expect(callStates(calls.events)).toHaveLength(1);
+    const phases = await run(source("phases"), {}, echoing, { extra: { [`${ROOT}/lib.ts`]: lib } });
+    expect(phases.result.outputs).toEqual({ result: "stamped a" });
+    expect(phases.events.some((e) => e.type === "script.call.settled" && e.site === "recorded:stamp#0")).toBe(true);
+    // Recorded means awaited: a synchronous function cannot make the call.
+    const sync = `import { stamp } from "./lib" with { as: "operation" };
+export const meta = { compile: "phases" };
+export default async function f() { return ["a"].map((x) => stamp(x)); }`;
+    await expect(compile(sync, { [`${ROOT}/lib.ts`]: lib })).rejects.toThrow(/s\.ts:3.*imported as an operation.*async function/);
+  });
+
+  it("bans Date.now() in code the script imports, too", async () => {
+    const lib = `export function late(): number { return Date.now(); }`;
+    const { result } = await run(`import { late } from "./lib";\nexport default async function f() { return late(); }`, {}, echoing, { extra: { [`${ROOT}/lib.ts`]: lib } });
+    expect(result.outcome).toBe("error");
+    expect(JSON.stringify(result)).toMatch(/Date\.now\(\) breaks replay/);
+  });
+
+  it("hands a generic helper its caller's T as a schema, where helpers are not inlined (\"phases\" mode)", async () => {
+    const source = `export const meta = { compile: "phases" };\nasync function typed<T>(q: string): Promise<T> { return await llm<T>(q); }\nexport default async function f() { const v = await typed<{ ok: boolean }>("judge"); return v.ok; }`;
+    const { calls, result } = await run(source, {}, () => ok({ ok: true }));
+    expect(calls[0]!.op.output.schema).toMatchObject({ type: "object", properties: { ok: { type: "boolean" } } });
+    expect(result.outputs).toEqual({ result: true });
   });
 });

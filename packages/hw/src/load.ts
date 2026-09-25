@@ -141,6 +141,13 @@ export interface LoadedInstance {
    * released in this order so a race resolves as it did, and a log line here is not written twice.
    */
   scriptCalls?: readonly ScriptCallRecord[];
+  /**
+   * The script call site that entered this instance (`instance.entered.calledAt`) — a state a
+   * compiled script's code CALLED rather than a mount's entry (SCRIPTS.md §10). Listed among its
+   * caller's `children` like any child, it is no mount's record: the caller's code re-attaches it when
+   * a re-run reaches the same site with no settled answer, continuing it when `live`.
+   */
+  calledAt?: string;
   /** In entry order. Superseded instances are omitted; their entries survive in `occurrence`. */
   children?: readonly LoadedInstance[];
 }

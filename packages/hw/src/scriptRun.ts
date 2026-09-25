@@ -40,8 +40,39 @@ export interface ScriptModuleOptions {
   maxCalls?: number;
 }
 
-/** A phase's code, loaded: run it from an entry with its variables. */
-export type SegmentFunction = (vars: Record<string, unknown>, entry: number) => Promise<unknown>;
+/** A state's code, loaded: run it from an entry (its own, when omitted) with its variables. */
+export type SegmentFunction = (vars: Record<string, unknown>, entry: number | undefined) => Promise<unknown>;
+
+/**
+ * What a script's code sees as `Math` and `Date`: Claude's determinism bans (SCRIPTS.md §11). A
+ * state's code re-runs from its entry after a restart, so a clock or a coin read inline would come
+ * back different the second time; `now()` and `random()` are the calls that may.
+ */
+const DETERMINISM_GLOBALS: Readonly<Record<string, unknown>> = {
+  Math: new Proxy(globalThis.Math, {
+    get(target, property) {
+      if (property === "random") return () => {
+        throw new Error("Math.random() breaks replay — use random() from @declarative-ai/hw/script");
+      };
+      return Reflect.get(target, property);
+    },
+  }),
+  Date: new Proxy(globalThis.Date, {
+    construct(target, args: unknown[]) {
+      if (args.length === 0) throw new Error("new Date() with no argument breaks replay — use now() from @declarative-ai/hw/script");
+      return Reflect.construct(target, args);
+    },
+    apply() {
+      throw new Error("Date() breaks replay — use now() from @declarative-ai/hw/script");
+    },
+    get(target, property) {
+      if (property === "now") return () => {
+        throw new Error("Date.now() breaks replay — use now() from @declarative-ai/hw/script");
+      };
+      return Reflect.get(target, property);
+    },
+  }),
+};
 
 const NO_FILES: Vfs = { list: () => [], read: () => undefined };
 
@@ -67,7 +98,8 @@ export class ScriptSegments {
       cache: this.transpiled,
       sources: { [path]: code },
     });
-    const namespace = prepared.execute(path) as { default?: unknown };
+    // The script's code AND every module it runs inline see Claude's determinism bans (SCRIPTS.md §11).
+    const namespace = prepared.execute(path, DETERMINISM_GLOBALS) as { default?: unknown };
     if (typeof namespace.default !== "function") throw new Error(`the compiled code of '${file}' exports no segment`);
     return namespace.default as SegmentFunction;
   }
@@ -96,7 +128,7 @@ export interface LoweredCall {
 }
 
 /** Fields of an `llm()` call that are not operation knobs. */
-const CALL_OWN = new Set(["prompt", "system", "config", "output", "failureValue", "label", "phase"]);
+const CALL_OWN = new Set(["prompt", "system", "config", "output", "failureValue", "label", "phase", "template", "inputs"]);
 
 /**
  * Lower one `llm()` call (SCRIPTS.md §9) over the defaults its state resolves in.
@@ -106,7 +138,7 @@ const CALL_OWN = new Set(["prompt", "system", "config", "output", "failureValue"
  * the JavaScript string that built it. A call gets a FRESH conversation unless it names one (§10).
  */
 export function lowerLlmCall(stateId: string, defaults: OperationFields | undefined, call: LlmCall, typed: JsonSchema | undefined): LoweredCall {
-  if (typeof call.prompt !== "string") throw new TypeError("llm() needs a string 'prompt'");
+  if (typeof call.prompt !== "string" && typeof call.template !== "string") throw new TypeError("llm() needs a string 'prompt'");
   const fields: Record<string, unknown> = { ...(defaults ?? {}) };
   delete fields.session;
   fields.session = null;
@@ -130,21 +162,27 @@ export function lowerLlmCall(stateId: string, defaults: OperationFields | undefi
     }
   }
   const schema = written ?? typed;
-  const text = schema === undefined && call.output?.kind !== "json";
-  const object = schema !== undefined && (schema as { type?: unknown }).type === "object";
+  // A plain string is text: the model says it, and nothing wraps it as `{ value }`.
+  const text = (schema === undefined || JSON.stringify(schema) === '{"type":"string"}') && call.output?.kind !== "json";
+  const object = !text && schema !== undefined && (schema as { type?: unknown }).type === "object";
   const output = text
     ? { text: { kind: "text" } }
     : object || schema === undefined
       ? { value: { kind: "json", ...(schema !== undefined ? { schema } : {}) } }
       : { value: { schema } };
   const { op: opFields, env } = splitExecEnvironment(fields as OperationFields);
+  // A template renders its own holes from the call's inputs; plain text is bound and rendered verbatim.
+  const input: Record<string, unknown> = {};
+  if (typeof call.template === "string") {
+    for (const [name, value] of Object.entries(call.inputs ?? {})) input[name] = { kind: "json", binding: { json: value } };
+  } else input.prompt = { kind: "text", binding: { text: call.prompt } };
   const op = desugarOperation(
     {
       ...opFields,
       kind: "prompt",
-      prompt: "{{.inputs.prompt}}",
+      prompt: typeof call.template === "string" ? call.template : "{{.inputs.prompt}}",
       ...(call.system !== undefined ? { system: call.system } : {}),
-      input: { prompt: { kind: "text", binding: { text: call.prompt } } },
+      input,
       output: output as unknown as OperationFields["output"],
     } as OperationFields,
     stateId,
