@@ -506,3 +506,35 @@ describe("fitReasoning — a request fitted to what the model takes", () => {
     expect(fitReasoning({ effort: "ultra" }, acceptanceOf(undefined))).toEqual({ spec: { effort: "ultra" }, notes: [] });
   });
 });
+
+describe("level descriptions and a route with no row of its own", () => {
+  it("carries the source's descriptions beside the levels, aligned with the enum, and reads them back", () => {
+    const schema = parametersFromNames([], {
+      reasoning: { efforts: ["high", "low"], defaultEffort: "low", descriptions: { low: "Fast responses", high: "Greater depth" }, budget: false },
+    });
+    expect(schema["properties"]).toMatchObject({
+      reasoning: { properties: { effort: { enum: ["low", "high"], enumDescriptions: ["Fast responses", "Greater depth"], default: "low" } } },
+    });
+    const gate = acceptanceOf(schema);
+    expect(gate.defaultEffort).toBe("low");
+    expect(gate.effortDescriptions).toEqual({ low: "Fast responses", high: "Greater depth" });
+    // No descriptions said, none invented.
+    expect(acceptanceOf(parametersFromNames([], { reasoning: { efforts: ["low"] } })).effortDescriptions).toBeUndefined();
+  });
+
+  it("describes an agent's model it has no row for by the same model's API row — and never a local one", () => {
+    const api = { route: "anthropic", model: "claude-opus-5-5", parameters: parametersFromNames([], { reasoning: { efforts: ["low", "max"], budget: false } }) };
+    const catalog = new ModelInfo([
+      api,
+      { route: "openrouter", model: "anthropic/claude-opus-5.5", parameters: parametersFromNames(["temperature", "reasoning"]) },
+      { route: "claude-cli", model: "sonnet", parameters: parametersFromNames([]) },
+      { route: "local", model: "claude-opus-5-5" },
+    ]);
+    expect(catalog.describedBy("claude-cli/claude-opus-5-5")).toBe(api);
+    expect(catalog.paramAcceptance("claude-cli/claude-opus-5-5").efforts).toEqual(["low", "max"]);
+    // Its own row, when it has one, wins.
+    expect(catalog.describedBy("claude-cli/sonnet")?.route).toBe("claude-cli");
+    // A model on this machine takes what its server takes: unknown stays unknown.
+    expect(catalog.parameters("local/claude-opus-5-5")).toBeUndefined();
+  });
+});

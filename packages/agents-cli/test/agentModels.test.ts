@@ -161,3 +161,14 @@ describe("an agent's rows fit its reasoning and take the API's price", () => {
     expect(catalog.computeCostUsd("codex-cli/default", 1_000_000, 0)).toBeCloseTo(5, 10);
   });
 });
+
+describe("codex's level descriptions", () => {
+  it("travel with the levels, for a picker to show beside each one", () => {
+    const [sol] = codexModelRows(CODEX);
+    expect(acceptanceOf(sol?.parameters).effortDescriptions).toEqual({
+      low: "Fast responses with lighter reasoning",
+      high: "Greater reasoning depth for complex problems",
+      ultra: "Maximum reasoning with automatic task delegation",
+    });
+  });
+});

@@ -395,6 +395,8 @@ export interface ReasoningCapability {
   efforts?: readonly ReasoningEffort[];
   /** The level it thinks at when none is asked for. */
   defaultEffort?: ReasoningEffort;
+  /** What each level means, in the SOURCE's own words (codex describes every level), when it says. */
+  descriptions?: Partial<Record<ReasoningEffort, string>>;
   /** Whether it takes a thinking budget in tokens, and in what range. Absent ⇒ it does (the
    *  OpenRouter reading: a model that lists `reasoning` takes `reasoning.max_tokens`). */
   budget?: boolean | { minimum?: number; maximum?: number };
@@ -441,8 +443,13 @@ function reasoningSchema(cap: ReasoningCapability | undefined): JsonValue {
     // levels without the schema claiming the model takes every one of them.
     properties["effort"] = { type: "string", examples: [...REASONING_EFFORTS] };
   } else if (cap.efforts.length > 0) {
+    const levels = orderedEfforts(cap.efforts);
+    const described = levels.some((l) => cap.descriptions?.[l] !== undefined);
     properties["effort"] = {
-      enum: orderedEfforts(cap.efforts),
+      enum: levels,
+      // `enumDescriptions` — the JSON Schema annotation for "what each enum value means", aligned with
+      // `enum` by position (VS Code's convention, and what a form reads for an option's label).
+      ...(described ? { enumDescriptions: levels.map((l) => cap.descriptions?.[l] ?? "") } : {}),
       ...(cap.defaultEffort !== undefined ? { default: cap.defaultEffort } : {}),
     };
   }
@@ -489,6 +496,10 @@ export interface ParamAcceptance {
   acceptsBudget: boolean | undefined;
   /** The largest budget it takes, when its schema says. */
   maxBudget?: number;
+  /** The level it thinks at when none is asked for, when its source says. */
+  defaultEffort?: ReasoningEffort;
+  /** What each level means, in its source's words, when it says. */
+  effortDescriptions?: Partial<Record<ReasoningEffort, string>>;
   /** The schema read, or `undefined` for an unknown model. */
   schema: SchemaDocument | undefined;
 }
@@ -505,7 +516,19 @@ export function acceptanceOf(schema: SchemaDocument | undefined): ParamAcceptanc
   const effortSchema = inner !== undefined ? objectOf(inner["effort"]) : undefined;
   const levels = effortSchema !== undefined && Array.isArray(effortSchema["enum"]) ? effortSchema["enum"] : undefined;
   const budgetSchema = inner !== undefined ? objectOf(inner["budgetTokens"]) : undefined;
+  const fallback = typeof effortSchema?.["default"] === "string" ? orderedEfforts([effortSchema["default"]])[0] : undefined;
+  const descriptions: Partial<Record<ReasoningEffort, string>> = {};
+  const said = effortSchema?.["enumDescriptions"];
+  if (levels !== undefined && Array.isArray(said)) {
+    levels.forEach((level, i) => {
+      const known = typeof level === "string" ? orderedEfforts([level])[0] : undefined;
+      const text = said[i];
+      if (known !== undefined && typeof text === "string" && text.length > 0) descriptions[known] = text;
+    });
+  }
   return {
+    ...(fallback !== undefined ? { defaultEffort: fallback } : {}),
+    ...(Object.keys(descriptions).length > 0 ? { effortDescriptions: descriptions } : {}),
     accepts: (key) => properties[key] !== undefined,
     acceptsReasoning: reasoning !== undefined,
     efforts:
@@ -723,10 +746,38 @@ export class ModelInfo<const Rows extends readonly ModelInfoInterface[] = readon
    * its sampling-less fallback, else `undefined` ⇒ the caller sends everything.
    */
   parameters(model: ModelKeyOf<Rows>): SchemaDocument | undefined {
-    const row = this.rows.get(model);
-    if (row?.parameters !== undefined) return row.parameters;
+    const described = this.describedBy(model);
+    if (described?.parameters !== undefined) return described.parameters;
     if (isReasoningModel(model)) return REASONING_FALLBACK_PARAMETERS;
     return undefined;
+  }
+
+  /**
+   * The row whose `parameters` describe `model`: its own, or — for a route that has NO row for it — the
+   * same model's row on the route that serves it natively (`anthropic/…`, `openai/…`), else OpenRouter's.
+   *
+   * An agent names models by id that its own list does not carry: `claude` 2.1.142 lists `default`,
+   * `sonnet` and `haiku`, and runs `claude-opus-5-5` too. What that model takes is what the API says it
+   * takes, so the call is fitted — and a form offers levels — from that row, as its price already is
+   * (JaiRA decision 0009). A route's OWN row, when there is one, always wins.
+   */
+  describedBy(model: ModelKeyOf<Rows>): ModelInfoInterface | undefined {
+    const row = this.rows.get(model);
+    if (row?.parameters !== undefined) return row;
+    const slash = model.indexOf("/");
+    // A model served on THIS machine takes what its server takes, which a remote row for the same
+    // weights says nothing about — unknown stays unknown there.
+    const route = row?.route ?? (slash > 0 ? model.slice(0, slash) : "");
+    if (route === "local" || route === "embedded") return row;
+    const id = row?.canonicalId ?? canonicalIdFor(slash > 0 ? model.slice(slash + 1) : model);
+    const rank = (route: string): number => (route === "anthropic" || route === "openai" ? 0 : route === "openrouter" ? 1 : 2);
+    let best: ModelInfoInterface | undefined;
+    for (const candidate of this.rows.values()) {
+      if (candidate.parameters === undefined || rank(candidate.route) > 1) continue;
+      if ((candidate.canonicalId ?? canonicalIdFor(candidate.model)) !== id) continue;
+      if (best === undefined || rank(candidate.route) < rank(best.route)) best = candidate;
+    }
+    return best ?? row;
   }
 
   /** The structured-output tier the model's endpoint offers, when recorded. */

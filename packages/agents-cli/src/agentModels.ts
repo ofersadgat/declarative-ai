@@ -13,7 +13,15 @@
  * Both probes start the binary for nothing else, ask, and close its input; neither sends a prompt, so no
  * model is called and nothing is spent.
  */
-import { canonicalIdFor, orderedEfforts, parametersFromNames, type CatalogSource, type ModelInfoInterface, type ReasoningCapability } from "@declarative-ai/llm";
+import {
+  canonicalIdFor,
+  orderedEfforts,
+  parametersFromNames,
+  type CatalogSource,
+  type ModelInfoInterface,
+  type ReasoningCapability,
+  type ReasoningEffort,
+} from "@declarative-ai/llm";
 import { defaultSpawn, type AgentProcess, type SpawnProcess } from "./process.js";
 
 export interface AgentModelsProbeOptions {
@@ -175,6 +183,13 @@ export function codexModelRows(entries: unknown, route = "codex-cli"): ModelInfo
         )
       : [];
     const fallback = typeof entry.defaultReasoningEffort === "string" ? orderedEfforts([entry.defaultReasoningEffort])[0] : undefined;
+    // codex says what each level means; that text is what a picker shows beside the level.
+    const descriptions: Partial<Record<ReasoningEffort, string>> = {};
+    for (const e of Array.isArray(entry.supportedReasoningEfforts) ? entry.supportedReasoningEfforts : []) {
+      const bag = e !== null && typeof e === "object" ? (e as { reasoningEffort?: unknown; description?: unknown }) : {};
+      const level = typeof bag.reasoningEffort === "string" ? orderedEfforts([bag.reasoningEffort])[0] : undefined;
+      if (level !== undefined && typeof bag.description === "string" && bag.description.length > 0) descriptions[level] = bag.description;
+    }
     const inputs = Array.isArray(entry.inputModalities) ? entry.inputModalities.filter((m): m is string => typeof m === "string") : undefined;
     const row: ModelInfoInterface = {
       route,
@@ -185,7 +200,16 @@ export function codexModelRows(entries: unknown, route = "codex-cli"): ModelInfo
       canonicalId: canonicalIdFor(id),
       parameters: parametersFromNames(
         [],
-        efforts.length > 0 ? { reasoning: { efforts, ...(fallback !== undefined ? { defaultEffort: fallback } : {}), budget: false } } : {},
+        efforts.length > 0
+          ? {
+              reasoning: {
+                efforts,
+                ...(fallback !== undefined ? { defaultEffort: fallback } : {}),
+                ...(Object.keys(descriptions).length > 0 ? { descriptions } : {}),
+                budget: false,
+              },
+            }
+          : {},
       ),
       ...(inputs !== undefined && inputs.length > 0 ? { modalities: { input: inputs, output: ["text"] } } : {}),
       ...(entry.hidden === true ? { available: false } : {}),
