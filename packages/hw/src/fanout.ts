@@ -18,7 +18,7 @@
  */
 import type { InlineFamily, Ref, RefTree } from "@declarative-ai/exec";
 import { pathOfRef } from "./lowerExpr.js";
-import { consumptionOf, RESOLVER_REFS, WHOLE_CHILD, type LoadedState } from "./format.js";
+import { consumptionOf, operationsOf, RESOLVER_REFS, WHOLE_CHILD, type LoadedState } from "./format.js";
 
 /** Marks a whole-child edge (`{ child: P }`, no output selected) — it consumes every output of P. */
 const WHOLE = WHOLE_CHILD;
@@ -69,8 +69,7 @@ export function isFannedOut(fanOut: readonly string[] | undefined, childKey: str
 
 /** Every top-level binding in a state that resolves against the run — each one a CONSUMER. */
 function* consumerBindings(state: LoadedState): Iterable<Ref<InlineFamily>> {
-  const op = state.operation;
-  if (op) for (const p of Object.values(op.input)) if (p.binding) yield p.binding;
+  for (const op of operationsOf(state)) for (const p of Object.values(op.input)) if (p.binding) yield p.binding;
   for (const slot of Object.values(state.outputs ?? {})) if (slot.binding) yield slot.binding;
   for (const slot of Object.values(state.inputs ?? {})) if (slot.binding) yield slot.binding;
   for (const child of Object.values(state.children ?? {})) for (const wire of Object.values(child.inputs ?? {})) yield wire;

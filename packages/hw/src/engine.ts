@@ -65,7 +65,7 @@ import {
   scopedOperationId,
 } from "@declarative-ai/exec";
 import type { InstanceAddress, InstanceAddressStep, WorkflowMetrics } from "./ports.js";
-import type { LoadedInstance } from "./load.js";
+import type { LoadedInstance, LoadedOperation } from "./load.js";
 import {
   createToolGate,
   PermissionLedger,
@@ -92,6 +92,7 @@ import type {
   TerminationOutcome,
   WorkflowBundle,
 } from "./format.js";
+import { environmentOf, isOperationList, operationsOf } from "./format.js";
 import { bindElement, bindInputs, higherOrderEdgesOf, higherOrderOf, isResolvedValue, isResolveError, resolveInputs, resolveOperationInputs, resolveRef, type ResolutionScope, type Resolved } from "./resolve.js";
 import { isByteStream, materialize, MaterializeError } from "./materialize.js";
 import {
@@ -106,7 +107,7 @@ import {
 } from "./session.js";
 import { addressPath, keyOfScopedName, NAME_KEY, type ScopedName } from "./scope.js";
 import { freshWorkspaceKey, isFreshWorkspace, RUN_RESOURCE_KEY, type NormalizedWorkspace } from "./workspace.js";
-import type { OperationNode } from "./operationNode.js";
+import { operationListNode, type OperationListNode, type OperationNode, type StateOperationNode } from "./operationNode.js";
 import { isFannedOut } from "./fanout.js";
 import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, type Persistence } from "./ports.js";
 // Computed fields (SPEC §5.3): evaluated once at entry, written into a per-instance definition.
@@ -412,7 +413,7 @@ interface TerminationRecord {
   outputs?: Record<string, ResolvedValue>;
   failure?: Failure;
   /** What the state's operation reported, carried up so a parent can read it (SPEC.md §6.1). */
-  operation?: OperationNode;
+  operation?: StateOperationNode;
 }
 
 /** What `.each` reads while ONE element of a fan-out is being wired (WORKFLOWS.md §6.2). */
@@ -544,7 +545,7 @@ interface ChildRecord {
   outcome?: TerminationOutcome;
   outputs?: Record<string, ResolvedValue>;
   /** The child's own operation node — what `children.<key>.operation.*` reads (SPEC.md §6.1). */
-  operation?: OperationNode;
+  operation?: StateOperationNode;
   /**
    * Why it ended, when it ended badly.
    *
@@ -591,7 +592,7 @@ interface Instance {
    * Accumulated on the instance rather than derived from the events journal, because an expression
    * cannot read a journal: that inaccessibility is the whole reason this namespace exists.
    */
-  operation?: OperationNode;
+  operation?: StateOperationNode;
   /**
    * Where this instance sits in the tree — the key a {@link ReplaySource} is asked with.
    *
@@ -639,8 +640,14 @@ interface Instance {
    * goes back and stays put when it goes on.
    */
   iteration: number;
-  /** Whether the state's single operation has run (§7.1: a state has ONE operation). */
+  /** Whether the state's operation has run (§7.1: a state has ONE operation — one call, or a list). */
   opRun: boolean;
+  /**
+   * How many calls of an operation LIST have completed (SPEC §7.1d) — where a run resumes. A list
+   * runs from here, so a loaded instance whose journal recorded the first calls runs only the rest.
+   * Always 0 for a single operation, which has nothing to resume inside.
+   */
+  callsDone: number;
   /**
    * Live child records by child key; `undefined`/absent = never ran or superseded.
    *
@@ -905,6 +912,21 @@ function operationOutputOf(value: ResolvedValue | undefined, session?: Published
 }
 
 /** One pass's view of a child, as an expression reads it. `undefined` = it did not run in that pass. */
+/**
+ * `operation` as a LIST state's expressions read it (SPEC §6.1, §7.1d): call `i`'s authored fields
+ * with its node laid over them at `[i]`, and the list-wide `output`, `outcome` and `cost` hung on the
+ * array — nothing hung before any call has run, so `.operation.outcome` is `undefined` then.
+ */
+function operationListView(authored: readonly Record<string, unknown>[], nodes: OperationListNode | undefined): unknown {
+  const view = authored.map((fields, i) => ({ ...fields, ...(nodes?.[i] ?? {}) })) as unknown as Record<string, unknown>;
+  if (nodes !== undefined) {
+    view["output"] = nodes.output;
+    if (nodes.outcome !== undefined) view["outcome"] = nodes.outcome;
+    if (nodes.cost !== undefined) view["cost"] = nodes.cost;
+  }
+  return view;
+}
+
 function passView(rec: ChildRecord | undefined): Record<string, unknown> | undefined {
   if (rec === undefined) return undefined;
   // IN FLIGHT is PENDING and not absence: a consumer of a running child WAITS, where a consumer of
@@ -1230,6 +1252,7 @@ export class WorkflowEngine {
       index: 0,
       iteration: 0,
       opRun: false,
+      callsDone: 0,
       // One pass to start with, and `children` IS it — see the field docs. Assigned below, because
       // the two names have to reach the same Map object.
       children: undefined as unknown as Map<string, ChildRecord>,
@@ -1337,6 +1360,7 @@ export class WorkflowEngine {
       index: loaded.index ?? 0,
       iteration: loaded.iteration ?? 0,
       opRun: false,
+      callsDone: 0,
       children: undefined as unknown as Map<string, ChildRecord>,
       passes: [],
       cursor: loaded.cursor ?? 0,
@@ -1381,16 +1405,28 @@ export class WorkflowEngine {
     // The COMPLETED operation, fed through exactly the path a live settle takes — the node, then
     // `acceptOpOutputs` — so a loaded state is indistinguishable downstream from one that ran. Spend
     // is deliberately NOT rolled up: the recorded metrics belong to the run that paid them.
-    if (loaded.operation !== undefined && def.operation) {
-      instance.opRun = true;
-      instance.operation = operationNodeOf(
-        "success",
-        loaded.operation.metrics,
-        loaded.operation.model ?? modelOfOp(def.operation),
-        publishedOfRef(loaded.operation.sessionRef),
-        loaded.operation.value,
+    //
+    // A LIST's record is the completed PREFIX of its calls (SPEC §7.1d): each call's node is rebuilt,
+    // and the instance resumes at the first call with none — the whole list done means the operation
+    // has run. There is nothing to pour into outputs: a list's outputs all bind.
+    if (loaded.operation !== undefined && isOperationList(def.operation)) {
+      const calls = def.operation;
+      const recorded = (Array.isArray(loaded.operation) ? loaded.operation : [loaded.operation]).slice(0, calls.length);
+      instance.operation = operationListNode(
+        calls.map((call, i) => {
+          const record = recorded[i];
+          return record === undefined
+            ? undefined
+            : operationNodeOf("success", record.metrics, record.model ?? modelOfOp(call), publishedOfRef(record.sessionRef), record.value);
+        }),
       );
-      const failure = this.acceptOpOutputs(instance, def.operation.kind === "prompt" ? "prompt" : "function", loaded.operation.value, def.operation.output.kind);
+      instance.callsDone = recorded.length;
+      instance.opRun = recorded.length === calls.length;
+    } else if (loaded.operation !== undefined && def.operation !== undefined && !isOperationList(def.operation)) {
+      const record = loaded.operation as LoadedOperation;
+      instance.opRun = true;
+      instance.operation = operationNodeOf("success", record.metrics, record.model ?? modelOfOp(def.operation), publishedOfRef(record.sessionRef), record.value);
+      const failure = this.acceptOpOutputs(instance, def.operation.kind === "prompt" ? "prompt" : "function", record.value, def.operation.output.kind);
       // A recorded value failing this state's own contract should be unreachable — the definition
       // is pinned — which is exactly why it must be loud rather than smoothed into a re-dispatch.
       // Aborting too, as the other fatal site does: a load standing on a corrupt record must not
@@ -1732,7 +1768,7 @@ export class WorkflowEngine {
       }
       if (def.operation && !instance.opRun) {
         instance.opRun = true;
-        const failure = await this.runOperation(instance, def.operation);
+        const failure = await this.runOperation(instance);
         if (failure) return this.finish(instance, failureOutcome(instance), failure);
         evaluationDue = true;
         continue;
@@ -3341,7 +3377,11 @@ export class WorkflowEngine {
       // node laid over them once it exists. `{}` for the result before it has run, so a guard reading
       // `operation.outcome` gets `undefined` rather than throwing — the same shape a never-entered
       // child gets. The two halves' keys do not overlap.
-      operation: { ...(fields.operation as Record<string, unknown>), ...(instance.operation ?? {}) },
+      // A LIST lays each call's node over that call's authored fields, and the array answers for the
+      // list as a whole as well (SPEC §6.1, §7.1d).
+      operation: Array.isArray(fields.operation)
+        ? operationListView(fields.operation as Record<string, unknown>[], instance.operation as OperationListNode | undefined)
+        : { ...(fields.operation as Record<string, unknown>), ...(instance.operation ?? {}) },
       children,
       // `run.cursor` is the child the cursor is ON: the one most recently ENTERED, not the one about
       // to be. Transitions are evaluated after an operation completes or a child terminates, so "we
@@ -3724,7 +3764,9 @@ export class WorkflowEngine {
    */
   private choiceKey(instance: Instance, field: LoadedField): string | undefined {
     if (field.lifetime !== "session") return undefined;
-    const session = this.sessionFor(instance);
+    // The model of call `i` of a LIST is held for THAT call's conversation (SPEC §7.1d).
+    const call = /^operation\.(\d+)\./.exec(field.path);
+    const session = this.callSession(instance, call !== null ? Number(call[1]) : undefined);
     if ("error" in session) return undefined;
     // A session joined BY REF (`{ id }`, a `$expr` over a published session) arrives as a POSITION,
     // `<conversation>@<seq>`, and the position moves with every call. The choice is the
@@ -3901,9 +3943,31 @@ export class WorkflowEngine {
    * registry entry's capabilities (§3.1). Conversation preambles, sessions, and permission gating
    * attach exactly where they did before — only the payload shape and wiring resolution changed.
    */
-  private async runOperation(instance: Instance, op: Operation<InlineFamily>): Promise<Failure | undefined> {
+  private async runOperation(instance: Instance): Promise<Failure | undefined> {
+    const op = instance.def.operation;
+    if (op === undefined) return undefined;
+    if (!isOperationList(op)) return this.runCall(instance, op, undefined);
+    // A LIST runs its calls IN ORDER, from the first one without a result (SPEC §7.1d): a loaded
+    // instance resumes past the calls its journal recorded. The first failure ends the list — the
+    // calls after it never run — and a cut leaves the rest for the loop top, as a single call's does.
+    for (let i = instance.callsDone; i < op.length; i++) {
+      const failure = await this.runCall(instance, op[i]!, i);
+      if (failure !== undefined) return failure;
+      // A call a cut interrupted may still have COMPLETED — journaled as such — and then it is done.
+      if ((instance.operation as OperationListNode | undefined)?.[i]?.outcome === "success") instance.callsDone = i + 1;
+      if (instance.abort.signal.aborted || instance.timedOut) return undefined;
+    }
+    return undefined;
+  }
+
+  /**
+   * Run ONE call of the state's operation — the operation itself, or call `index` of a list (SPEC
+   * §7.1d), which runs in its own environment, at its own site, and publishes its node at its index.
+   */
+  private async runCall(instance: Instance, op: Operation<InlineFamily>, index: number | undefined): Promise<Failure | undefined> {
     const kind: OperationKind = op.kind === "prompt" ? "prompt" : "function";
-    this.emit({ type: "operation.started", instanceId: instance.id, stateId: instance.stateId, op: kind });
+    const at = index !== undefined ? { index } : {};
+    this.emit({ type: "operation.started", instanceId: instance.id, stateId: instance.stateId, op: kind, ...at });
     // `operationId` and `metrics` both arrive from the dispatch paths, and for the same reason: they
     // exist only once the call was actually MADE. See the EngineEvent comment — a pre-dispatch
     // failure has no dispatched op to hash and nothing to measure, and saying so by omission is more
@@ -3914,6 +3978,7 @@ export class WorkflowEngine {
         instanceId: instance.id,
         stateId: instance.stateId,
         op: kind,
+        ...at,
         ...(operationId !== undefined ? { operationId } : {}),
         failure,
         ...(metrics !== undefined ? { metrics } : {}),
@@ -3941,8 +4006,42 @@ export class WorkflowEngine {
     const opInputs: FunctionInputs = { ...instance.inputs, ...resolved.values };
 
     return op.kind === "prompt"
-      ? this.runPromptOp(instance, op, opInputs, fail)
-      : this.runFunctionOp(instance, op, opInputs, fail);
+      ? this.runPromptOp(instance, op, opInputs, fail, index)
+      : this.runFunctionOp(instance, op, opInputs, fail, index);
+  }
+
+  /**
+   * The conversation call `index` of the state's operation joins — the one binding both a call and a
+   * choice held for its session (`choiceKey`) resolve through, so the two cannot disagree.
+   *
+   * A single operation keeps the rules it always had. A call of a LIST runs in its own environment,
+   * and one that declares no session shares the STATE's fresh conversation with the list's other
+   * calls — call 1 continues where call 0 ended (SPEC §7.1d); only an explicit `null` gets one private
+   * to that call.
+   */
+  private callSession(instance: Instance, index: number | undefined): SessionBinding | { error: string } {
+    if (index === undefined) return this.sessionFor(instance);
+    const env = environmentOf(instance.def, index) ?? {};
+    return this.sessionFor(instance, env, env.session === null ? `${instance.id}#operation[${index}]` : instance.id);
+  }
+
+  /** The dispatch site of call `index`: the state's own site 0 for a single operation, `-index` on a list (SPEC §7.1d). */
+  private callScope(instance: Instance, index: number | undefined): OperationScope {
+    return index === undefined || index === 0 ? this.stateOpScope(instance) : { instanceId: instance.id, sequence: -index };
+  }
+
+  /**
+   * Publish call `index`'s node — `operation.*` for a single operation, one position of the list's
+   * node for a list, the rest of which it keeps (SPEC §6.1).
+   */
+  private settleNode(instance: Instance, index: number | undefined, node: OperationNode): void {
+    if (index === undefined) {
+      instance.operation = node;
+      return;
+    }
+    const calls = operationsOf(instance.def);
+    const previous = Array.isArray(instance.operation) ? (instance.operation as OperationListNode) : undefined;
+    instance.operation = operationListNode(calls.map((_, i) => (i === index ? node : previous?.[i]?.outcome !== undefined ? previous[i] : undefined)));
   }
 
   /**
@@ -4556,7 +4655,7 @@ export class WorkflowEngine {
      */
     environment?: ExecEnvironmentDecl,
   ): Promise<Resolved> {
-    const env = environment ?? instance.def.environment ?? {};
+    const env = environment ?? environmentOf(instance.def) ?? {};
     const resourceKey = this.bundleFor(instance, environment);
     // Its arguments are already bound into `op.input` as literals (`resolveEmbedded`), so this reads
     // them back out as values.
@@ -4632,6 +4731,8 @@ export class WorkflowEngine {
     op: FunctionOp<InlineFamily>,
     opInputs: FunctionInputs,
     fail: (f: Failure, operationId?: string, metrics?: WorkflowMetrics) => Failure,
+    /** Which call of an operation LIST this is (SPEC §7.1d); absent for a single operation. */
+    index?: number,
   ): Promise<Failure | undefined> {
     const entry: RegisteredFunction<ExecServices, WorkflowMetrics> | undefined = this.config.registry.functions.get(op.functionRef);
     if (!entry) {
@@ -4648,7 +4749,7 @@ export class WorkflowEngine {
 
     // The execution ENVIRONMENT (session, tools, permissions) is a sibling of the op, never part of
     // it (§7.1). A delegated adapter enforces policy through its own callback, so its tools stay raw.
-    const env = instance.def.environment ?? {};
+    const env = environmentOf(instance.def, index) ?? {};
     // The entry's capabilities are REQUIRED and total per variant (§2), so this reads a definite value
     // instead of falling through an `undefined` and silently defaulting the permission gate.
     const delegates = entry.kind === "runtime" && entry.capabilities.policyEnforcement === "callback";
@@ -4666,7 +4767,7 @@ export class WorkflowEngine {
      */
     let session: SessionBinding | undefined;
     if (entry.kind === "runtime" && entry.capabilities.sessionResume) {
-      const resolved = this.sessionFor(instance);
+      const resolved = this.callSession(instance, index);
       // A `{ expr }` session that cannot be read is PERMANENT: retrying re-evaluates the same
       // expression against the same data and fails the same way.
       if ("error" in resolved) return fail({ classification: "permanent", reason: resolved.error });
@@ -4676,11 +4777,12 @@ export class WorkflowEngine {
     // position — a position moves on every call, and a `"session"`-scoped approval that moved with
     // it would cover exactly one operation (DESIGN.md §5.1). The two agree except when a session was
     // named by an EXPRESSION, where only the resolved binding knows the name it evaluated to.
-    const resourceKey = session?.resourceKey ?? instance.resourceKey;
+    // A call of a LIST names its bundle through its own environment, as a binding's own call does.
+    const resourceKey = session?.resourceKey ?? (index === undefined ? instance.resourceKey : this.bundleFor(instance, env));
     const toolsOrFailure = this.resolveTools(env, resourceKey, delegates, instance.id);
     if ("failure" in toolsOrFailure) return fail(toolsOrFailure.failure);
 
-    const scope = this.stateOpScope(instance);
+    const scope = this.callScope(instance, index);
     const services = await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, session, toolsOrFailure.gate, scope, "function", toolsOrFailure.authored);
     // Errors are DATA (§4.2): the impl RESOLVES value-or-failure, so a 429 raised inside a registered
     // function keeps its classification instead of being reconstructed from `err.name` — which is what
@@ -4721,33 +4823,33 @@ export class WorkflowEngine {
     // loader has no registry, so it cannot tell a delegated adapter from a host helper, and widening
     // the type for every function op would trade a load-time error for a value that is usually
     // undefined. Wiring one agent's conversation into a later state is done by NAME today.
-    instance.operation = operationNodeOf(
-      isOk(outcome) ? "success" : "error",
-      metrics,
-      modelOfOp(op),
-      undefined,
-      isOk(outcome) ? outcome.value : undefined,
+    this.settleNode(
+      instance,
+      index,
+      operationNodeOf(isOk(outcome) ? "success" : "error", metrics, modelOfOp(op), undefined, isOk(outcome) ? outcome.value : undefined),
     );
     if (instance.abort.signal.aborted || instance.timedOut) {
       // The CUT is visible now. This used to return with no event at all, so a stopped call's
       // journal ended at `operation.started` and a run parked on a person read exactly like one
       // that hung. The call settled — the executor classifies a cut as `interrupted` and keeps the
       // partial — so the journal says so, and the loop top still owns what happens to the instance.
-      this.emitAbortedSettle(instance, "function", operationId, outcome, metrics);
+      this.emitAbortedSettle(instance, "function", operationId, outcome, metrics, index);
       return undefined; // loop top handles
     }
     if (!isOk(outcome)) return fail(outcome.error, operationId, metrics);
     // The op's declared output KIND decides how its value is read — a `blob` output IS the value
     // (bytes), any other kind is a record of named outputs. Omitting it here left the blob branch
     // unreachable from the function path, so a function op producing a `Uint8Array` failed with "did
-    // not produce required output" about the file it had just produced (§7.1).
-    const failure = this.acceptOpOutputs(instance, "function", outcome.value, op.output.kind);
+    // not produce required output" about the file it had just produced (§7.1). A LIST's result is
+    // read through its outputs' bindings alone (§7.1d), so a call of one pours nothing.
+    const failure = index === undefined ? this.acceptOpOutputs(instance, "function", outcome.value, op.output.kind) : undefined;
     if (failure) return fail(failure, operationId, metrics);
     this.emit({
       type: "operation.completed",
       instanceId: instance.id,
       stateId: instance.stateId,
       op: "function",
+      ...(index !== undefined ? { index } : {}),
       ...(operationId !== undefined ? { operationId } : {}),
       ...(metrics !== undefined ? { metrics } : {}),
     });
@@ -4760,13 +4862,15 @@ export class WorkflowEngine {
     op: PromptOp<InlineFamily>,
     opInputs: FunctionInputs,
     fail: (f: Failure, operationId?: string, metrics?: WorkflowMetrics) => Failure,
+    /** Which call of an operation LIST this is (SPEC §7.1d); absent for a single operation. */
+    index?: number,
   ): Promise<Failure | undefined> {
     const promptExecutor = this.config.prompt;
     if (!promptExecutor) {
       return fail({ classification: "permanent", reason: "this workflow contains a prompt state but no prompt executor is wired in (EngineConfig.prompt)" });
     }
 
-    const env = instance.def.environment ?? {};
+    const env = environmentOf(instance.def, index) ?? {};
     // The two halves one `sessionId` used to be (DESIGN.md §1.6).
     //
     // `session.id` is the CONVERSATION — which transcript this call joins. A declared name joins that
@@ -4778,7 +4882,7 @@ export class WorkflowEngine {
     // `session.resourceKey` is the RESOURCE BUNDLE — workspace, permission ledger, approval scope. It
     // is inherited from the enclosing instance and does not move when the conversation does, which is
     // what keeps one worktree and one set of approvals across a retry, a loop iteration or a fork.
-    const session = this.sessionFor(instance);
+    const session = this.callSession(instance, index);
     // A `{ expr }` session that cannot be read is PERMANENT: retrying re-evaluates the same
     // expression against the same instance data and fails the same way.
     if ("error" in session) return fail({ classification: "permanent", reason: session.error });
@@ -4819,7 +4923,10 @@ export class WorkflowEngine {
     // A BLOB-kind op output is the exception (§7.1): the operation produces bytes, not a JSON record
     // of named outputs, so overwriting its schema with the object contract would ask a model for JSON
     // and then hand back a file. Its schema is left alone and the bytes fill the single produced slot.
-    const producedSlots = this.producedOutputSlots(instance.def);
+    //
+    // A call of a LIST is never handed the state's outputs as its contract: the state's outputs read
+    // the list's result through their bindings, and each call says what it returns itself (§7.1d).
+    const producedSlots = index === undefined ? this.producedOutputSlots(instance.def) : {};
     const produced = op.output.kind === "blob" ? undefined : buildOutputSchema(producedSlots, instance.def);
     const resolvedOp: PromptOp<InlineFamily> = {
       ...op,
@@ -4831,7 +4938,7 @@ export class WorkflowEngine {
     // cancellation — are `ExecServices` fields now, which is why that type could be deleted outright.
     // The gate rides along exactly as it does on the function path: inert for a composed transport,
     // and the ONLY carrier of authored modes and the session profile for a delegated one.
-    const scope = this.stateOpScope(instance);
+    const scope = this.callScope(instance, index);
     const services = await this.servicesFor(session.resourceKey, instance, tools, session, toolsOrFailure.gate, scope, "prompt", toolsOrFailure.authored);
     // An authored `limits.timeout` reaches the call as CANCELLATION. It used to be published as
     // `services.timeoutMs`, which only an executor that knew to read it honoured — and which the llm
@@ -4858,17 +4965,15 @@ export class WorkflowEngine {
     // call is exactly when a guard most wants to read what it cost and where the conversation ended
     // up, and a node written only on the happy path would be missing then.
     const published = this.publish(services.session, session);
-    instance.operation = operationNodeOf(
-      isOk(outcome) ? "success" : "error",
-      outcome.metrics,
-      modelOfOp(resolvedOp),
-      published,
-      isOk(outcome) ? outcome.value : undefined,
+    this.settleNode(
+      instance,
+      index,
+      operationNodeOf(isOk(outcome) ? "success" : "error", outcome.metrics, modelOfOp(resolvedOp), published, isOk(outcome) ? outcome.value : undefined),
     );
     if (instance.abort.signal.aborted || instance.timedOut) {
       // Same as the function path: the cut settles in the journal instead of vanishing after
       // `operation.started`, and the loop top still owns the instance's fate.
-      this.emitAbortedSettle(instance, "prompt", operationId, outcome, outcome.metrics);
+      this.emitAbortedSettle(instance, "prompt", operationId, outcome, outcome.metrics, index);
       return undefined; // loop top handles
     }
 
@@ -4884,13 +4989,14 @@ export class WorkflowEngine {
     // `{ conversation }` binding in this state's outputs sees what the call just added.
     await this.refreshTranscript(published.id, session.id, published.end.id);
 
-    const failure = this.acceptOpOutputs(instance, "prompt", (outcome.value ?? null) as ResolvedValue, op.output.kind);
+    const failure = index === undefined ? this.acceptOpOutputs(instance, "prompt", (outcome.value ?? null) as ResolvedValue, op.output.kind) : undefined;
     if (failure) return fail(failure, operationId, outcome.metrics);
     this.emit({
       type: "operation.completed",
       instanceId: instance.id,
       stateId: instance.stateId,
       op: "prompt",
+      ...(index !== undefined ? { index } : {}),
       ...(operationId !== undefined ? { operationId } : {}),
       metrics: outcome.metrics,
     });
@@ -5054,13 +5160,17 @@ export class WorkflowEngine {
     operationId: string | undefined,
     outcome: { value?: unknown; error?: Failure },
     metrics: WorkflowMetrics | undefined,
+    /** Which call of an operation LIST settled (SPEC §7.1d); absent for a single operation. */
+    index?: number,
   ): void {
+    const at = index !== undefined ? { index } : {};
     if (isOk(outcome as never)) {
       this.emit({
         type: "operation.completed",
         instanceId: instance.id,
         stateId: instance.stateId,
         op,
+        ...at,
         ...(operationId !== undefined ? { operationId } : {}),
         ...(metrics !== undefined ? { metrics } : {}),
       });
@@ -5073,6 +5183,7 @@ export class WorkflowEngine {
       instanceId: instance.id,
       stateId: instance.stateId,
       op,
+      ...at,
       ...(operationId !== undefined ? { operationId } : {}),
       failure,
       ...(metrics !== undefined ? { metrics } : {}),
@@ -5129,12 +5240,16 @@ export class WorkflowEngine {
       services.scope = scope;
       // hw's half of the dispatch seam: the record layer fires this AFTER the row is inserted and
       // BEFORE the provider call, so this event never names a row that was not written.
+      // A call of an operation LIST dispatches at `-index` (`callScope`), which is how its row says
+      // which call it was (SPEC §7.1d).
+      const index = isOperationList(instance.def.operation) && scope.sequence <= 0 ? Math.abs(scope.sequence) : undefined;
       services.onDispatch = (dispatch): void =>
         this.emit({
           type: "operation.dispatched",
           instanceId: instance.id,
           stateId: instance.stateId,
           op: opKind,
+          ...(index !== undefined ? { index } : {}),
           operationId: dispatch.id,
         });
     } else {
@@ -5206,7 +5321,7 @@ export class WorkflowEngine {
     /** What a fresh conversation is keyed on: the instance, or one call site inside it. */
     freshKey: string = instance.id,
   ): SessionBinding | { error: string } {
-    const env = environment ?? instance.def.environment ?? {};
+    const env = environment ?? environmentOf(instance.def) ?? {};
     // NORMALIZED by the loader (`normalizeSession`), so a name arriving here already carries the
     // scope of the state that WROTE it — including one an ancestor's `environment` supplied, which
     // is the case the origin-time normalization exists for: after the merge a root's declaration and
@@ -5551,8 +5666,11 @@ export class WorkflowEngine {
    * wins the unpositioned alias, exactly as last-write-wins does live.
    */
   private async seedTranscripts(loaded: LoadedInstance): Promise<void> {
-    const published = publishedOfRef(loaded.operation?.sessionRef);
-    if (published !== undefined) await this.refreshTranscript(published.id, published.end.id);
+    const records = loaded.operation === undefined ? [] : Array.isArray(loaded.operation) ? loaded.operation : [loaded.operation];
+    for (const record of records as readonly LoadedOperation[]) {
+      const published = publishedOfRef(record.sessionRef);
+      if (published !== undefined) await this.refreshTranscript(published.id, published.end.id);
+    }
     for (const child of loaded.children ?? []) await this.seedTranscripts(child);
   }
 }

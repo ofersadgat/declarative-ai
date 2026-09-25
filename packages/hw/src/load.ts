@@ -74,8 +74,14 @@ export interface LoadedInstance {
   /** How a terminated instance ended. Ignored when `live`. */
   outcome?: TerminationOutcome;
   failure?: Failure;
-  /** The state's own operation, when it COMPLETED. A live instance without one re-dispatches. */
-  operation?: LoadedOperation;
+  /**
+   * The state's own operation, when it COMPLETED. A live instance without one re-dispatches.
+   *
+   * For an operation LIST (SPEC §7.1d), one record per completed call, in list order — the completed
+   * PREFIX, read off the `operation.completed` rows by their `index`. A live instance resumes at the
+   * first call without one; a record for every call means the operation has run.
+   */
+  operation?: LoadedOperation | readonly LoadedOperation[];
   /**
    * Children that finished and were never answered by an evaluation round — finished after the
    * parent's last advancement (a transition taken, or a later child entered). These seed

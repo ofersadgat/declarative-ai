@@ -108,6 +108,37 @@ export interface PromptOperationNode extends OperationNodeCore {
 
 export type OperationNode = OperationNodeCore | PromptOperationNode;
 
+/**
+ * `operation.*` for an operation LIST (SPEC §7.1d): one node per call, in list order, and the array
+ * ALSO answering for the list as a whole — the move `.children.<key>` makes with its passes, so
+ * `.operation[1].output` and `.operation.output` are one value read two ways rather than two that can
+ * drift.
+ *
+ * A call that has not run is `{}`, the same shape a never-run single operation reads as.
+ */
+export type OperationListNode = OperationNode[] & {
+  /** Every call's result, in list order — `undefined` at a call that has not returned. */
+  output?: JsonValue;
+  /** The first call's outcome that is not `success`; `success` once every call succeeded. */
+  outcome?: string;
+  /** What the calls that ran cost, summed. */
+  cost?: number;
+};
+
+/** What a state's `operation.*` holds: one call's node, or a list's. */
+export type StateOperationNode = OperationNode | OperationListNode;
+
+/** Build a list's node from its calls' nodes so far — `length` calls, `undefined` where one has not run. */
+export function operationListNode(nodes: readonly (OperationNode | undefined)[]): OperationListNode {
+  const list = nodes.map((node) => node ?? {}) as OperationListNode;
+  list.output = nodes.map((node) => (node as PromptOperationNode | undefined)?.output) as JsonValue;
+  const failed = nodes.find((node) => node?.outcome !== undefined && node.outcome !== "success");
+  const outcome = failed?.outcome ?? (nodes.every((node) => node?.outcome === "success") ? "success" : undefined);
+  if (outcome !== undefined) list.outcome = outcome;
+  if (nodes.some((node) => node?.cost !== undefined)) list.cost = nodes.reduce((sum, node) => sum + (node?.cost ?? 0), 0);
+  return list;
+}
+
 const STRING: JsonValue = { type: "string" };
 const NUMBER: JsonValue = { type: "number" };
 
@@ -169,6 +200,31 @@ export function operationNodeSchema(
   // Closed, for the same reason `session` is: a typo in a metadata field name should be a lint
   // error, and every field this namespace has is listed right here.
   return { type: "object", properties, additionalProperties: false };
+}
+
+/**
+ * The schema for `operation.*` on a state whose operation is a LIST (SPEC §7.1d): a TUPLE of the
+ * calls' own node schemas, so `.operation[1].output.x` is checked against call 1's return, with the
+ * list-wide fields the array also answers — `output` (the tuple of the calls' results), `outcome` and
+ * `cost` — declared on it as properties, the way a child's passes are typed.
+ *
+ * `usage` and `model` are per call only: a list has no one model, and a summed measurement record is
+ * a record nobody measured.
+ */
+export function operationListSchema(calls: readonly JsonSchema[]): JsonSchema {
+  const outputs = calls.map((call) => {
+    const output = (call.properties as Record<string, JsonValue> | undefined)?.["output"];
+    return output === undefined ? {} : output;
+  });
+  return {
+    type: "array",
+    prefixItems: calls as JsonValue[],
+    properties: {
+      output: { type: "array", prefixItems: outputs },
+      outcome: { type: "string", enum: [...OPERATION_OUTCOMES] },
+      cost: NUMBER,
+    },
+  };
 }
 
 /**

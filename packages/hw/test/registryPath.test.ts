@@ -22,6 +22,7 @@ import type { EntrySignature, InlineFamily, Operation, Signature } from "@declar
 import { loadBundle } from "../src/loader.js";
 import { REGISTRY_ROOT, resolveReference, type Vfs } from "../src/reference.js";
 import type { StateDef } from "../src/format.js";
+import { operationsOf } from "../src/format.js";
 
 const OPS = "/p/ops";
 
@@ -159,7 +160,7 @@ describe("a state's own operation resolves its callee the same way", () => {
     });
 
   const stateOp = (op: Record<string, unknown>, opts: { files?: Record<string, string> } = {}): Operation<InlineFamily> =>
-    stateBundle(op, opts).states["s"]!.operation!;
+    operationsOf(stateBundle(op, opts).states["s"]!)[0]!;
 
   /**
    * An operation the loader could not build is carried as DATA and reported by the validator, rather

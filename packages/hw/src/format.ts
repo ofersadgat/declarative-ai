@@ -1062,8 +1062,9 @@ export interface StateDef {
   inputs?: Record<string, ParameterDecl>;
   outputs?: Record<string, NamedParameterDecl>;
   /** The state's operation (§7.1). A state with children and no operation is a pure composite;
-   *  `{}` means "the operation my `environment` chain describes". */
-  operation?: OperationDecl;
+   *  `{}` means "the operation my `environment` chain describes". An ARRAY is a list of calls run in
+   *  order, whose result is the array of their results (SPEC §7.1d); each element inherits alone. */
+  operation?: OperationDecl | OperationDecl[];
   /** Defaults for this state's operation AND every descendant's (§5). */
   environment?: EnvironmentDecl;
   children?: Record<string, ChildDecl>;
@@ -1149,9 +1150,19 @@ export interface LoadedState
   fields?: LoadedField[];
   inputs?: Record<string, Parameter<InlineFamily>>;
   outputs?: Record<string, NamedParameter<InlineFamily>>;
-  operation?: Operation<InlineFamily>;
-  /** The merged execution environment this state's operation runs under. */
-  environment?: ExecEnvironmentDecl;
+  /**
+   * The state's operation — shaped as it was WRITTEN: one call, or the list of calls an authored
+   * array lowers to (SPEC §7.1d). The shape is a fact about the state, not about how many calls there
+   * are: `[op]` is a list of one, and its result is a one-element array. {@link operationsOf} reads
+   * either as the calls in order.
+   */
+  operation?: Operation<InlineFamily> | readonly Operation<InlineFamily>[];
+  /**
+   * The merged execution environment this state's operation runs under — for a LIST, one per call,
+   * aligned with `operation`, since each call is merged over the chain on its own (SPEC §7.1d).
+   * {@link environmentOf} reads the one a call runs in.
+   */
+  environment?: ExecEnvironmentDecl | readonly ExecEnvironmentDecl[];
   /**
    * The session this state's SUBTREE resolves in — its own `environment.session` merged over what the
    * chain supplied, whether or not this state declares an operation.
@@ -1245,6 +1256,33 @@ export interface LoadedState
    * without an error.
    */
   fanOut?: readonly string[];
+}
+
+/**
+ * A state's calls, in the order they run: the one call of a single operation, or every element of a
+ * list (SPEC §7.1d). Empty for a pure composite.
+ */
+export function operationsOf(def: Pick<LoadedState, "operation">): readonly Operation<InlineFamily>[] {
+  const op = def.operation;
+  if (op === undefined) return [];
+  return isOperationList(op) ? op : [op];
+}
+
+/** Whether an operation was written as a LIST — which decides that its result is an array (§7.1d). */
+export function isOperationList(op: LoadedState["operation"]): op is readonly Operation<InlineFamily>[] {
+  return Array.isArray(op);
+}
+
+/**
+ * The environment call `index` runs under: the state's one environment for a single operation, the
+ * call's own for a list. With no index, the environment of the STATE — a single operation's, and
+ * nothing for a list, whose calls each have their own and none of which is the state's (§7.1d).
+ */
+export function environmentOf(def: Pick<LoadedState, "environment">, index?: number): ExecEnvironmentDecl | undefined {
+  const env = def.environment;
+  if (env === undefined) return undefined;
+  if (!Array.isArray(env)) return env as ExecEnvironmentDecl;
+  return index === undefined ? undefined : (env as readonly ExecEnvironmentDecl[])[index];
 }
 
 /** One `prefix*` output: republish every output of `child`, prefixed, as this state's own (§3.4). */

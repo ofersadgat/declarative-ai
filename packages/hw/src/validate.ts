@@ -28,7 +28,7 @@ import { forbiddenFieldRead, isFieldRoot } from "./fields.js";
 import { EXPRESSION_REFS, pathOfRef, referencePathsOf } from "./lowerExpr.js";
 import { embeddedOpsOf } from "./resolve.js";
 import { isSessionExpr, isSessionRef, validateSessionDecl } from "./session.js";
-import { operationNodeSchema } from "./operationNode.js";
+import { operationListSchema, operationNodeSchema } from "./operationNode.js";
 import { NAME_KEY } from "./scope.js";
 import { ANY_SCHEMA, inferExpression, inferRef, isBooleanSchema, isUniversalSchema, type ExprScope } from "./inferExpr.js";
 import {
@@ -38,7 +38,10 @@ import {
   EVENT_NAMESPACE,
   FIELD_NAMESPACES,
   GUARD_NAMESPACES,
+  environmentOf,
   hasDefault,
+  isOperationList,
+  operationsOf,
   REF_NAMESPACES,
   RESOLVER_REFS,
   TERMINATE_TARGETS,
@@ -199,7 +202,10 @@ function validateState(
     if (session !== undefined && session !== null && !isSessionExpr(session) && !isSessionRef(session)) {
       err(path, `a binding's environment.session must be null (a fresh conversation) or a ref expression, not a session name`);
     }
-    if (path === "operation.prompt") {
+    // Which call a field of the operation belongs to — the state's one, or one of a list's, whose
+    // path carries its index (`operation.1.prompt`, SPEC §7.1d).
+    const onCall = callOfFieldPath(def, path);
+    if (onCall?.field === "prompt") {
       // A template string, or a prompt passed BY VALUE (SPEC §7.1) — either, and nothing else.
       const schema = typed(field.ref);
       if (!isUniversalSchema(schema) && schema.type !== "string" && !(isCallableSchema(schema) && schema.kind === "prompt")) {
@@ -215,8 +221,8 @@ function validateState(
     }
     // A bound callee (§7.1): what the state passes is checked against the SIGNATURE the field infers
     // to, since there is no declaration a name would have resolved to.
-    if (path === "operation.function" && def.operation?.kind === "function") {
-      checkAgainstBoundCallee(def.operation, typed(field.ref), path, def, typed, err);
+    if (onCall?.field === "function" && onCall.op?.kind === "function") {
+      checkAgainstBoundCallee(onCall.op, typed(field.ref), path, def, typed, err);
     }
   }
 
@@ -290,8 +296,12 @@ function validateState(
   // `environment` supplied. The empty string is the case worth catching at load time: `""` would
   // otherwise start an isolated conversation and report success, which is the failure mode that
   // makes `null` the only explicit "fresh" marker.
-  const sessionComplaint = validateSessionDecl(def.environment?.session);
-  if (sessionComplaint !== undefined) err("operation.session", sessionComplaint);
+  const calls = operationsOf(def);
+  const list = isOperationList(def.operation);
+  for (const i of calls.keys()) {
+    const sessionComplaint = validateSessionDecl(environmentOf(def, list ? i : undefined)?.session);
+    if (sessionComplaint !== undefined) err(`${callPath(list, i)}.session`, sessionComplaint);
+  }
 
   // A `session` whose SCOPE could not be resolved — an `in` or a `join` naming no ancestor, or a
   // `join` whose target declares nothing (DESIGN.md §1.6). Answered by the loader rather than here
@@ -495,9 +505,10 @@ function validateState(
   }
 
   // --- operation --------------------------------------------------------------
-  if (def.operation) {
-    checkOperation(def.operation, "operation", id, def, bundle, scope, reachable, errors, warn, env);
+  for (const [i, op] of calls.entries()) {
+    checkOperation(op, callPath(list, i), list ? `operation.${i}` : "operation", id, def, bundle, scope, reachable, errors, warn, env);
   }
+  if (list) checkOperationList(def, calls, err);
 
   // A state with nothing to run and nothing to compute. Both halves matter: an output with a BINDING
   // is resolved when the state terminates (§3.7), so a state whose outputs all bind is a pure
@@ -572,9 +583,91 @@ function literalModelOf(op: Extract<Operation<InlineFamily>, { kind: "prompt" }>
   return typeof model === "string" && model.length > 0 ? model : undefined;
 }
 
+/** Where a call is reported: `operation`, or one call of a list as `operation[i]`. */
+function callPath(list: boolean, index: number): string {
+  return list ? `operation[${index}]` : "operation";
+}
+
+/**
+ * The call a computed field of the operation belongs to, and which of its fields it is: `prompt` of
+ * `operation.prompt`, or of `operation.1.prompt` on a list (SPEC §7.1d). Undefined off the operation.
+ */
+function callOfFieldPath(def: LoadedState, path: string): { op?: Operation<InlineFamily>; field: string } | undefined {
+  const match = /^operation(?:\.(\d+))?\.([^.]+)$/.exec(path);
+  if (match === null) return undefined;
+  const calls = operationsOf(def);
+  const op = match[1] === undefined ? (isOperationList(def.operation) ? undefined : calls[0]) : calls[Number(match[1])];
+  return { ...(op !== undefined ? { op } : {}), field: match[2]! };
+}
+
+/**
+ * What only an operation LIST can get wrong (SPEC §7.1d).
+ *
+ * Every declared output must BIND: a list's result is an array, which has no names to pour into
+ * unbound slots the way a single call's record does — so an unbound output would never be filled.
+ *
+ * And a call may read only the calls BEFORE it. `.operation[j]` in call i's own bindings is read when
+ * call i is made, so a `j` at or after `i` names a value that cannot exist yet; an unindexed read of
+ * `.operation` names every call, this one included.
+ */
+function checkOperationList(def: LoadedState, calls: readonly Operation<InlineFamily>[], err: (path: string, message: string) => void): void {
+  for (const [name, slot] of Object.entries(def.outputs ?? {})) {
+    if (slot.binding !== undefined) continue;
+    err(`outputs.${name}`, `a state whose operation is a list must bind every output — the list returns an array, which has no '${name}' to fill it with; bind it, e.g. '.operation[${calls.length - 1}].output.${name}'`);
+  }
+  for (const [i, op] of calls.entries()) {
+    const bindings: Array<[string, Ref<InlineFamily>]> = [];
+    for (const [name, p] of Object.entries(op.input)) if (p.binding !== undefined) bindings.push([`operation[${i}].input.${name}`, p.binding]);
+    for (const [j, ref] of (op.spread ?? []).entries()) bindings.push([`operation[${i}].spread[${j}]`, ref]);
+    for (const [where, ref] of bindings) {
+      const read = operationCallsRead(ref, calls.length);
+      if (read.whole) err(where, `call ${i} reads '.operation' as a whole, which includes itself and every call after it — index the call it means, '.operation[j]' with j < ${i}`);
+      for (const j of read.indices) {
+        if (j >= i) err(where, `call ${i} reads '.operation[${j}]', which ${j === i ? "is this call" : "runs after it"} — a call can read only the calls before it`);
+      }
+    }
+  }
+}
+
+/**
+ * Which calls of an operation list a binding reads: `.operation[j]` at a literal `j` (counted from the
+ * end when negative), and `whole` for any other read of `.operation` — `.operation.output`, or an
+ * index computed at run time, which could be any of them.
+ */
+function operationCallsRead(ref: Ref<InlineFamily>, count: number): { indices: number[]; whole: boolean } {
+  const indices: number[] = [];
+  let whole = false;
+  const walk = (node: Ref<InlineFamily>): void => {
+    const path = pathOfRef(node);
+    if (path !== undefined) {
+      if (path[0] === "operation") whole = true;
+      return;
+    }
+    if (!("op" in node)) return;
+    const producer = node.op;
+    if (typeof producer === "string" || producer.kind !== "function") return;
+    if (producer.functionRef === "at") {
+      const value = producer.input["value"]?.binding;
+      const index = producer.input["index"]?.binding;
+      const literal = index !== undefined && "json" in index ? index.json : undefined;
+      if (value !== undefined && pathOfRef(value)?.join(".") === "operation" && typeof literal === "number" && Number.isInteger(literal)) {
+        indices.push(literal < 0 ? count + literal : literal);
+        return;
+      }
+    }
+    for (const p of Object.values(producer.input)) if (p.binding !== undefined) walk(p.binding);
+    for (const s of producer.spread ?? []) walk(s);
+    for (const p of Object.values(node.parameters ?? {})) if (p.binding !== undefined) walk(p.binding);
+  };
+  walk(ref);
+  return { indices, whole };
+}
+
 function checkOperation(
   op: Operation<InlineFamily>,
   path: string,
+  /** Where this call's computed fields are found — `operation`, or `operation.<i>` on a list. */
+  fieldPrefix: string,
   stateId: string,
   def: LoadedState,
   bundle: WorkflowBundle,
@@ -589,7 +682,7 @@ function checkOperation(
   };
   /** How this state types one binding — see {@link typeOf}. */
   const typed = typeOf(stateId, def, bundle, scope, reachable, errors, false);
-  const boundPrompt = def.fields?.some((f) => f.path === "operation.prompt") === true;
+  const boundPrompt = def.fields?.some((f) => f.path === `${fieldPrefix}.prompt`) === true;
   if (op.kind === "function") {
     if (typeof op.functionRef !== "string" || op.functionRef.length === 0) {
       err(`${path}.function`, "a function operation must name a function");
@@ -986,8 +1079,10 @@ const EMPTY_SLOT_SET: ReadonlySet<string> = new Set<string>();
 
 /** Every binding a state carries, with the field that named it — guards included. */
 function* bindingsOf(def: LoadedState): Iterable<[string, Ref<InlineFamily>]> {
-  const op = def.operation;
-  if (op) for (const [name, p] of Object.entries(op.input)) if (p.binding) yield [`operation.input.${name}`, p.binding];
+  const list = isOperationList(def.operation);
+  for (const [i, op] of operationsOf(def).entries()) {
+    for (const [name, p] of Object.entries(op.input)) if (p.binding) yield [`${callPath(list, i)}.input.${name}`, p.binding];
+  }
   for (const [name, slot] of Object.entries(def.outputs ?? {})) if (slot.binding) yield [`outputs.${name}`, slot.binding];
   for (const [name, slot] of Object.entries(def.inputs ?? {})) if (slot.binding) yield [`inputs.${name}`, slot.binding];
   for (const [key, child] of Object.entries(def.children ?? {})) {
@@ -1620,14 +1715,52 @@ function reachabilityOf(def: LoadedState): Reachability {
  * synthesizes when the author declared none. Reading the authored file instead would type the
  * namespace against a declaration that is often absent.
  */
-function outputDeclOf(def: LoadedState): { name: string; kind?: string; schema?: JsonValue } | undefined {
-  const output = (def as { operation?: { output?: { name?: unknown; kind?: unknown; schema?: unknown } } }).operation?.output;
+function outputDeclOf(op: Operation<InlineFamily>): { name: string; kind?: string; schema?: JsonValue } | undefined {
+  const output = (op as { output?: { name?: unknown; kind?: unknown; schema?: unknown } }).output;
   if (output === undefined || typeof output.name !== "string") return undefined;
   return {
     name: output.name,
     ...(typeof output.kind === "string" ? { kind: output.kind } : {}),
     ...(output.schema !== undefined ? { schema: output.schema as JsonValue } : {}),
   };
+}
+
+/** What `.environment` reads as for one call. */
+const ENVIRONMENT_SCHEMA: JsonSchema = {
+  type: "object",
+  properties: {
+    tools: { type: "array", items: { type: "string" } } as JsonValue,
+    session: {} as JsonValue,
+    permissions: { type: "object" } as JsonValue,
+  },
+};
+
+/**
+ * The schema of a state's `operation.*` (SPEC §6.1): its call's node, or a TUPLE of its calls' nodes
+ * for a list (§7.1d). Undefined for a state with no operation, so `operation.cost` there is an
+ * unresolved reference rather than an object of unknowns.
+ *
+ * `authored` adds the AUTHORED fields (§5.3) the state reads under the same root — `prompt`,
+ * `system`, `function`, `config` — which only the state's own view has: a CHILD's `operation` is the
+ * result node alone.
+ */
+function operationSchemaOf(def: LoadedState, authored: boolean): JsonSchema | undefined {
+  const callSchema = (op: Operation<InlineFamily>): JsonSchema => {
+    const node = operationNodeSchema(op.kind === "prompt" ? "prompt" : "function", outputDeclOf(op))!;
+    if (!authored) return node;
+    return {
+      ...node,
+      properties: {
+        ...(node.properties as Record<string, JsonValue>),
+        ...(op.kind === "prompt" ? { prompt: STRING_SCHEMA, system: STRING_SCHEMA } : { function: {} }),
+        // Open beyond the knobs hw knows, so a bound `providerOptions.x` is readable.
+        config: { type: "object", properties: { ...CONFIG_FIELD_SCHEMAS } as Record<string, JsonValue>, additionalProperties: {} } as JsonValue,
+      },
+    };
+  };
+  const op = def.operation;
+  if (op === undefined) return undefined;
+  return isOperationList(op) ? operationListSchema(op.map(callSchema)) : callSchema(op);
 }
 
 /**
@@ -1664,9 +1797,7 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle, seen: ReadonlySet
     // A child's own operation node, typed by ITS operation's kind — so
     // `children.plan.operation.output.session` is checked against what `plan` actually runs, and
     // pointing it at a `ui` gate is a load-time error rather than a runtime undefined.
-    const childOperation = childState
-      ? operationNodeSchema(childState.operation?.kind, outputDeclOf(childState))
-      : undefined;
+    const childOperation = childState ? operationSchemaOf(childState, false) : undefined;
     const passProperties: Record<string, JsonValue> = {
       output: outputs as JsonValue,
       outcome: outcomeSchema,
@@ -1684,19 +1815,7 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle, seen: ReadonlySet
   //
   // The node carries the call's RESULT; the state's AUTHORED operation fields (§5.3) sit beside them
   // under the same root — `prompt`, `system`, `function`, `config` — and the key sets do not overlap.
-  const node = operationNodeSchema(def.operation?.kind, outputDeclOf(def));
-  const operation: JsonSchema | undefined =
-    node === undefined
-      ? undefined
-      : {
-          ...node,
-          properties: {
-            ...(node.properties as Record<string, JsonValue>),
-            ...(def.operation?.kind === "prompt" ? { prompt: STRING_SCHEMA, system: STRING_SCHEMA } : { function: {} }),
-            // Open beyond the knobs hw knows, so a bound `providerOptions.x` is readable.
-            config: { type: "object", properties: { ...CONFIG_FIELD_SCHEMAS } as Record<string, JsonValue>, additionalProperties: {} } as JsonValue,
-          },
-        };
+  const operation = operationSchemaOf(def, true);
 
   const sequenceKeys = def.sequence ?? [];
 
@@ -1705,14 +1824,8 @@ function exprScopeOf(def: LoadedState, bundle: WorkflowBundle, seen: ReadonlySet
     title: STRING_SCHEMA,
     label: STRING_SCHEMA,
     description: STRING_SCHEMA,
-    environment: {
-      type: "object",
-      properties: {
-        tools: { type: "array", items: { type: "string" } } as JsonValue,
-        session: {} as JsonValue,
-        permissions: { type: "object" } as JsonValue,
-      },
-    },
+    // One per call on an operation LIST (SPEC §7.1d), as `operation` is.
+    environment: isOperationList(def.operation) ? { type: "array", items: ENVIRONMENT_SCHEMA as JsonValue } : ENVIRONMENT_SCHEMA,
     inputs: objectOf(def.inputs),
     // The state's OWN outputs, through the same reader a CHILD's go through — so an output that
     // adopts its binding's type adopts it for `.outputs.<name>` here as well. A second output

@@ -408,10 +408,29 @@ function recordSchema(entries: readonly (readonly [string, JsonSchema])[]): Json
   return { type: "object", properties, required: entries.map(([name]) => name), additionalProperties: false };
 }
 
-/** An array schema's element type, or the universal schema when it declares none. */
+/**
+ * An array schema's element type, or the universal schema when it declares none. A TUPLE with no
+ * `items` (an operation list's result, SPEC §7.1d) has the join of its positions as its element type.
+ */
 function itemsOf(s: JsonSchema): JsonSchema {
   const items = s.items;
-  return items !== null && typeof items === "object" && !Array.isArray(items) ? (items as JsonSchema) : ANY_SCHEMA;
+  if (items !== null && typeof items === "object" && !Array.isArray(items)) return items as JsonSchema;
+  const tuple = tupleOf(s);
+  return tuple !== undefined && tuple.length > 0 ? tuple.reduce(joinSchemas) : ANY_SCHEMA;
+}
+
+/** A tuple schema's positions (`prefixItems`), or undefined when it declares none. */
+function tupleOf(s: JsonSchema): JsonSchema[] | undefined {
+  const prefix = s.prefixItems;
+  return Array.isArray(prefix) ? (prefix as JsonSchema[]) : undefined;
+}
+
+/** The position a literal index names in a tuple — counted from the end when negative, as `at` does. */
+function tupleAt(s: JsonSchema, index: JsonSchema): JsonSchema | undefined {
+  const tuple = tupleOf(s);
+  const i = "const" in index ? index.const : undefined;
+  if (tuple === undefined || typeof i !== "number" || !Number.isInteger(i)) return undefined;
+  return tuple[i < 0 ? tuple.length + i : i];
 }
 
 const arrayOf = (items: JsonSchema): JsonSchema => ({ type: "array", items: items as JsonValue });
@@ -477,7 +496,15 @@ export function builtinResult(name: string, args: readonly JsonSchema[]): JsonSc
     case "concat":
       // Array when either side is one, string otherwise — the implementation's own rule, restated.
       return a.type === "array" || b.type === "array" ? arrayOf(joinSchemas(itemsOf(a), itemsOf(b))) : STRING;
-    case "first": case "last": case "at": case "find": case "maxBy": case "minBy":
+    // A TUPLE read at a literal position is that position's type, not the join of all of them — which
+    // is what lets `.operation[1].output.x` check against call 1's return (SPEC §7.1d).
+    case "at":
+      return tupleAt(a, b) ?? itemsOf(a);
+    case "first":
+      return tupleAt(a, { const: 0 }) ?? itemsOf(a);
+    case "last":
+      return tupleAt(a, { const: -1 }) ?? itemsOf(a);
+    case "find": case "maxBy": case "minBy":
       return itemsOf(a);
     case "pluck": {
       const key = constStringOf(b);

@@ -147,8 +147,9 @@ then decides what to do.
 
 ### 3.2 Operations
 
-A state does its work by running **one operation** and its child states. A state
-declares at most one `operation`, of one of two kinds:
+A state does its work by running **its operation** and its child states. A state
+declares at most one `operation` — one call, or a LIST of calls run in order (§7.1d). Each call is
+of one of two kinds:
 
 - `prompt`: one structured model call, driven by the state's prompt. The prompt comes from an
   inline `template` or a named `skill` (a reusable prompt template from `registry.skills`).
@@ -164,8 +165,8 @@ entirely, in which case they are INFERRED from the state's own namespace: every 
 segment below it, keyed by basename, in alphabetical order. `"children": {}` declares none.
 
 A state may declare an operation, children, or both. Operations run one at a time
-in a fixed priority order: the state's `operation`, then child states in
-`sequence` order. The cursor HOLDS on the child it entered until that child resolves, so one child
+in a fixed priority order: the state's `operation` — every call of a list, in list order — then
+child states in `sequence` order. The cursor HOLDS on the child it entered until that child resolves, so one child
 runs at a time; `async: true` on a child is the sole exception and the sole meaning of the flag.
 Concurrency is something an author asks for, never what a plain sequence falls into.
 
@@ -183,7 +184,8 @@ every descendant.
 2. The engine runs the highest-priority operation that has not yet run in this
    instance.
 3. When an operation completes, its outputs are validated and transitions are
-   evaluated. A child that finished since the last evaluation contributes its
+   evaluated. A state's operation LIST completes when its last call does: the calls run back to
+   back, and no transition is considered between them (§7.1d). A child that finished since the last evaluation contributes its
    OWN `transitions` first — in the order the state runs its children — and the
    state's list is considered after them. Within each list, declared order; the
    first transition whose `when` expression is true is taken.
@@ -419,7 +421,7 @@ through a `DirectedTransitions` port (`EngineConfig.directed`):
   failed and not yet been answered: the person said where the run goes.
 - without `skip` it is HELD while a sync child holds the cursor, and taken when
   that child ends. The latest move handed over wins. A state's own operation
-  always runs first — a move is between children.
+  always runs first — every call of a list — since a move is between children.
 - with `skip` the running sequence children (and the child holding the cursor)
   are INTERRUPTED. **The jump is decided before the interrupt lands**: an
   interrupted operation may well complete — an agent's turn cut short returns the
@@ -925,10 +927,11 @@ limits
 : Declared slots for values the state emits.
 
 `operation`
-: The state's single operation (§7.1): `{ "kind": "prompt", … }` (a structured model call from an
+: The state's operation (§7.1): `{ "kind": "prompt", … }` (a structured model call from an
   inline `template` or a named `skill`) or `{ "kind": "function", "function": "<name>", … }` (a
   registered function — host code, an interactive UI component, a sub-workflow, or a delegated
-  agent adapter).
+  agent adapter) — or a non-empty ARRAY of those, run in order, whose result is the array of their
+  results (§7.1d).
 
 `environment`
 : DEFAULTS for `operation` — the same shape with every field optional, inherited by this state and
@@ -1215,6 +1218,20 @@ ambiguous. Its shape is a **typed union** — a common core on every kind plus l
 | `cost` | all | USD — lifted out of `usage` because it is the field asked for by name, and a *failed* call still spends money and still reports it |
 | `model` | all | the model the call was actually made with, post-resolution |
 | `outputs.session` | prompt only | a `SessionRef` — `{ id }`, plus `end`, which is another `SessionRef` |
+
+A state whose operation is a LIST (§7.1d) has one such node per call, and `operation` is the array
+of them: `.operation[1].output` is what the second call returned, `.operation[1].model` the model it
+ran on. The array also answers for the list as a whole, the way `.children.<key>` is the array of its
+passes that also answers as its last one:
+
+| On the list | Is |
+| --- | --- |
+| `.operation.output` | the array of the calls' results, in list order — `[r0, r1, …]` |
+| `.operation.outcome` | the first call's outcome that is not `success`, else `success` |
+| `.operation.cost` | the sum of the calls' costs |
+
+`usage` and `model` are per call only: a list has no one model, and a sum of measurement records is a
+record nobody measured.
 
 `provider` and `attempts` are **absent on purpose**. Neither reaches the engine's seam today — they
 are things an executor knows and does not report — so declaring them would hand the lint a field it
@@ -1844,7 +1861,8 @@ merge(root.environment, …, parent.environment, mount.environment, own.environm
 ```
 
 with the nearest layer winning, so a root can set the model, the session and the tool set once for
-a whole subtree. Only a state that DECLARES an `operation` gets one — `{}` is the opt-in to a fully
+a whole subtree. An operation LIST (§7.1d) is merged per element: each call is its own
+`own.operation` over the same chain. Only a state that DECLARES an `operation` gets one — `{}` is the opt-in to a fully
 inherited one, and without it a pure composite under an `environment`-declaring root stays a pure
 composite instead of inheriting an operation and running it.
 
@@ -1865,6 +1883,68 @@ are replaced whole, because merging them produces documents that are not prompts
 Arrays (`tools`) replace, which is what makes `[]` the way to drop an inherited tool. A layer that
 changes `kind` drops the inherited `config`/`prompt`/`system`/`function`, since those mean different
 things per kind.
+
+#### 7.1d An operation list
+
+`operation` may be an ARRAY of operations. It is still the state's one operation — the thing that runs
+before any child, once per instance — made of several calls:
+
+```json
+{
+  "operation": [
+    { "prompt": "Plan the change to {{.inputs.issue}}.", "output": { "plan": { "schema": { "type": "string" } } } },
+    { "function": "claude-code", "input": { "prompt": { "binding": ".operation[0].output.plan" } } }
+  ],
+  "outputs": {
+    "plan":   { "schema": { "type": "string" }, "binding": ".operation[0].output.plan" },
+    "result": { "binding": ".operation[1].output" }
+  }
+}
+```
+
+- **The calls run IN ORDER, one at a time.** A call starts when the one before it has succeeded, and
+  the first that fails ends the list: the state terminates with `terminate.error` as it would for a
+  single failed operation, and the calls after it never run. Concurrency is something an author asks
+  for (§3.2), and a list does not ask for it.
+- **The result is the array of results.** `.operation.output` is `[r0, r1, …]`, and `.operation[i]` is
+  call i's own node (§6.1). The SHAPE follows what was written, not how many calls there are: `[op]`
+  returns `[r0]`, where `op` returns `r0`. `[]` is refused at load — a state with no operation leaves
+  the field out.
+- **A call may read the calls before it.** `.operation[j].output` in call i's `input`, `args` or
+  applied `function` is an ordinary binding when `j < i`, resolved against the value call j returned.
+  Reading call i itself, or a later one, is a load error: that value cannot exist when call i is
+  made.
+- **Transitions wait for the whole list.** No rule is evaluated between two calls; the list is one
+  operation, and the round it triggers runs when its last call completes. A directed move is held
+  until then too (§3.3).
+- **Every output binds.** A single operation's record-shaped result may fill the state's unbound
+  outputs by name; an array has no names to pour, so a state whose operation is a list must bind each
+  declared output (`.operation[1].output.x`, a child, an expression), and an unbound one is a load
+  error.
+- **The type is a tuple.** `.operation.output` is typed `{ "type": "array", "prefixItems": [ … ] }`,
+  one entry per call, each what that call's own `output` (or its callee) says it returns, so
+  `.operation[1].output.x` is checked against call 1's return exactly as `.operation.output.x` is
+  against a single call's.
+
+**Each call inherits on its own.** §7.1a's merge runs once per element —
+`merge(…, own.environment, operation[i])` — so a root's model, tools and session reach every call, and
+a call may still name its own `kind`, `function`, `session` or `model`. `environment` is never a list:
+it is a layer of DEFAULTS, and a list of defaults would have nothing to be the default of.
+
+**One conversation, unless a call asks for another.** A call that declares no `session` runs in the
+state's own conversation (§4.7), and the calls of a list SHARE it: call 1 continues where call 0
+ended, which is what "run these in order" means for a conversation. A call that writes
+`"session": null` gets a fresh one private to that call; a named session means what it always
+means. A state's `$join` target (§7.1b) is its `environment.session`: a list's calls each declare
+their own, so no one of them is what the state declared.
+
+**What is journaled.** `operation.started`, `operation.dispatched`, `operation.completed` and
+`operation.failed` carry `index` — which call of the list — and each call dispatches at its own site
+(`OperationScope.sequence` is `-i` for call i, so call 0 keeps the state's site 0 and no call shares
+a record identity with another or with a call site, which count up from 1). A loaded instance carries
+one record per completed call (`LoadedInstance.operation` is then an array, the completed PREFIX of
+the list); a live one resumes at the first call without a record, so a restart between two calls
+re-runs neither.
 
 ### 7.2 Agent Responsibilities
 

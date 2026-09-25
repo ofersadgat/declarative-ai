@@ -31,6 +31,7 @@ import {
   FIELD_NAMESPACES,
   isBindingDecl,
   isNameUse,
+  isOperationList,
   isPick,
   isWrappedBinding,
   literalPermissions,
@@ -52,6 +53,11 @@ import { isOperationValue } from "./resolve.js";
 
 /** The authored path of a prompt operation's model — the position a session fixes. */
 const MODEL_FIELD = "operation.config.model";
+
+/** Whether a field path is a call's model — a single operation's, or one call's of a list (`operation.1.config.model`). */
+function isModelField(path: string): boolean {
+  return /^operation(\.\d+)?\.config\.model$/.test(path);
+}
 
 /** How the loader lowers one binding — `desugarBinding`, with the site already bound in. */
 export type LowerBinding = (binding: BindingDecl, where: string) => Ref<InlineFamily>;
@@ -291,7 +297,7 @@ export function lowerFields(found: readonly Extracted[], lower: LowerBinding, en
     // The one position whose choice outlives the instance (NAMES.md §6). A literal or an ordinary
     // expression is not a CHOICE — it reads this instance's own data — so only what is CHOSEN is
     // held: a pick, and a name, whose binding time is the position's whatever it turns out to hold.
-    if (f.path === MODEL_FIELD && (isPick(f.binding) || isNameUse(f.binding))) field.lifetime = "session";
+    if (isModelField(f.path) && (isPick(f.binding) || isNameUse(f.binding))) field.lifetime = "session";
     if (f.schema !== undefined) field.schema = f.schema;
     if (f.kind !== undefined) field.kind = f.kind;
     if (typeof f.binding === "object" && "$expr" in f.binding) {
@@ -436,8 +442,27 @@ function writeField(def: LoadedState, path: string, authored: ResolvedValue | un
       : authored;
   const segments = path.split(".");
   const [root, ...rest] = segments as [string, ...string[]];
+  const calls = def.operation;
+  if ((root === "operation" || root === "environment") && isOperationList(calls)) {
+    // One call of a LIST (SPEC §7.1d): its path carries the index, and the rest is exactly what a
+    // single operation's would be — so it is written by the same code, into that call alone.
+    const [index, ...tail] = rest;
+    const i = Number(index);
+    if (!Number.isInteger(i) || calls[i] === undefined) return { error: `field '${path}' names no call of the operation list` };
+    const envs = def.environment as readonly ExecEnvironmentDecl[] | undefined;
+    const one: LoadedState = { ...def, operation: calls[i], environment: envs?.[i] ?? {} };
+    const written = writeField(one, [root, ...tail].join("."), authored, bindCallee);
+    if ("error" in written) return written;
+    return {
+      def: {
+        ...def,
+        operation: calls.map((call, j) => (j === i ? (written.def.operation as Operation<InlineFamily>) : call)),
+        environment: calls.map((_, j) => (j === i ? (written.def.environment as ExecEnvironmentDecl) : (envs?.[j] ?? {}))),
+      },
+    };
+  }
   if (root === "operation") {
-    const op = def.operation;
+    const op = calls as Operation<InlineFamily> | undefined;
     if (op === undefined) return { error: `field '${path}' has no operation to write into` };
     const [field, ...more] = rest as [string, ...string[]];
     switch (field) {
@@ -498,7 +523,7 @@ function writeField(def: LoadedState, path: string, authored: ResolvedValue | un
     }
   }
   if (root === "environment") {
-    return { def: { ...def, environment: writePath(def.environment ?? {}, rest, value) } };
+    return { def: { ...def, environment: writePath((def.environment ?? {}) as ExecEnvironmentDecl, rest, value) } };
   }
   if (root === "limits") {
     return { def: { ...def, limits: writePath(def.limits ?? {}, rest, value) } };
@@ -532,27 +557,35 @@ function describe(value: unknown): string {
  * engine lays the call's RESULT node over it; the key sets do not overlap.
  */
 export function fieldsView(def: LoadedState, unsettled: ReadonlySet<string>): Record<string, unknown> {
-  const op = def.operation;
-  const operation: Record<string, unknown> = {};
-  if (op !== undefined) {
-    if (op.kind === "prompt") {
-      operation.prompt = op.user;
-      if (op.system !== undefined) operation.system = op.system;
-    } else {
-      operation.function = op.functionRef === BOUND_CALLEE ? undefined : op.functionRef;
-    }
-    const config = (op as { config?: JsonValue }).config;
-    if (config !== undefined) operation.config = config;
-  }
-  const env = def.environment ?? {};
+  const calls = def.operation;
+  // A LIST reads as the list it is (SPEC §7.1d): `.operation[1].config.model`, `.environment[1].tools`.
+  const list = isOperationList(calls);
+  const envs = def.environment;
   let view: Record<string, unknown> = {
     ...(def.title !== undefined ? { title: def.title } : {}),
     ...(def.label !== undefined ? { label: def.label } : {}),
     ...(def.description !== undefined ? { description: def.description } : {}),
     limits: { ...(def.limits ?? {}) },
-    operation,
-    environment: { ...env },
+    operation: list ? calls.map(authoredView) : authoredView(calls),
+    environment: list
+      ? calls.map((_, i) => ({ ...(envs as readonly ExecEnvironmentDecl[] | undefined)?.[i] }))
+      : { ...(envs as ExecEnvironmentDecl | undefined) },
   };
   for (const path of unsettled) view = writePath(view, path.split("."), PENDING);
   return view;
+}
+
+/** One call's AUTHORED fields as an expression reads them: `prompt`, `system`, `function`, `config`. */
+function authoredView(op: Operation<InlineFamily> | undefined): Record<string, unknown> {
+  const operation: Record<string, unknown> = {};
+  if (op === undefined) return operation;
+  if (op.kind === "prompt") {
+    operation.prompt = op.user;
+    if (op.system !== undefined) operation.system = op.system;
+  } else {
+    operation.function = op.functionRef === BOUND_CALLEE ? undefined : op.functionRef;
+  }
+  const config = (op as { config?: JsonValue }).config;
+  if (config !== undefined) operation.config = config;
+  return operation;
 }

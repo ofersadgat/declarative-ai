@@ -14,6 +14,7 @@ import { validateBundle } from "../src/validate.js";
 import { FakePromptExecutor, newRegistry, ok, promptTail } from "./fakes.js";
 import type { Vfs } from "../src/reference.js";
 import { InMemoryPersistence, type WorkflowMetrics } from "../src/ports.js";
+import { operationsOf } from "../src/format.js";
 
 const ROOT = "/p/.jaira";
 const WF = `${ROOT}/workflows`;
@@ -291,7 +292,7 @@ describe("validating a deferred spread", () => {
  * the entire hazard of offering a form twice.
  */
 describe("the call form of 'function'", () => {
-  const opOf = (def: unknown) => bundleFor(def).states.plan!.operation!;
+  const opOf = (def: unknown) => operationsOf(bundleFor(def).states.plan!)[0]!;
   /** An authoring mistake in an operation is RECORDED, not thrown — the loader defers it so the
    *  validator reports it beside every other issue, and only entering the state fails the run. */
   const errorOf = (def: unknown) => bundleFor(def).states.plan!.operationError ?? "";
@@ -375,7 +376,7 @@ describe("the call form of 'function'", () => {
  * downstream was checked against fiction.
  */
 describe("a call's output type", () => {
-  const opOf = (def: unknown) => bundleFor(def).states.plan!.operation!;
+  const opOf = (def: unknown) => operationsOf(bundleFor(def).states.plan!)[0]!;
   const errorOf = (def: unknown) => bundleFor(def).states.plan!.operationError ?? "";
 
   it("comes from the callee when the state declares none", () => {

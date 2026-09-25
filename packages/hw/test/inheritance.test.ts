@@ -9,6 +9,7 @@ import { validateBundle } from "../src/validate.js";
 import { mergeOperationChain } from "../src/merge.js";
 import type { StateDef } from "../src/format.js";
 import type { Vfs } from "../src/reference.js";
+import { environmentOf } from "../src/format.js";
 
 const leaf = (extra: Partial<StateDef> = {}): StateDef => ({
   label: "Leaf",
@@ -63,7 +64,7 @@ describe("environment inheritance (§5)", () => {
     });
     const op = opOf(defs);
     expect(op.config).toEqual({ model: "anthropic/claude-sonnet-5", temperature: 0.1 });
-    expect(loadBundle(defs, "root").states["root/mid/leaf"]!.environment!.session).toEqual({
+    expect(environmentOf(loadBundle(defs, "root").states["root/mid/leaf"]!)?.session).toEqual({
       $ref: "leaf-session",
       $in: "root/mid/leaf",
     });
@@ -252,7 +253,7 @@ describe("environment inheritance (§5)", () => {
     expect((bundle.states[mounted]!.operation as PromptOp<never>).config).toEqual({ model: "m2" });
     // Still the ROOT's scope after the mount: a declaration is scoped where it was written, so
     // inheriting it does not re-scope it onto each state it reaches.
-    expect(bundle.states[mounted]!.environment?.session).toEqual({ $ref: "review", $in: "root" });
+    expect(environmentOf(bundle.states[mounted]!)?.session).toEqual({ $ref: "review", $in: "root" });
   });
 
   it("collapses back to ONE entry when two mounts declare the same thing", () => {

@@ -4,6 +4,7 @@ import { validateBundle } from "../src/validate.js";
 import { referencePathsOf } from "../src/lowerExpr.js";
 import type { StateDef } from "../src/format.js";
 import { FANOUT_ID, PLAN_ID, specFanoutFiles, specPlanningFiles } from "./fixtures.js";
+import { operationsOf } from "../src/format.js";
 
 describe("stateIdFromPath", () => {
   it("strips extensions and normalizes separators", () => {
@@ -40,7 +41,7 @@ describe("desugaring (API.md, \"Binding desugaring\")", () => {
   it("an operation's declared output is what the OPERATION produces — bound outputs excluded", () => {
     // `human_decision` is derived from a child when the state terminates, so requiring it of the
     // operation would be a contract the operation cannot meet.
-    const op = critique().operation!;
+    const op = operationsOf(critique())[0]!;
     const props = op.output.schema!.properties as Record<string, unknown>;
     expect(Object.keys(props).sort()).toEqual(["critique_report", "outcome", "weaknesses"]);
     expect(op.output.schema!.required).not.toContain("human_decision");
@@ -57,7 +58,7 @@ describe("desugaring (API.md, \"Binding desugaring\")", () => {
       input: { style: { kind: "text", binding: { text: "terse" } } },
     };
     const goals = loadBundle(files, PLAN_ID).states["feature/plan/goals"]!;
-    expect(goals.operation!.input["style"]).toEqual({ kind: "text", binding: { text: "terse" } });
+    expect(operationsOf(goals)[0]!.input["style"]).toEqual({ kind: "text", binding: { text: "terse" } });
   });
 });
 

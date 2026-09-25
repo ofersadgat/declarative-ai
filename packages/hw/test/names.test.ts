@@ -16,6 +16,7 @@ import { validateBundle } from "../src/validate.js";
 import type { StateDef } from "../src/format.js";
 import { InMemoryPersistence, type WorkflowMetrics } from "../src/ports.js";
 import { newRegistry, ok } from "./fakes.js";
+import { environmentOf, operationsOf } from "../src/format.js";
 
 const ROOT = "/p/.jaira";
 const WF = `${ROOT}/workflows`;
@@ -66,14 +67,14 @@ describe("where a name is scoped (§3)", () => {
       },
       "root",
     );
-    expect(bundle.states["root/a"]!.environment!.session).toEqual({ $ref: "review", $in: "root" });
-    expect(bundle.states["root/b"]!.environment!.session).toEqual({ $ref: "review", $in: "root" });
+    expect(environmentOf(bundle.states["root/a"]!)?.session).toEqual({ $ref: "review", $in: "root" });
+    expect(environmentOf(bundle.states["root/b"]!)?.session).toEqual({ $ref: "review", $in: "root" });
   });
 
   it("is the writer of the USE when no entry is visible — what a session name has always meant", () => {
     const bundle = load({ root: { children: { a: {}, b: {} } }, "root/a": leaf({ session: "review" }), "root/b": leaf({ session: "review" }) }, "root");
-    expect(bundle.states["root/a"]!.environment!.session).toEqual({ $ref: "review", $in: "root/a" });
-    expect(bundle.states["root/b"]!.environment!.session).toEqual({ $ref: "review", $in: "root/b" });
+    expect(environmentOf(bundle.states["root/a"]!)?.session).toEqual({ $ref: "review", $in: "root/a" });
+    expect(environmentOf(bundle.states["root/b"]!)?.session).toEqual({ $ref: "review", $in: "root/b" });
   });
 
   it("lets `$in` redirect either", () => {
@@ -85,7 +86,7 @@ describe("where a name is scoped (§3)", () => {
       },
       "root",
     );
-    expect(bundle.states["root/mid/a"]!.environment!.session).toEqual({ $ref: "review", $in: "root/mid" });
+    expect(environmentOf(bundle.states["root/mid/a"]!)?.session).toEqual({ $ref: "review", $in: "root/mid" });
   });
 });
 
@@ -467,7 +468,7 @@ describe("a name is usable only where a VALUE is read (§5, §6)", () => {
       "root",
       { [`${WF}/shared.json`]: { text: { schema: { type: "string" }, default: "hi" } } },
     );
-    expect(Object.keys(bundle.states.root!.operation!.input)).toEqual(["text"]);
+    expect(Object.keys(operationsOf(bundle.states.root!)[0]!.input)).toEqual(["text"]);
   });
 
   it("says so when there is no such file either, instead of loading `$ref` and `$in` as slots", () => {
@@ -533,7 +534,7 @@ describe("the plain keys beside a session's `$ref` are overrides of the NAME (§
   it("configures the identity, and stays off the declaration that travels", () => {
     const bundle = load(tree({ $ref: "draft", title: "Draft" }, "draft"), "root");
     expect(bundle.states.root!.names).toEqual({ draft: { retention: "run", title: "Draft" } });
-    expect(bundle.states["root/a"]!.environment!.session).toEqual({ $ref: "draft", $in: "root" });
+    expect(environmentOf(bundle.states["root/a"]!)?.session).toEqual({ $ref: "draft", $in: "root" });
   });
 
   it("is a lint error when two uses disagree, like any other writer of the name", () => {

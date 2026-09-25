@@ -2549,7 +2549,7 @@ The ports (apps implement these). Source: `ports.ts`.
 | --- | --- |
 | `Persistence` | `record(event: EngineEvent, atMs: number): void` — the durable run-record sink (SPEC §10.2). |
 | `InMemoryPersistence` | the bundled buffering implementation (embedding & tests); exposes `events`. |
-| `EngineEvent` | the run-record event union: `instance.entered`, `instance.blocked`, `operation.started`, `operation.dispatched` (the record for a call exists — emitted from the record layer's callback after the row is inserted and before the provider call; carries the scoped `operationId`), `operation.completed`, `operation.failed`, `call.waiting`, `call.settled`, `value.settled` (a computed field settled — `field` path, `outcome`, its `value`, and `error`/`fallback` when a `failureValue` stood in; SPEC §5.3), `transition.taken` (with the fired rule's `name` when it has one), `child.superseded`, `instance.terminated`. Settled events' `operationId` is the SCOPED id (`scopedOperationId(hashOperation(op), scope)`), the same key `withRecord` files the record under. |
+| `EngineEvent` | the run-record event union: `instance.entered`, `instance.blocked`, `operation.started`, `operation.dispatched` (the record for a call exists — emitted from the record layer's callback after the row is inserted and before the provider call; carries the scoped `operationId`), `operation.completed`, `operation.failed`, `call.waiting`, `call.settled`, `value.settled` (a computed field settled — `field` path, `outcome`, its `value`, and `error`/`fallback` when a `failureValue` stood in; SPEC §5.3), `transition.taken` (with the fired rule's `name` when it has one), `child.superseded`, `instance.terminated`. Settled events' `operationId` is the SCOPED id (`scopedOperationId(hashOperation(op), scope)`), the same key `withRecord` files the record under. The four `operation.*` events carry `index` — which call of an operation LIST (SPEC §7.1d) — and omit it for a single operation; call `i` dispatches at `OperationScope.sequence` `-i` (call 0 at the state's site 0), so no two calls share a record id. |
 | `OperationKind` | `"prompt" \| "function"` — the two operation types (the event `op` field). |
 | `ArtifactRef` / `isArtifactRef` | `{ artifact: true; name; format?; content?; path? }` — an artifact value flowing through workflow inputs/outputs. |
 
@@ -2755,7 +2755,9 @@ interface LoadedState extends Omit<StateDef, "operation" | "inputs" | "outputs" 
   label?: string; title?: string; description?: string;   // literal, or absent while a bound one is unevaluated
   inputs?:  Record<string, Parameter<InlineFamily>>;
   outputs?: Record<string, NamedParameter<InlineFamily>>;
-  operation?: Operation<InlineFamily>;                 // a real op — the authored sugar is gone
+  operation?: Operation<InlineFamily> | readonly Operation<InlineFamily>[];   // a real op — the authored sugar is gone;
+                                                       // a LIST as written (SPEC §7.1d), `[op]` included
+  environment?: ExecEnvironmentDecl | readonly ExecEnvironmentDecl[];  // the merged environment; one per call of a list
   children?: Record<string, LoadedChild>;
   slotMeta?: Record<string, SlotMeta>;                 // keyed "<section>.<name>"
   fields?: LoadedField[];                              // the COMPUTED FIELDS (SPEC §5.3), in declaration order
@@ -2763,12 +2765,17 @@ interface LoadedState extends Omit<StateDef, "operation" | "inputs" | "outputs" 
 interface LoadedField {
   path: string;                 // where the value goes, in AUTHORED terms: `title`, `operation.prompt`,
                                 // `operation.function`, `operation.config.model`, `environment.tools`, …
+                                // — on a list, under the call's index: `operation.1.config.model`
   ref: Ref<InlineFamily>;
   schema?: JsonSchema; kind?: RefKind;
   failureValue?: JsonValue;     // stands in when evaluation fails; without it the failure is the instance's
   environment?: ExecEnvironmentDecl;   // the binding's own layer, merged over the state's, for its calls
 }
 const FIELD_NAMESPACES: readonly ["title", "label", "description", "environment"];   // roots a field is read back under (§6.1)
+// An operation LIST (SPEC §7.1d), read uniformly:
+function operationsOf(def): readonly Operation<InlineFamily>[];        // the calls in order — one for a single op, none for a composite
+function isOperationList(op: LoadedState["operation"]): boolean;       // written as an array ⇒ its result is an array
+function environmentOf(def, index?: number): ExecEnvironmentDecl | undefined;  // call `index`'s; without one, the STATE's (none for a list)
 const BOUND_CALLEE = "$bound";  // the `functionRef` a bound `function` carries until the engine replaces the op
 interface SlotMeta {
   default?: JsonValue;
@@ -2805,6 +2812,13 @@ instance entry — ready fields run together, started in declaration order — a
 `value.settled`; a loaded instance hands its settled values back in `LoadedInstance.fields` and pays for
 none of them again. A callable slot's `schema` is stamped with its kind at load (`callableSchemaFor`),
 so `inputs.fn.schema` on a loaded state is a self-describing `CallableSchema`.
+
+An operation LIST (SPEC §7.1d) loads as `LoadedState.operation` an array, with `environment` aligned to
+it, one merged layer per call. Its `operation.*` node is an `OperationListNode` — `OperationNode[]` with the
+list-wide `output` (every call's result), `outcome` and `cost` hung on the array (`operationListNode`),
+typed by `operationListSchema` as a tuple of the calls' nodes. A loaded list's `LoadedInstance.operation`
+is the completed PREFIX, one `LoadedOperation` per call in order (built from the `operation.completed`
+rows' `index`); `loadRun` resumes it at the first call without one.
 
 | Export | Purpose |
 | --- | --- |

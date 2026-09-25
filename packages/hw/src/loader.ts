@@ -43,6 +43,7 @@ import {
   type LoadedTransition,
   type NamedParameterDecl,
   OPERATION_OWN_FIELDS,
+  type OperationDecl,
   type OperationFields,
   type OutputSpread,
   type ParameterDecl,
@@ -1136,16 +1137,30 @@ function normalizeStateNames(
   }
   let opSession: NormalizedSession | undefined;
   let wroteOp = false;
-  if (def.operation !== undefined && "session" in def.operation) {
-    wroteOp = true;
-    opSession = sessionAt("operation.session", def.operation.session, visible);
-    replace({ operation: { ...out.operation, session: opSession } as StateDef["operation"] });
-  }
   let opWorkspace: NormalizedWorkspace | undefined;
-  const wroteOpWorkspace = def.operation !== undefined && "workspace" in def.operation;
-  if (wroteOpWorkspace) {
-    opWorkspace = workspaceAt("operation.workspace", def.operation!.workspace, visible);
-    replace({ operation: { ...out.operation, workspace: opWorkspace } as StateDef["operation"] });
+  let wroteOpWorkspace = false;
+  if (Array.isArray(def.operation)) {
+    // A LIST's calls each canonicalize their own, at their own path — and none of them is what the
+    // STATE declared, for a `$join` or for its bundle: that is its `environment`'s (SPEC §7.1d).
+    replace({
+      operation: def.operation.map((call, i) => {
+        let written = call;
+        if ("session" in call) written = { ...written, session: sessionAt(`operation.${i}.session`, call.session, visible) };
+        if ("workspace" in call) written = { ...written, workspace: workspaceAt(`operation.${i}.workspace`, call.workspace, visible) };
+        return written;
+      }),
+    });
+  } else if (def.operation !== undefined) {
+    if ("session" in def.operation) {
+      wroteOp = true;
+      opSession = sessionAt("operation.session", def.operation.session, visible);
+      replace({ operation: { ...out.operation, session: opSession } as StateDef["operation"] });
+    }
+    if ("workspace" in def.operation) {
+      wroteOpWorkspace = true;
+      opWorkspace = workspaceAt("operation.workspace", def.operation.workspace, visible);
+      replace({ operation: { ...out.operation, workspace: opWorkspace } as StateDef["operation"] });
+    }
   }
 
   const children = out.children;
@@ -1194,7 +1209,7 @@ function normalizeStateNames(
 }
 
 /** Where an `args` key IS an argument bag - on an operation, an environment, or a function's defaults - rather than a slot that happens to be called `args`. */
-const ARGS_PARENT = /^(operation|environment|children\.[^.]+\.environment)(\.functions\.[^.]+)?$/;
+const ARGS_PARENT = /^(operation(\.\d+)?|environment|children\.[^.]+\.environment)(\.functions\.[^.]+)?$/;
 
 /** One state on the path to a writer, with what it WROTE for each providing position — what a `$join` searches. */
 type Ancestor = SessionAncestor & WorkspaceAncestor;
@@ -1356,16 +1371,26 @@ export function desugarState(
   // The operation's computed fields come out of the MERGED block (SPEC §5.3): a binding an ancestor's
   // `environment` supplied is this state's to evaluate, in this state's scope, exactly as a literal
   // it supplied is this state's to run under.
-  const mergedAll = def.operation !== undefined ? withFunctionDefaults(mergeOperationFields(environment, def.operation)) : undefined;
-  const extracted = mergedAll !== undefined ? extractOperationFields(mergedAll) : undefined;
-  const merged = extracted?.op;
-  const split = merged !== undefined ? splitExecEnvironment(merged) : undefined;
+  //
+  // A LIST is merged per call (SPEC §7.1d): each element is its own `own.operation` over the same
+  // chain, and its fields are found under its own index — `operation.1.config.model`.
+  const list = Array.isArray(def.operation);
+  const authoredCalls: readonly OperationDecl[] = def.operation === undefined ? [] : Array.isArray(def.operation) ? def.operation : [def.operation];
+  const calls = authoredCalls.map((call, i) => {
+    const mergedAll = withFunctionDefaults(mergeOperationFields(environment, call));
+    const extracted = extractOperationFields(mergedAll);
+    const split = splitExecEnvironment(extracted.op);
+    const found = list ? extracted.found.map((f) => ({ ...f, path: indexedFieldPath(f.path, i) })) : extracted.found;
+    const lowered = lowerFields(found, (binding, where) => desugarBinding(binding, where, id, undefined, lower), split.env);
+    return { mergedAll, split, fields: lowered };
+  });
 
-  const fields = lowerFields(
-    [...top.found, ...(extracted?.found ?? [])],
-    (binding, where) => desugarBinding(binding, where, id, undefined, lower),
-    split?.env,
-  );
+  const fields = [
+    // A top-level field's own `environment` layers over the STATE's — a single operation's, and
+    // nothing for a list, whose calls each have their own (`environmentOf`).
+    ...lowerFields(top.found, (binding, where) => desugarBinding(binding, where, id, undefined, lower), list ? undefined : calls[0]?.split.env),
+    ...calls.flatMap((c) => c.fields),
+  ];
   // A field that reads itself, through however many others, can never settle (§5.3).
   const cycle = fieldCycle(fields);
   if (cycle !== undefined) {
@@ -1381,7 +1406,13 @@ export function desugarState(
   // and reported by the validator alongside every other one. Throwing here instead aborted the load
   // at the first such state, and the author saw a downstream consequence — "this leaf has no kind" —
   // in place of the mistake they actually made two files away.
-  const operationOrError = describeOperation(split, id, def.outputs, lower);
+  const operationOrError = list ? describeOperationList(calls.map((c) => c.split), id, lower) : describeOperation(calls[0]?.split, id, def.outputs, lower);
+  const single = list ? undefined : calls[0];
+  const operationEnvironment = list
+    ? { environment: calls.map((c) => c.split.env) }
+    : single !== undefined && Object.keys(single.split.env).length > 0
+      ? { environment: single.split.env }
+      : {};
 
   const { operation, environment: _e, inputs: _i, outputs: _o, children: _c, sequence: _s, transitions: _t, title: _title, label, description, limits, ...rest } = def;
   return {
@@ -1399,7 +1430,7 @@ export function desugarState(
     ...(sequence ? { sequence, sequenceAuthored: def.sequence !== undefined } : {}),
     ...(operationOrError.operation !== undefined ? { operation: operationOrError.operation } : {}),
     ...(operationOrError.error !== undefined ? { operationError: operationOrError.error } : {}),
-    ...(split && Object.keys(split.env).length > 0 ? { environment: split.env } : {}),
+    ...operationEnvironment,
     // The session this state's SUBTREE resolves in, recorded separately from `environment` because
     // `environment` exists only on a state that declares an OPERATION. A pure composite that
     // declares `environment.session` — the ordinary way to give a whole subtree one session — would
@@ -1415,8 +1446,10 @@ export function desugarState(
     // ENCLOSING INSTANCE's bundle (`resourceKeyFor`) — which, under a state that has both an
     // operation and children, is the bundle that operation runs in. Deliberately unlike the rest of
     // `operation`: a bundle belongs to an instance, and "absent" means "where my parent is working".
-    ...(mergedAll !== undefined && "workspace" in mergedAll
-      ? { scopeWorkspace: mergedAll.workspace as NormalizedWorkspace }
+    // A LIST's calls are not the instance, so its bundle is the chain's; a call naming a workspace
+    // runs in that one, as a binding's own call does (SPEC §7.1d).
+    ...(single !== undefined && "workspace" in single.mergedAll
+      ? { scopeWorkspace: single.mergedAll.workspace as NormalizedWorkspace }
       : "workspace" in environment
         ? { scopeWorkspace: environment.workspace as NormalizedWorkspace }
         : {}),
@@ -1530,6 +1563,34 @@ function describeOperation(
     if (e instanceof WorkflowLoadError) return { error: e.message.replace(`${id}: `, "") };
     throw e;
   }
+}
+
+/**
+ * Lower an operation LIST call by call (SPEC §7.1d). One call the chain never completed makes the
+ * whole list unbuildable — a list missing a call is not the list the author wrote — and the error
+ * names which call. `[]` is refused: a state with no operation leaves the field out.
+ */
+function describeOperationList(
+  splits: readonly { op: OperationFields }[],
+  id: string,
+  lower: LowerOptions,
+): { operation?: readonly Operation<InlineFamily>[]; error?: string } {
+  if (splits.length === 0) return { error: "operation is an empty list — a state with no operation leaves the field out" };
+  const operation: Operation<InlineFamily>[] = [];
+  for (const [i, split] of splits.entries()) {
+    // No state outputs to default from: a list's result is an array, and the state binds each output
+    // it declares rather than having one poured into it (§7.1d).
+    const built = describeOperation(split, id, undefined, lower);
+    if (built.error !== undefined) return { error: `operation[${i}]: ${built.error}` };
+    operation.push(built.operation!);
+  }
+  return { operation };
+}
+
+/** A field path found on one call of a list, moved under that call's index: `operation.config.model` → `operation.1.config.model`. */
+function indexedFieldPath(path: string, index: number): string {
+  const [root, ...rest] = path.split(".");
+  return root === "operation" || root === "environment" ? [root, String(index), ...rest].join(".") : path;
 }
 
 /** Resolve a `children[].state` reference, reporting it against the field that named it. */

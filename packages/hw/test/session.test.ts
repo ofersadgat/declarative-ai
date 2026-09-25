@@ -27,6 +27,7 @@ import { mergeOperationFields, refuseSynonyms } from "../src/merge.js";
 import { loadBundle } from "../src/loader.js";
 import { validateBundle } from "../src/validate.js";
 import type { OperationFields, StateDef } from "../src/format.js";
+import { environmentOf } from "../src/format.js";
 
 const scope = (overrides: Partial<SessionScope> = {}): SessionScope => ({
   instanceId: "7",
@@ -374,7 +375,7 @@ describe("the environment merge", () => {
       },
     };
     // `null` must reach the loaded state; dropped at the split it would silently restore "planning".
-    expect(loadBundle(files, "root").states["leaf"]?.environment?.session).toBeNull();
+    expect(environmentOf(loadBundle(files, "root").states["leaf"]!)?.session).toBeNull();
   });
 });
 
@@ -403,8 +404,8 @@ describe("an inherited declaration keeps the scope of the state that WROTE it", 
 
   it("scopes at the root, so the whole subtree shares one conversation", () => {
     const bundle = loadBundle(files, "root");
-    expect(bundle.states["a"]?.environment?.session).toEqual({ $ref: "planning", $in: "root" });
-    expect(bundle.states["b"]?.environment?.session).toEqual({ $ref: "planning", $in: "root" });
+    expect(environmentOf(bundle.states["a"]!)?.session).toEqual({ $ref: "planning", $in: "root" });
+    expect(environmentOf(bundle.states["b"]!)?.session).toEqual({ $ref: "planning", $in: "root" });
   });
 
   it("scopes a leaf's OWN name to the leaf, which is what makes it private", () => {
@@ -413,9 +414,9 @@ describe("an inherited declaration keeps the scope of the state that WROTE it", 
       a: { ...files["a"]!, operation: { ...files["a"]!.operation, session: "planning" } as never },
     };
     const bundle = loadBundle(own, "root");
-    expect(bundle.states["a"]?.environment?.session).toEqual({ $ref: "planning", $in: "a" });
+    expect(environmentOf(bundle.states["a"]!)?.session).toEqual({ $ref: "planning", $in: "a" });
     // Same word, two scopes: `a`'s own declaration does not join the root's thread.
-    expect(bundle.states["b"]?.environment?.session).toEqual({ $ref: "planning", $in: "root" });
+    expect(environmentOf(bundle.states["b"]!)?.session).toEqual({ $ref: "planning", $in: "root" });
   });
 });
 
@@ -508,7 +509,7 @@ describe("the load-time lint", () => {
       },
     };
     const bundle = loadBundle(files, "root");
-    expect(bundle.states["leaf"]?.environment?.session).toEqual({ $ref: "thread", $in: "root", $fork: true });
+    expect(environmentOf(bundle.states["leaf"]!)?.session).toEqual({ $ref: "thread", $in: "root", $fork: true });
   });
 });
 

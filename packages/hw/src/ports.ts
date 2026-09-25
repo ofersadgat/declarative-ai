@@ -94,7 +94,11 @@ export type EngineEvent =
    * Without the parent and the key, a reader is told a block happened somewhere and not where.
    */
   | { type: "instance.blocked"; stateId: string; childKey?: string; parentInstanceId?: string; reason: string }
-  | { type: "operation.started"; instanceId: string; stateId: string; op: OperationKind }
+  /**
+   * `index` on every `operation.*` event names which call of an operation LIST it is about (SPEC
+   * §7.1d) — absent for a single operation, so a journal reader tells the two shapes apart by it.
+   */
+  | { type: "operation.started"; instanceId: string; stateId: string; op: OperationKind; index?: number }
   /**
    * The record for this call EXISTS — emitted from the record layer's own callback, at the moment
    * the row is written and its position claimed, before the provider call is made. That order is
@@ -103,7 +107,7 @@ export type EngineEvent =
    * nothing. Not emitted when the position claim is refused — no row exists, and the typed
    * `positionTaken` failure already carries the fork signal.
    */
-  | { type: "operation.dispatched"; instanceId: string; stateId: string; op: OperationKind; operationId: string }
+  | { type: "operation.dispatched"; instanceId: string; stateId: string; op: OperationKind; index?: number; operationId: string }
   /**
    * `operationId` is the SCOPED id — the op's content hash folded with the dispatch site
    * `(instanceId, sequence)`, exactly the id `withRecord` keys the record by (`scopedOperationId`),
@@ -114,7 +118,7 @@ export type EngineEvent =
    * input resolution, so the dispatched op — the thing the hash is OF — does not exist yet), and on
    * a `failed` that never reached dispatch.
    */
-  | { type: "operation.completed"; instanceId: string; stateId: string; op: OperationKind; operationId?: string; metrics?: WorkflowMetrics }
+  | { type: "operation.completed"; instanceId: string; stateId: string; op: OperationKind; index?: number; operationId?: string; metrics?: WorkflowMetrics }
   /**
    * `metrics` is present exactly when the operation actually RAN — a post-dispatch failure, where
    * the call was made and the money was spent. A pre-dispatch failure (unresolvable inputs, no
@@ -131,6 +135,7 @@ export type EngineEvent =
       instanceId: string;
       stateId: string;
       op: OperationKind;
+      index?: number;
       operationId?: string;
       failure: Failure;
       metrics?: WorkflowMetrics;
