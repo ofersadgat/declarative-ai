@@ -47,7 +47,14 @@
  * every call is put to `serverToolGate` at the bridge and forwarded only once it allows — which is
  * what lets a tool whose mode is `ask` be asked about on this transport at all.
  */
-import { ASK_USER_TOOL, type AgentQuery, type AgentQueryOptions, type AgentResult, type AgentStreamMessage } from "@declarative-ai/agents-api";
+import {
+  ASK_USER_TOOL,
+  type AgentQuery,
+  type AgentQueryOptions,
+  type AgentResult,
+  type AgentStreamMessage,
+  type AgentTokenCounts,
+} from "@declarative-ai/agents-api";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -190,11 +197,12 @@ export function codexRefusal(opts: AgentQueryOptions): string | undefined {
       "This adapter declares policyEnforcement: 'config' and must be constructed with approvalCallback: false"
     );
   }
-  if (opts.reasoning !== undefined) {
+  // A LEVEL travels (`model_reasoning_effort`, see {@link codexArgv}); a budget has nowhere to go —
+  // codex has no thinking-budget key, the same gap the `claude` CLI has.
+  if (opts.reasoning?.budgetTokens !== undefined) {
     return (
-      "this adapter has no verified reasoning channel for codex, so `reasoning` cannot be honoured. " +
-      "Codex exposes model behaviour through `-c` config overrides, which is `providerOptions.codex.args` territory — " +
-      "state it there once the key is confirmed against the installed binary, or run the state on a claude transport"
+      "codex has no thinking-budget setting, so `reasoning.budgetTokens` cannot be honoured. " +
+      "Ask for a level instead (`reasoning.effort`), or run the state on the claude SDK transport, which carries a budget"
     );
   }
   if (opts.maxSteps !== undefined) {
@@ -320,6 +328,19 @@ export function codexArgv(
     // conversation is under way. `model` is a documented key, and `--strict-config` would reject it if
     // it were not.
     ...(opts.model !== undefined ? ["-c", `model="${opts.model}"`] : []),
+    // How hard to think, as a config key for the same reason again (both forms take `-c`).
+    //
+    // ✅ OBSERVED against `codex-cli 0.147.0`: `--strict-config` accepts `model_reasoning_effort`. Codex
+    // does NOT check the value itself — it forwards it, and the API answers an unknown one with
+    // `invalid_enum_value` — so the level must already be one the model takes; that is the catalog's
+    // job upstream of this adapter, which states what it is given.
+    ...(opts.reasoning?.effort !== undefined ? ["-c", `model_reasoning_effort="${opts.reasoning.effort}"`] : []),
+    // The reasoning SHOWN, always. ✅ OBSERVED (0.147.0): with a summary on, `--json` carries each
+    // reasoning step as an `item.completed` of type `reasoning` holding the summary text, which
+    // {@link codexTurnMessage} turns into a thinking block. Stated rather than inherited so a
+    // `~/.codex/config.toml` that turned summaries off cannot silently empty the conversation of them.
+    "-c",
+    'model_reasoning_summary="auto"',
     // The answer's SHAPE. Codex takes a FILE where the `claude` sibling takes the schema inline, so the
     // caller writes one and passes its path — which keeps this builder pure and directly assertable.
     //
@@ -394,6 +415,10 @@ export interface CodexRun {
   /** The model codex named when it configured the session — see {@link AgentResult.model}. */
   model?: string;
   error?: string;
+  /** The turn's token counts, off `turn.completed` — see {@link codexUsageOf}. */
+  usage?: AgentTokenCounts;
+  /** That event's usage object verbatim, so a reading of it stays recomputable. */
+  rawUsage?: JsonValue;
 }
 
 /**
@@ -450,6 +475,10 @@ export function readCodexEvent(event: Record<string, unknown>, run: CodexRun): C
         ? { ...run, text: stringOf(bag, "text", "message") ?? run.text }
         : run;
     }
+    case "turn.completed": {
+      const usage = codexUsageOf(event["usage"]);
+      return usage === undefined ? run : { ...run, usage, rawUsage: event["usage"] as JsonValue };
+    }
     case "turn.failed":
       return { ...run, error: errorTextOf(event["error"]) ?? "codex turn failed" };
     case "thread.error":
@@ -458,6 +487,75 @@ export function readCodexEvent(event: Record<string, unknown>, run: CodexRun): C
     default:
       return run;
   }
+}
+
+/**
+ * One finished item as a TURN of the conversation — a thinking block, or something the agent said —
+ * or `undefined` for an item that is neither.
+ *
+ * `exec --json` has no message objects the way `claude` does, only items, so this builds the
+ * `{role, content}` turn the record reads (`entriesOfMessages` takes a `reasoning` part as thinking).
+ * Without it a codex run recorded no conversation at all: the answer reached the caller as the
+ * result's text, and every step the agent took between was dropped.
+ *
+ * ✅ OBSERVED (codex-cli 0.147.0, with `model_reasoning_summary` on):
+ * `{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"**Computing number 391**"}}`
+ * then `{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"391"}}`. The
+ * older `msg` dialect's names (`agent_reasoning`, `agent_message`) are read too, as
+ * {@link readCodexEvent} reads them.
+ */
+export function codexTurnMessage(event: Record<string, unknown>): AgentStreamMessage | undefined {
+  const inner = event["msg"];
+  let kind: string | undefined;
+  let text: string | undefined;
+  if (inner !== null && typeof inner === "object" && !Array.isArray(inner)) {
+    const bag = inner as Record<string, unknown>;
+    kind = typeof bag["type"] === "string" ? bag["type"] : undefined;
+    text = stringOf(bag, "text", "message");
+  } else if (event["type"] === "item.completed") {
+    const item = event["item"];
+    if (item === null || typeof item !== "object" || Array.isArray(item)) return undefined;
+    const bag = item as Record<string, unknown>;
+    kind = stringOf(bag, "item_type", "type");
+    text = stringOf(bag, "text", "message");
+  }
+  if (text === undefined) return undefined;
+  if (kind === "reasoning" || kind === "agent_reasoning") {
+    return { type: "assistant", message: { role: "assistant", content: [{ type: "reasoning", text }] }, thinking: [{ text }] };
+  }
+  if (kind === "agent_message" || kind === "assistant_message") {
+    return { type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] }, text };
+  }
+  return undefined;
+}
+
+/**
+ * A `turn.completed` usage object as token counts.
+ *
+ * ✅ OBSERVED (codex-cli 0.147.0): `{"input_tokens":13551,"cached_input_tokens":0,
+ * "cache_write_input_tokens":0,"output_tokens":21,"reasoning_output_tokens":14}`. `input_tokens` is
+ * the whole billed input, cached reads included — OpenAI's convention, and {@link AgentTokenCounts}'.
+ */
+export function codexUsageOf(usage: unknown): AgentTokenCounts | undefined {
+  if (usage === null || typeof usage !== "object" || Array.isArray(usage)) return undefined;
+  const bag = usage as Record<string, unknown>;
+  const num = (key: string): number | undefined => (typeof bag[key] === "number" ? (bag[key] as number) : undefined);
+  const input = num("input_tokens");
+  const cacheRead = num("cached_input_tokens");
+  const cacheWrite = num("cache_write_input_tokens");
+  const output = num("output_tokens");
+  const reasoning = num("reasoning_output_tokens");
+  if (input === undefined && output === undefined) return undefined;
+  const counts: AgentTokenCounts = {
+    ...(input !== undefined ? { inputTokens: input } : {}),
+    ...(output !== undefined ? { outputTokens: output } : {}),
+    ...(cacheRead !== undefined ? { cacheReadTokens: cacheRead } : {}),
+    ...(cacheWrite !== undefined ? { cacheWriteTokens: cacheWrite } : {}),
+    ...(input !== undefined ? { noCacheTokens: Math.max(0, input - (cacheRead ?? 0) - (cacheWrite ?? 0)) } : {}),
+    ...(reasoning !== undefined ? { reasoningTokens: reasoning } : {}),
+    ...(input !== undefined || output !== undefined ? { totalTokens: (input ?? 0) + (output ?? 0) } : {}),
+  };
+  return counts;
 }
 
 function stringOf(bag: Record<string, unknown>, ...keys: string[]): string | undefined {
@@ -589,7 +687,7 @@ export function createCodexAgentQuery(config: CodexAgentOptions = {}): AgentQuer
           return;
         }
         run = next;
-        yield { type: "other" };
+        yield codexTurnMessage(event) ?? { type: "other" };
       }
       const code = await c.exit;
       // How full the thread is and how much of the account is left — neither rides `exec --json`, both
@@ -623,6 +721,8 @@ export function createCodexAgentQuery(config: CodexAgentOptions = {}): AgentQuer
         ...(structured !== undefined ? { structured } : {}),
         ...(run.sessionId !== undefined ? { sessionId: run.sessionId } : {}),
         ...(run.model !== undefined ? { model: run.model } : {}),
+        ...(run.usage !== undefined ? { usage: run.usage } : {}),
+        ...(run.rawUsage !== undefined ? { rawUsage: run.rawUsage } : {}),
       };
       yield { type: "result", result };
     } finally {

@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { isOk, promptOp, type ExecServices, type FunctionInputs, type ResolvedSession } from "@declarative-ai/exec";
 import type { AgentQuery, AgentQueryOptions } from "@declarative-ai/agents-api";
-import { codexArgv, codexRefusal, createCodexAgentQuery, mcpServerOverride, readCodexEvent, replayPreamble, sandboxFor } from "../src/codexQuery.js";
+import {
+  codexArgv,
+  codexRefusal,
+  codexTurnMessage,
+  codexUsageOf,
+  createCodexAgentQuery,
+  mcpServerOverride,
+  readCodexEvent,
+  replayPreamble,
+  sandboxFor,
+} from "../src/codexQuery.js";
 import { AgentCodexExecutor } from "../src/cliExecutor.js";
 import { CODEX_CAPS, createCodexAgentFunction } from "../src/codexRuntime.js";
 import type { AgentProcess, SpawnOptions, SpawnProcess } from "../src/process.js";
@@ -125,12 +135,12 @@ describe("codexRefusal — what this transport will not pretend to do", () => {
     expect(codexRefusal({ prompt: "x", allowedTools: ["Read"] })).toMatch(/no native tool allow-list/);
   });
 
-  it("refuses a reasoning request it has no verified channel for", () => {
-    // The neutral knobs now REACH every transport, which makes "this one cannot carry it" a thing that
-    // has to be said. Codex exposes model behaviour through `-c` overrides and this adapter maps none
-    // of them, so a caller asking for effort would otherwise get the binary's default and no warning.
-    expect(codexRefusal({ prompt: "x", reasoning: { effort: "high" } })).toMatch(/no verified reasoning channel/);
-    expect(codexRefusal({ prompt: "x", reasoning: { budgetTokens: 8192 } })).toMatch(/no verified reasoning channel/);
+  it("carries an effort LEVEL, and refuses a budget it has no setting for", () => {
+    // A level travels as `model_reasoning_effort`; codex has no budget key, so a budget asked for would
+    // otherwise be the binary's default and no warning.
+    expect(codexRefusal({ prompt: "x", reasoning: { effort: "high" } })).toBeUndefined();
+    expect(codexRefusal({ prompt: "x", reasoning: { budgetTokens: 8192 } })).toMatch(/no thinking-budget setting/);
+    expect(codexRefusal({ prompt: "x", reasoning: { effort: "high", budgetTokens: 8192 } })).toMatch(/no thinking-budget setting/);
   });
 
   it("refuses a step budget, having no turn-cap option", () => {
@@ -217,7 +227,15 @@ describe("createCodexAgentQuery — a subprocess speaking JSONL", () => {
     const { spawn, argv, opts } = fakeSpawn(answered("looks good"));
     const seen = [];
     for await (const m of createCodexAgentQuery({ spawn })({ prompt: "review it", cwd: "/repo" })) seen.push(m);
-    expect(seen.at(-1)).toEqual({ type: "result", result: { text: "looks good", sessionId: "01997" } });
+    expect(seen.at(-1)).toEqual({
+      type: "result",
+      result: {
+        text: "looks good",
+        sessionId: "01997",
+        usage: { inputTokens: 10, outputTokens: 4, noCacheTokens: 10, totalTokens: 14 },
+        rawUsage: { input_tokens: 10, output_tokens: 4 },
+      },
+    });
     expect(argv[0]![0]).toBe("codex");
     expect(opts[0]!.stdin).toBe("review it");
     // The working root is the process CWD, never codex's `-C`: only the spawn seam knows how to
@@ -239,7 +257,7 @@ describe("createCodexAgentQuery — a subprocess speaking JSONL", () => {
     const { spawn } = fakeSpawn(["Reading config…", "", ...answered("ok")]);
     const seen = [];
     for await (const m of createCodexAgentQuery({ spawn })({ prompt: "x" })) seen.push(m);
-    expect(seen.at(-1)).toEqual({ type: "result", result: { text: "ok", sessionId: "01997" } });
+    expect(seen.at(-1)).toMatchObject({ type: "result", result: { text: "ok", sessionId: "01997" } });
   });
 
   it("surfaces a non-zero exit as an error, so the cause is named rather than 'no result'", async () => {
@@ -568,5 +586,70 @@ describe("the model override", () => {
 
   it("omits it when none was named", () => {
     expect(codexArgv({ prompt: "go" }).join(" ")).not.toContain("model=");
+  });
+});
+
+describe("reasoning — effort in, thinking out", () => {
+  it("sends the effort level as a config key, surviving a resume", () => {
+    expect(codexArgv({ prompt: "go", reasoning: { effort: "xhigh" } }).join(" ")).toContain('model_reasoning_effort="xhigh"');
+    expect(codexArgv({ prompt: "go", reasoning: { effort: "low" }, resume: "s1" }).join(" ")).toContain('model_reasoning_effort="low"');
+    expect(codexArgv({ prompt: "go" }).join(" ")).not.toContain("model_reasoning_effort");
+  });
+
+  it("always asks for reasoning summaries, so ~/.codex/config.toml cannot hide the thinking", () => {
+    expect(codexArgv({ prompt: "go" }).join(" ")).toContain('model_reasoning_summary="auto"');
+  });
+
+  it("turns a reasoning item into a thinking turn, and an agent message into a said one", () => {
+    // Recorded from codex-cli 0.147.0 with a summary on.
+    expect(codexTurnMessage({ type: "item.completed", item: { id: "item_0", type: "reasoning", text: "**Computing number 391**" } })).toEqual({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "reasoning", text: "**Computing number 391**" }] },
+      thinking: [{ text: "**Computing number 391**" }],
+    });
+    expect(codexTurnMessage({ type: "item.completed", item: { id: "item_1", type: "agent_message", text: "391" } })).toEqual({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "text", text: "391" }] },
+      text: "391",
+    });
+    // The older dialect too.
+    expect(codexTurnMessage({ msg: { type: "agent_reasoning", text: "hmm" } })?.thinking).toEqual([{ text: "hmm" }]);
+    // Anything else is no turn.
+    expect(codexTurnMessage({ type: "item.completed", item: { type: "command_execution", command: "ls" } })).toBeUndefined();
+    expect(codexTurnMessage({ type: "turn.started" })).toBeUndefined();
+  });
+
+  it("reads the turn's usage, reasoning tokens included", () => {
+    expect(
+      codexUsageOf({ input_tokens: 13551, cached_input_tokens: 1000, cache_write_input_tokens: 0, output_tokens: 21, reasoning_output_tokens: 14 }),
+    ).toEqual({
+      inputTokens: 13551,
+      outputTokens: 21,
+      cacheReadTokens: 1000,
+      cacheWriteTokens: 0,
+      noCacheTokens: 12551,
+      reasoningTokens: 14,
+      totalTokens: 13572,
+    });
+    expect(codexUsageOf(undefined)).toBeUndefined();
+    expect(codexUsageOf({})).toBeUndefined();
+  });
+
+  it("streams the thinking and the answer as turns, in order, before the result", async () => {
+    const { spawn } = fakeSpawn([
+      JSON.stringify({ type: "thread.started", thread_id: "t1" }),
+      JSON.stringify({ type: "turn.started" }),
+      JSON.stringify({ type: "item.completed", item: { id: "item_0", type: "reasoning", text: "**Computing**" } }),
+      JSON.stringify({ type: "item.completed", item: { id: "item_1", type: "agent_message", text: "391" } }),
+      JSON.stringify({ type: "turn.completed", usage: { input_tokens: 5, output_tokens: 3, reasoning_output_tokens: 2 } }),
+    ]);
+    const seen = [];
+    for await (const m of createCodexAgentQuery({ spawn, sessionFiles: false })({ prompt: "x", reasoning: { effort: "high" } })) seen.push(m);
+    const turns = seen.filter((m) => m.type === "assistant");
+    expect(turns.map((m) => m.thinking?.[0]?.text ?? m.text)).toEqual(["**Computing**", "391"]);
+    const result = seen.at(-1) as { type: string; result: { text: string; usage?: { reasoningTokens?: number } } };
+    expect(result.type).toBe("result");
+    expect(result.result.text).toBe("391");
+    expect(result.result.usage?.reasoningTokens).toBe(2);
   });
 });
