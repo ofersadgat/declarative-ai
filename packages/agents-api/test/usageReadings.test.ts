@@ -65,6 +65,44 @@ describe("claude's vocabulary, normalized", () => {
     ]);
   });
 
+  it("keeps only the plan windows of a real get_usage answer, and reads extra_usage as overage", () => {
+    // The `rate_limits` of a claude 2.1.223 answer (2026-09-24, a max account), the dollar fields and
+    // the null codenames trimmed. `nimbus_quill` has a window's shape and is not one.
+    const money = { limit_dollars: null, used_dollars: null, remaining_dollars: null, locked_reason: null };
+    const answer = {
+      subscription_type: "max",
+      rate_limits_available: true,
+      rate_limits: {
+        five_hour: { utilization: 6, resets_at: "2026-09-25T02:40:00.370831+00:00", ...money },
+        seven_day: { utilization: 16, resets_at: "2026-09-30T16:00:00.370861+00:00", ...money },
+        seven_day_oauth_apps: null,
+        seven_day_opus: null,
+        seven_day_sonnet: null,
+        seven_day_cowork: null,
+        tangelo: null,
+        nimbus_quill: { utilization: 0, resets_at: null, ...money },
+        extra_usage: { is_enabled: false, monthly_limit: null, used_credits: null, utilization: null, currency: null, user_disabled: true, spend_limit_reached: false, daily: null, weekly: null },
+        limits: [{ kind: "session", group: "session", percent: 6, severity: "normal", resets_at: "2026-09-25T02:40:00.370831+00:00", scope: null, is_active: false }],
+        spend: { used: { amount_minor: 0, currency: "USD", exponent: 2 }, limit: null, percent: 0, severity: "normal", enabled: false },
+        member_dashboard_available: false,
+        seven_day_breakdown: { as_of: "2026-09-25T00:24:25.386552+00:00", window_started_at: "2026-09-23T16:00:00.370861+00:00", rows: [{ key: "claude_code", display_name: "Claude Code", percent: 100 }] },
+        model_scoped: [{ display_name: "Fable", utilization: 0, resets_at: "2026-09-30T16:00:00+00:00" }],
+      },
+    };
+    const r = limitReadingOfClaudeUsage(answer, "claude-cli")!;
+    expect(r.windows.map((w) => [w.id, w.label, w.usedPercent])).toEqual([
+      ["five_hour", "5-hour", 6],
+      ["seven_day", "Weekly", 16],
+    ]);
+    expect(r).toMatchObject({ status: "ok", complete: true, overage: false });
+
+    const withCredits = (extra: object) => limitReadingOfClaudeUsage({ ...answer, rate_limits: { ...answer.rate_limits, extra_usage: { ...answer.rate_limits.extra_usage, ...extra } } }, "claude-cli")!;
+    expect(withCredits({ is_enabled: true }).overage).toBe(true);
+    expect(withCredits({ is_enabled: true, spend_limit_reached: true }).overage).toBe(false);
+    const { extra_usage: _gone, ...noExtra } = answer.rate_limits;
+    expect(limitReadingOfClaudeUsage({ ...answer, rate_limits: noExtra }, "claude-cli")!.overage).toBeUndefined();
+  });
+
   it("gives nothing for a signed-out answer (rate_limits: null)", () => {
     expect(limitReadingOfClaudeUsage({ subscription_type: null, rate_limits_available: false, rate_limits: null }, "claude-cli")).toBeUndefined();
   });

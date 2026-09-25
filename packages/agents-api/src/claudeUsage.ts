@@ -80,6 +80,23 @@ export function limitReadingOfRateLimitEvent(event: unknown, route: string, at: 
   };
 }
 
+/**
+ * Which `rate_limits` keys are plan windows. MEASURED 2026-09-24 (claude 2.1.223, a max account): the
+ * object also holds codenamed entries in the SAME `{utilization, resets_at}` shape (`nimbus_quill` at
+ * 0 with no reset), `extra_usage` (the credits switch), `spend` (money), `seven_day_breakdown` (the
+ * week split by surface), `limits` and `model_scoped` (arrays restating the windows) and a flag. So a
+ * window is named for its length — `five_hour`, `seven_day`, or a `seven_day_*` slice of the week —
+ * AND carries a figure.
+ */
+const PLAN_WINDOW = /^(five_hour|seven_day(_[a-z0-9_]+)?)$/;
+
+/** `extra_usage` → the reading's `overage`: on, and not stopped by its spend cap. `undefined` when absent. */
+function overageOf(raw: unknown): boolean | undefined {
+  const x = bag(raw);
+  if (x === undefined || typeof x["is_enabled"] !== "boolean") return undefined;
+  return x["is_enabled"] === true && x["spend_limit_reached"] !== true;
+}
+
 /** The `get_usage` answer → a COMPLETE limit reading; `undefined` when it carries no windows (signed out, API key). */
 export function limitReadingOfClaudeUsage(response: unknown, route: string, at: string = new Date().toISOString()): LimitReading | undefined {
   const r = bag(response);
@@ -87,14 +104,16 @@ export function limitReadingOfClaudeUsage(response: unknown, route: string, at: 
   if (r === undefined || limits === undefined) return undefined;
   const windows: LimitWindow[] = [];
   for (const [id, raw] of Object.entries(limits)) {
+    if (!PLAN_WINDOW.test(id)) continue;
     const w = bag(raw);
-    if (w === undefined) continue;
-    const u = num(w["utilization"]);
-    windows.push(windowOf(id, u ?? null, isoOf(w["resets_at"])));
+    const u = num(w?.["utilization"]);
+    if (w === undefined || u === undefined) continue;
+    windows.push(windowOf(id, u, isoOf(w["resets_at"])));
   }
   if (windows.length === 0) return undefined;
   const status: LimitStatus = windows.some((w) => (w.usedPercent ?? 0) >= 100) ? "exhausted" : "ok";
-  return { route, plan: str(r["subscription_type"]) ?? null, windows, status, source: "query", at, complete: true };
+  const overage = overageOf(limits["extra_usage"]);
+  return { route, plan: str(r["subscription_type"]) ?? null, windows, status, source: "query", at, complete: true, ...(overage !== undefined ? { overage } : {}) };
 }
 
 /** An Anthropic `usage` object → the tokens the conversation holds after that response. */
