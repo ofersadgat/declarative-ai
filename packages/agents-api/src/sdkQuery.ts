@@ -157,9 +157,20 @@ export const CLAUDE_CODE_OPTION_KEYS = [
   "ultracode",
 ] as const;
 
+/** Every level `claude` takes for `--effort` / the SDK's `effort` — measured on 2.1.142 and 2.1.223. A
+ *  given model takes a subset of these, which its catalog row lists; the call is fitted to that before it
+ *  gets here. */
+export const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+
 /** What this run asks for that the CLAUDE transports cannot honour, or `undefined` to proceed. Shared
  *  by both, since they drive the same binary and differ only in how they reach it. */
 export function claudeOptionsRefusal(opts: AgentQueryOptions): string | undefined {
+  // A level outside claude's vocabulary would be refused by the binary as an argument error, far from
+  // anything that says why — so it is named here instead.
+  const effort = opts.reasoning?.effort;
+  if (effort !== undefined && !(CLAUDE_EFFORTS as readonly string[]).includes(effort)) {
+    return `claude has no "${effort}" effort level — it takes ${CLAUDE_EFFORTS.join(", ")}`;
+  }
   const unknown = Object.keys(opts.providerOptions ?? {}).filter((k) => !(CLAUDE_CODE_OPTION_KEYS as readonly string[]).includes(k));
   if (unknown.length > 0) {
     return (
@@ -267,7 +278,8 @@ export function sdkOptions(opts: AgentQueryOptions, binaryPath: string | undefin
     // `low | medium | high | xhigh | max`, which is why `xhigh` is now in `ReasoningSpec` rather than
     // being smuggled through `providerOptions`. A budget is the newer `thinking` option rather than the
     // deprecated `maxThinkingTokens`, whose meaning collapsed to on/off on recent models.
-    ...(opts.reasoning?.effort !== undefined ? { effort: opts.reasoning.effort } : {}),
+    // Narrowed by `claudeOptionsRefusal`, which refuses any other level before this is built.
+    ...(opts.reasoning?.effort !== undefined ? { effort: opts.reasoning.effort as (typeof CLAUDE_EFFORTS)[number] } : {}),
     ...(opts.reasoning?.budgetTokens !== undefined ? { thinking: { type: "enabled", budgetTokens: opts.reasoning.budgetTokens } } : {}),
     // The agent's OWN loop bound: one step is one model→tool→model turn, which is exactly what
     // `maxTurns` counts.

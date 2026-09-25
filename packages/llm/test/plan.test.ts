@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { JsonSchema } from "@declarative-ai/json";
 import { plan } from "../src/plan.js";
 import type { LlmCallDefinition } from "../src/llmConfig.js";
-import { ModelInfo } from "../src/model-catalog.js";
+import { ModelInfo, parametersFromNames } from "../src/model-catalog.js";
 import { flatSchema } from "./fakes.js";
 
 const baseDef: LlmCallDefinition & { schema?: JsonSchema } = {
@@ -100,5 +100,26 @@ describe("content hashing with binary attachments", () => {
   it("leaves a byte-free declaration's hash alone", () => {
     expect(plan(baseDef).contentHash).toBe(plan(baseDef).contentHash);
     expect(plan(baseDef).contentHash).not.toBe(plan(withBytes(new Uint8Array([1]))).contentHash);
+  });
+});
+
+describe("plan — reasoning fitted to the model's levels (decision 0009)", () => {
+  it("reports a clamped level and a dropped request, as the call will do them", () => {
+    ModelInfo.instance.upsert({
+      route: "openrouter",
+      model: "test/three-levels",
+      inputPerMillion: 0,
+      outputPerMillion: 0,
+      parameters: parametersFromNames(["reasoning"], { reasoning: { efforts: ["low", "medium", "high"], budget: false } }),
+    });
+    ModelInfo.instance.upsert({ route: "openrouter", model: "test/no-reasoning", inputPerMillion: 0, outputPerMillion: 0, parameters: parametersFromNames(["temperature"]) });
+    const asking = (model: string): LlmCallDefinition => ({ model, prompt: "think", reasoning: { effort: "max" }, timeoutMs: 1000 });
+
+    expect(plan(asking("openrouter/test/three-levels")).issues).toEqual([
+      'model openrouter/test/three-levels "max" is not one of its levels (low, medium, high) — sent as "high" (at call time)',
+    ]);
+    expect(plan(asking("openrouter/test/no-reasoning")).issues).toEqual([
+      "model openrouter/test/no-reasoning takes no reasoning request — dropped (at call time)",
+    ]);
   });
 });

@@ -7,8 +7,8 @@
  * The shape is a small TYPE HIERARCHY keyed on what a model family accepts (the user's "extending
  * interfaces depending on provider / model type"): the universal base, a SAMPLING variant (temperature /
  * top-p / top-k), and a REASONING variant (reasoning effort, rejects the sampling knobs). The runtime
- * witness of "which variant is this model" already exists as the catalog capability lookup
- * (`supportedParametersFor` + `acceptsParam` in `search/config/space.ts`); these types just name it.
+ * witness of "which variant is this model" is the catalog row's `parameters` schema, read through
+ * `ModelInfo.paramAcceptance`; these types just name it.
  *
  * This is the canonical SERIALIZABLE descriptor of an LLM call: it carries EVERY input the underlying
  * call mechanism accepts, so that a stored config transforms losslessly into a real call (`@declarative-ai/llm`
@@ -136,21 +136,29 @@ export interface SamplingConfiguration extends LlmConfiguration {
  *  config or the stored config JSON. */
 export interface ReasoningSpec {
   /**
-   * How hard to think, as a LEVEL.
+   * How hard to think, as a LEVEL — one of {@link REASONING_EFFORTS}.
    *
-   * `xhigh` is above `high` and exists because a transport we drive has a level the three-value
-   * vocabulary cannot name: Claude Code takes `low | medium | high | xhigh | max`, and a call asking
-   * for its deepest tier had nowhere to say so — it either lost the request or had to smuggle it
-   * through `providerOptions`, which is exactly the provider-shape leak `ReasoningSpec` exists to
-   * prevent. A provider that tops out at `high` clamps it there rather than refusing, since asking for
-   * more thought than a model offers is satisfied by giving it all of it.
+   * WHICH levels a model takes is not this type's business: the catalog row's `parameters` schema
+   * lists them, and `fitReasoning` clamps a request to them before the call. Asking for more thought
+   * than a model offers is satisfied by giving it all of it, so a level above the model's top clamps
+   * down rather than failing the call.
    */
-  effort?: "low" | "medium" | "high" | "xhigh";
+  effort?: ReasoningEffort;
   budgetTokens?: number;
 }
 
-/** Every effort level, in ascending order — shared by the parse and by the adapters that clamp. */
-export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
+/**
+ * Every effort level any route names, in ASCENDING order. The order is what it is for: clamping a
+ * request to the levels a model lists takes the highest one at or below the request.
+ *
+ * The union of what the sources report (JaiRA decision 0009): OpenAI and OpenRouter go down to `none`
+ * and `minimal`; Claude and codex go up to `max`; codex adds `ultra` above it. `none` asks for no
+ * reasoning at all, which a model with no such level satisfies by being sent none.
+ */
+export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+
+/** One effort level — see {@link REASONING_EFFORTS}. */
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
 /** Reasoning models — accept a `reasoning` request (effort/budget) and REJECT the sampling knobs (so a
  *  reasoning model simply has no temperature/top-p branch, §config-as-dimensions). `reasoning` is REQUIRED:

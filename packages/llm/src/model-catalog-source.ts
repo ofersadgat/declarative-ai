@@ -15,16 +15,26 @@
  * source that fails to fetch, parse, or VALIDATE is skipped, and existing prices stand.
  */
 import { createLogger } from "@declarative-ai/log";
-import { deriveIdentity, displayProviderFor, keyForModel, ModelInfo, type ModelInfoInterface } from "./model-catalog.js";
+import {
+  deriveIdentity,
+  displayProviderFor,
+  keyForModel,
+  ModelInfo,
+  orderedEfforts,
+  parametersFromNames,
+  structuredOutputFromNames,
+  type ModelInfoInterface,
+  type ReasoningCapability,
+} from "./model-catalog.js";
 
 const log = createLogger("engine.providers.model-catalog-source");
 
 // --- Native Claude capability synthesis -------------------------------------
 // The Anthropic docs table (and the in-code price seed) carry NO capability columns, and the native
 // `claude-*` ids aren't on OpenRouter, so THIS module is the ONE place that knows Claude's default
-// parameter support. What it synthesizes is written to the `models` TABLE — by the §5 refresh below and
-// by the seed generator (which imports these) — and the loaded row is the runtime source of truth.
-// Nothing reads this at call time; `ModelInfo.supportedParameters` reads the row.
+// parameter support. What it synthesizes becomes the row's `parameters` schema — by the §5 refresh
+// below and by the seed generator (which imports these) — and the loaded row is the runtime source of
+// truth. Nothing reads this at call time; `ModelInfo.parameters` reads the row.
 
 /** Drop any `vendor/` routing prefix (e.g. OpenRouter ids). */
 function bareId(modelId: string): string {
@@ -82,14 +92,16 @@ export function claudeSupportedParameters(modelId: string): string[] {
 /**
  * Complete a SEED / scraped row for insertion into the `models` table: generic identity always
  * ({@link deriveIdentity}), PLUS — for a native Claude row with no capability feed — its synthesized
- * `supported_parameters` + modalities. Fill-only. Used by {@link parseAnthropicDocsPricing} (all-Claude
- * scrape rows) and the models-seed generator (`db/genModelsSeedSql.ts`). OpenRouter rows use
- * {@link deriveIdentity} directly (their capabilities come from the feed).
+ * `parameters` + modalities. Fill-only. Used by {@link parseAnthropicDocsPricing} (all-Claude scrape
+ * rows) and the snapshot generator. OpenRouter rows use {@link deriveIdentity} directly (their
+ * capabilities come from the feed).
  */
 export function completeSeedRow(row: ModelInfoInterface): ModelInfoInterface {
   const out = deriveIdentity(row);
   if (isClaudeModel(row.model)) {
-    if (out.supportedParameters === undefined) out.supportedParameters = claudeSupportedParameters(row.model);
+    if (out.parameters === undefined) out.parameters = parametersFromNames(claudeSupportedParameters(row.model));
+    // Native Claude's SDK carries structured output itself (see `profileForCaps`).
+    if (out.structuredOutput === undefined) out.structuredOutput = "schema";
     if (out.modalities === undefined) out.modalities = { input: [...CLAUDE_MODALITIES.input], output: [...CLAUDE_MODALITIES.output] };
   }
   return out;
@@ -189,9 +201,9 @@ function modelNameToPrefix(name: string): { id: string; dateScoped: boolean } | 
  * an empty/short result as a failed scrape and keeps existing prices).
  *
  * The docs table carries NO capability/modality columns, and the native `claude-*` ids aren't on
- * OpenRouter, so nothing else fills them — {@link completeSeedRow} stamps the correct per-model
- * `supportedParameters` (via `claudeSupportedParameters`, so opus-4-7/4-8 reject the sampling knobs) +
- * modalities + canonical id / provider, the SAME way the seed does.
+ * OpenRouter, so nothing else fills them — {@link completeSeedRow} stamps the per-model `parameters`
+ * (via `claudeSupportedParameters`, so opus-4-7/4-8 reject the sampling knobs) + modalities + canonical
+ * id / provider, the SAME way the seed does.
  */
 export function parseAnthropicDocsPricing(text: string): ModelInfoInterface[] {
   const rows = extractRows(text);
@@ -276,10 +288,11 @@ function perMillion(v: unknown): number | undefined {
  * the orchestrator, not fatal. (Note: we PREFER OpenRouter's per-call reported cost; this table is
  * the fallback when a response omits it.)
  *
- * Beyond price, the feed carries the model's CAPABILITIES — `supported_parameters` (which the
- * executor filters outgoing params against, §5.1), `context_length`, `top_provider.max_completion_tokens`,
- * and `architecture.{input,output}_modalities` — so the catalog drives routing/structured-output
- * decisions from data instead of hardcoded family heuristics.
+ * Beyond price, the feed carries the model's CAPABILITIES — `supported_parameters` and the `reasoning`
+ * object (`supported_efforts`, `default_effort`, `mandatory`), which become the row's `parameters`
+ * schema the executor filters and fits a call against (§5.1); `context_length`;
+ * `top_provider.max_completion_tokens`; and `architecture.{input,output}_modalities` — so the catalog
+ * drives routing/structured-output decisions from data instead of hardcoded family heuristics.
  */
 export function parseOpenRouterModels(json: string): ModelInfoInterface[] {
   let parsed: unknown;
@@ -298,6 +311,7 @@ export function parseOpenRouterModels(json: string): ModelInfoInterface[] {
       created?: unknown;
       context_length?: unknown;
       supported_parameters?: unknown;
+      reasoning?: { supported_efforts?: unknown; default_effort?: unknown; mandatory?: unknown };
       top_provider?: { max_completion_tokens?: unknown };
       architecture?: { input_modalities?: unknown; output_modalities?: unknown };
     };
@@ -327,14 +341,20 @@ export function parseOpenRouterModels(json: string): ModelInfoInterface[] {
     const created = model.created;
     if (typeof created === "number" && Number.isFinite(created) && created > 0) row.releasedAt = created;
     // Capabilities + limits (all optional; absent ⇒ heuristic fallbacks apply downstream).
-    const supported = model.supported_parameters;
-    if (Array.isArray(supported) && supported.every((p) => typeof p === "string") && supported.length > 0) {
-      row.supportedParameters = supported as string[];
-    }
     const ctx = model.context_length;
     if (typeof ctx === "number" && Number.isFinite(ctx) && ctx > 0) row.contextLength = ctx;
     const maxOut = model.top_provider?.max_completion_tokens;
     if (typeof maxOut === "number" && Number.isFinite(maxOut) && maxOut > 0) row.maxOutputTokens = maxOut;
+    const supported = model.supported_parameters;
+    if (Array.isArray(supported) && supported.every((p) => typeof p === "string") && supported.length > 0) {
+      const names = supported as string[];
+      const reasoning = openRouterReasoning(model.reasoning);
+      row.parameters = parametersFromNames(names, {
+        ...(reasoning !== undefined ? { reasoning } : {}),
+        ...(row.maxOutputTokens !== undefined ? { maxOutputTokens: row.maxOutputTokens } : {}),
+      });
+      row.structuredOutput = structuredOutputFromNames(names);
+    }
     const inMods = model.architecture?.input_modalities;
     const outMods = model.architecture?.output_modalities;
     const modalities: { input?: string[]; output?: string[] } = {};
@@ -346,6 +366,26 @@ export function parseOpenRouterModels(json: string): ModelInfoInterface[] {
     out.push(deriveIdentity(row));
   }
   return out;
+}
+
+/**
+ * OpenRouter's per-model `reasoning` object as a {@link ReasoningCapability}, or `undefined` when the
+ * model has none (its names alone then say whether it reasons).
+ *
+ * MEASURED 2026-09-24: `{"mandatory":true,"supported_efforts":["max","xhigh","high","medium","low"],
+ * "default_effort":"high"}` on `anthropic/claude-opus-5.5`. Levels arrive highest-first and in
+ * OpenRouter's spelling, which is ours; one we do not know is dropped rather than guessed at.
+ */
+function openRouterReasoning(raw: unknown): ReasoningCapability | undefined {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const r = raw as { supported_efforts?: unknown; default_effort?: unknown; mandatory?: unknown };
+  const efforts = Array.isArray(r.supported_efforts) ? orderedEfforts(r.supported_efforts.filter((e): e is string => typeof e === "string")) : undefined;
+  const fallback = typeof r.default_effort === "string" ? orderedEfforts([r.default_effort])[0] : undefined;
+  return {
+    ...(efforts !== undefined && efforts.length > 0 ? { efforts } : {}),
+    ...(fallback !== undefined ? { defaultEffort: fallback } : {}),
+    ...(r.mandatory === true ? { mandatory: true } : {}),
+  };
 }
 
 /** The OpenRouter models-API pricing source. Lenient (thousands of heterogeneous models). */

@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  acceptanceOf,
   canonicalIdFor,
+  clampEffort,
   DEFAULT_MODELS,
   deriveIdentity,
+  fitReasoning,
   isReasoningModel,
   ModelInfo,
-  SAMPLING_PARAM_NAMES,
+  parametersFromNames,
+  structuredOutputFromNames,
 } from "../src/model-catalog.js";
 import type { ProviderSchemaProfile } from "../src/schema/index.js";
 
@@ -255,54 +259,58 @@ describe("capabilities (param filtering substrate, §5.1)", () => {
     }
   });
 
-  it("returns the RECORDED supportedParameters when present (data wins over heuristic)", () => {
+  it("reads the RECORDED parameters schema when present (data wins over heuristic)", () => {
     const c = new ModelInfo([
       {
         route: "openrouter",
         model: "openai/gpt-5-nano",
         inputPerMillion: 0.25,
         outputPerMillion: 1,
-        supportedParameters: ["temperature", "response_format"], // pretend it DID accept temperature
+        parameters: parametersFromNames(["temperature", "response_format"]), // pretend it DID accept temperature
       },
     ]);
-    expect(c.supportedParameters("openrouter/openai/gpt-5-nano")).toContain("temperature");
+    expect(c.paramAcceptance("openrouter/openai/gpt-5-nano").accepts("temperature")).toBe(true);
   });
 
-  it("falls back to a temperature-LESS set for a reasoning model with no recorded capabilities", () => {
+  it("falls back to a temperature-LESS schema for a reasoning model with no recorded capabilities", () => {
     const c = new ModelInfo([]); // empty — cold catalog
-    const supported = c.supportedParameters("openrouter/openai/gpt-5-nano");
-    expect(supported).toBeDefined();
-    expect(supported).not.toContain(SAMPLING_PARAM_NAMES.temperature);
-    expect(supported).not.toContain(SAMPLING_PARAM_NAMES.topP);
-    expect(supported).not.toContain(SAMPLING_PARAM_NAMES.topK);
-    // structured output still works → response_format/structured_outputs ARE present.
-    expect(supported).toContain("response_format");
-    expect(supported).toContain("structured_outputs");
+    expect(c.parameters("openrouter/openai/gpt-5-nano")).toBeDefined();
+    const gate = c.paramAcceptance("openrouter/openai/gpt-5-nano");
+    expect(gate.accepts("temperature")).toBe(false);
+    expect(gate.accepts("topP")).toBe(false);
+    expect(gate.accepts("topK")).toBe(false);
+    expect(gate.accepts("seed")).toBe(true);
+    expect(gate.acceptsReasoning).toBe(true);
+    // A cold row states no tier, so structured output takes the route's default profile.
+    expect(c.structuredOutput("openrouter/openai/gpt-5-nano")).toBeUndefined();
   });
 
   it("returns undefined for an unknown non-reasoning model (⇒ caller sends everything)", () => {
     const c = new ModelInfo([]);
-    expect(c.supportedParameters("openrouter/some/unknown-chat-model")).toBeUndefined();
-    expect(c.supportedParameters("openrouter/openai/gpt-4.1-mini")).toBeUndefined();
+    expect(c.parameters("openrouter/some/unknown-chat-model")).toBeUndefined();
+    expect(c.parameters("openrouter/openai/gpt-4.1-mini")).toBeUndefined();
+    const gate = c.paramAcceptance("openrouter/some/unknown-chat-model");
+    expect(gate.accepts("temperature")).toBe(true);
+    expect(gate.efforts).toBeUndefined();
   });
 
   it("native Claude capabilities are NOT computed by the catalog — they come from the recorded row", () => {
     const c = new ModelInfo([]); // cold catalog: no claude-opus-4-8 row
-    // The catalog no longer synthesizes Claude caps; an un-seeded model just returns undefined (send all).
-    expect(c.supportedParameters("anthropic/claude-opus-4-8")).toBeUndefined();
-    // With the row present (as the ingestion path seeds it), the recorded sampling-less set is returned.
+    // The catalog does not synthesize Claude caps; an un-seeded model just returns undefined (send all).
+    expect(c.parameters("anthropic/claude-opus-4-8")).toBeUndefined();
+    // With the row present (as the ingestion path seeds it), the recorded sampling-less schema is read.
     const seeded = new ModelInfo([
       {
         route: "anthropic",
         model: "claude-opus-4-8",
         inputPerMillion: 5,
         outputPerMillion: 25,
-        supportedParameters: ["max_tokens", "stop", "tools", "tool_choice", "reasoning"],
+        parameters: parametersFromNames(["max_tokens", "stop", "tools", "tool_choice", "reasoning"]),
       },
     ]);
-    const supported = seeded.supportedParameters("anthropic/claude-opus-4-8");
-    expect(supported).not.toContain(SAMPLING_PARAM_NAMES.temperature);
-    expect(supported).toContain(SAMPLING_PARAM_NAMES.stopSequences);
+    const gate = seeded.paramAcceptance("anthropic/claude-opus-4-8");
+    expect(gate.accepts("temperature")).toBe(false);
+    expect(gate.accepts("stopSequences")).toBe(true);
   });
 
   it("exposes the recorded (resolved) schema profile, exact-key matched", () => {
@@ -329,10 +337,11 @@ describe("model identity derivation (canonical id / display)", () => {
     expect(row.canonicalId).toBe("claude-opus-4-8");
     expect(row.provider).toBe("Anthropic");
     expect(row.label).toBe("claude-opus-4.8");
-    expect(row.supportedParameters).toBeUndefined(); // identity only — no capability synthesis here
+    expect(row.parameters).toBeUndefined(); // identity only — no capability synthesis here
     // Fill-only: an explicit value is kept.
-    const fed = deriveIdentity({ route: "openrouter", model: "x/y", inputPerMillion: 1, outputPerMillion: 1, supportedParameters: ["temperature"] });
-    expect(fed.supportedParameters).toEqual(["temperature"]);
+    const parameters = parametersFromNames(["temperature"]);
+    const fed = deriveIdentity({ route: "openrouter", model: "x/y", inputPerMillion: 1, outputPerMillion: 1, parameters });
+    expect(fed.parameters).toEqual(parameters);
   });
 });
 
@@ -375,5 +384,102 @@ describe("DEFAULT_MODELS — the snapshot folded together with the seed rows it 
 
   it("lets the REFRESH win where a key is in both halves — the seed is a fallback, not an override", () => {
     expect(keyed.get("anthropic/claude-opus-4-8")?.source).toBe("anthropic-docs");
+  });
+});
+
+describe("parameters — a JSON Schema over the call's own field names (decision 0009)", () => {
+  it("builds from a source's NAMES, translated to the call's fields, closed to anything unlisted", () => {
+    const schema = parametersFromNames(["temperature", "top_p", "stop", "max_tokens", "response_format", "verbosity"], { maxOutputTokens: 128000 });
+    expect(schema).toEqual({
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        temperature: { type: "number", minimum: 0 },
+        topP: { type: "number", minimum: 0, maximum: 1 },
+        stopSequences: { type: "array", items: { type: "string" } },
+        maxOutputTokens: { type: "integer", minimum: 1, maximum: 128000 },
+      },
+    });
+  });
+
+  it("describes reasoning's LEVELS when the source names them, ordered, with the default", () => {
+    // OpenRouter lists them highest-first; the schema holds them in ascending order.
+    const schema = parametersFromNames(["reasoning"], { reasoning: { efforts: ["max", "xhigh", "high", "medium", "low"], defaultEffort: "high", mandatory: true } });
+    expect(schema["properties"]).toEqual({
+      reasoning: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          effort: { enum: ["low", "medium", "high", "xhigh", "max"], default: "high" },
+          budgetTokens: { type: "integer", minimum: 1 },
+        },
+      },
+    });
+    expect(schema["required"]).toEqual(["reasoning"]);
+  });
+
+  it("offers the usual levels as SUGGESTIONS when a source names reasoning but not its levels", () => {
+    const gate = acceptanceOf(parametersFromNames(["reasoning"]));
+    expect(gate.acceptsReasoning).toBe(true);
+    expect(gate.efforts).toBeUndefined(); // unknown — any level may be sent
+    expect(gate.acceptsBudget).toBe(true);
+  });
+
+  it("reads a model that takes levels but no budget, and one that takes neither", () => {
+    const adaptiveOnly = acceptanceOf(parametersFromNames([], { reasoning: { efforts: ["low", "medium", "high", "xhigh", "max"], budget: false } }));
+    expect(adaptiveOnly.efforts).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(adaptiveOnly.acceptsBudget).toBe(false);
+    const none = acceptanceOf(parametersFromNames(["temperature"]));
+    expect(none.acceptsReasoning).toBe(false);
+    expect(none.efforts).toEqual([]);
+    expect(none.acceptsBudget).toBe(false);
+  });
+
+  it("derives the structured-output tier from the names", () => {
+    expect(structuredOutputFromNames(["structured_outputs", "response_format"])).toBe("schema");
+    expect(structuredOutputFromNames(["response_format"])).toBe("object");
+    expect(structuredOutputFromNames(["temperature"])).toBe(false);
+  });
+});
+
+describe("fitReasoning — a request fitted to what the model takes", () => {
+  const takes = (efforts: Parameters<typeof clampEffort>[1], budget: boolean) =>
+    acceptanceOf(parametersFromNames([], { reasoning: { efforts, budget } }));
+
+  it("clamps a level to the highest the model offers at or below it", () => {
+    expect(clampEffort("ultra", ["low", "medium", "high", "xhigh", "max"])).toBe("max");
+    expect(clampEffort("xhigh", ["low", "medium", "high", "max"])).toBe("high");
+    expect(clampEffort("minimal", ["low", "medium", "high"])).toBe("low"); // below them all → the lowest
+    const fit = fitReasoning({ effort: "xhigh" }, takes(["low", "medium", "high"], false));
+    expect(fit.spec).toEqual({ effort: "high" });
+    expect(fit.notes[0]).toMatch(/"xhigh" is not one of its levels/);
+  });
+
+  it("leaves a level the model lists alone, and says nothing", () => {
+    expect(fitReasoning({ effort: "max" }, takes(["low", "high", "max"], false))).toEqual({ spec: { effort: "max" }, notes: [] });
+  });
+
+  it("turns a level into a budget for a model that takes only a budget, and back", () => {
+    expect(fitReasoning({ effort: "high" }, takes([], true)).spec).toEqual({ budgetTokens: 16384 });
+    expect(fitReasoning({ budgetTokens: 5000 }, takes(["low", "medium", "high"], false)).spec).toEqual({ effort: "medium" });
+  });
+
+  it("caps a budget at the model's maximum", () => {
+    const gate = acceptanceOf(parametersFromNames([], { reasoning: { efforts: [], budget: { maximum: 32000 } } }));
+    expect(fitReasoning({ budgetTokens: 64000 }, gate).spec).toEqual({ budgetTokens: 32000 });
+  });
+
+  it("honours `none` on a model without such a level by sending no request", () => {
+    const fit = fitReasoning({ effort: "none" }, takes(["low", "high"], false));
+    expect(fit.spec).toBeUndefined();
+    expect(fit.notes[0]).toMatch(/no "none" level/);
+  });
+
+  it("drops the request for a model that takes no reasoning, and passes it through for an unknown one", () => {
+    expect(fitReasoning({ effort: "high" }, acceptanceOf(parametersFromNames(["temperature"])))).toEqual({
+      spec: undefined,
+      notes: ["takes no reasoning request — dropped"],
+    });
+    expect(fitReasoning({ effort: "ultra" }, acceptanceOf(undefined))).toEqual({ spec: { effort: "ultra" }, notes: [] });
   });
 });

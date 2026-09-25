@@ -730,9 +730,9 @@ export interface OperationFields extends ExecEnvironmentDecl {
   presencePenalty?: Bindable<number>;
   frequencyPenalty?: Bindable<number>;
   /** How hard to think. Mirrors `llm`'s `ReasoningSpec` by hand, as everything on this authoring
-   *  surface does — `xhigh` included, because a delegated agent has such a tier and an author must be
-   *  able to write it here or the level cannot be requested at all. */
-  reasoning?: Bindable<{ effort?: "low" | "medium" | "high" | "xhigh"; budgetTokens?: number }>;
+   *  surface does — every level of `REASONING_EFFORTS`, since an author must be able to write a level
+   *  here or it cannot be requested at all. Which levels a model takes is its catalog row's business. */
+  reasoning?: Bindable<{ effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"; budgetTokens?: number }>;
 }
 
 /** What an `environment` may say about one function — see {@link OperationFields.functions}. */

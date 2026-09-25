@@ -10,10 +10,10 @@ import type { ContextReading, FunctionInputs, JsonSchema, JsonValue, LimitReadin
 /** The permission mode handed to the delegated agent (its NATIVE profile control). */
 export type AgentPermissionMode = "default" | "plan" | "acceptEdits" | "bypassPermissions";
 
-/** How hard to think, as a level. The neutral `ReasoningSpec.effort`, restated for the reason
- *  {@link AgentReasoning} gives — `xhigh` is in the vocabulary because a delegated agent is the
- *  transport that has such a tier. */
-export type AgentEffort = "low" | "medium" | "high" | "xhigh";
+/** How hard to think, as a level. The neutral `ReasoningSpec.effort` (`llm`'s `REASONING_EFFORTS`),
+ *  restated for the reason {@link AgentReasoning} gives. Which levels an agent's model takes is its
+ *  catalog row's business, not this type's (JaiRA decision 0009). */
+export type AgentEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 /** A tool-use the agent wants to make, surfaced to our approver via {@link AgentPermissionCallback}. */
 export interface AgentToolRequest {

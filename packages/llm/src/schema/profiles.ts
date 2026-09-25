@@ -310,38 +310,36 @@ export const PROVIDER_DEFAULT_PROFILE_ID: Record<string, string> = {
 };
 
 /**
- * Map a model's OpenRouter `supported_parameters` to its structured-output profile (§5.1) — the single
- * derivation shared by import (`persistModels`), the seed (`genModelsSeedSql`), and the pure-engine
- * fallback (`profileForModelId`). Native Anthropic wins first (its SDK carries structured output the
- * OpenRouter param names don't describe). Then: `structured_outputs`→strict json_schema,
- * `response_format`→json_object, a KNOWN list with neither→the text floor, and an UNKNOWN/absent list→
- * the provider default (so a not-yet-refreshed row degrades gracefully, not to the text floor).
+ * Map a model's structured-output TIER (the catalog row's `structuredOutput`) to its profile (§5.1) —
+ * the single derivation behind the pure-engine fallback (`profileForModelId`). Native Anthropic wins
+ * first (its SDK carries structured output the OpenRouter tier doesn't describe). Then: `"schema"`→strict
+ * json_schema, `"object"`→json_object, a KNOWN `false`→the text floor, and an UNKNOWN tier→the provider
+ * default (so a not-yet-refreshed row degrades gracefully, not to the text floor).
  */
-export function profileForCaps(modelId: string, supportedParameters: readonly string[] | undefined): ProviderSchemaProfile {
+export function profileForCaps(modelId: string, structuredOutput: "schema" | "object" | false | undefined): ProviderSchemaProfile {
   if (isAnthropicModel(modelId)) return ANTHROPIC_AI_SDK;
-  if (supportedParameters === undefined) {
+  if (structuredOutput === undefined) {
     const defaultId = PROVIDER_DEFAULT_PROFILE_ID.openrouter;
     return (defaultId ? PROFILE_REGISTRY[defaultId] : undefined) ?? OPENROUTER_STRICT;
   }
-  if (supportedParameters.includes("structured_outputs")) return OPENROUTER_STRICT;
-  if (supportedParameters.includes("response_format")) return JSON_OBJECT;
-  return ADVISORY; // known caps, neither signal → text floor
+  if (structuredOutput === "schema") return OPENROUTER_STRICT;
+  if (structuredOutput === "object") return JSON_OBJECT;
+  return ADVISORY; // known tier, neither mode → text floor
 }
 
-/** The profile id {@link profileForCaps} resolves to — what import/seed write into
- *  `models.schema_profile_id`. */
-export function profileIdForCaps(modelId: string, supportedParameters: readonly string[] | undefined): string {
-  return profileForCaps(modelId, supportedParameters).id;
+/** The profile id {@link profileForCaps} resolves to. */
+export function profileIdForCaps(modelId: string, structuredOutput: "schema" | "object" | false | undefined): string {
+  return profileForCaps(modelId, structuredOutput).id;
 }
 
 /**
  * Resolve the profile for a model id at CALL time. The CATALOG wins when it has a recorded
  * (already-resolved, table-hydrated) profile for the model (§5.1) — the data-driven path. Absent that,
- * fall back to the capability derivation over the catalog's `supported_parameters` (which itself
- * handles native Anthropic + the provider default). Keyed by id alone because the executor (the single
- * adaptation site, §6.1) must adapt the schema and derive the wire mode BEFORE it resolves the model
- * object. An Anthropic model reached via OpenRouter has a non-`claude-` id + `structured_outputs` in
- * its caps, so it correctly resolves to the OpenRouter strict dialect, not the native SDK profile.
+ * fall back to the derivation over the catalog's `structuredOutput` tier (which itself handles native
+ * Anthropic + the provider default). Keyed by id alone because the executor (the single adaptation
+ * site, §6.1) must adapt the schema and derive the wire mode BEFORE it resolves the model object. An
+ * Anthropic model reached via OpenRouter has a non-`claude-` id and a `"schema"` tier, so it correctly
+ * resolves to the OpenRouter strict dialect, not the native SDK profile.
  */
 export function profileForModelId(modelId: string): ProviderSchemaProfile {
   const catalog = ModelInfo.instance;
@@ -349,8 +347,8 @@ export function profileForModelId(modelId: string): ProviderSchemaProfile {
   if (recorded) return recorded;
   const { route, providerId } = parseModelRoute(modelId);
   // A LOCAL route is decided by its ROUTE, before the capability derivation runs. `profileForCaps`
-  // reasons about OpenRouter's `supported_parameters` vocabulary, and a locally-served model has no
-  // such list — so it would fall to that function's "unknown caps" arm and resolve to OPENROUTER_STRICT,
+  // reasons about an OpenRouter-style tier, and a locally-served model has none recorded — so it
+  // would fall to that function's "unknown" arm and resolve to OPENROUTER_STRICT,
   // i.e. the OpenAI strict dialect with its 10-deep / 5000-property ceilings, for a GGUF on your desk.
   if (route === "local" || route === "embedded") {
     const defaultId = PROVIDER_DEFAULT_PROFILE_ID[route];
@@ -358,5 +356,5 @@ export function profileForModelId(modelId: string): ProviderSchemaProfile {
   }
   // Catalog lookups key on the full `{route}/{model}` id; the family heuristic in `profileForCaps` wants
   // the provider-native id (its `isAnthropicModel` check is on the bare `claude-…`), so strip the route.
-  return profileForCaps(providerId, catalog.supportedParameters(modelId));
+  return profileForCaps(providerId, catalog.structuredOutput(modelId));
 }

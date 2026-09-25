@@ -18,14 +18,17 @@
  * construct it with a plain `ModelInfoInterface[]` (or read the runtime-hydrated `ModelInfo.instance`)
  * and the methods accept any `string`. Strong seed → strong methods; weak seed → weak methods.
  *
- * PACKAGING: this module is dependency-FREE (its only runtime import is the generated seed data; the
- * router/schema imports are type-only) and is published as its own `@declarative-ai/llm/model-catalog`
+ * PACKAGING: this module is dependency-FREE (its runtime imports are the generated seed data and the
+ * effort ORDER from `llmConfig`, which itself imports nothing at runtime; the router/schema/json
+ * imports are type-only) and is published as its own `@declarative-ai/llm/model-catalog`
  * subpath for exactly that reason. Model *identity*, *pricing* and *capabilities* are the parts a UI
  * legitimately needs, and reaching them through the package barrel would drag `call`→`router`→
  * `dispatcher` — hence `undici`/`node:net` and the AI SDK providers — into a browser bundle. Same
  * un-barrelling rationale as the ajv note in index.ts: keep the module graph honest, not just the API.
  */
+import type { JsonValue, SchemaDocument } from "@declarative-ai/json";
 import { GENERATED_MODELS } from "./model-catalog-data.generated.js";
+import { REASONING_EFFORTS, type ReasoningEffort, type ReasoningSpec } from "./llmConfig.js";
 import type { ModelRoute } from "./router.js";
 import type { ProviderSchemaProfile } from "./schema/profile.js";
 
@@ -109,16 +112,29 @@ export interface ModelInfoInterface extends RateSet {
   /** Input/output modalities (OpenRouter `architecture.input/output_modalities`). */
   modalities?: Modalities;
   /**
-   * Parameters the model MAY be sent (capability) — OpenRouter snake_case names, e.g.
-   * `["temperature","top_p","response_format","structured_outputs"]`. The executor FILTERS the
-   * sampling params it sends down to this set, so a param no endpoint accepts (e.g. `temperature`
-   * on a reasoning model) is never sent — which is what keeps OpenRouter's `require_parameters`
-   * routing from rejecting the call (§5.1). Absent ⇒ unknown (send everything; see the
-   * reasoning-family fallback in {@link ModelInfo.supportedParameters}).
+   * What the model may be SENT, and what each value may be — a JSON Schema over the call's model
+   * parameters ({@link MODEL_PARAMETER_KEYS}: `LlmCallConfig`'s own field names, never a wire name).
+   *
+   *  - A listed property is accepted, and its schema is the values it takes — `reasoning.effort`'s
+   *    `enum` is the levels the model offers.
+   *  - An unlisted one is not (`additionalProperties: false`). The executor FILTERS what it sends down
+   *    to this, so a param no endpoint accepts (`temperature` on a reasoning model) is never sent —
+   *    which keeps OpenRouter's `require_parameters` routing from rejecting the call (§5.1).
+   *  - A value schema carrying no constraint (`{}`, or suggestions only in `examples`) is accepted
+   *    with its values unknown — all a source that lists NAMES can say.
+   *  - `required` names what the model must be sent.
+   *
+   * Absent ⇒ unknown: the model accepts everything (see the reasoning-family fallback in
+   * {@link ModelInfo.parameters}). Built on the way in from each source's own vocabulary
+   * ({@link parametersFromNames}). JaiRA decision 0009.
    */
-  supportedParameters?: readonly string[];
-  /** Parameters the model MUST be sent (mandatory) — always included; their absence is an error. */
-  requiredParameters?: readonly string[];
+  parameters?: SchemaDocument;
+  /**
+   * The structured-output tier the model's endpoint offers: constrained decoding against a schema,
+   * JSON-object mode only, or neither. What `profileForCaps` derives a schema profile from when the
+   * row records none. Absent ⇒ unknown (the route's default profile).
+   */
+  structuredOutput?: "schema" | "object" | false;
   /**
    * The RESOLVED structured-output schema profile (§5.1) for this model, resolved to a whole object at
    * hydrate time so the engine reads it synchronously. Absent ⇒ the static `profileForModelId` family
@@ -225,8 +241,8 @@ function bareModel(model: string): string {
 /**
  * Heuristic: OpenAI reasoning families (GPT-5*, o1/o3/o4*) reject sampling params (`temperature`,
  * `top_p`, `top_k`) — no OpenRouter endpoint lists them as supported. Used ONLY as a cold-start
- * fallback for {@link ModelInfo.supportedParameters} when the §5 refresh hasn't yet recorded the
- * model's real `supportedParameters`; the recorded data always wins when present. Accepts either a
+ * fallback for {@link ModelInfo.parameters} when the §5 refresh hasn't yet recorded the model's real
+ * `parameters`; the recorded data always wins when present. Accepts either a
  * bare `model` id or a full `${route}/${model}` key (the bare model segment is what's matched).
  */
 export function isReasoningModel(modelId: string): boolean {
@@ -291,35 +307,285 @@ export function displayProviderFor(model: string): string {
   return "Other";
 }
 
-/** OpenRouter parameter NAMES for the sampling params the executor may filter out (our key → OR name). */
-export const SAMPLING_PARAM_NAMES = {
-  temperature: "temperature",
-  topP: "top_p",
-  topK: "top_k",
-  stopSequences: "stop",
-  presencePenalty: "presence_penalty",
-  frequencyPenalty: "frequency_penalty",
-  seed: "seed",
-} as const;
+// --- Parameters: what a model may be sent ------------------------------------
 
-/** Fallback `supportedParameters` for a reasoning model with no recorded capabilities: everything a
- *  reasoning endpoint typically takes EXCEPT the sampling params it rejects (so they get filtered). */
-const REASONING_FALLBACK_SUPPORTED = [
-  "max_tokens",
-  "response_format",
-  "structured_outputs",
-  "reasoning",
+/** The call fields a row's `parameters` schema speaks about — `LlmCallConfig`'s model parameters. */
+export const MODEL_PARAMETER_KEYS = [
+  "maxOutputTokens",
+  "temperature",
+  "topP",
+  "topK",
+  "stopSequences",
+  "presencePenalty",
+  "frequencyPenalty",
   "seed",
   "tools",
-  "tool_choice",
-];
+  "toolChoice",
+  "reasoning",
+] as const;
 
-/** The capability gate for one model's optional params — the SINGLE implementation shared by `plan` (fit
- *  reporting) and `executeStructuredCall` (param filtering), so the dry-run can never drift from what
- *  execution actually sends. An unknown model (no catalog row) accepts everything — the prior behavior. */
+/** One of {@link MODEL_PARAMETER_KEYS}. */
+export type ModelParameterKey = (typeof MODEL_PARAMETER_KEYS)[number];
+
+/** The decoding knobs among them — the ones the executor filters a call's settings down to. */
+export const SAMPLING_PARAMETER_KEYS = ["temperature", "topP", "topK", "stopSequences", "presencePenalty", "frequencyPenalty", "seed"] as const;
+
+/** One of {@link SAMPLING_PARAMETER_KEYS}. */
+export type SamplingParameterKey = (typeof SAMPLING_PARAMETER_KEYS)[number];
+
+/**
+ * A source's parameter NAME → the call field it is. OpenRouter's snake_case vocabulary, which is also
+ * OpenAI's; a name not here is not a call parameter (`response_format`, `structured_outputs` and
+ * `verbosity` are transport facts or knobs the config does not carry) and is left out of the schema.
+ */
+export const WIRE_PARAMETER_NAMES: Readonly<Record<string, ModelParameterKey>> = {
+  max_tokens: "maxOutputTokens",
+  max_completion_tokens: "maxOutputTokens",
+  temperature: "temperature",
+  top_p: "topP",
+  top_k: "topK",
+  stop: "stopSequences",
+  presence_penalty: "presencePenalty",
+  frequency_penalty: "frequencyPenalty",
+  seed: "seed",
+  tools: "tools",
+  tool_choice: "toolChoice",
+  reasoning: "reasoning",
+  reasoning_effort: "reasoning",
+  include_reasoning: "reasoning",
+};
+
+/** The value schema a parameter gets when a source names it and says nothing more about its values. */
+const VALUE_SCHEMAS: Readonly<Record<Exclude<ModelParameterKey, "reasoning">, JsonValue>> = {
+  maxOutputTokens: { type: "integer", minimum: 1 },
+  temperature: { type: "number", minimum: 0 },
+  topP: { type: "number", minimum: 0, maximum: 1 },
+  topK: { type: "integer", minimum: 1 },
+  stopSequences: { type: "array", items: { type: "string" } },
+  presencePenalty: { type: "number" },
+  frequencyPenalty: { type: "number" },
+  seed: { type: "integer" },
+  tools: {},
+  toolChoice: {},
+};
+
+/** What a source says about a model's reasoning — the input to {@link parametersFromNames}. */
+export interface ReasoningCapability {
+  /** The levels it takes, in any order. Absent ⇒ unknown: any level may be sent. */
+  efforts?: readonly ReasoningEffort[];
+  /** The level it thinks at when none is asked for. */
+  defaultEffort?: ReasoningEffort;
+  /** Whether it takes a thinking budget in tokens, and in what range. Absent ⇒ it does (the
+   *  OpenRouter reading: a model that lists `reasoning` takes `reasoning.max_tokens`). */
+  budget?: boolean | { minimum?: number; maximum?: number };
+  /** It must be sent a reasoning request. */
+  mandatory?: boolean;
+}
+
+/**
+ * Build a row's `parameters` schema from a source's parameter NAMES plus whatever it says about values.
+ *
+ * The ONE builder every ingestion path goes through, so a row from OpenRouter, from Anthropic's model
+ * list or from an agent's own report reads the same way. `reasoning` is described when the names list it
+ * OR a capability is given (an agent reports levels without a names list).
+ */
+export function parametersFromNames(
+  names: readonly string[],
+  opts: { reasoning?: ReasoningCapability; maxOutputTokens?: number } = {},
+): SchemaDocument {
+  const properties: Record<string, JsonValue> = {};
+  let reasons = opts.reasoning !== undefined;
+  for (const name of names) {
+    const key = WIRE_PARAMETER_NAMES[name];
+    if (key === undefined) continue;
+    if (key === "reasoning") reasons = true;
+    else properties[key] ??= VALUE_SCHEMAS[key];
+  }
+  if (opts.maxOutputTokens !== undefined && opts.maxOutputTokens > 0) {
+    properties["maxOutputTokens"] = { type: "integer", minimum: 1, maximum: opts.maxOutputTokens };
+  }
+  if (reasons) properties["reasoning"] = reasoningSchema(opts.reasoning);
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties,
+    ...(opts.reasoning?.mandatory === true ? { required: ["reasoning"] } : {}),
+  };
+}
+
+/** The `reasoning` property's schema — see {@link ReasoningCapability}. */
+function reasoningSchema(cap: ReasoningCapability | undefined): JsonValue {
+  const properties: Record<string, JsonValue> = {};
+  if (cap?.efforts === undefined) {
+    // Accepted, levels unknown: a SUGGESTION list rather than an `enum`, so a form offers the usual
+    // levels without the schema claiming the model takes every one of them.
+    properties["effort"] = { type: "string", examples: [...REASONING_EFFORTS] };
+  } else if (cap.efforts.length > 0) {
+    properties["effort"] = {
+      enum: orderedEfforts(cap.efforts),
+      ...(cap.defaultEffort !== undefined ? { default: cap.defaultEffort } : {}),
+    };
+  }
+  if (cap?.budget !== false) {
+    const range = typeof cap?.budget === "object" ? cap.budget : {};
+    properties["budgetTokens"] = {
+      type: "integer",
+      minimum: range.minimum ?? 1,
+      ...(range.maximum !== undefined ? { maximum: range.maximum } : {}),
+    };
+  }
+  return { type: "object", additionalProperties: false, properties };
+}
+
+/** The structured-output tier a source's parameter names imply (OpenRouter's convention). */
+export function structuredOutputFromNames(names: readonly string[]): "schema" | "object" | false {
+  if (names.includes("structured_outputs")) return "schema";
+  if (names.includes("response_format")) return "object";
+  return false;
+}
+
+/** Levels in {@link REASONING_EFFORTS} order, unknown spellings dropped, each once. */
+export function orderedEfforts(levels: readonly string[]): ReasoningEffort[] {
+  return REASONING_EFFORTS.filter((e) => levels.includes(e));
+}
+
+/** Fallback `parameters` for a reasoning-family model with no recorded capabilities: everything a
+ *  reasoning endpoint typically takes EXCEPT the sampling params it rejects (so they get filtered). */
+const REASONING_FALLBACK_PARAMETERS = parametersFromNames(["max_tokens", "reasoning", "seed", "tools", "tool_choice"]);
+
+/**
+ * The capability gate for one model — the SINGLE reading of its `parameters`, shared by `plan` (fit
+ * reporting) and `executeStructuredCall` (param filtering), so the dry-run can never drift from what
+ * execution actually sends. An unknown model (no schema) accepts everything — the prior behavior.
+ */
 export interface ParamAcceptance {
-  accepts(key: keyof typeof SAMPLING_PARAM_NAMES): boolean;
+  /** Whether the model takes this parameter. */
+  accepts(key: ModelParameterKey): boolean;
   acceptsReasoning: boolean;
+  /** The effort levels it takes, ascending. `undefined` ⇒ unknown (any level may be sent); empty ⇒ it
+   *  takes reasoning but no level. */
+  efforts: readonly ReasoningEffort[] | undefined;
+  /** Whether it takes a thinking budget. `undefined` ⇒ unknown. */
+  acceptsBudget: boolean | undefined;
+  /** The largest budget it takes, when its schema says. */
+  maxBudget?: number;
+  /** The schema read, or `undefined` for an unknown model. */
+  schema: SchemaDocument | undefined;
+}
+
+/** Read a `parameters` schema into a {@link ParamAcceptance}. */
+export function acceptanceOf(schema: SchemaDocument | undefined): ParamAcceptance {
+  if (schema === undefined) {
+    return { accepts: () => true, acceptsReasoning: true, efforts: undefined, acceptsBudget: undefined, schema };
+  }
+  const properties = objectOf(schema["properties"]) ?? {};
+  const reasoning = objectOf(properties["reasoning"]);
+  const inner = reasoning !== undefined ? objectOf(reasoning["properties"]) : undefined;
+  // `{}` for reasoning: accepted, and nothing known about how.
+  const effortSchema = inner !== undefined ? objectOf(inner["effort"]) : undefined;
+  const levels = effortSchema !== undefined && Array.isArray(effortSchema["enum"]) ? effortSchema["enum"] : undefined;
+  const budgetSchema = inner !== undefined ? objectOf(inner["budgetTokens"]) : undefined;
+  return {
+    accepts: (key) => properties[key] !== undefined,
+    acceptsReasoning: reasoning !== undefined,
+    efforts:
+      reasoning === undefined ? [] : inner === undefined ? undefined : effortSchema === undefined ? [] : levels === undefined ? undefined : orderedEfforts(levels as string[]),
+    acceptsBudget: reasoning === undefined ? false : inner === undefined ? undefined : budgetSchema !== undefined,
+    ...(budgetSchema !== undefined && typeof budgetSchema["maximum"] === "number" ? { maxBudget: budgetSchema["maximum"] } : {}),
+    schema,
+  };
+}
+
+function objectOf(v: unknown): Record<string, unknown> | undefined {
+  return v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+}
+
+// --- Reasoning: fitting a request to what the model takes ---------------------
+
+/** Representative thinking budgets for an effort level, for a model that takes only a budget. */
+export const EFFORT_BUDGET: Readonly<Record<ReasoningEffort, number>> = {
+  none: 0,
+  minimal: 1024,
+  low: 2048,
+  medium: 8192,
+  high: 16384,
+  xhigh: 32768,
+  max: 65536,
+  ultra: 65536,
+};
+
+/** The effort level a budget asks for, on a model with no budget knob: the lowest level whose
+ *  representative budget covers it, and `max` above them all. The inverse of {@link EFFORT_BUDGET}. */
+export function effortForBudget(budgetTokens: number): ReasoningEffort {
+  for (const level of ["low", "medium", "high", "xhigh"] as const) if (budgetTokens <= EFFORT_BUDGET[level]) return level;
+  return "max";
+}
+
+/**
+ * Clamp a level to the ones a model offers: the highest at or below the request — asking for more
+ * thought than a model has is satisfied by all of it — and the lowest it offers when the request is
+ * below them all.
+ */
+export function clampEffort(effort: ReasoningEffort, levels: readonly ReasoningEffort[]): ReasoningEffort {
+  const rank = REASONING_EFFORTS.indexOf(effort);
+  const ordered = orderedEfforts(levels);
+  const below = ordered.filter((l) => REASONING_EFFORTS.indexOf(l) <= rank);
+  return below.at(-1) ?? ordered[0] ?? effort;
+}
+
+/** A reasoning request fitted to one model, and what fitting it changed, in words. */
+export interface FittedReasoning {
+  spec: ReasoningSpec | undefined;
+  notes: string[];
+}
+
+/**
+ * Fit a reasoning request to what a model takes — the ONE place a level is clamped, a budget turned
+ * into a level (or back), or the request dropped, shared by the plan that reports it and the call that
+ * sends it (JaiRA decision 0009 §5). An unknown model gets the request as asked.
+ */
+export function fitReasoning(spec: ReasoningSpec | undefined, gate: ParamAcceptance): FittedReasoning {
+  const notes: string[] = [];
+  if (spec === undefined || (spec.effort === undefined && spec.budgetTokens === undefined)) return { spec: undefined, notes };
+  if (!gate.acceptsReasoning) return { spec: undefined, notes: ["takes no reasoning request — dropped"] };
+  let effort = spec.effort;
+  let budget = spec.budgetTokens;
+  if (effort !== undefined && gate.efforts !== undefined) {
+    if (effort === "none" && !gate.efforts.includes("none")) {
+      // "Don't think" to a model with no such level is honoured by asking for nothing.
+      notes.push('has no "none" level — sent no reasoning request');
+      effort = undefined;
+    } else if (gate.efforts.length === 0) {
+      if (budget === undefined && gate.acceptsBudget !== false) {
+        budget = EFFORT_BUDGET[effort];
+        notes.push(`takes no effort level — "${effort}" sent as a ${budget}-token budget`);
+      } else {
+        notes.push(`takes no effort level — "${effort}" dropped`);
+      }
+      effort = undefined;
+    } else if (!gate.efforts.includes(effort)) {
+      const clamped = clampEffort(effort, gate.efforts);
+      notes.push(`"${effort}" is not one of its levels (${gate.efforts.join(", ")}) — sent as "${clamped}"`);
+      effort = clamped;
+    }
+  }
+  if (budget !== undefined) {
+    if (gate.acceptsBudget === false) {
+      if (effort === undefined && gate.efforts?.length !== 0) {
+        const asked = effortForBudget(budget);
+        effort = gate.efforts === undefined ? asked : clampEffort(asked, gate.efforts);
+        notes.push(`takes no thinking budget — ${budget} tokens sent as effort "${effort}"`);
+      } else {
+        notes.push("takes no thinking budget — dropped");
+      }
+      budget = undefined;
+    } else if (gate.maxBudget !== undefined && budget > gate.maxBudget) {
+      notes.push(`a ${budget}-token budget is above its ${gate.maxBudget} — sent as ${gate.maxBudget}`);
+      budget = gate.maxBudget;
+    }
+  }
+  if (effort === undefined && budget === undefined) return { spec: undefined, notes };
+  return { spec: { ...(effort !== undefined ? { effort } : {}), ...(budget !== undefined ? { budgetTokens: budget } : {}) }, notes };
 }
 
 /**
@@ -400,30 +666,24 @@ export class ModelInfo<const Rows extends readonly ModelInfoInterface[] = readon
   }
 
   /**
-   * Parameters the model MAY be sent — the recorded `supported_parameters`, else (for an OpenAI reasoning
-   * model) its sampling-less fallback set, else `undefined` ⇒ the caller sends everything. Native Claude
-   * capabilities live in the row (synthesized by the ingestion path in `model-catalog-source`), not here.
+   * What the model may be sent — the recorded `parameters` schema, else (for an OpenAI reasoning model)
+   * its sampling-less fallback, else `undefined` ⇒ the caller sends everything.
    */
-  supportedParameters(model: ModelKeyOf<Rows>): readonly string[] | undefined {
+  parameters(model: ModelKeyOf<Rows>): SchemaDocument | undefined {
     const row = this.rows.get(model);
-    if (row?.supportedParameters && row.supportedParameters.length > 0) return row.supportedParameters;
-    if (isReasoningModel(model)) return REASONING_FALLBACK_SUPPORTED;
+    if (row?.parameters !== undefined) return row.parameters;
+    if (isReasoningModel(model)) return REASONING_FALLBACK_PARAMETERS;
     return undefined;
   }
 
-  /** Parameters the model MUST be sent (mandatory), or undefined if none recorded. */
-  requiredParameters(model: ModelKeyOf<Rows>): readonly string[] | undefined {
-    return this.rows.get(model)?.requiredParameters;
+  /** The structured-output tier the model's endpoint offers, when recorded. */
+  structuredOutput(model: ModelKeyOf<Rows>): "schema" | "object" | false | undefined {
+    return this.rows.get(model)?.structuredOutput;
   }
 
-  /** The capability gate for one model's optional params (see {@link ParamAcceptance}). Unknown model ⇒
-   *  accepts everything (`supportedParameters` undefined). */
+  /** The capability gate for one model (see {@link ParamAcceptance}). Unknown model ⇒ accepts everything. */
   paramAcceptance(model: ModelKeyOf<Rows>): ParamAcceptance {
-    const supported = this.supportedParameters(model);
-    return {
-      accepts: (key) => supported === undefined || supported.includes(SAMPLING_PARAM_NAMES[key]),
-      acceptsReasoning: supported === undefined || supported.includes("reasoning"),
-    };
+    return acceptanceOf(this.parameters(model));
   }
 
   /** The recorded (already-resolved) structured-output schema profile for a model, if any. */
@@ -516,8 +776,8 @@ export class ModelInfo<const Rows extends readonly ModelInfoInterface[] = readon
  * Seed catalog — a STARTING point, kept current by the §5 refresh (scrapes the Anthropic docs
  * pricing table + OpenRouter models API, which hydrates `ModelInfo.instance` at startup). Values
  * verified against https://platform.claude.com/docs/en/about-claude/pricing (2026-06-02). The seed
- * carries PRICE only; capabilities (supportedParameters / schemaProfile) are filled by the refresh +
- * the profile-artifact seed, with heuristic fallbacks until then.
+ * carries PRICE only; capabilities (`parameters` / `structuredOutput` / `schemaProfile`) are filled by
+ * the refresh, with heuristic fallbacks until then.
  *
  * Identity is `{route}/{model}`: native Claude → route "anthropic"; everything else routes via
  * OpenRouter, so OpenAI/embeddings use route "openrouter" and the OpenRouter-native `openai/…` model id

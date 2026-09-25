@@ -64,3 +64,40 @@ describe("adaptReasoning — provider-neutral ReasoningSpec → provider provide
     });
   });
 });
+
+describe("adaptReasoning — shaped by what the model takes (decision 0009)", () => {
+  const efforts = ["low", "medium", "high", "xhigh", "max"] as const;
+
+  it("an adaptive-only Claude (4.7 on) gets adaptive thinking and the level — never a budget", () => {
+    // MEASURED from Anthropic's /v1/models, 2026-09-24: `thinking.types` has only `adaptive`.
+    expect(adaptReasoning({ effort: "max" }, { anthropic: true, accept: { efforts, acceptsBudget: false } })).toEqual({
+      anthropic: { thinking: { type: "adaptive" }, effort: "max" },
+    });
+  });
+
+  it("a Claude that takes a budget AND a level gets both", () => {
+    expect(adaptReasoning({ effort: "high" }, { anthropic: true, accept: { efforts: ["low", "medium", "high", "max"], acceptsBudget: true } })).toEqual({
+      anthropic: { thinking: { type: "enabled", budgetTokens: 16384 }, effort: "high" },
+    });
+  });
+
+  it("a budget-only Claude (Haiku 4.5) gets the budget and no level", () => {
+    expect(adaptReasoning({ budgetTokens: 4000 }, { anthropic: true, accept: { efforts: [], acceptsBudget: true } })).toEqual({
+      anthropic: { thinking: { type: "enabled", budgetTokens: 4000 } },
+    });
+  });
+
+  it("a level the model is KNOWN to take passes through unclamped", () => {
+    expect(adaptReasoning({ effort: "xhigh" }, { anthropic: false, accept: { efforts, acceptsBudget: true } })).toEqual({
+      openrouter: { reasoning: { effort: "xhigh" } },
+    });
+    expect(adaptReasoning({ effort: "minimal" }, { anthropic: false, openai: true, accept: { efforts: ["minimal", "low"], acceptsBudget: false } })).toEqual({
+      openai: { reasoningEffort: "minimal" },
+    });
+  });
+
+  it("an UNKNOWN model keeps the old assumptions: clamped to low–high, and `none` sends nothing", () => {
+    expect(adaptReasoning({ effort: "ultra" }, { anthropic: false })).toEqual({ openrouter: { reasoning: { effort: "high" } } });
+    expect(adaptReasoning({ effort: "none" }, { anthropic: false })).toBeUndefined();
+  });
+});

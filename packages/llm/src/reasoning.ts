@@ -4,9 +4,14 @@
  * (mirrors the structured-output schema adapter, `providers/schema/`): the search config + stored config
  * JSON stay neutral, and we translate on the way OUT.
  *
- * Provider shapes differ in WHICH knob they take:
- *  - Anthropic extended thinking takes a token BUDGET (`thinking.budgetTokens`); an effort level is mapped
- *    to a representative budget.
+ * The request arrives already FITTED to the model (`fitReasoning`, model-catalog.ts): its level is one
+ * the model lists and its budget one it takes. What is left here is the provider's SHAPE:
+ *
+ *  - Anthropic takes a level (`effort`) and a thinking mode. A model whose schema takes a budget gets
+ *    `thinking: {type: "enabled", budgetTokens}`; one that takes only a level gets
+ *    `thinking: {type: "adaptive"}` — MEASURED from Anthropic's `/v1/models` (2026-09-24): every Claude
+ *    from 4.7 on is adaptive-only, so a budget sent to one asks for a mode it does not have. 4.6 takes
+ *    both; 4.5 and Haiku 4.5 take only a budget.
  *  - OpenRouter takes an effort LEVEL (`reasoning.effort`); a budget is sent as `reasoning.max_tokens`.
  *  - Native OpenAI takes an effort level too, but under its OWN key and spelling — `reasoningEffort`
  *    on `providerOptions.openai`, which `@ai-sdk/openai-compatible` lowers to `reasoning_effort`.
@@ -14,74 +19,59 @@
  * That last arm is not a nicety. The AI SDK routes `providerOptions` by the PROVIDER'S OWN NAME, so a
  * request emitted under the `openrouter` key reaches a client built as `name: "openai"` and is
  * discarded without a warning — the call runs at the model's default effort while the config, the
- * catalog's `acceptsReasoning` and the UI all say the level was honoured. Every route this function
- * does not name fails exactly that way, which is why {@link LOCAL_CONFIG_SCHEMA} omits `reasoning`
- * outright rather than offering a knob nothing translates.
+ * catalog and the UI all say the level was honoured. Every route this function does not name fails
+ * exactly that way, which is why {@link LOCAL_CONFIG_SCHEMA} omits `reasoning` outright rather than
+ * offering a knob nothing translates.
  *
- * NOTE: the exact option SHAPES need live verification against each provider/model (no API keys here); the
- * MAPPING logic is unit-tested, and the result is `undefined` when nothing is requested — so a no-reasoning
- * call is byte-identical to before (this can't regress existing runs).
+ * A model with NO schema (not in the catalog yet) gets what this did before the catalog knew levels: a
+ * budget on Anthropic, and a level clamped to `low`–`high` elsewhere.
  */
 import type { JsonValue } from "@declarative-ai/json";
-import type { ProviderOptions, ReasoningSpec } from "./llmConfig.js";
+import type { ProviderOptions, ReasoningEffort, ReasoningSpec } from "./llmConfig.js";
+import { clampEffort, EFFORT_BUDGET, effortForBudget, type ParamAcceptance } from "./model-catalog.js";
 
-/** Representative thinking budgets for an effort level, for providers that only accept a budget. */
-const EFFORT_BUDGET: Record<NonNullable<ReasoningSpec["effort"]>, number> = { low: 2048, medium: 8192, high: 16384, xhigh: 32768 };
-
-/**
- * The effort level a provider that tops out at `high` is asked for.
- *
- * `xhigh` exists because a delegated Claude Code run has a tier the three-value vocabulary could not
- * name. A message-based provider that has never heard of it must not fail the call over it: asking for
- * more thought than a model offers is satisfied by giving it all of it, so the level CLAMPS. Losing
- * the request entirely would be the wrong answer; refusing it would make one transport's vocabulary
- * everyone's problem.
- */
-const CLAMPED: Record<NonNullable<ReasoningSpec["effort"]>, "low" | "medium" | "high"> = {
-  low: "low",
-  medium: "medium",
-  high: "high",
-  xhigh: "high",
-};
-
-/**
- * The effort level a budget asks for, on a provider that has no budget knob.
- *
- * The inverse of {@link EFFORT_BUDGET}: the lowest level whose representative budget covers what was
- * asked for, and the top level for anything above it. Native OpenAI is the case — `reasoning_effort`
- * is the only lever it offers, so a spec carrying only a budget would otherwise be dropped, and
- * dropping it is the failure this whole module exists to prevent.
- */
-function effortForBudget(budgetTokens: number): "low" | "medium" | "high" {
-  if (budgetTokens <= EFFORT_BUDGET.low) return "low";
-  if (budgetTokens <= EFFORT_BUDGET.medium) return "medium";
-  return "high";
-}
+/** The levels an UNKNOWN model is assumed to take — the three every reasoning endpoint has. */
+const ASSUMED_EFFORTS: readonly ReasoningEffort[] = ["low", "medium", "high"];
 
 /**
  * @param opts.anthropic  Native Anthropic — asked of the ROUTER, which owns the question.
  * @param opts.openai     The native `openai` route. Read from the route prefix rather than from the
  *                        router, which exposes no predicate for it; the two are checked in this
  *                        order and a call cannot be both.
+ * @param opts.accept     What the model takes (its catalog gate). Absent, or an unknown model's gate ⇒
+ *                        the assumptions above.
  */
 export function adaptReasoning(
   spec: ReasoningSpec | undefined,
-  opts: { anthropic: boolean; openai?: boolean },
+  opts: { anthropic: boolean; openai?: boolean; accept?: Pick<ParamAcceptance, "efforts" | "acceptsBudget"> },
 ): ProviderOptions | undefined {
   if (!spec || (spec.effort === undefined && spec.budgetTokens === undefined)) return undefined;
+  const levels = opts.accept?.efforts;
+  const thinks = spec.effort !== undefined && spec.effort !== "none";
   if (opts.anthropic) {
-    const budgetTokens = spec.budgetTokens ?? (spec.effort ? EFFORT_BUDGET[spec.effort] : undefined);
-    if (budgetTokens === undefined) return undefined;
-    return { anthropic: { thinking: { type: "enabled", budgetTokens } } };
+    // A level rides along only where the model is KNOWN to take one; unknown ⇒ a budget alone, as
+    // before the catalog could say otherwise.
+    const effort = thinks && levels !== undefined && levels.length > 0 ? spec.effort : undefined;
+    if (opts.accept?.acceptsBudget ?? true) {
+      const budgetTokens = spec.budgetTokens ?? (thinks ? EFFORT_BUDGET[spec.effort!] : undefined);
+      if (budgetTokens === undefined) return undefined;
+      return { anthropic: { thinking: { type: "enabled", budgetTokens }, ...(effort !== undefined ? { effort } : {}) } };
+    }
+    if (effort === undefined) return undefined;
+    return { anthropic: { thinking: { type: "adaptive" }, effort } };
   }
+  // A level for the two effort-shaped providers: the one asked for (already one the model lists, when
+  // its levels are known), else the one a budget asks for.
+  const asked = spec.effort ?? effortForBudget(spec.budgetTokens!);
+  if (asked === "none" && levels === undefined) return undefined;
+  const effort = levels === undefined ? clampEffort(asked, ASSUMED_EFFORTS) : asked;
   if (opts.openai === true) {
     // `reasoningEffort`, camelCase, on the provider's own key — the compatible client parses that
     // name and emits `reasoning_effort`. A budget is converted rather than forwarded: there is no
     // field on this API to forward it to.
-    const effort = spec.effort !== undefined ? CLAMPED[spec.effort] : effortForBudget(spec.budgetTokens!);
     return { openai: { reasoningEffort: effort } };
   }
   // OpenRouter (default): prefer the effort level; fall back to the token budget as `max_tokens`.
-  const reasoning: Record<string, JsonValue> = spec.effort !== undefined ? { effort: CLAMPED[spec.effort] } : { max_tokens: spec.budgetTokens ?? null };
+  const reasoning: Record<string, JsonValue> = spec.effort !== undefined ? { effort } : { max_tokens: spec.budgetTokens ?? null };
   return { openrouter: { reasoning } };
 }

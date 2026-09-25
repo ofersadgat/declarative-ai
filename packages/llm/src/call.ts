@@ -20,7 +20,7 @@ import type { LlmCallDefinition, ProviderOptions, ToolDefinition } from "./llmCo
 import type { FileInput } from "./files.js";
 import { generateStructured, type GenerateEnvironment } from "./generate.js";
 import type { LlmCallResult } from "./output.js";
-import { ModelInfo } from "./model-catalog.js";
+import { fitReasoning, ModelInfo } from "./model-catalog.js";
 import { promptAsMessages, promptText, type CallPromptInput } from "./prompt.js";
 import { adaptReasoning } from "./reasoning.js";
 import { familyForModel, providerNativeId, type ModelRouter } from "./router.js";
@@ -146,21 +146,24 @@ async function runCall<T>(def: LlmCallDefinition<T>, env: CallDeps, timeoutArg?:
   // Which decoding knobs the model actually accepts. A param no endpoint supports — e.g. `temperature`
   // on an OpenAI reasoning model — would otherwise be dragged into OpenRouter's `require_parameters`
   // routing constraint and make EVERY endpoint a non-match (HTTP 404 "No endpoints found").
-  const { accepts, acceptsReasoning } = ModelInfo.instance.paramAcceptance(def.model);
+  const gate = ModelInfo.instance.paramAcceptance(def.model);
+  const accepts = gate.accepts;
 
-  // Reasoning: capability-gated like the sampling params, then ADAPTED from the neutral `ReasoningSpec`
-  // to the provider's `providerOptions` shape, MERGED over the config's raw passthrough (adapted
-  // reasoning wins per provider key, since it's the first-class neutral request).
+  // Reasoning: FITTED to the model like the sampling params are filtered — a level it does not list is
+  // clamped to one it does, a budget it cannot take becomes a level, a request it takes none of is
+  // dropped (`fitReasoning`, the same judgement `plan` reports) — then ADAPTED from the neutral
+  // `ReasoningSpec` to the provider's `providerOptions` shape, MERGED over the config's raw passthrough
+  // (adapted reasoning wins per provider key, since it's the first-class neutral request).
   const reasoning = "reasoning" in def ? def.reasoning : undefined;
+  const fitted = fitReasoning(reasoning, gate).spec;
   // `openai` comes from the ROUTE PREFIX because the router publishes no predicate for it — and it
   // has to be told apart at all, because the AI SDK keys `providerOptions` by the provider's own
   // name and a request filed under another one is discarded silently (see `adaptReasoning`).
-  const adaptedReasoning = acceptsReasoning
-    ? adaptReasoning(reasoning, {
-        anthropic: env.modelRouter.isAnthropic(def.model),
-        openai: familyForModel(def.model) === "openai",
-      })
-    : undefined;
+  const adaptedReasoning = adaptReasoning(fitted, {
+    anthropic: env.modelRouter.isAnthropic(def.model),
+    openai: familyForModel(def.model) === "openai",
+    accept: gate,
+  });
   const providerOptions = mergeProviderOptions(def.providerOptions, adaptedReasoning);
 
   // Build the runtime tool set from the serializable declarations + injected `execute` impls, and bound

@@ -13,7 +13,7 @@ import { estimateCallTokens } from "./tokens.js";
 import type { FilePart, ModelMessage } from "ai";
 import { promptText } from "./prompt.js";
 import type { LlmCallDefinition } from "./llmConfig.js";
-import { ModelInfo, SAMPLING_PARAM_NAMES, type Modalities } from "./model-catalog.js";
+import { fitReasoning, ModelInfo, SAMPLING_PARAMETER_KEYS, type Modalities } from "./model-catalog.js";
 import { familyForModel, type ModelFamily } from "./router.js";
 import { adaptSchemaCached, profileForModelId, type Enforcement } from "./schema/index.js";
 
@@ -95,12 +95,14 @@ export function plan(def: LlmCallDefinition & { schema?: JsonSchema }): CallPlan
 
   // Sampling params present in the declaration that the model would filter out — judged by the SAME
   // acceptance gate `executeStructuredCall` filters with, so plan and execute cannot drift.
-  const paramKeys = Object.keys(SAMPLING_PARAM_NAMES) as Array<keyof typeof SAMPLING_PARAM_NAMES>;
   const bag = def as unknown as Record<string, unknown>;
-  const unsupportedParams = paramKeys.filter((k) => bag[k] !== undefined && !gate.accepts(k));
+  const unsupportedParams = SAMPLING_PARAMETER_KEYS.filter((k) => bag[k] !== undefined && !gate.accepts(k));
   if (unsupportedParams.length > 0) issues.push(`model ${modelId} does not accept: ${unsupportedParams.join(", ")} (dropped at call time)`);
 
-  if (isReasoningConfig(def) && !gate.acceptsReasoning) issues.push(`model ${modelId} does not accept reasoning (dropped at call time)`);
+  // What fitting the reasoning request to the model changes — the same `fitReasoning` the call runs.
+  if (isReasoningConfig(def)) {
+    for (const note of fitReasoning(def.reasoning, gate).notes) issues.push(`model ${modelId} ${note} (at call time)`);
+  }
 
   // Modality fit (Phase 5): each media input's REQUIRED modality (from its mediaType) vs `modalities.input`;
   // requested OUTPUT modalities vs `modalities.output`.

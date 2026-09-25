@@ -1,7 +1,12 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { keyForModel, ModelInfo } from "../src/model-catalog.js";
+import { keyForModel, ModelInfo, parametersFromNames, type ModelInfoInterface } from "../src/model-catalog.js";
+
+/** The call fields a row's `parameters` schema accepts — what the old name list said, in the new vocabulary. */
+function fields(row: ModelInfoInterface | undefined): string[] {
+  return Object.keys((row?.parameters?.["properties"] as Record<string, unknown> | undefined) ?? {});
+}
 import {
   anthropicRejectsSampling,
   claudeSupportedParameters,
@@ -42,19 +47,20 @@ describe("parseAnthropicDocsPricing", () => {
       // extended thinking (`reasoning`) but REJECTS the sampling knobs (temperature/top_p/top_k) — mirrors
       // the AI SDK's rejectsSamplingParameters, so the refresh can't re-introduce the ignored-param warning.
       modalities: { input: ["text", "image", "file"], output: ["text"] },
-      supportedParameters: ["max_tokens", "stop", "tools", "tool_choice", "reasoning"],
+      parameters: parametersFromNames(["max_tokens", "stop", "tools", "tool_choice", "reasoning"]),
+      structuredOutput: "schema",
       source: "anthropic-docs",
     });
     expect(byId["claude-haiku-4-5"]).toMatchObject({ inputPerMillion: 1, outputPerMillion: 5 });
     // Claude 4.5 Haiku supports extended thinking → reasoning is in its supported params.
-    expect(byId["claude-haiku-4-5"]?.supportedParameters).toContain("reasoning");
+    expect(fields(byId["claude-haiku-4-5"])).toContain("reasoning");
     // The name→prefix map drops "([deprecated])" notes and dots → hyphens.
     expect(byId["claude-sonnet-4"]).toMatchObject({ inputPerMillion: 3 });
-    expect(byId["claude-sonnet-4"]?.supportedParameters).toContain("reasoning");
+    expect(fields(byId["claude-sonnet-4"])).toContain("reasoning");
     expect(byId["claude-haiku-3-5"]).toMatchObject({ inputPerMillion: 0.8, outputPerMillion: 4 });
     // Claude 3.5 Haiku does NOT support extended thinking → no reasoning branch (sampling-only).
-    expect(byId["claude-haiku-3-5"]?.supportedParameters).not.toContain("reasoning");
-    expect(byId["claude-haiku-3-5"]?.supportedParameters).toContain("temperature");
+    expect(fields(byId["claude-haiku-3-5"])).not.toContain("reasoning");
+    expect(fields(byId["claude-haiku-3-5"])).toContain("temperature");
   });
 
   it("collapses date-scheduled price rows onto the canonical model id (no bogus dated id)", () => {
@@ -69,7 +75,7 @@ describe("parseAnthropicDocsPricing", () => {
     expect(rows.filter((r) => r.model === "claude-sonnet-5")).toHaveLength(1);
     expect(byId["claude-sonnet-5"]?.inputPerMillion).toBe(3);
     // A Claude-5 model supports extended thinking → reasoning stays in its supported params.
-    expect(byId["claude-sonnet-5"]?.supportedParameters).toContain("reasoning");
+    expect(fields(byId["claude-sonnet-5"])).toContain("reasoning");
   });
 
   it("fills capabilities for a NEW family (fable) the family list didn't hardcode", () => {
@@ -77,7 +83,7 @@ describe("parseAnthropicDocsPricing", () => {
     // `claudeSupportsThinking` gates on the MAJOR version, not the family word, so a Claude-5 model in a
     // family beyond opus/sonnet/haiku still gets `reasoning` — the whole point of recording caps per row.
     expect(byId["claude-fable-5"]).toMatchObject({ inputPerMillion: 10, outputPerMillion: 50 });
-    expect(byId["claude-fable-5"]?.supportedParameters).toContain("reasoning");
+    expect(fields(byId["claude-fable-5"])).toContain("reasoning");
   });
 
   it("parses an HTML <table> form too (production fetch may return HTML)", () => {
@@ -128,7 +134,7 @@ describe("parseOpenRouterModels", () => {
       label: "claude-opus-4.8", // vendor/ prefix dropped
       canonicalId: "claude-opus-4-8", // dots→hyphens: collapses onto the native `claude-opus-4-8` row
       source: "openrouter-models",
-      // No supportedParameters/modalities stamped: the feed omitted them and OR rows are NOT given
+      // No parameters/modalities stamped: the feed omitted them and OR rows are NOT given
       // native-Claude caps (the read-time fallback resolves them if needed).
     });
     expect(byId["openai/gpt-4.1-mini"]).toMatchObject({ inputPerMillion: 0.4, outputPerMillion: 1.6 });
@@ -155,14 +161,36 @@ describe("parseOpenRouterModels", () => {
       route: "openrouter",
       model: "openai/gpt-5-nano",
       provider: "OpenAI",
-      supportedParameters: ["reasoning", "response_format", "structured_outputs", "max_tokens"],
+      structuredOutput: "schema",
       contextLength: 400000,
       maxOutputTokens: 128000,
       modalities: { input: ["text", "image"], output: ["text"] },
     });
+    expect(fields(row)).toEqual(["maxOutputTokens", "reasoning"]);
+    expect(row?.parameters?.["properties"]).toMatchObject({ maxOutputTokens: { maximum: 128000 } });
     // The reasoning model does NOT list temperature/top_p/top_k — exactly why require_parameters would
     // 404 it if we sent them; the executor filters them out (see llmStep / param-filter test).
-    expect(row?.supportedParameters).not.toContain("temperature");
+    expect(fields(row)).not.toContain("temperature");
+  });
+
+  it("reads the per-model `reasoning` object into the levels the model takes", () => {
+    // MEASURED 2026-09-24 on anthropic/claude-opus-5.5 (trimmed).
+    const feed = JSON.stringify({
+      data: [
+        {
+          id: "anthropic/claude-opus-5.5",
+          pricing: { prompt: "0.000004", completion: "0.00002" },
+          supported_parameters: ["include_reasoning", "max_tokens", "reasoning", "reasoning_effort", "structured_outputs", "temperature", "verbosity"],
+          reasoning: { mandatory: true, supported_efforts: ["max", "xhigh", "high", "medium", "low"], default_effort: "high" },
+        },
+      ],
+    });
+    const [row] = parseOpenRouterModels(feed);
+    expect(fields(row).sort()).toEqual(["maxOutputTokens", "reasoning", "temperature"]);
+    expect(row?.parameters?.["required"]).toEqual(["reasoning"]);
+    expect(row?.parameters?.["properties"]).toMatchObject({
+      reasoning: { properties: { effort: { enum: ["low", "medium", "high", "xhigh", "max"], default: "high" } } },
+    });
   });
 
   it("returns [] for non-JSON or a missing data array", () => {
@@ -333,8 +361,8 @@ describe("completeSeedRow — identity always, Claude caps for native rows only"
     expect(row.canonicalId).toBe("claude-opus-4-8");
     expect(row.route).toBe("anthropic");
     expect(row.provider).toBe("Anthropic");
-    expect(row.supportedParameters).not.toContain("temperature"); // opus-4-8 rejects sampling
-    expect(row.supportedParameters).toContain("reasoning");
+    expect(fields(row)).not.toContain("temperature"); // opus-4-8 rejects sampling
+    expect(fields(row)).toContain("reasoning");
     expect(row.modalities).toEqual({ input: ["text", "image", "file"], output: ["text"] });
   });
 
@@ -342,7 +370,7 @@ describe("completeSeedRow — identity always, Claude caps for native rows only"
     const row = completeSeedRow({ route: "openrouter", model: "openai/gpt-4o", inputPerMillion: 2.5, outputPerMillion: 10 });
     expect(row.canonicalId).toBe("gpt-4o");
     expect(row.route).toBe("openrouter");
-    expect(row.supportedParameters).toBeUndefined();
+    expect(row.parameters).toBeUndefined();
     expect(row.modalities).toBeUndefined();
   });
 });

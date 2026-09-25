@@ -12,15 +12,38 @@ export const GENERATED_MODELS = [
     "canonicalId": "claude-3-haiku",
     "provider": "Anthropic",
     "label": "claude-3-haiku",
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p",
-      "top_k",
-      "stop",
-      "tools",
-      "tool_choice"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {},
+        "toolChoice": {}
+      }
+    },
+    "structuredOutput": "schema",
     "modalities": {
       "input": [
         "text",
@@ -44,16 +67,61 @@ export const GENERATED_MODELS = [
     "cacheWritePerMillion": 12.5,
     "cacheWrite1hPerMillion": 20,
     "canonicalId": "claude-fable-5",
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p",
-      "top_k",
-      "stop",
-      "tools",
-      "tool_choice",
-      "reasoning"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {},
+        "toolChoice": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "modalities": {
       "input": [
         "text",
@@ -77,15 +145,38 @@ export const GENERATED_MODELS = [
     "cacheWritePerMillion": 1,
     "cacheWrite1hPerMillion": 1.6,
     "canonicalId": "claude-haiku-3-5",
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p",
-      "top_k",
-      "stop",
-      "tools",
-      "tool_choice"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {},
+        "toolChoice": {}
+      }
+    },
+    "structuredOutput": "schema",
     "modalities": {
       "input": [
         "text",
@@ -109,16 +200,61 @@ export const GENERATED_MODELS = [
     "cacheWritePerMillion": 1.25,
     "cacheWrite1hPerMillion": 2,
     "canonicalId": "claude-haiku-4-5",
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p",
-      "top_k",
-      "stop",
-      "tools",
-      "tool_choice",
-      "reasoning"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {},
+        "toolChoice": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "modalities": {
       "input": [
         "text",
@@ -142,16 +278,61 @@ export const GENERATED_MODELS = [
     "cacheWritePerMillion": 12.5,
     "cacheWrite1hPerMillion": 20,
     "canonicalId": "claude-mythos-5",
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p",
-      "top_k",
-      "stop",
-      "tools",
-      "tool_choice",
-      "reasoning"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {},
+        "toolChoice": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "modalities": {
       "input": [
         "text",
@@ -175,16 +356,61 @@ export const GENERATED_MODELS = [
     "cacheWritePerMillion": 18.75,
     "cacheWrite1hPerMillion": 30,
     "canonicalId": "claude-opus-4",
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p",
-      "top_k",
-      "stop",
-      "tools",
-      "tool_choice",
-      "reasoning"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {},
+        "toolChoice": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "modalities": {
       "input": [
         "text",
@@ -204,16 +430,61 @@ export const GENERATED_MODELS = [
     "canonicalId": "claude-opus-4-0",
     "provider": "Anthropic",
     "label": "claude-opus-4-0",
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p",
-      "top_k",
-      "stop",
-      "tools",
-      "tool_choice",
-      "reasoning"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {},
+        "toolChoice": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "modalities": {
       "input": [
         "text",
@@ -237,16 +508,61 @@ export const GENERATED_MODELS = [
     "cacheWritePerMillion": 18.75,
     "cacheWrite1hPerMillion": 30,
     "canonicalId": "claude-opus-4-1",
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p",
-      "top_k",
-      "stop",
-      "tools",
-      "tool_choice",
-      "reasoning"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {},
+        "toolChoice": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "modalities": {
       "input": [
         "text",
@@ -270,16 +586,61 @@ export const GENERATED_MODELS = [
     "cacheWritePerMillion": 6.25,
     "cacheWrite1hPerMillion": 10,
     "canonicalId": "claude-opus-4-5",
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p",
-      "top_k",
-      "stop",
-      "tools",
-      "tool_choice",
-      "reasoning"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {},
+        "toolChoice": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "modalities": {
       "input": [
         "text",
@@ -303,16 +664,61 @@ export const GENERATED_MODELS = [
     "cacheWritePerMillion": 6.25,
     "cacheWrite1hPerMillion": 10,
     "canonicalId": "claude-opus-4-6",
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p",
-      "top_k",
-      "stop",
-      "tools",
-      "tool_choice",
-      "reasoning"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {},
+        "toolChoice": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "modalities": {
       "input": [
         "text",
@@ -336,13 +742,48 @@ export const GENERATED_MODELS = [
     "cacheWritePerMillion": 6.25,
     "cacheWrite1hPerMillion": 10,
     "canonicalId": "claude-opus-4-7",
-    "supportedParameters": [
-      "max_tokens",
-      "stop",
-      "tools",
-      "tool_choice",
-      "reasoning"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {},
+        "toolChoice": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "modalities": {
       "input": [
         "text",
@@ -366,13 +807,48 @@ export const GENERATED_MODELS = [
     "cacheWritePerMillion": 6.25,
     "cacheWrite1hPerMillion": 10,
     "canonicalId": "claude-opus-4-8",
-    "supportedParameters": [
-      "max_tokens",
-      "stop",
-      "tools",
-      "tool_choice",
-      "reasoning"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {},
+        "toolChoice": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "modalities": {
       "input": [
         "text",
@@ -396,16 +872,61 @@ export const GENERATED_MODELS = [
     "cacheWritePerMillion": 3.75,
     "cacheWrite1hPerMillion": 6,
     "canonicalId": "claude-sonnet-4",
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p",
-      "top_k",
-      "stop",
-      "tools",
-      "tool_choice",
-      "reasoning"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {},
+        "toolChoice": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "modalities": {
       "input": [
         "text",
@@ -425,16 +946,61 @@ export const GENERATED_MODELS = [
     "canonicalId": "claude-sonnet-4-0",
     "provider": "Anthropic",
     "label": "claude-sonnet-4-0",
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p",
-      "top_k",
-      "stop",
-      "tools",
-      "tool_choice",
-      "reasoning"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {},
+        "toolChoice": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "modalities": {
       "input": [
         "text",
@@ -454,16 +1020,61 @@ export const GENERATED_MODELS = [
     "canonicalId": "claude-sonnet-4-2",
     "provider": "Anthropic",
     "label": "claude-sonnet-4-2",
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p",
-      "top_k",
-      "stop",
-      "tools",
-      "tool_choice",
-      "reasoning"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {},
+        "toolChoice": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "modalities": {
       "input": [
         "text",
@@ -487,16 +1098,61 @@ export const GENERATED_MODELS = [
     "cacheWritePerMillion": 3.75,
     "cacheWrite1hPerMillion": 6,
     "canonicalId": "claude-sonnet-4-5",
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p",
-      "top_k",
-      "stop",
-      "tools",
-      "tool_choice",
-      "reasoning"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {},
+        "toolChoice": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "modalities": {
       "input": [
         "text",
@@ -520,16 +1176,61 @@ export const GENERATED_MODELS = [
     "cacheWritePerMillion": 3.75,
     "cacheWrite1hPerMillion": 6,
     "canonicalId": "claude-sonnet-4-6",
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p",
-      "top_k",
-      "stop",
-      "tools",
-      "tool_choice",
-      "reasoning"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {},
+        "toolChoice": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "modalities": {
       "input": [
         "text",
@@ -549,16 +1250,61 @@ export const GENERATED_MODELS = [
     "canonicalId": "claude-sonnet-4-8",
     "provider": "Anthropic",
     "label": "claude-sonnet-4-8",
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p",
-      "top_k",
-      "stop",
-      "tools",
-      "tool_choice",
-      "reasoning"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {},
+        "toolChoice": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "modalities": {
       "input": [
         "text",
@@ -582,16 +1328,61 @@ export const GENERATED_MODELS = [
     "cacheWritePerMillion": 2.5,
     "cacheWrite1hPerMillion": 4,
     "canonicalId": "claude-sonnet-5",
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p",
-      "top_k",
-      "stop",
-      "tools",
-      "tool_choice",
-      "reasoning"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {},
+        "toolChoice": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "modalities": {
       "input": [
         "text",
@@ -614,19 +1405,49 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 1,
     "cacheWritePerMillion": 12.5,
     "releasedAt": 1781029944,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "tool_choice",
-      "tools",
-      "verbosity"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -652,20 +1473,62 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.1,
     "cacheWritePerMillion": 1.25,
     "releasedAt": 1777318492,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 200000,
     "maxOutputTokens": 64000,
     "modalities": {
@@ -691,20 +1554,53 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.5,
     "cacheWritePerMillion": 6.25,
     "releasedAt": 1776795361,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "verbosity"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -730,19 +1626,49 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.2,
     "cacheWritePerMillion": 2.5,
     "releasedAt": 1777318368,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "tool_choice",
-      "tools",
-      "verbosity"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -768,20 +1694,61 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.15,
     "cacheWritePerMillion": 0.083333,
     "releasedAt": 1777318398,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -809,20 +1776,61 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.2,
     "cacheWritePerMillion": 0.375,
     "releasedAt": 1777318451,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -849,19 +1857,54 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.3,
     "releasedAt": 1777318428,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "modalities": {
       "input": [
@@ -885,18 +1928,46 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.5,
     "cacheWritePerMillion": 6.25,
     "releasedAt": 1777318334,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1050000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -921,18 +1992,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.075,
     "releasedAt": 1777318471,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 400000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -957,24 +2056,66 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.3,
     "releasedAt": 1783519360,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 500000,
     "modalities": {
       "input": [
@@ -997,15 +2138,35 @@ export const GENERATED_MODELS = [
     "label": "jamba-large-1.7",
     "source": "openrouter-models",
     "releasedAt": 1754669020,
-    "supportedParameters": [
-      "max_tokens",
-      "response_format",
-      "stop",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 256000,
     "maxOutputTokens": 4096,
     "modalities": {
@@ -1028,16 +2189,52 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.2,
     "releasedAt": 1771881306,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 131072,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -1060,16 +2257,52 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.75,
     "releasedAt": 1783443095,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 131072,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -1092,16 +2325,52 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.18,
     "releasedAt": 1783443096,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 131072,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -1123,11 +2392,27 @@ export const GENERATED_MODELS = [
     "label": "aion-rp-llama-3.1-8b",
     "source": "openrouter-models",
     "releasedAt": 1738696718,
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 32768,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -1149,22 +2434,69 @@ export const GENERATED_MODELS = [
     "label": "olmo-3-32b-think",
     "source": "openrouter-models",
     "releasedAt": 1763758276,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 65536,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -1186,17 +2518,62 @@ export const GENERATED_MODELS = [
     "label": "nova-2-lite-v1",
     "source": "openrouter-models",
     "releasedAt": 1764696672,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "stop",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 1000000,
     "maxOutputTokens": 65535,
     "modalities": {
@@ -1221,14 +2598,38 @@ export const GENERATED_MODELS = [
     "label": "nova-lite-v1",
     "source": "openrouter-models",
     "releasedAt": 1733437363,
-    "supportedParameters": [
-      "max_tokens",
-      "stop",
-      "temperature",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5120
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 300000,
     "maxOutputTokens": 5120,
     "modalities": {
@@ -1251,14 +2652,38 @@ export const GENERATED_MODELS = [
     "label": "nova-micro-v1",
     "source": "openrouter-models",
     "releasedAt": 1733437237,
-    "supportedParameters": [
-      "max_tokens",
-      "stop",
-      "temperature",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5120
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 128000,
     "maxOutputTokens": 5120,
     "modalities": {
@@ -1281,14 +2706,38 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.625,
     "releasedAt": 1761950332,
-    "supportedParameters": [
-      "max_tokens",
-      "stop",
-      "temperature",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 1000000,
     "maxOutputTokens": 32000,
     "modalities": {
@@ -1311,14 +2760,38 @@ export const GENERATED_MODELS = [
     "label": "nova-pro-v1",
     "source": "openrouter-models",
     "releasedAt": 1733436303,
-    "supportedParameters": [
-      "max_tokens",
-      "stop",
-      "temperature",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5120
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 300000,
     "maxOutputTokens": 5120,
     "modalities": {
@@ -1341,24 +2814,46 @@ export const GENERATED_MODELS = [
     "label": "magnum-v4-72b",
     "source": "openrouter-models",
     "releasedAt": 1729555200,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_a",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2048
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 32768,
     "maxOutputTokens": 2048,
     "modalities": {
@@ -1382,15 +2877,39 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.03,
     "cacheWritePerMillion": 0.3,
     "releasedAt": 1710288000,
-    "supportedParameters": [
-      "max_tokens",
-      "stop",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 200000,
     "maxOutputTokens": 4096,
     "modalities": {
@@ -1415,19 +2934,49 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 1,
     "cacheWritePerMillion": 12.5,
     "releasedAt": 1781007515,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "tool_choice",
-      "tools",
-      "verbosity"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -1453,20 +3002,62 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.1,
     "cacheWritePerMillion": 1.25,
     "releasedAt": 1760547638,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 200000,
     "maxOutputTokens": 64000,
     "modalities": {
@@ -1492,16 +3083,58 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 1.5,
     "cacheWritePerMillion": 18.75,
     "releasedAt": 1747931245,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "stop",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 200000,
     "maxOutputTokens": 32000,
     "modalities": {
@@ -1527,20 +3160,62 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 1.5,
     "cacheWritePerMillion": 18.75,
     "releasedAt": 1754411591,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 200000,
     "maxOutputTokens": 32000,
     "modalities": {
@@ -1566,20 +3241,57 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.5,
     "cacheWritePerMillion": 6.25,
     "releasedAt": 1764010580,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "verbosity"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 200000,
     "maxOutputTokens": 64000,
     "modalities": {
@@ -1605,22 +3317,62 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.5,
     "cacheWritePerMillion": 6.25,
     "releasedAt": 1770219050,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p",
-      "verbosity"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -1646,19 +3398,49 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.5,
     "cacheWritePerMillion": 6.25,
     "releasedAt": 1776351100,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "tool_choice",
-      "tools",
-      "verbosity"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -1684,18 +3466,49 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 3,
     "cacheWritePerMillion": 37.5,
     "releasedAt": 1778613011,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "tool_choice",
-      "tools",
-      "verbosity"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -1721,20 +3534,53 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.5,
     "cacheWritePerMillion": 6.25,
     "releasedAt": 1779905091,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "verbosity"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -1760,18 +3606,49 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 1,
     "cacheWritePerMillion": 12.5,
     "releasedAt": 1779913703,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "tool_choice",
-      "tools",
-      "verbosity"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -1797,17 +3674,62 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.3,
     "cacheWritePerMillion": 3.75,
     "releasedAt": 1747930371,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "stop",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 1000000,
     "maxOutputTokens": 64000,
     "modalities": {
@@ -1833,20 +3755,62 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.3,
     "cacheWritePerMillion": 3.75,
     "releasedAt": 1759161676,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 64000,
     "modalities": {
@@ -1872,22 +3836,62 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.3,
     "cacheWritePerMillion": 3.75,
     "releasedAt": 1771342990,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p",
-      "verbosity"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -1913,19 +3917,49 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.2,
     "cacheWritePerMillion": 2.5,
     "releasedAt": 1782843083,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "tool_choice",
-      "tools",
-      "verbosity"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -1950,26 +3984,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.06,
     "releasedAt": 1775058318,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 80000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 80000,
     "modalities": {
@@ -1991,20 +4070,45 @@ export const GENERATED_MODELS = [
     "label": "virtuoso-large",
     "source": "openrouter-models",
     "releasedAt": 1746478885,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "stop",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 131072,
     "maxOutputTokens": 64000,
     "modalities": {
@@ -2026,19 +4130,69 @@ export const GENERATED_MODELS = [
     "label": "ernie-4.5-vl-424b-a47b",
     "source": "openrouter-models",
     "releasedAt": 1751300903,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "seed",
-      "stop",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 131072,
     "maxOutputTokens": 16000,
     "modalities": {
@@ -2061,19 +4215,61 @@ export const GENERATED_MODELS = [
     "label": "seed-1.6",
     "source": "openrouter-models",
     "releasedAt": 1766504997,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -2097,19 +4293,61 @@ export const GENERATED_MODELS = [
     "label": "seed-1.6-flash",
     "source": "openrouter-models",
     "releasedAt": 1766505011,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -2133,20 +4371,61 @@ export const GENERATED_MODELS = [
     "label": "seed-2.0-lite",
     "source": "openrouter-models",
     "releasedAt": 1773157231,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 131072,
     "modalities": {
@@ -2170,20 +4449,61 @@ export const GENERATED_MODELS = [
     "label": "seed-2.0-mini",
     "source": "openrouter-models",
     "releasedAt": 1772131107,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 131072,
     "modalities": {
@@ -2207,16 +4527,43 @@ export const GENERATED_MODELS = [
     "label": "dolphin-mistral-24b-venice-edition",
     "source": "openrouter-models",
     "releasedAt": 1752094966,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "stop",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 128000,
     "maxOutputTokens": 8192,
     "modalities": {
@@ -2238,18 +4585,46 @@ export const GENERATED_MODELS = [
     "label": "command-a",
     "source": "openrouter-models",
     "releasedAt": 1741894342,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 256000,
     "maxOutputTokens": 8192,
     "modalities": {
@@ -2271,20 +4646,48 @@ export const GENERATED_MODELS = [
     "label": "command-r-08-2024",
     "source": "openrouter-models",
     "releasedAt": 1724976000,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 4000,
     "modalities": {
@@ -2306,20 +4709,48 @@ export const GENERATED_MODELS = [
     "label": "command-r-plus-08-2024",
     "source": "openrouter-models",
     "releasedAt": 1724976000,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 4000,
     "modalities": {
@@ -2341,18 +4772,46 @@ export const GENERATED_MODELS = [
     "label": "command-r7b-12-2024",
     "source": "openrouter-models",
     "releasedAt": 1734158152,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 4000,
     "modalities": {
@@ -2374,22 +4833,65 @@ export const GENERATED_MODELS = [
     "label": "cogito-v2.1-671b",
     "source": "openrouter-models",
     "releasedAt": 1763071233,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "modalities": {
       "input": [
@@ -2410,23 +4912,48 @@ export const GENERATED_MODELS = [
     "label": "deepseek-chat",
     "source": "openrouter-models",
     "releasedAt": 1735241320,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 16000,
     "modalities": {
@@ -2449,23 +4976,48 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.135,
     "releasedAt": 1742824755,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 163840,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -2488,27 +5040,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.13,
     "releasedAt": 1755779628,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 163840,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -2530,24 +5126,71 @@ export const GENERATED_MODELS = [
     "label": "deepseek-r1",
     "source": "openrouter-models",
     "releasedAt": 1737381095,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 163840,
     "maxOutputTokens": 16000,
     "modalities": {
@@ -2570,27 +5213,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.35,
     "releasedAt": 1748455170,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 163840,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -2612,19 +5299,69 @@ export const GENERATED_MODELS = [
     "label": "deepseek-r1-distill-llama-70b",
     "source": "openrouter-models",
     "releasedAt": 1737663169,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "seed",
-      "stop",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 128000,
     "maxOutputTokens": 8192,
     "modalities": {
@@ -2647,25 +5384,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.135,
     "releasedAt": 1758548275,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -2688,27 +5471,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.1345,
     "releasedAt": 1764594642,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 163840,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -2730,27 +5557,71 @@ export const GENERATED_MODELS = [
     "label": "deepseek-v3.2-exp",
     "source": "openrouter-models",
     "releasedAt": 1759150481,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 163840,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -2773,28 +5644,70 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.0196,
     "releasedAt": 1777000666,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "reasoning_effort",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "modalities": {
       "input": [
@@ -2816,28 +5729,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.003625,
     "releasedAt": 1777000679,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "reasoning_effort",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 384000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "maxOutputTokens": 384000,
     "modalities": {
@@ -2861,19 +5817,61 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.03,
     "cacheWritePerMillion": 0.083333,
     "releasedAt": 1750172488,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "maxOutputTokens": 65535,
     "modalities": {
@@ -2901,15 +5899,36 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.03,
     "cacheWritePerMillion": 0.083333,
     "releasedAt": 1759870431,
-    "supportedParameters": [
-      "max_tokens",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 32768,
     "maxOutputTokens": 8192,
     "modalities": {
@@ -2935,19 +5954,61 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.01,
     "cacheWritePerMillion": 0.083333,
     "releasedAt": 1753200276,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "maxOutputTokens": 65535,
     "modalities": {
@@ -2975,19 +6036,61 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.125,
     "cacheWritePerMillion": 0.375,
     "releasedAt": 1750169544,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -3015,19 +6118,61 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.125,
     "cacheWritePerMillion": 0.375,
     "releasedAt": 1749137257,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -3054,19 +6199,61 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.125,
     "cacheWritePerMillion": 0.375,
     "releasedAt": 1746578513,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "maxOutputTokens": 65535,
     "modalities": {
@@ -3094,20 +6281,61 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.05,
     "cacheWritePerMillion": 0.083333,
     "releasedAt": 1765987078,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "maxOutputTokens": 65535,
     "modalities": {
@@ -3135,19 +6363,61 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.2,
     "cacheWritePerMillion": 0.375,
     "releasedAt": 1781754054,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 65536,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -3173,17 +6443,59 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.2,
     "cacheWritePerMillion": 0.375,
     "releasedAt": 1763653797,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 65536,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -3207,17 +6519,53 @@ export const GENERATED_MODELS = [
     "label": "gemini-3.1-flash-image",
     "source": "openrouter-models",
     "releasedAt": 1781754065,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -3241,17 +6589,53 @@ export const GENERATED_MODELS = [
     "label": "gemini-3.1-flash-image-preview",
     "source": "openrouter-models",
     "releasedAt": 1772119558,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -3277,20 +6661,61 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.025,
     "cacheWritePerMillion": 0.083333,
     "releasedAt": 1778168828,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -3316,16 +6741,53 @@ export const GENERATED_MODELS = [
     "label": "gemini-3.1-flash-lite-image",
     "source": "openrouter-models",
     "releasedAt": 1782837225,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "temperature",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 65536,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -3351,19 +6813,55 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.025,
     "cacheWritePerMillion": 0.083333,
     "releasedAt": 1772512673,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -3391,20 +6889,61 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.2,
     "cacheWritePerMillion": 0.375,
     "releasedAt": 1771509627,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -3432,19 +6971,55 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.2,
     "cacheWritePerMillion": 0.375,
     "releasedAt": 1772045923,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048756,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -3472,20 +7047,61 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.15,
     "cacheWritePerMillion": 0.083333,
     "releasedAt": 1779193800,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -3511,18 +7127,42 @@ export const GENERATED_MODELS = [
     "label": "gemma-2-27b-it",
     "source": "openrouter-models",
     "releasedAt": 1720828800,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2048
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 8192,
     "maxOutputTokens": 2048,
     "modalities": {
@@ -3544,23 +7184,48 @@ export const GENERATED_MODELS = [
     "label": "gemma-3-12b-it",
     "source": "openrouter-models",
     "releasedAt": 1741902625,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -3583,25 +7248,47 @@ export const GENERATED_MODELS = [
     "label": "gemma-3-27b-it",
     "source": "openrouter-models",
     "releasedAt": 1741756359,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "modalities": {
       "input": [
@@ -3623,21 +7310,46 @@ export const GENERATED_MODELS = [
     "label": "gemma-3-4b-it",
     "source": "openrouter-models",
     "releasedAt": 1741905510,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -3660,20 +7372,42 @@ export const GENERATED_MODELS = [
     "label": "gemma-3n-e4b-it",
     "source": "openrouter-models",
     "releasedAt": 1747776824,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 32768,
     "modalities": {
       "input": [
@@ -3694,27 +7428,71 @@ export const GENERATED_MODELS = [
     "label": "gemma-4-26b-a4b-it",
     "source": "openrouter-models",
     "releasedAt": 1775227989,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -3739,28 +7517,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.12,
     "releasedAt": 1775148486,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_a",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 262144,
     "modalities": {
@@ -3784,24 +7605,46 @@ export const GENERATED_MODELS = [
     "label": "mythomax-l2-13b",
     "source": "openrouter-models",
     "releasedAt": 1688256000,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_a",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 4096,
     "maxOutputTokens": 4096,
     "modalities": {
@@ -3823,22 +7666,46 @@ export const GENERATED_MODELS = [
     "label": "granite-4.0-h-micro",
     "source": "openrouter-models",
     "releasedAt": 1760927695,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "temperature",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 131000,
     "maxOutputTokens": 131000,
     "modalities": {
@@ -3861,18 +7728,53 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.025,
     "releasedAt": 1772636275,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 50000,
     "modalities": {
@@ -3895,23 +7797,48 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.015,
     "releasedAt": 1776948238,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -3934,23 +7861,48 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.002,
     "releasedAt": 1776795886,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -3973,23 +7925,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.015,
     "releasedAt": 1778247440,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "reasoning_effort",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 262144,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -4011,12 +8011,33 @@ export const GENERATED_MODELS = [
     "label": "inflection-3-pi",
     "source": "openrouter-models",
     "releasedAt": 1728604800,
-    "supportedParameters": [
-      "max_tokens",
-      "stop",
-      "temperature",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 8000,
     "maxOutputTokens": 1024,
     "modalities": {
@@ -4038,12 +8059,33 @@ export const GENERATED_MODELS = [
     "label": "inflection-3-productivity",
     "source": "openrouter-models",
     "releasedAt": 1728604800,
-    "supportedParameters": [
-      "max_tokens",
-      "stop",
-      "temperature",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 8000,
     "maxOutputTokens": 1024,
     "modalities": {
@@ -4066,20 +8108,41 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.03,
     "releasedAt": 1783714590,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 80000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 256000,
     "maxOutputTokens": 80000,
     "modalities": {
@@ -4102,25 +8165,48 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.06,
     "releasedAt": 1774649310,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 80000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 256000,
     "maxOutputTokens": 80000,
     "modalities": {
@@ -4143,20 +8229,41 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.15,
     "releasedAt": 1783714589,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 80000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 256000,
     "maxOutputTokens": 80000,
     "modalities": {
@@ -4178,24 +8285,46 @@ export const GENERATED_MODELS = [
     "label": "weaver",
     "source": "openrouter-models",
     "releasedAt": 1690934400,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_a",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 8000,
     "maxOutputTokens": 2000,
     "modalities": {
@@ -4218,23 +8347,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.006,
     "releasedAt": 1784554658,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "seed",
-      "stop",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 1048756,
     "maxOutputTokens": 262144,
     "modalities": {
@@ -4256,25 +8433,48 @@ export const GENERATED_MODELS = [
     "label": "llama-3.1-70b-instruct",
     "source": "openrouter-models",
     "releasedAt": 1721692800,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -4297,25 +8497,48 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.025,
     "releasedAt": 1721692800,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 131072,
     "modalities": {
@@ -4337,19 +8560,46 @@ export const GENERATED_MODELS = [
     "label": "llama-3.2-1b-instruct",
     "source": "openrouter-models",
     "releasedAt": 1727222400,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "seed",
-      "stop",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 131072,
     "maxOutputTokens": 60000,
     "modalities": {
@@ -4371,22 +8621,46 @@ export const GENERATED_MODELS = [
     "label": "llama-3.2-3b-instruct",
     "source": "openrouter-models",
     "releasedAt": 1727222400,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 80000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 80000,
     "modalities": {
@@ -4408,25 +8682,48 @@ export const GENERATED_MODELS = [
     "label": "llama-3.3-70b-instruct",
     "source": "openrouter-models",
     "releasedAt": 1733506137,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -4448,25 +8745,48 @@ export const GENERATED_MODELS = [
     "label": "llama-4-maverick",
     "source": "openrouter-models",
     "releasedAt": 1743881822,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -4489,23 +8809,48 @@ export const GENERATED_MODELS = [
     "label": "llama-4-scout",
     "source": "openrouter-models",
     "releasedAt": 1743881519,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 10000000,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -4528,20 +8873,46 @@ export const GENERATED_MODELS = [
     "label": "llama-guard-4-12b",
     "source": "openrouter-models",
     "releasedAt": 1745975193,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 163840,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -4565,20 +8936,55 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.15,
     "releasedAt": 1784215741,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "repetition_penalty",
-      "response_format",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "modalities": {
       "input": [
@@ -4603,21 +9009,46 @@ export const GENERATED_MODELS = [
     "label": "phi-4",
     "source": "openrouter-models",
     "releasedAt": 1736489872,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 16384,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -4639,18 +9070,46 @@ export const GENERATED_MODELS = [
     "label": "wizardlm-2-8x22b",
     "source": "openrouter-models",
     "releasedAt": 1713225600,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 65536,
     "maxOutputTokens": 8000,
     "modalities": {
@@ -4672,11 +9131,27 @@ export const GENERATED_MODELS = [
     "label": "minimax-01",
     "source": "openrouter-models",
     "releasedAt": 1736915462,
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000192
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 1000192,
     "maxOutputTokens": 1000192,
     "modalities": {
@@ -4699,21 +9174,71 @@ export const GENERATED_MODELS = [
     "label": "minimax-m1",
     "source": "openrouter-models",
     "releasedAt": 1750200414,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "seed",
-      "stop",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 40000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 1000000,
     "maxOutputTokens": 40000,
     "modalities": {
@@ -4736,25 +9261,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.03,
     "releasedAt": 1761252093,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 204800,
     "maxOutputTokens": 131072,
     "modalities": {
@@ -4777,11 +9348,27 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.03,
     "releasedAt": 1769177239,
-    "supportedParameters": [
-      "max_tokens",
-      "temperature",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2048
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 65536,
     "maxOutputTokens": 2048,
     "modalities": {
@@ -4804,22 +9391,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.03,
     "releasedAt": 1766454997,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 204800,
     "maxOutputTokens": 131072,
     "modalities": {
@@ -4842,28 +9478,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.05,
     "releasedAt": 1770908502,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "parallel_tool_calls",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 196608
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 204800,
     "maxOutputTokens": 196608,
     "modalities": {
@@ -4886,27 +9565,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.05,
     "releasedAt": 1773836697,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 204800,
     "maxOutputTokens": 131072,
     "modalities": {
@@ -4929,27 +9652,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.06,
     "releasedAt": 1780245374,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 512000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "maxOutputTokens": 512000,
     "modalities": {
@@ -4974,20 +9741,43 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.03,
     "releasedAt": 1754079630,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "prediction",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 256000,
     "modalities": {
       "input": [
@@ -5010,19 +9800,43 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.04,
     "releasedAt": 1765285419,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "modalities": {
       "input": [
@@ -5045,22 +9859,43 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.02,
     "releasedAt": 1764681735,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "modalities": {
       "input": [
@@ -5083,22 +9918,43 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.01,
     "releasedAt": 1764681560,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "modalities": {
       "input": [
@@ -5121,22 +9977,43 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.015,
     "releasedAt": 1764681654,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "modalities": {
       "input": [
@@ -5159,19 +10036,43 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.2,
     "releasedAt": 1708905600,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "modalities": {
       "input": [
@@ -5194,19 +10095,43 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.2,
     "releasedAt": 1731978415,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "modalities": {
       "input": [
@@ -5229,19 +10154,43 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.05,
     "releasedAt": 1764624472,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "modalities": {
       "input": [
@@ -5265,19 +10214,43 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.04,
     "releasedAt": 1746627341,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "modalities": {
       "input": [
@@ -5300,22 +10273,66 @@ export const GENERATED_MODELS = [
     "label": "mistral-medium-3-5",
     "source": "openrouter-models",
     "releasedAt": 1777570439,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "modalities": {
       "input": [
@@ -5339,19 +10356,43 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.04,
     "releasedAt": 1755095639,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "modalities": {
       "input": [
@@ -5374,25 +10415,48 @@ export const GENERATED_MODELS = [
     "label": "mistral-nemo",
     "source": "openrouter-models",
     "releasedAt": 1721347200,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -5415,19 +10479,43 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.02,
     "releasedAt": 1739803239,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 32768,
     "modalities": {
       "input": [
@@ -5449,21 +10537,46 @@ export const GENERATED_MODELS = [
     "label": "mistral-small-24b-instruct-2501",
     "source": "openrouter-models",
     "releasedAt": 1738255409,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 32768,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -5486,23 +10599,70 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.015,
     "releasedAt": 1773695685,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "modalities": {
       "input": [
@@ -5524,21 +10684,46 @@ export const GENERATED_MODELS = [
     "label": "mistral-small-3.1-24b-instruct",
     "source": "openrouter-models",
     "releasedAt": 1742238937,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "seed",
-      "stop",
-      "temperature",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 128000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -5562,25 +10747,47 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.01,
     "releasedAt": 1750443016,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "modalities": {
       "input": [
@@ -5603,19 +10810,43 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.2,
     "releasedAt": 1713312000,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 65536,
     "modalities": {
       "input": [
@@ -5638,19 +10869,43 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.01,
     "releasedAt": 1761835144,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 32000,
     "modalities": {
       "input": [
@@ -5673,19 +10928,48 @@ export const GENERATED_MODELS = [
     "label": "kimi-k2",
     "source": "openrouter-models",
     "releasedAt": 1752263252,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "repetition_penalty",
-      "seed",
-      "stop",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100352
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 131072,
     "maxOutputTokens": 100352,
     "modalities": {
@@ -5707,21 +10991,48 @@ export const GENERATED_MODELS = [
     "label": "kimi-k2-0905",
     "source": "openrouter-models",
     "releasedAt": 1757021147,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100352
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 100352,
     "modalities": {
@@ -5744,25 +11055,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.15,
     "releasedAt": 1762440622,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100352
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 100352,
     "modalities": {
@@ -5785,27 +11142,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.095,
     "releasedAt": 1769487076,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 262144,
     "modalities": {
@@ -5829,28 +11230,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.144,
     "releasedAt": 1776699402,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "parallel_tool_calls",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 262144,
     "modalities": {
@@ -5874,28 +11318,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.17,
     "releasedAt": 1781266361,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "parallel_tool_calls",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 262144,
     "modalities": {
@@ -5919,19 +11406,54 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.3,
     "releasedAt": 1784215858,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "modalities": {
       "input": [
@@ -5953,11 +11475,28 @@ export const GENERATED_MODELS = [
     "label": "morph-v3-fast",
     "source": "openrouter-models",
     "releasedAt": 1751910002,
-    "supportedParameters": [
-      "max_tokens",
-      "stop",
-      "temperature"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 38000
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 81920,
     "maxOutputTokens": 38000,
     "modalities": {
@@ -5979,15 +11518,28 @@ export const GENERATED_MODELS = [
     "label": "morph-v3-large",
     "source": "openrouter-models",
     "releasedAt": 1751910858,
-    "supportedParameters": [
-      "logprobs",
-      "max_tokens",
-      "response_format",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_logprobs"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 131072,
     "modalities": {
@@ -6010,20 +11562,56 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.0025,
     "releasedAt": 1782312964,
-    "supportedParameters": [
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 262144,
     "modalities": {
@@ -6047,19 +11635,59 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.025,
     "releasedAt": 1780937140,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "reasoning",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 262144,
     "maxOutputTokens": 262144,
     "modalities": {
@@ -6082,21 +11710,46 @@ export const GENERATED_MODELS = [
     "label": "hermes-3-llama-3.1-405b",
     "source": "openrouter-models",
     "releasedAt": 1723766400,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -6118,21 +11771,46 @@ export const GENERATED_MODELS = [
     "label": "hermes-3-llama-3.1-70b",
     "source": "openrouter-models",
     "releasedAt": 1723939200,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -6154,18 +11832,59 @@ export const GENERATED_MODELS = [
     "label": "hermes-4-405b",
     "source": "openrouter-models",
     "releasedAt": 1756235463,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 131072,
     "modalities": {
       "input": [
@@ -6186,18 +11905,59 @@ export const GENERATED_MODELS = [
     "label": "hermes-4-70b",
     "source": "openrouter-models",
     "releasedAt": 1756236182,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 131072,
     "modalities": {
       "input": [
@@ -6218,27 +11978,71 @@ export const GENERATED_MODELS = [
     "label": "nemotron-3-nano-30b-a3b",
     "source": "openrouter-models",
     "releasedAt": 1765731275,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 228000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 228000,
     "modalities": {
@@ -6260,28 +12064,71 @@ export const GENERATED_MODELS = [
     "label": "nemotron-3-super-120b-a12b",
     "source": "openrouter-models",
     "releasedAt": 1773245239,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "reasoning_effort",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -6304,26 +12151,70 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.2,
     "releasedAt": 1780551208,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "reasoning_effort",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "modalities": {
       "input": [
@@ -6344,22 +12235,44 @@ export const GENERATED_MODELS = [
     "label": "gpt-3.5-turbo",
     "source": "openrouter-models",
     "releasedAt": 1685232000,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 16385,
     "maxOutputTokens": 4096,
     "modalities": {
@@ -6381,22 +12294,44 @@ export const GENERATED_MODELS = [
     "label": "gpt-3.5-turbo-0613",
     "source": "openrouter-models",
     "releasedAt": 1706140800,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_completion_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 4095,
     "maxOutputTokens": 4096,
     "modalities": {
@@ -6418,23 +12353,44 @@ export const GENERATED_MODELS = [
     "label": "gpt-3.5-turbo-16k",
     "source": "openrouter-models",
     "releasedAt": 1693180800,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_completion_tokens",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 16385,
     "maxOutputTokens": 4096,
     "modalities": {
@@ -6456,20 +12412,42 @@ export const GENERATED_MODELS = [
     "label": "gpt-3.5-turbo-instruct",
     "source": "openrouter-models",
     "releasedAt": 1695859200,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 4095,
     "maxOutputTokens": 4096,
     "modalities": {
@@ -6491,23 +12469,44 @@ export const GENERATED_MODELS = [
     "label": "gpt-4",
     "source": "openrouter-models",
     "releasedAt": 1685232000,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_completion_tokens",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 8191,
     "maxOutputTokens": 4096,
     "modalities": {
@@ -6529,22 +12528,44 @@ export const GENERATED_MODELS = [
     "label": "gpt-4-turbo",
     "source": "openrouter-models",
     "releasedAt": 1712620800,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 4096,
     "modalities": {
@@ -6567,22 +12588,44 @@ export const GENERATED_MODELS = [
     "label": "gpt-4-turbo-preview",
     "source": "openrouter-models",
     "releasedAt": 1706140800,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 4096,
     "modalities": {
@@ -6605,17 +12648,32 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.5,
     "releasedAt": 1744651385,
-    "supportedParameters": [
-      "max_completion_tokens",
-      "max_tokens",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1047576,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -6640,17 +12698,32 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.1,
     "releasedAt": 1744651381,
-    "supportedParameters": [
-      "max_completion_tokens",
-      "max_tokens",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1047576,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -6675,17 +12748,32 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.025,
     "releasedAt": 1744651369,
-    "supportedParameters": [
-      "max_completion_tokens",
-      "max_tokens",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1047576,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -6710,25 +12798,44 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 1.25,
     "releasedAt": 1715558400,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_completion_tokens",
-      "max_tokens",
-      "prediction",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p",
-      "web_search_options"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -6752,25 +12859,44 @@ export const GENERATED_MODELS = [
     "label": "gpt-4o-2024-05-13",
     "source": "openrouter-models",
     "releasedAt": 1715558400,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_completion_tokens",
-      "max_tokens",
-      "prediction",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p",
-      "web_search_options"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 4096,
     "modalities": {
@@ -6795,25 +12921,44 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 1.25,
     "releasedAt": 1722902400,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_completion_tokens",
-      "max_tokens",
-      "prediction",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p",
-      "web_search_options"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -6838,24 +12983,44 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 1.25,
     "releasedAt": 1732127594,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "prediction",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p",
-      "web_search_options"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -6880,25 +13045,44 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.075,
     "releasedAt": 1721260800,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_completion_tokens",
-      "max_tokens",
-      "prediction",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p",
-      "web_search_options"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -6923,24 +13107,44 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.075,
     "releasedAt": 1721260800,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "prediction",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p",
-      "web_search_options"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -6964,12 +13168,18 @@ export const GENERATED_MODELS = [
     "label": "gpt-4o-mini-search-preview",
     "source": "openrouter-models",
     "releasedAt": 1741818122,
-    "supportedParameters": [
-      "max_tokens",
-      "response_format",
-      "structured_outputs",
-      "web_search_options"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -6991,12 +13201,18 @@ export const GENERATED_MODELS = [
     "label": "gpt-4o-search-preview",
     "source": "openrouter-models",
     "releasedAt": 1741817949,
-    "supportedParameters": [
-      "max_tokens",
-      "response_format",
-      "structured_outputs",
-      "web_search_options"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -7019,18 +13235,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.125,
     "releasedAt": 1754587413,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 400000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7055,12 +13299,21 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.125,
     "releasedAt": 1754587837,
-    "supportedParameters": [
-      "max_tokens",
-      "response_format",
-      "seed",
-      "structured_outputs"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "seed": {
+          "type": "integer"
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -7085,16 +13338,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.125,
     "releasedAt": 1758643403,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 400000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7118,22 +13401,65 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 1.25,
     "releasedAt": 1760447986,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 400000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7159,18 +13485,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.025,
     "releasedAt": 1754587407,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 400000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7195,18 +13549,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.005,
     "releasedAt": 1754587402,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 400000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7230,17 +13612,46 @@ export const GENERATED_MODELS = [
     "label": "gpt-5-pro",
     "source": "openrouter-models",
     "releasedAt": 1759776663,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 400000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7265,18 +13676,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.125,
     "releasedAt": 1763060305,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 400000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7301,15 +13740,23 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.125,
     "releasedAt": 1763060302,
-    "supportedParameters": [
-      "max_completion_tokens",
-      "max_tokens",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {}
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -7334,18 +13781,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.125,
     "releasedAt": 1763060298,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 400000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7369,18 +13844,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.125,
     "releasedAt": 1764878934,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 400000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7404,18 +13907,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.025,
     "releasedAt": 1763057820,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 400000,
     "maxOutputTokens": 100000,
     "modalities": {
@@ -7439,18 +13970,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.175,
     "releasedAt": 1765389775,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 400000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7475,15 +14034,23 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.175,
     "releasedAt": 1765389783,
-    "supportedParameters": [
-      "max_completion_tokens",
-      "max_tokens",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {}
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -7508,18 +14075,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.175,
     "releasedAt": 1768409315,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 400000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7542,17 +14137,46 @@ export const GENERATED_MODELS = [
     "label": "gpt-5.2-pro",
     "source": "openrouter-models",
     "releasedAt": 1765389780,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 400000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7577,15 +14201,23 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.175,
     "releasedAt": 1772564061,
-    "supportedParameters": [
-      "max_completion_tokens",
-      "max_tokens",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {}
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -7610,18 +14242,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.175,
     "releasedAt": 1771959164,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 400000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7646,18 +14306,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.25,
     "releasedAt": 1772734352,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1050000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7682,21 +14370,56 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 2,
     "releasedAt": 1776797528,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "top_logprobs"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 272000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7722,18 +14445,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.075,
     "releasedAt": 1773748178,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 400000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7758,18 +14509,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.02,
     "releasedAt": 1773748187,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 400000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7793,18 +14572,46 @@ export const GENERATED_MODELS = [
     "label": "gpt-5.4-pro",
     "source": "openrouter-models",
     "releasedAt": 1772734366,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1050000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7829,18 +14636,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.5,
     "releasedAt": 1777051893,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1050000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7864,17 +14699,46 @@ export const GENERATED_MODELS = [
     "label": "gpt-5.5-pro",
     "source": "openrouter-models",
     "releasedAt": 1777051896,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1050000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7900,18 +14764,46 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.1,
     "cacheWritePerMillion": 1.25,
     "releasedAt": 1783590864,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1050000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7937,18 +14829,46 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.1,
     "cacheWritePerMillion": 1.25,
     "releasedAt": 1783590867,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1050000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -7974,18 +14894,46 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.5,
     "cacheWritePerMillion": 6.25,
     "releasedAt": 1783590850,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1050000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -8011,18 +14959,46 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.5,
     "cacheWritePerMillion": 6.25,
     "releasedAt": 1783590854,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1050000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -8048,18 +15024,46 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.25,
     "cacheWritePerMillion": 3.125,
     "releasedAt": 1783590857,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1050000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -8085,18 +15089,46 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.25,
     "cacheWritePerMillion": 3.125,
     "releasedAt": 1783590861,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_completion_tokens",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1050000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -8120,22 +15152,44 @@ export const GENERATED_MODELS = [
     "label": "gpt-audio",
     "source": "openrouter-models",
     "releasedAt": 1768862569,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -8159,22 +15213,44 @@ export const GENERATED_MODELS = [
     "label": "gpt-audio-mini",
     "source": "openrouter-models",
     "releasedAt": 1768859419,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -8199,14 +15275,23 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.5,
     "releasedAt": 1778000212,
-    "supportedParameters": [
-      "max_tokens",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {}
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 400000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -8230,29 +15315,71 @@ export const GENERATED_MODELS = [
     "label": "gpt-oss-120b",
     "source": "openrouter-models",
     "releasedAt": 1754414231,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "reasoning_effort",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_a",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 131072,
     "modalities": {
@@ -8275,19 +15402,61 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.0375,
     "releasedAt": 1761752836,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -8310,16 +15479,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 7.5,
     "releasedAt": 1734459999,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 200000,
     "maxOutputTokens": 100000,
     "modalities": {
@@ -8343,14 +15542,44 @@ export const GENERATED_MODELS = [
     "label": "o1-pro",
     "source": "openrouter-models",
     "releasedAt": 1742423211,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 200000,
     "maxOutputTokens": 100000,
     "modalities": {
@@ -8375,16 +15604,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.5,
     "releasedAt": 1744823457,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 200000,
     "maxOutputTokens": 100000,
     "modalities": {
@@ -8409,24 +15668,67 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 2.5,
     "releasedAt": 1760129661,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 200000,
     "maxOutputTokens": 100000,
     "modalities": {
@@ -8451,16 +15753,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.55,
     "releasedAt": 1738351721,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 200000,
     "maxOutputTokens": 100000,
     "modalities": {
@@ -8484,17 +15816,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.55,
     "releasedAt": 1739372611,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 200000,
     "maxOutputTokens": 100000,
     "modalities": {
@@ -8517,16 +15878,46 @@ export const GENERATED_MODELS = [
     "label": "o3-pro",
     "source": "openrouter-models",
     "releasedAt": 1749598352,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 200000,
     "maxOutputTokens": 100000,
     "modalities": {
@@ -8551,16 +15942,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.275,
     "releasedAt": 1744820942,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 200000,
     "maxOutputTokens": 100000,
     "modalities": {
@@ -8585,24 +16006,67 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.5,
     "releasedAt": 1760129642,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 200000,
     "maxOutputTokens": 100000,
     "modalities": {
@@ -8627,17 +16091,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.275,
     "releasedAt": 1744824212,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 200000,
     "maxOutputTokens": 100000,
     "modalities": {
@@ -8679,17 +16172,60 @@ export const GENERATED_MODELS = [
     "label": "perceptron-mk1",
     "source": "openrouter-models",
     "releasedAt": 1778597029,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 32768,
     "maxOutputTokens": 8192,
     "modalities": {
@@ -8713,15 +16249,36 @@ export const GENERATED_MODELS = [
     "label": "sonar",
     "source": "openrouter-models",
     "releasedAt": 1738013808,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "temperature",
-      "top_k",
-      "top_p",
-      "web_search_options"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 127072,
     "modalities": {
       "input": [
@@ -8743,17 +16300,59 @@ export const GENERATED_MODELS = [
     "label": "sonar-deep-research",
     "source": "openrouter-models",
     "releasedAt": 1741311246,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "temperature",
-      "top_k",
-      "top_p",
-      "web_search_options"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 128000,
     "modalities": {
       "input": [
@@ -8774,15 +16373,37 @@ export const GENERATED_MODELS = [
     "label": "sonar-pro",
     "source": "openrouter-models",
     "releasedAt": 1741312423,
-    "supportedParameters": [
-      "frequency_penalty",
-      "max_tokens",
-      "presence_penalty",
-      "temperature",
-      "top_k",
-      "top_p",
-      "web_search_options"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 200000,
     "maxOutputTokens": 8000,
     "modalities": {
@@ -8805,18 +16426,60 @@ export const GENERATED_MODELS = [
     "label": "sonar-pro-search",
     "source": "openrouter-models",
     "releasedAt": 1761854366,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_p",
-      "web_search_options"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 200000,
     "maxOutputTokens": 8000,
     "modalities": {
@@ -8839,17 +16502,59 @@ export const GENERATED_MODELS = [
     "label": "sonar-reasoning-pro",
     "source": "openrouter-models",
     "releasedAt": 1741313308,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "temperature",
-      "top_k",
-      "top_p",
-      "web_search_options"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 128000,
     "modalities": {
       "input": [
@@ -8872,14 +16577,47 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.1,
     "releasedAt": 1777388504,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "temperature",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 262144,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -8902,14 +16640,47 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.03,
     "releasedAt": 1783002429,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "temperature",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 262144,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -8931,23 +16702,48 @@ export const GENERATED_MODELS = [
     "label": "qwen-2.5-72b-instruct",
     "source": "openrouter-models",
     "releasedAt": 1726704000,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -8969,25 +16765,48 @@ export const GENERATED_MODELS = [
     "label": "qwen-2.5-7b-instruct",
     "source": "openrouter-models",
     "releasedAt": 1729036800,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -9009,19 +16828,46 @@ export const GENERATED_MODELS = [
     "label": "qwen-2.5-coder-32b-instruct",
     "source": "openrouter-models",
     "releasedAt": 1731368400,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "seed",
-      "stop",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 128000,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -9045,19 +16891,35 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.052,
     "cacheWritePerMillion": 0.325,
     "releasedAt": 1738409840,
-    "supportedParameters": [
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -9079,19 +16941,35 @@ export const GENERATED_MODELS = [
     "label": "qwen-plus-2025-07-28",
     "source": "openrouter-models",
     "releasedAt": 1757347599,
-    "supportedParameters": [
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -9114,19 +16992,58 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheWritePerMillion": 0.325,
     "releasedAt": 1757347599,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -9149,22 +17066,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.4,
     "releasedAt": 1738410311,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -9187,27 +17128,71 @@ export const GENERATED_MODELS = [
     "label": "qwen3-14b",
     "source": "openrouter-models",
     "releasedAt": 1745876478,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131702,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -9229,18 +17214,58 @@ export const GENERATED_MODELS = [
     "label": "qwen3-235b-a22b",
     "source": "openrouter-models",
     "releasedAt": 1745875757,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "response_format",
-      "seed",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 131072,
     "maxOutputTokens": 8192,
     "modalities": {
@@ -9262,25 +17287,48 @@ export const GENERATED_MODELS = [
     "label": "qwen3-235b-a22b-2507",
     "source": "openrouter-models",
     "releasedAt": 1753119555,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -9302,26 +17350,71 @@ export const GENERATED_MODELS = [
     "label": "qwen3-235b-a22b-thinking-2507",
     "source": "openrouter-models",
     "releasedAt": 1753449557,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 262144,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -9343,27 +17436,71 @@ export const GENERATED_MODELS = [
     "label": "qwen3-30b-a3b",
     "source": "openrouter-models",
     "releasedAt": 1745878604,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 8192,
     "modalities": {
@@ -9385,25 +17522,47 @@ export const GENERATED_MODELS = [
     "label": "qwen3-30b-a3b-instruct-2507",
     "source": "openrouter-models",
     "releasedAt": 1753806965,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "modalities": {
       "input": [
@@ -9424,18 +17583,58 @@ export const GENERATED_MODELS = [
     "label": "qwen3-30b-a3b-thinking-2507",
     "source": "openrouter-models",
     "releasedAt": 1756399192,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "response_format",
-      "seed",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 131072,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -9457,27 +17656,71 @@ export const GENERATED_MODELS = [
     "label": "qwen3-32b",
     "source": "openrouter-models",
     "releasedAt": 1745875945,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -9499,18 +17742,58 @@ export const GENERATED_MODELS = [
     "label": "qwen3-8b",
     "source": "openrouter-models",
     "releasedAt": 1745876632,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "response_format",
-      "seed",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 131072,
     "maxOutputTokens": 8192,
     "modalities": {
@@ -9533,25 +17816,48 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.1,
     "releasedAt": 1753230546,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -9573,23 +17879,48 @@ export const GENERATED_MODELS = [
     "label": "qwen3-coder-30b-a3b-instruct",
     "source": "openrouter-models",
     "releasedAt": 1753972379,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 160000,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -9613,18 +17944,35 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.039,
     "cacheWritePerMillion": 0.24375,
     "releasedAt": 1758115536,
-    "supportedParameters": [
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 1000000,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -9647,24 +17995,48 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.07,
     "releasedAt": 1770164101,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 262144,
     "modalities": {
@@ -9688,19 +18060,35 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.13,
     "cacheWritePerMillion": 0.8125,
     "releasedAt": 1758662707,
-    "supportedParameters": [
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -9724,19 +18112,35 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.156,
     "cacheWritePerMillion": 0.975,
     "releasedAt": 1758662808,
-    "supportedParameters": [
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -9758,21 +18162,58 @@ export const GENERATED_MODELS = [
     "label": "qwen3-max-thinking",
     "source": "openrouter-models",
     "releasedAt": 1770671901,
-    "supportedParameters": [
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -9795,25 +18236,48 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.07,
     "releasedAt": 1757612213,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 262144,
     "modalities": {
@@ -9835,25 +18299,71 @@ export const GENERATED_MODELS = [
     "label": "qwen3-next-80b-a3b-thinking",
     "source": "openrouter-models",
     "releasedAt": 1757612284,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -9876,25 +18386,48 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.1,
     "releasedAt": 1758668687,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -9917,25 +18450,71 @@ export const GENERATED_MODELS = [
     "label": "qwen3-vl-235b-a22b-thinking",
     "source": "openrouter-models",
     "releasedAt": 1758668690,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -9958,25 +18537,48 @@ export const GENERATED_MODELS = [
     "label": "qwen3-vl-30b-a3b-instruct",
     "source": "openrouter-models",
     "releasedAt": 1759794476,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -9999,23 +18601,65 @@ export const GENERATED_MODELS = [
     "label": "qwen3-vl-30b-a3b-thinking",
     "source": "openrouter-models",
     "releasedAt": 1759794479,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -10038,19 +18682,35 @@ export const GENERATED_MODELS = [
     "label": "qwen3-vl-32b-instruct",
     "source": "openrouter-models",
     "releasedAt": 1761231332,
-    "supportedParameters": [
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -10073,24 +18733,48 @@ export const GENERATED_MODELS = [
     "label": "qwen3-vl-8b-instruct",
     "source": "openrouter-models",
     "releasedAt": 1760463308,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 256000,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -10113,21 +18797,58 @@ export const GENERATED_MODELS = [
     "label": "qwen3-vl-8b-thinking",
     "source": "openrouter-models",
     "releasedAt": 1760463746,
-    "supportedParameters": [
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 256000,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -10150,27 +18871,71 @@ export const GENERATED_MODELS = [
     "label": "qwen3.5-122b-a10b",
     "source": "openrouter-models",
     "releasedAt": 1772053789,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -10194,27 +18959,71 @@ export const GENERATED_MODELS = [
     "label": "qwen3.5-27b",
     "source": "openrouter-models",
     "releasedAt": 1772053810,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 81920
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 81920,
     "modalities": {
@@ -10238,27 +19047,71 @@ export const GENERATED_MODELS = [
     "label": "qwen3.5-35b-a3b",
     "source": "openrouter-models",
     "releasedAt": 1772053822,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 262144,
     "modalities": {
@@ -10282,27 +19135,71 @@ export const GENERATED_MODELS = [
     "label": "qwen3.5-397b-a17b",
     "source": "openrouter-models",
     "releasedAt": 1771223018,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -10326,27 +19223,71 @@ export const GENERATED_MODELS = [
     "label": "qwen3.5-9b",
     "source": "openrouter-models",
     "releasedAt": 1773152396,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 262144,
     "modalities": {
@@ -10370,19 +19311,58 @@ export const GENERATED_MODELS = [
     "label": "qwen3.5-flash-02-23",
     "source": "openrouter-models",
     "releasedAt": 1772053776,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -10406,21 +19386,58 @@ export const GENERATED_MODELS = [
     "label": "qwen3.5-plus-02-15",
     "source": "openrouter-models",
     "releasedAt": 1771229416,
-    "supportedParameters": [
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -10445,21 +19462,58 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheWritePerMillion": 0.375,
     "releasedAt": 1777261368,
-    "supportedParameters": [
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -10483,27 +19537,71 @@ export const GENERATED_MODELS = [
     "label": "qwen3.6-27b",
     "source": "openrouter-models",
     "releasedAt": 1777255064,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -10527,27 +19625,71 @@ export const GENERATED_MODELS = [
     "label": "qwen3.6-35b-a3b",
     "source": "openrouter-models",
     "releasedAt": 1777260255,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 262144,
     "modalities": {
@@ -10572,21 +19714,58 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheWritePerMillion": 0.234375,
     "releasedAt": 1777261362,
-    "supportedParameters": [
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -10611,21 +19790,58 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheWritePerMillion": 1.3,
     "releasedAt": 1777260242,
-    "supportedParameters": [
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -10648,21 +19864,58 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheWritePerMillion": 0.40625,
     "releasedAt": 1775133557,
-    "supportedParameters": [
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -10688,21 +19941,58 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.295,
     "cacheWritePerMillion": 1.84375,
     "releasedAt": 1779376861,
-    "supportedParameters": [
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -10726,21 +20016,58 @@ export const GENERATED_MODELS = [
     "cacheReadPerMillion": 0.064,
     "cacheWritePerMillion": 0.4,
     "releasedAt": 1780491783,
-    "supportedParameters": [
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -10763,21 +20090,48 @@ export const GENERATED_MODELS = [
     "label": "reka-edge",
     "source": "openrouter-models",
     "releasedAt": 1774026965,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 16384,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -10801,21 +20155,69 @@ export const GENERATED_MODELS = [
     "label": "reka-flash-3",
     "source": "openrouter-models",
     "releasedAt": 1741812813,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 65536,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -10837,11 +20239,27 @@ export const GENERATED_MODELS = [
     "label": "relace-apply-3",
     "source": "openrouter-models",
     "releasedAt": 1758891572,
-    "supportedParameters": [
-      "max_tokens",
-      "seed",
-      "stop"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 256000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -10863,16 +20281,38 @@ export const GENERATED_MODELS = [
     "label": "relace-search",
     "source": "openrouter-models",
     "releasedAt": 1765213560,
-    "supportedParameters": [
-      "max_tokens",
-      "response_format",
-      "seed",
-      "stop",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 256000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -10895,15 +20335,43 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.5,
     "releasedAt": 1782276303,
-    "supportedParameters": [
-      "include_reasoning",
-      "reasoning",
-      "reasoning_effort",
-      "structured_outputs",
-      "tool_choice",
-      "tools",
-      "web_search_options"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "toolChoice": {},
+        "tools": {},
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -10926,21 +20394,46 @@ export const GENERATED_MODELS = [
     "label": "l3-lunaris-8b",
     "source": "openrouter-models",
     "releasedAt": 1723507200,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 8192,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -10962,23 +20455,48 @@ export const GENERATED_MODELS = [
     "label": "l3.1-euryale-70b",
     "source": "openrouter-models",
     "releasedAt": 1724803200,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -11000,20 +20518,42 @@ export const GENERATED_MODELS = [
     "label": "l3.3-euryale-70b",
     "source": "openrouter-models",
     "releasedAt": 1734535928,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -11035,17 +20575,59 @@ export const GENERATED_MODELS = [
     "label": "step-3.5-flash",
     "source": "openrouter-models",
     "releasedAt": 1769728337,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 262144,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -11068,28 +20650,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.04,
     "releasedAt": 1779985069,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "reasoning_effort",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 256000,
     "maxOutputTokens": 256000,
     "modalities": {
@@ -11113,17 +20738,57 @@ export const GENERATED_MODELS = [
     "label": "hunyuan-a13b-instruct",
     "source": "openrouter-models",
     "releasedAt": 1751987664,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 131072,
     "modalities": {
@@ -11146,27 +20811,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.05,
     "releasedAt": 1783344048,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "max_completion_tokens",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "reasoning_effort",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 262144,
     "maxOutputTokens": 131072,
     "modalities": {
@@ -11189,21 +20898,70 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.021,
     "releasedAt": 1776878150,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "reasoning_effort",
-      "seed",
-      "stop",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 262144,
     "modalities": {
       "input": [
@@ -11225,22 +20983,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.15,
     "releasedAt": 1758931878,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 131072,
     "maxOutputTokens": 131072,
     "modalities": {
@@ -11262,22 +21044,46 @@ export const GENERATED_MODELS = [
     "label": "rocinante-12b",
     "source": "openrouter-models",
     "releasedAt": 1727654400,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 65536,
     "maxOutputTokens": 65536,
     "modalities": {
@@ -11300,22 +21106,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.25,
     "releasedAt": 1741636566,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 32768,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -11337,22 +21167,44 @@ export const GENERATED_MODELS = [
     "label": "unslopnemo-12b",
     "source": "openrouter-models",
     "releasedAt": 1731103448,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 32768,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -11375,23 +21227,67 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.17,
     "releasedAt": 1784325956,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "reasoning_effort",
-      "repetition_penalty",
-      "stop",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 1048576,
     "modalities": {
       "input": [
@@ -11414,24 +21310,46 @@ export const GENERATED_MODELS = [
     "label": "remm-slerp-l2-13b",
     "source": "openrouter-models",
     "releasedAt": 1689984000,
-    "supportedParameters": [
-      "frequency_penalty",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "top_a",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 6144,
     "maxOutputTokens": 4096,
     "modalities": {
@@ -11454,16 +21372,46 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.015,
     "releasedAt": 1769481200,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 128000,
     "modalities": {
       "input": [
@@ -11484,13 +21432,37 @@ export const GENERATED_MODELS = [
     "label": "palmyra-x5",
     "source": "openrouter-models",
     "releasedAt": 1769003823,
-    "supportedParameters": [
-      "max_tokens",
-      "stop",
-      "temperature",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 1040000,
     "maxOutputTokens": 8192,
     "modalities": {
@@ -11513,20 +21485,54 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.2,
     "releasedAt": 1774979019,
-    "supportedParameters": [
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 2000000,
     "modalities": {
       "input": [
@@ -11550,19 +21556,52 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.2,
     "releasedAt": 1774979158,
-    "supportedParameters": [
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "structured_outputs",
-      "temperature",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 2000000,
     "modalities": {
       "input": [
@@ -11586,24 +21625,66 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.2,
     "releasedAt": 1777591821,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1000000,
     "modalities": {
       "input": [
@@ -11627,24 +21708,66 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.3,
     "releasedAt": 1783523154,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "reasoning_effort",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 500000,
     "modalities": {
       "input": [
@@ -11668,23 +21791,66 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.2,
     "releasedAt": 1779298123,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logprobs",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 256000,
     "modalities": {
       "input": [
@@ -11708,27 +21874,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.0028,
     "releasedAt": 1776874269,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "maxOutputTokens": 131072,
     "modalities": {
@@ -11754,27 +21964,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.0036,
     "releasedAt": 1776874273,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "maxOutputTokens": 131072,
     "modalities": {
@@ -11797,17 +22051,56 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.11,
     "releasedAt": 1753471347,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 98304
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 131072,
     "maxOutputTokens": 98304,
     "modalities": {
@@ -11830,21 +22123,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.025,
     "releasedAt": 1753471258,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "seed",
-      "stop",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 98304
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": false,
     "contextLength": 131072,
     "maxOutputTokens": 98304,
     "modalities": {
@@ -11867,22 +22210,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.11,
     "releasedAt": 1754922288,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 65536,
     "maxOutputTokens": 16384,
     "modalities": {
@@ -11906,25 +22298,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.1,
     "releasedAt": 1759235576,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 202752,
     "maxOutputTokens": 131072,
     "modalities": {
@@ -11947,22 +22385,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.055,
     "releasedAt": 1765207462,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "max_tokens",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 131072,
     "maxOutputTokens": 32768,
     "modalities": {
@@ -11987,27 +22474,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.08,
     "releasedAt": 1766378014,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 202752,
     "maxOutputTokens": 131072,
     "modalities": {
@@ -12029,27 +22560,71 @@ export const GENERATED_MODELS = [
     "label": "glm-4.7-flash",
     "source": "openrouter-models",
     "releasedAt": 1768833913,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 200000,
     "maxOutputTokens": 131072,
     "modalities": {
@@ -12072,27 +22647,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.2,
     "releasedAt": 1770829182,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 204800,
     "maxOutputTokens": 131072,
     "modalities": {
@@ -12115,17 +22734,56 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.24,
     "releasedAt": 1773583573,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 202752,
     "maxOutputTokens": 131072,
     "modalities": {
@@ -12148,27 +22806,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.1794,
     "releasedAt": 1775578025,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "presence_penalty",
-      "reasoning",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128000
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 202752,
     "maxOutputTokens": 128000,
     "modalities": {
@@ -12191,29 +22893,71 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.17732,
     "releasedAt": 1781631930,
-    "supportedParameters": [
-      "frequency_penalty",
-      "include_reasoning",
-      "logit_bias",
-      "logprobs",
-      "max_tokens",
-      "min_p",
-      "parallel_tool_calls",
-      "presence_penalty",
-      "reasoning",
-      "reasoning_effort",
-      "repetition_penalty",
-      "response_format",
-      "seed",
-      "stop",
-      "structured_outputs",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_logprobs",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequencyPenalty": {
+          "type": "number"
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "presencePenalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "stopSequences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "schema",
     "contextLength": 1048576,
     "maxOutputTokens": 131072,
     "modalities": {
@@ -12236,17 +22980,56 @@ export const GENERATED_MODELS = [
     "source": "openrouter-models",
     "cacheReadPerMillion": 0.24,
     "releasedAt": 1775061458,
-    "supportedParameters": [
-      "include_reasoning",
-      "max_tokens",
-      "reasoning",
-      "response_format",
-      "temperature",
-      "tool_choice",
-      "tools",
-      "top_k",
-      "top_p"
-    ],
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "toolChoice": {},
+        "tools": {},
+        "topK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topP": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": {
+              "type": "string",
+              "examples": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra"
+              ]
+            },
+            "budgetTokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "structuredOutput": "object",
     "contextLength": 202752,
     "maxOutputTokens": 131072,
     "modalities": {
