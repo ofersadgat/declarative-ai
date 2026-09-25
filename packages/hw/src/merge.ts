@@ -123,7 +123,7 @@ function mergeSlotMap(
  * `model` to every `choose_option` gate in the subtree as if the author had written it there — a
  * silent, plausible-looking argument no one asked for.
  */
-const KIND_SPECIFIC = ["args", "prompt", "system", "function"] as const;
+const KIND_SPECIFIC = ["args", "prompt", "system", "function", "script"] as const;
 
 /**
  * Refuse the two spellings that are no longer fields: `sessionId`, and a top-level `fork`.

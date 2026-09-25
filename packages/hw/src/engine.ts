@@ -58,6 +58,8 @@ import {
   type Clock,
   type OperationScope,
   MapSessionStore,
+  canonicalize,
+  sha256Hex,
   createOperationExecutor,
   hashOperation,
   isOk,
@@ -113,7 +115,9 @@ import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, 
 // Computed fields (SPEC §5.3): evaluated once at entry, written into a per-instance definition.
 import { fieldDependencies, fieldsView, materializeFields } from "./fields.js";
 import { bindIntoSlots } from "./loader.js";
-import { EVENT_NAMESPACE, hasDefault, literalPermissions, SPAWN_DEFAULTS, type HostedEachKind, type LiteralPermissions, type LoadedField, type SpawnFields } from "./format.js";
+import { EVENT_NAMESPACE, hasDefault, literalPermissions, SCRIPT_CODE_INPUT, SCRIPT_CONTROL, SCRIPT_FILE_INPUT, SCRIPT_FUNCTION, SPAWN_DEFAULTS, type HostedEachKind, type LiteralPermissions, type LoadedField, type SpawnFields } from "./format.js";
+import { hasScriptContext, loadScriptContext, runWithScriptHost, type AgentOptions, type LlmCall, type ScriptHost } from "./scriptHooks.js";
+import { agentCall, answerOf, lowerLlmCall, ScriptCallError, ScriptRunState, ScriptSegments, type ScriptModuleOptions } from "./scriptRun.js";
 import { isCallableKind, isCallableSchema } from "@declarative-ai/exec";
 import { isOperationValue } from "./resolve.js";
 import { uuidv7 } from "./ids.js";
@@ -296,6 +300,12 @@ export interface EngineConfig {
    *  configured it with; absent for the run's own bundle. Returns `undefined` ⇒ fall back to the single
    *  run-level `services.workspace`. Absent ⇒ always the run-level one. */
   workspaceFor?: (resourceKey: string, declared?: { name: string; configuration: JsonValue }) => Workspace | undefined;
+  /**
+   * How a compiled script's code runs (SCRIPTS.md §6.2, §9): where its imports resolve, whether an
+   * imported file may run, and what "an agent" means for `agent()`. Absent ⇒ a script may import
+   * nothing and `agent()` is `llm()` with Claude's `null` contract.
+   */
+  scripts?: ScriptModuleOptions;
   /**
    * Where a HOSTED fan-out's elements go (WORKFLOWS.md §6.3) — the seam `each: "task"` and
    * `each: "split"` hand their elements through. The engine resolves the elements exactly as it does
@@ -622,6 +632,11 @@ interface Instance {
   sites: Map<string, number>;
   /** The next call-site sequence number — 1-based, 0 being the state's own operation. */
   nextSite: number;
+  /**
+   * What a compiled script's code recorded before the run stopped (`LoadedInstance.scriptCalls`) —
+   * the answers a re-run of its code is handed back instead of asking again (SCRIPTS.md §11).
+   */
+  scriptCalls?: readonly import("./load.js").ScriptCallRecord[];
   /**
    * Transitions this instance has taken — EVERY one, forward jumps and the exit included.
    *
@@ -1043,6 +1058,8 @@ function resourceKeyFor(def: LoadedState, parent: Instance | undefined, selfAddr
 export class WorkflowEngine {
   /** The name each resource key came from — what `workspaceFor` is told beside the key. */
   private readonly workspaceNames = new Map<string, ScopedName>();
+  /** Compiled scripts' code, prepared through the module loader (SCRIPTS.md §6.2). */
+  private readonly segments: ScriptSegments;
   /** Choices that outlive the instance that made them, by what they are held for — see `choiceKey`. */
   private readonly sessionChoices = new Map<string, Promise<{ value: ResolvedValue } | { failure: Failure }>>();
   private readonly validator: SyncOutputValidator;
@@ -1085,6 +1102,7 @@ export class WorkflowEngine {
   private readonly splits: SplitEntry[];
 
   constructor(private readonly config: EngineConfig) {
+    this.segments = new ScriptSegments(config.scripts);
     this.validator = config.validator ?? new SchemaValidator();
     this.clock = config.clock ?? { now: () => Date.now() };
     this.splits = [...(config.split ?? [])];
@@ -1102,6 +1120,9 @@ export class WorkflowEngine {
   }
 
   async run(options: WorkflowRunOptions): Promise<WorkflowRunResult> {
+    // The async context the script hooks find their caller through — loaded before anything runs,
+    // so dispatching a call never waits on it (SCRIPTS.md §6).
+    await loadScriptContext();
     const start = this.clock.now();
     const rootDef = this.config.bundle.states[this.config.bundle.rootId];
     if (!rootDef) throw new Error(`root state '${this.config.bundle.rootId}' missing from bundle`);
@@ -1156,6 +1177,7 @@ export class WorkflowEngine {
    * and the tree keeps the very ids the conversation records point at.
    */
   async loadRun(loaded: LoadedInstance, options: WorkflowRunOptions = { inputs: {} }): Promise<WorkflowRunResult> {
+    await loadScriptContext();
     const start = this.clock.now();
     const abort = new AbortController();
     if (options.abortSignal) {
@@ -1227,6 +1249,8 @@ export class WorkflowEngine {
      * element. Absent for an ordinary entry, which counts its own.
      */
     step?: InstanceAddressStep,
+    /** The script call site entering this instance, when a compiled script called it (SCRIPTS.md §10). */
+    calledAt?: string,
   ): Promise<TerminationRecord> {
     // Taken ONCE, before the literal: `addressOf` mutates the parent's entry tally, so asking for it
     // twice would count this entry twice and hand the second reader a different occurrence.
@@ -1278,6 +1302,7 @@ export class WorkflowEngine {
       childKey,
       parentInstanceId: parent?.id,
       ...(step?.element !== undefined ? { element: step.element } : {}),
+      ...(calledAt !== undefined ? { calledAt } : {}),
       inputs: shallowRedactArtifacts(inputs),
     });
 
@@ -1376,6 +1401,7 @@ export class WorkflowEngine {
     instance.children = new Map();
     instance.passes.push(instance.children);
     if (entered !== undefined) instance.entered = entered;
+    if (loaded.scriptCalls !== undefined) instance.scriptCalls = loaded.scriptCalls;
     // The SETTLED fields the stopped run journaled (SPEC §5.3), written back verbatim: a loaded
     // instance does not pay for a title twice. A field the description lacks is evaluated by the
     // continuation (`resumeInstance`), which is the one case a run stopped mid-evaluation leaves.
@@ -4654,9 +4680,13 @@ export class WorkflowEngine {
      * a field's own layer, merged over the state's. Else the instance's.
      */
     environment?: ExecEnvironmentDecl,
+    /** Told what the call cost — a script's `budget` counts it (SCRIPTS.md §6). */
+    onMetrics?: (metrics: WorkflowMetrics) => void,
+    /** A bundle of the call's own — `agent({ isolation: "worktree" })`. */
+    resourceKeyOverride?: string,
   ): Promise<Resolved> {
     const env = environment ?? environmentOf(instance.def) ?? {};
-    const resourceKey = this.bundleFor(instance, environment);
+    const resourceKey = resourceKeyOverride ?? this.bundleFor(instance, environment);
     // Its arguments are already bound into `op.input` as literals (`resolveEmbedded`), so this reads
     // them back out as values.
     const literal = resolveInputs(op.input, this.scopeFor(instance));
@@ -4705,15 +4735,15 @@ export class WorkflowEngine {
     }
     let outcome;
     try {
-      const handle = this.operations.start(
-        rendered,
-        await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, session, toolsOrFailure.gate, scope, op.kind, toolsOrFailure.authored),
-      );
+      const services = await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, session, toolsOrFailure.gate, scope, op.kind, toolsOrFailure.authored);
+      const within = op.kind === "function" ? this.functionHost(instance, `${op.functionRef}@${scope.sequence}`) : <T,>(fn: () => T): T => fn();
+      const handle = within(() => this.operations.start(rendered, services));
       onHandle?.(handle);
       outcome = await handle.result;
     } catch (e) {
       return { error: `executor rejected: ${(e as Error).message}` };
     }
+    onMetrics?.(outcome.metrics);
     this.childLlmCalls += (op.kind === "prompt" ? 1 : 0) + (outcome.metrics.childLlmCalls ?? 0);
     // `?? 0` for the same reason the state path needs it: the dispatcher frames every execution with
     // its own timing and always reports metrics, so an impl that costs nothing arrives without a
@@ -4725,6 +4755,232 @@ export class WorkflowEngine {
       : { error: outcome.error.reason, failure: outcome.error };
   }
 
+  /**
+   * Run a compiled script's code — the `$script` operation (SCRIPTS.md §6.2).
+   *
+   * The code is the operation's own input, so it is part of the definition and hashed with it. It
+   * runs from the entry the state was entered at, with the variables it was handed, inside an async
+   * context holding this instance's {@link ScriptHost}: every `llm()` it makes is dispatched at a
+   * site of its own and recorded, and a re-run after a restart is handed back what was recorded. What
+   * it returns — the continuation — is the operation's value, which the state's outputs and its
+   * mount's rules read like any other.
+   */
+  private async runScriptOp(
+    instance: Instance,
+    op: FunctionOp<InlineFamily>,
+    opInputs: FunctionInputs,
+    fail: (f: Failure, operationId?: string, metrics?: WorkflowMetrics) => Failure,
+    index?: number,
+  ): Promise<Failure | undefined> {
+    const code = opInputs[SCRIPT_CODE_INPUT];
+    const file = opInputs[SCRIPT_FILE_INPUT];
+    if (typeof code !== "string" || typeof file !== "string") {
+      return fail({ classification: "permanent", reason: "a script operation carries no code" });
+    }
+    const scope = this.callScope(instance, index);
+    const operationId = tryScopedId(tryHashOperation(bindInputs(this.operationFor(instance, op), opInputs)), scope);
+    const run = new ScriptRunState(instance.scriptCalls);
+    const startMs = this.clock.now();
+    const metrics = (): WorkflowMetrics => ({ durationMs: this.clock.now() - startMs, startMs, costUsd: run.spent, costSource: "unknown", childLlmCalls: run.calls });
+
+    let value: unknown;
+    try {
+      await loadScriptContext();
+      const segment = await this.segments.load(code, file);
+      const vars: Record<string, unknown> = {};
+      for (const [key, v] of Object.entries(opInputs)) {
+        if (key !== SCRIPT_CODE_INPUT && key !== SCRIPT_FILE_INPUT && key !== SCRIPT_CONTROL.entry) vars[key] = v;
+      }
+      const entry = typeof opInputs[SCRIPT_CONTROL.entry] === "number" ? (opInputs[SCRIPT_CONTROL.entry] as number) : 0;
+      value = await runWithScriptHost(this.scriptHost(instance, run), () => segment(vars, entry));
+    } catch (e) {
+      if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
+      const failure = e instanceof ScriptCallError ? e.failure : { classification: "permanent" as const, reason: `the script threw: ${(e as Error)?.message ?? String(e)}` };
+      this.settleNode(instance, index, operationNodeOf("error", metrics(), undefined, undefined, undefined));
+      return fail(failure, operationId, metrics());
+    }
+    const settled = metrics();
+    this.settleNode(instance, index, operationNodeOf("success", settled, undefined, undefined, value as ResolvedValue));
+    if (instance.abort.signal.aborted || instance.timedOut) return undefined;
+    const failure = index === undefined ? this.acceptOpOutputs(instance, "function", value as ResolvedValue, op.output.kind) : undefined;
+    if (failure) return fail(failure, operationId, settled);
+    this.emit({
+      type: "operation.completed",
+      instanceId: instance.id,
+      stateId: instance.stateId,
+      op: "function",
+      ...(index !== undefined ? { index } : {}),
+      ...(operationId !== undefined ? { operationId } : {}),
+      metrics: settled,
+    });
+    return undefined;
+  }
+
+  /**
+   * The async context a FUNCTION call runs in: a script host for the calling instance, whose sites are
+   * prefixed with the call's own — so a function module's `llm()` calls are recorded under the state
+   * that called it, and two calls of one function keep their calls apart (SCRIPTS.md §11).
+   */
+  private functionHost(instance: Instance, prefix: string): <T>(fn: () => T) => T {
+    // Loaded by `run`/`loadRun`; a caller that dispatched without either has no scripts to serve.
+    if (!hasScriptContext()) return (fn) => fn();
+    const host = this.scriptHost(instance, new ScriptRunState(instance.scriptCalls, `${prefix}/`));
+    return (fn) => runWithScriptHost(host, fn);
+  }
+
+  /** What a script's code reaches the engine through, for ONE instance (SCRIPTS.md §6). */
+  private scriptHost(instance: Instance, run: ScriptRunState): ScriptHost {
+    const total = instance.def.limits?.budget ?? null;
+    const recordOnce = (kind: "log" | "phase", emit: (site: string) => void): void => {
+      const site = run.site(kind);
+      if (run.recordAt(site) === undefined) emit(site);
+    };
+    const recordedValue = (kind: "now" | "random", compute: () => number): number => {
+      const site = run.site(kind);
+      const recorded = run.recordAt(site);
+      if (recorded !== undefined && typeof recorded.value === "number") return recorded.value;
+      const value = compute();
+      this.emit({ type: "script.call.settled", instanceId: instance.id, stateId: instance.stateId, site, outcome: "value", value });
+      return value;
+    };
+    return {
+      llm: (call, schema) => this.scriptCall(instance, run, call, schema),
+      agent: (prompt, options, schema) => this.scriptCall(instance, run, agentCall(prompt, options as AgentOptions, this.segments.agentDefaults), schema),
+      workflow: (ref, args) => this.scriptWorkflow(instance, run, ref, args),
+      phase: (title) => {
+        run.phase = title;
+        recordOnce("phase", (site) => this.emit({ type: "script.phase", instanceId: instance.id, stateId: instance.stateId, site, title }));
+      },
+      log: (message) => recordOnce("log", (site) => this.emit({ type: "script.log", instanceId: instance.id, stateId: instance.stateId, site, message })),
+      now: () => recordedValue("now", () => this.clock.now()),
+      random: () => recordedValue("random", () => Math.random()),
+      budget: {
+        total,
+        spent: () => run.spent,
+        remaining: () => (total === null ? Number.POSITIVE_INFINITY : Math.max(0, total - run.spent)),
+      },
+    };
+  }
+
+  /**
+   * One `llm()` call from a script (SCRIPTS.md §9, §11): lowered over the state's defaults, given a
+   * site of its own, answered from the record when an earlier run of this code already made it, and
+   * otherwise dispatched through the same path any embedded call takes — then journaled.
+   */
+  private async scriptCall(instance: Instance, run: ScriptRunState, call: LlmCall, schema: JsonSchema | undefined): Promise<unknown> {
+    const lowered = lowerLlmCall(instance.stateId, instance.def.scriptDefaults, call, schema);
+    let key: string;
+    try {
+      key = hashOperation(lowered.op);
+    } catch {
+      key = `unhashable:${run.calls}`;
+    }
+    const site = run.site(key);
+    const phase = lowered.phase ?? run.phase;
+    const recorded = run.recordAt(site);
+    let outcome: { value: unknown } | { failure: Failure };
+    if (recorded !== undefined) {
+      await run.release(site);
+      run.spent += recorded.costUsd ?? 0;
+      outcome = recorded.failure !== undefined ? { failure: recorded.failure } : { value: recorded.value };
+    } else {
+      if (run.calls >= this.segments.maxCalls) {
+        throw new ScriptCallError({ classification: "permanent", reason: `the script made ${run.calls} calls — the limit is ${this.segments.maxCalls}` });
+      }
+      const total = instance.def.limits?.budget;
+      if (total !== undefined && run.spent >= total) {
+        throw new ScriptCallError({ classification: "permanent", reason: `the script's budget of $${total} is spent` });
+      }
+      run.calls++;
+      let cost = 0;
+      const isolated = lowered.isolated ? `${instance.resourceKey}#isolated:${site}` : undefined;
+      const answer = await this.runEmbeddedOp(instance, lowered.op, undefined, site, lowered.env, (m) => (cost = m.costUsd ?? 0), isolated);
+      run.spent += cost;
+      outcome = isPending(answer)
+        ? { failure: { classification: "permanent", reason: "the call did not resolve" } }
+        : "error" in answer
+          ? { failure: answer.failure ?? { classification: "permanent", reason: answer.error } }
+          : { value: answer.value };
+      this.emit({
+        type: "script.call.settled",
+        instanceId: instance.id,
+        stateId: instance.stateId,
+        site,
+        ...(lowered.label !== undefined ? { label: lowered.label } : {}),
+        ...(phase !== undefined ? { phase } : {}),
+        ...("failure" in outcome ? { outcome: "error" as const, failure: outcome.failure } : { outcome: "value" as const, value: outcome.value as ResolvedValue }),
+        costUsd: cost,
+      });
+    }
+    if ("failure" in outcome) {
+      if (lowered.hasFailureValue) return lowered.failureValue;
+      throw new ScriptCallError(outcome.failure);
+    }
+    return answerOf(lowered, outcome.value);
+  }
+
+  /**
+   * A state CALLED from a script (SCRIPTS.md §10) — an imported state, or `workflow("…")`.
+   *
+   * It runs as a real instance under the calling one: journaled, on the board, resumable in its own
+   * right. What differs from an entry the spine or a rule makes is who waits for it — the script
+   * does, so its end triggers no round and moves no cursor, a failure is thrown into the script rather
+   * than ending the state, and two calls to one state run side by side instead of one superseding the
+   * other. Its answer is recorded at the call's site, so a re-run of the script's code is handed it back.
+   */
+  private async scriptWorkflow(instance: Instance, run: ScriptRunState, ref: unknown, args: unknown): Promise<unknown> {
+    const stateId = typeof ref === "string" ? ref : undefined;
+    const def = stateId !== undefined ? this.config.bundle.states[stateId] : undefined;
+    if (stateId === undefined || def === undefined) {
+      throw new ScriptCallError({ classification: "permanent", reason: `workflow(): no state '${String(ref)}' in this workflow — a script calls the states it imports or names with a literal` });
+    }
+    // Claude's `workflow(name, args)` hands the child ONE value; a state takes named inputs. A child
+    // whose one input is `args` (a script whose body is its function) gets the value whole.
+    const declared = Object.keys(def.inputs ?? {});
+    const inputs: Record<string, ResolvedValue> =
+      declared.length === 1 && declared[0] === "args"
+        ? args === undefined ? {} : { args: args as ResolvedValue }
+        : args === undefined || args === null ? {} : typeof args === "object" && !Array.isArray(args) ? (args as Record<string, ResolvedValue>) : (() => {
+            throw new ScriptCallError({ classification: "permanent", reason: `'${stateId}' takes named inputs (${declared.join(", ")}) — call it with an object` });
+          })();
+    let key: string;
+    try {
+      key = `workflow:${stateId}:${sha256Hex(canonicalize(inputs as never))}`;
+    } catch {
+      key = `workflow:${stateId}:unhashable`;
+    }
+    const site = run.site(key);
+    const recorded = run.recordAt(site);
+    const whole = (def as { generated?: { whole?: string } }).generated?.whole;
+    const answer = (outputs: Record<string, ResolvedValue> | undefined): unknown => (whole !== undefined ? outputs?.[whole] : outputs ?? {});
+    if (recorded !== undefined) {
+      await run.release(site);
+      if (recorded.failure !== undefined) throw new ScriptCallError(recorded.failure);
+      return recorded.value;
+    }
+    const abort = new AbortController();
+    const cancel = (): void => abort.abort();
+    instance.abort.signal.addEventListener("abort", cancel, { once: true });
+    let term: TerminationRecord;
+    try {
+      term = await this.runInstance(stateId, def, inputs, abort, stateId.split("/").pop(), instance, this.newInstanceId(), undefined, site);
+    } finally {
+      instance.abort.signal.removeEventListener("abort", cancel);
+    }
+    const failure: Failure | undefined = term.outcome === "success" ? undefined : term.failure ?? { classification: "permanent", reason: `'${stateId}' ended ${term.outcome}` };
+    const value = failure === undefined ? (answer(term.outputs) as ResolvedValue) : undefined;
+    this.emit({
+      type: "script.call.settled",
+      instanceId: instance.id,
+      stateId: instance.stateId,
+      site,
+      label: stateId,
+      ...(failure !== undefined ? { outcome: "error" as const, failure } : { outcome: "value" as const, value: value as ResolvedValue }),
+    });
+    if (failure !== undefined) throw new ScriptCallError(failure);
+    return value;
+  }
+
   /** Dispatch a `FunctionOp` through the function registry (§7.4). */
   private async runFunctionOp(
     instance: Instance,
@@ -4734,6 +4990,8 @@ export class WorkflowEngine {
     /** Which call of an operation LIST this is (SPEC §7.1d); absent for a single operation. */
     index?: number,
   ): Promise<Failure | undefined> {
+    // A compiled script is the engine's own to run, never a registry entry (SCRIPTS.md §6.2).
+    if (op.functionRef === SCRIPT_FUNCTION) return this.runScriptOp(instance, op, opInputs, fail, index);
     const entry: RegisteredFunction<ExecServices, WorkflowMetrics> | undefined = this.config.registry.functions.get(op.functionRef);
     if (!entry) {
       // Run-fatal, not a state outcome: a transition could otherwise keep re-entering the state (e.g.
@@ -4796,7 +5054,9 @@ export class WorkflowEngine {
     // input, which `hashOperation` refuses by design) folds the record layer's own sentinel instead.
     const dispatched = bindInputs(this.operationFor(instance, op), opInputs);
     const operationId = tryScopedId(tryHashOperation(dispatched), scope);
-    const outcome = await this.operations.start(dispatched, services).result;
+    // A function module may call the script hooks (SCRIPTS.md §11, `"function"` mode): it runs inside
+    // a host for THIS instance, so an `llm()` it makes is dispatched and recorded here.
+    const outcome = await this.functionHost(instance, `${op.functionRef}@${scope.sequence}`)(() => this.operations.start(dispatched, services)).result;
     // An impl that reports what it cost (a delegated agent bills inside its own loop) rolls up here,
     // exactly as a prompt op's outcome does — otherwise the spend of the most expensive thing in the
     // graph is the one thing the run's metrics never see. `childLlmCalls` counts LLM calls: a prompt op

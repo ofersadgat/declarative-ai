@@ -2997,6 +2997,69 @@ The DSL is no longer the wiring default — it is a *binding kind* (`{ $expr }`)
 it is type-checked, not merely parsed: see `inferExpression` under
 [Binding desugaring](#binding-desugaring).
 
+### Workflow scripts
+
+A state machine written as code, compiled to states ([SCRIPTS.md](SCRIPTS.md)). Sources: `scriptCompile.ts`
+(the compiler), `scriptHooks.ts` (what a script calls), `scriptRun.ts` (the engine's half).
+
+```ts
+type ScriptMode = "states" | "state" | "function";
+
+// Compile one script to the state documents it is — plain `StateDef`s `loadBundle` loads like any other.
+function compileScript(options: CompileScriptOptions): Promise<CompiledScript>;
+function compileScriptWith(context: SignatureContext, options: CompileScriptOptions): CompiledScript;   // sync
+interface CompileScriptOptions extends ModuleResolveOptions {
+  file: string;                 // the script — where its imports resolve, and its provenance
+  stateId: string;              // the state it IS; phases compile to `<stateId>/<key>`
+  source?: string;
+  defaultMode?: ScriptMode;     // the location's default when `meta.compile` names none
+  compilerOptions?: TS.CompilerOptions;
+  stateIdOf?: (file: string) => string | undefined;   // how an imported state is named
+}
+interface CompiledScript { mode: ScriptMode; meta: ScriptMeta; documents: Record<string, StateDef>; warnings: string[]; generated: GeneratedProvenance }
+class ScriptCompileError extends Error { file: string; line?: number; column?: number }
+function hasScriptMeta(ts: typeof TS, file: string, source: string): boolean;   // `export const meta` first
+function generatedFiles(compiled: CompiledScript): Record<string, string>;      // `<id>.json` → text, for a host to write
+function staleGenerated(document: StateDef, current: CompiledScript): string | undefined;
+
+// The hooks — globals in a script, or `import { … } from "@declarative-ai/hw/script"` (HOOK_MODULE).
+const llm: <T = string>(call: LlmCall | string, more?: Partial<LlmCall>) => Promise<T>;   // `llm<T>` → `llm.withOutput(schema)`
+const agent: <T = string>(prompt: string, options?: AgentOptions) => Promise<T | null>;
+function parallel(thunks: ReadonlyArray<() => unknown>): Promise<unknown[]>;            // Claude's: a barrier, throw → null
+function pipeline(items: readonly unknown[], ...stages: Stage[]): Promise<unknown[]>;   // Claude's: no barrier between stages
+function phase(title: string): void;
+function log(message: string): void;
+function workflow(ref: string | { scriptPath: string }, args?: unknown): Promise<unknown>;
+function now(): number;       // journaled — recorded once, replayed after
+function random(): number;
+const budget: { readonly total: number | null; spent(): number; remaining(): number };  // USD, `limits.budget`
+interface ScriptHost { … }    // what the engine provides per instance, found through AsyncLocalStorage
+function loadScriptContext(): Promise<void>;
+function runWithScriptHost<T>(host: ScriptHost, fn: () => T): T;
+
+// The engine seam.
+interface EngineConfig { scripts?: ScriptModuleOptions }
+interface ScriptModuleOptions { vfs?: Vfs; requirePath?: readonly string[]; roots?: Record<string, string>; approved?: (file: string) => boolean; agent?: OperationFields; maxCalls?: number }
+```
+
+A compiled state runs `operation.script` (`{ code, file }`), which desugars to a function op calling the
+engine's own `$script` (`SCRIPT_FUNCTION`) with the code as its input — so the code is part of the
+state's identity and its snapshot. The code returns a continuation (`SCRIPT_CONTROL`: `_next`, `_entry`,
+`_return`, and the live variables), which the state's outputs and its mount's rules read. `LoadedState`
+gains `scriptDefaults` (the literal environment chain a script's `llm()` calls inherit); `StateDef` gains
+`generated` (provenance, and `whole` — the output holding a non-record return) and `whenToUse`;
+`LimitsDecl` gains `budget` (USD); `ChildDecl`/`LoadedChild` gain `called` — a mount a script calls, whose inputs
+each call hands over and the validator does not require wired.
+
+Journal: `script.call.settled { site, label?, phase?, outcome, value?, failure?, costUsd? }` for every
+call a script's code makes (`site` is `<content hash>#<ordinal>`), `script.log` and `script.phase` (both
+with a `site`), and `instance.entered.calledAt` on a state a script called. `LoadedInstance.scriptCalls`
+hands a live instance its settled rows back, in journal order; a host building a loaded run leaves an
+instance with `calledAt` out of its parent's children.
+
+`loadBundleFromDir` compiles every `*.ts`/`*.js` under the directory (`"states"` by default), refuses a
+JSON file and a script defining one state, and checks a GENERATED JSON file against its script.
+
 ---
 
 ## `@declarative-ai/agents-api`

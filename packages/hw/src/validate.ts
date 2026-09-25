@@ -263,8 +263,9 @@ function validateState(
     if (child.asyncRef !== undefined) {
       checkBinding(child.asyncRef, { type: "boolean" }, `children.${key}.async`, id, def, bundle, scope, reachable.enteredAt(key), errors, false, undefined, "json", warnings);
     }
-    // Required child inputs must be wired (or defaulted/optional).
-    if (childDef) {
+    // Required child inputs must be wired (or defaulted/optional) — except on a mount a script CALLS,
+    // whose inputs each call hands over (SCRIPTS.md §10).
+    if (childDef && child.called !== true) {
       for (const inputName of Object.keys(childDef.inputs ?? {})) {
         const wired = child.inputs && inputName in child.inputs;
         const meta = childDef.slotMeta?.[`inputs.${inputName}`];

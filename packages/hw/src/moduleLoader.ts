@@ -31,6 +31,7 @@
 import { sha256Hex } from "@declarative-ai/exec";
 import type * as TS from "typescript";
 import { MODULE_EXTENSIONS, ReferenceError_, type Vfs } from "./reference.js";
+import { HOOK_MODULE, hookModule } from "./scriptHooks.js";
 
 /** The TypeScript compiler, imported on first use — see the note in `moduleExports`. */
 let compiler: Promise<typeof TS> | undefined;
@@ -225,6 +226,7 @@ export async function prepareModules(entries: readonly string[], options: Prepar
     const resolved = new Map<string, string>();
     for (const specifier of specifiers) {
       if (isBuiltin(specifier)) continue; // resolved by the host at run time, never bundled
+      if (specifier === HOOK_MODULE) continue; // the script hooks — provided, never a file (SCRIPTS.md §6)
       const target = resolveSpecifier(specifier, dirOf(file), options);
       if (target === undefined) {
         throw new ModuleLoadError(
@@ -301,6 +303,9 @@ function execute(
   loaded.set(entry, exports);
 
   const requireFrom = (specifier: string): unknown => {
+    // The script hooks are the engine's, not a file: every module that imports them gets the one
+    // module, which finds the instance it runs for through the async context (`scriptHooks.ts`).
+    if (specifier === HOOK_MODULE) return hookModule;
     if (isBuiltin(specifier)) {
       // Not a hole in anything: SPEC §7.5.4 says outright that the require path is resolution and
       // not containment, and the host is free to supply no builtins at all.

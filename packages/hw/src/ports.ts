@@ -83,6 +83,13 @@ export type EngineEvent =
        * the two mean opposite things: a pass SUPERSEDES the one before it, an element sits beside it.
        */
       element?: number;
+      /**
+       * The script call site that entered this instance, when a compiled script CALLED it rather than
+       * a transition or the spine entering it (SCRIPTS.md §10). A reader building a loaded run leaves
+       * such an instance out of its parent's children: the call is replayed from its
+       * `script.call.settled` row when it finished, and made again when it had not.
+       */
+      calledAt?: string;
       inputs: Record<string, ResolvedValue>;
     }
   /**
@@ -230,6 +237,33 @@ export type EngineEvent =
       inputs?: Record<string, ResolvedValue>;
       descent?: DirectedDescent;
     }
+  /**
+   * A compiled script's CALL settled (SCRIPTS.md §11) — an `llm()`, an `agent()`, or a recorded
+   * `now()`/`random()`. `site` is the call's content key with its ordinal (`<hash>#<k>`): the k-th
+   * identical call this instance's code made. A loaded instance is handed these back
+   * (`LoadedInstance.scriptCalls`, in journal order) and a replayed call with a settled site returns
+   * the recorded answer instead of asking again.
+   */
+  | {
+      type: "script.call.settled";
+      instanceId: string;
+      stateId: string;
+      site: string;
+      label?: string;
+      /** The phase the call was grouped under — Claude's `opts.phase`, or the current `phase()`. */
+      phase?: string;
+      outcome: "value" | "error";
+      value?: ResolvedValue;
+      failure?: Failure;
+      costUsd?: number;
+    }
+  /** A script's `log()` (SCRIPTS.md §13). `site` is `log#<k>`, so a replay writes it once. */
+  | { type: "script.log"; instanceId: string; stateId: string; site: string; message: string }
+  /**
+   * A script's `phase()` where it does not cut a state — a `"state"`-mode script's display group
+   * (SCRIPTS.md §3). `site` is `phase#<k>`.
+   */
+  | { type: "script.phase"; instanceId: string; stateId: string; site: string; title: string }
   | { type: "child.superseded"; instanceId: string; stateId: string; childKey: string }
   | { type: "instance.terminated"; instanceId: string; stateId: string; outcome: TerminationOutcome; failure?: Failure };
 

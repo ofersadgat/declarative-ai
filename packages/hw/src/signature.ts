@@ -32,6 +32,7 @@ import type { JsonSchema, JsonValue } from "@declarative-ai/json";
 import type * as TS from "typescript";
 import { loadCompiler } from "./moduleExports.js";
 import { dirOf, resolveSpecifier, type ModuleResolveOptions } from "./moduleLoader.js";
+import { HOOK_GLOBALS_PATH, HOOK_GLOBALS_SOURCE, HOOK_MODULE, HOOK_MODULE_PATH, HOOK_MODULE_SOURCE } from "./scriptHooks.js";
 import { typeToWireSlot, WireTypeError } from "./wireType.js";
 
 export class SignatureError extends Error {}
@@ -176,7 +177,14 @@ export function extractSignatureWith(
   if (signatures.length > 1) {
     throw new SignatureError(`${where} is overloaded; a callee must have one signature for arguments to bind against`);
   }
+  return readSignature(ts, checker, source, signature, where);
+}
 
+/**
+ * Read ONE call signature into slots — the core of {@link extractSignatureWith}, shared with a
+ * workflow script's exported function (SCRIPTS.md §5), which is read under a program of its own.
+ */
+export function readSignature(ts: typeof TS, checker: TS.TypeChecker, source: TS.Node, signature: TS.Signature, where: string): ExtractedSignature {
   const warnings: string[] = [];
   const parameters: ExtractedParameter[] = [];
   signature.getParameters().forEach((symbol, index) => {
@@ -231,7 +239,7 @@ export function extractSignatureWith(
 }
 
 /** `Promise<T>` → `T`. A function may be async; what a caller sees is what it resolves with. */
-function awaited(ts: typeof TS, checker: TS.TypeChecker, type: TS.Type): TS.Type {
+export function awaited(ts: typeof TS, checker: TS.TypeChecker, type: TS.Type): TS.Type {
   if (type.getSymbol()?.getName() !== "Promise") return type;
   const argument = checker.getTypeArguments(type as TS.TypeReference)[0];
   return argument ?? type;
@@ -299,11 +307,16 @@ function createProgram(
   entry: string,
   compilerOptions: TS.CompilerOptions,
   options: SignatureOptions,
+  /** Further root files — the script hooks' GLOBALS, for a script (SCRIPTS.md §13). */
+  extraRoots: readonly string[] = [],
 ): TS.Program {
   const { ts, readLib } = context;
   const libDir = ts.getDefaultLibFilePath(compilerOptions).replace(/\\/g, "/").replace(/\/[^/]+$/, "");
 
   const read = (fileName: string): string | undefined => {
+    // The hooks' declarations are the engine's, not a file on the workflow's disk.
+    if (fileName === HOOK_MODULE_PATH) return HOOK_MODULE_SOURCE;
+    if (fileName === HOOK_GLOBALS_PATH) return HOOK_GLOBALS_SOURCE;
     const own = options.sources?.[fileName] ?? options.vfs.read(fileName);
     if (own !== undefined) return own;
     // Only lib files fall through to the real disk. A workflow's own files come from the `Vfs`, so a
@@ -336,6 +349,7 @@ function createProgram(
     // THE shared resolver. See the module note: two resolvers is the bug that type-checks.
     resolveModuleNames: (moduleNames, containingFile) =>
       moduleNames.map((name) => {
+        if (name === HOOK_MODULE) return { resolvedFileName: HOOK_MODULE_PATH, extension: ts.Extension.Dts, isExternalLibraryImport: false };
         const resolved = resolveSpecifier(name, dirOf(containingFile), options);
         return resolved === undefined
           ? undefined
@@ -343,7 +357,7 @@ function createProgram(
       }),
   };
 
-  const program = ts.createProgram([entry], compilerOptions, host);
+  const program = ts.createProgram([entry, ...extraRoots], compilerOptions, host);
 
   // The lib is not optional, and a program without one does not FAIL — it answers wrongly.
   //
@@ -372,6 +386,16 @@ function createProgram(
     );
   }
   return program;
+}
+
+/**
+ * A checked `Program` over a script, with the hooks' globals in scope (SCRIPTS.md §13) — the same
+ * host, resolver and lib check a function's signature is read under, so a script and the functions
+ * it imports are typed by one resolver.
+ */
+export function createScriptProgram(context: SignatureContext, entry: string, options: SignatureOptions): TS.Program {
+  const compilerOptions = { ...DEFAULT_COMPILER_OPTIONS, ...options.compilerOptions };
+  return createProgram(context, entry, compilerOptions, options, [HOOK_GLOBALS_PATH]);
 }
 
 function extensionOf(ts: typeof TS, file: string): TS.Extension {

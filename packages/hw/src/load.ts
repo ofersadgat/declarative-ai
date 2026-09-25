@@ -37,6 +37,17 @@ export interface LoadedOperation {
 }
 
 /**
+ * One settled thing a script's code did (SCRIPTS.md §11) — a call's answer, a recorded value, or a
+ * log line — read off the `script.*` rows by `site`. What replay returns instead of asking again.
+ */
+export interface ScriptCallRecord {
+  site: string;
+  value?: ResolvedValue;
+  failure?: Failure;
+  costUsd?: number;
+}
+
+/**
  * One instance of the stopped run, as the journal recorded it.
  *
  * `live: true` marks the spine that continues: an instance that was entered and never terminated.
@@ -123,6 +134,13 @@ export interface LoadedInstance {
    * its own spine, which it would otherwise start from its first child with the move forgotten.
    */
   descent?: DirectedDescent;
+  /**
+   * What a compiled script's code had done when the run stopped (SCRIPTS.md §11): every
+   * `script.call.settled`, `script.log` and `script.phase` row of this instance, IN JOURNAL ORDER.
+   * The code re-runs from the top of its entry; a call whose site is here returns the recorded answer,
+   * released in this order so a race resolves as it did, and a log line here is not written twice.
+   */
+  scriptCalls?: readonly ScriptCallRecord[];
   /** In entry order. Superseded instances are omitted; their entries survive in `occurrence`. */
   children?: readonly LoadedInstance[];
 }

@@ -43,6 +43,9 @@ import {
   type LoadedTransition,
   type NamedParameterDecl,
   OPERATION_OWN_FIELDS,
+  SCRIPT_CODE_INPUT,
+  SCRIPT_FILE_INPUT,
+  SCRIPT_FUNCTION,
   type OperationDecl,
   type OperationFields,
   type OutputSpread,
@@ -509,6 +512,9 @@ export function desugarOperation(
   // A wrapped `args` value is an input slot's binding (SPEC §5.3) — lifted before anything reads
   // `args` as constants.
   const decl = liftWrappedArgs(authored);
+  // A compiled SCRIPT (SCRIPTS.md §6.2): a call of the engine's own `$script`, with the code as its
+  // input — so the code is part of the operation's identity, and of the snapshot's.
+  if (decl.script !== undefined) return scriptOperation(decl, stateId);
   const userFunctions = lower.userFunctions;
   // An EMBEDDED BODY (SPEC §7.5.1, form 2). The document declares its slots the way a state does and
   // supplies js/ts; the wrapper's parameters are those slots in `positionalOrder`, so a call binds
@@ -882,6 +888,44 @@ export function registryOperation(ref: string, entry: EntrySignature | undefined
     input: Object.fromEntries(Object.entries(signature?.input ?? {}).map(([name, slot]) => [name, { ...slot }])),
     output: signature?.output ?? { name: "output", kind: "json" },
   };
+}
+
+/** `operation.script` as the function operation it is (SCRIPTS.md §6.2). */
+function scriptOperation(decl: OperationFields, stateId: string): Operation<InlineFamily> {
+  const script = decl.script!;
+  if (typeof script !== "object" || script === null || typeof script.code !== "string" || typeof script.file !== "string") {
+    throw new WorkflowLoadError("operation.script must be { code, file } — the code a compiled script runs, and the script it came from", stateId);
+  }
+  for (const field of ["prompt", "function", "body", "args"] as const) {
+    if (decl[field] !== undefined) throw new WorkflowLoadError(`operation declares both a 'script' and a '${field}' — exactly one says what it runs`, stateId);
+  }
+  const text = (value: string, where: string) => desugarParameter({ kind: "text", binding: { text: value } }, where, stateId).param;
+  return {
+    kind: "function",
+    functionRef: SCRIPT_FUNCTION,
+    input: {
+      [SCRIPT_CODE_INPUT]: text(script.code, "operation.script.code"),
+      [SCRIPT_FILE_INPUT]: text(script.file, "operation.script.file"),
+    },
+    output: outputSlotFor(decl.output, stateId),
+  };
+}
+
+/**
+ * What a script state's `llm()` calls inherit (SCRIPTS.md §10): the environment chain the state
+ * resolves in, as LITERALS — its model and knobs, tools, permissions, workspace and session — and
+ * none of what makes it one operation or another. A computed default is skipped: a call made from
+ * code has no field of the state to be evaluated as.
+ */
+function scriptDefaultsOf(environment: OperationFields): OperationFields {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(environment)) {
+    if (value === undefined) continue;
+    if (["kind", "prompt", "system", "function", "args", "input", "output", "outputs", "body", "script", "path", "names", "functions"].includes(key)) continue;
+    if (hasComputedPart(value)) continue;
+    out[key] = value;
+  }
+  return out as OperationFields;
 }
 
 /**
@@ -1347,6 +1391,7 @@ export function desugarState(
         // (§6) only by the wiring it adds.
         state: resolveChildRef(child.state ?? `./${key}`, id, key, refs),
         ...(child.inputs ? { inputs: wired } : {}),
+        ...(child.called === true ? { called: true as const } : {}),
         ...(each.length > 0 ? { each } : {}),
         ...(hosted ? { eachKind: eachKind as HostedEachKind, eachExprs, spawn: { ...SPAWN_DEFAULTS, ...spawn } } : {}),
         // A literal flag stays one; a BOUND one (SPEC §5.3) is lowered in this state's scope, to be
@@ -1454,6 +1499,7 @@ export function desugarState(
         ? { scopeWorkspace: environment.workspace as NormalizedWorkspace }
         : {}),
     ...functionDefaultsOf(def),
+    ...(!list && (def.operation as OperationDecl | undefined)?.script !== undefined ? { scriptDefaults: scriptDefaultsOf(environment) } : {}),
     ...(spreads.length > 0 ? { outputSpreads: spreads } : {}),
     ...(Object.keys(slotMeta).length > 0 ? { slotMeta } : {}),
   };
@@ -2142,24 +2188,74 @@ function stripDerivedId(def: StateDef | LoadedState): JsonValue {
 }
 
 /**
- * Node-only convenience: load every `*.json` under a directory as a bundle rooted at
- * `rootId`. Uses dynamic imports so the module stays edge-safe when unused.
+ * Node-only convenience: load every state under a directory as a bundle rooted at `rootId` — each
+ * `*.json`, and each workflow SCRIPT (`*.ts`/`*.js`), compiled to the states it is (SCRIPTS.md §3). A
+ * script under a workflow directory compiles to states unless its `meta` says otherwise; one whose
+ * mode is `"function"` stays a module and contributes no state. A JSON file GENERATED from a script is
+ * checked against it and must still match (SCRIPTS.md §12); a JSON file and a script that both define
+ * one state are refused. Uses dynamic imports so the module stays edge-safe when unused.
  */
 export async function loadBundleFromDir(dir: string, rootId: string, options: LoadBundleOptions = {}): Promise<WorkflowBundle> {
   const { readdir, readFile } = await import("node:fs/promises");
   const { join, relative, resolve } = await import("node:path");
   const files: Record<string, unknown> = {};
+  const scripts: string[] = [];
   const walk = async (d: string): Promise<void> => {
     for (const entry of await readdir(d, { withFileTypes: true })) {
       const full = join(d, entry.name);
-      if (entry.isDirectory()) await walk(full);
-      else if (entry.isFile() && entry.name.toLowerCase().endsWith(".json")) {
+      const lower = entry.name.toLowerCase();
+      if (entry.isDirectory()) {
+        if (entry.name !== "node_modules") await walk(full);
+      } else if (entry.isFile() && lower.endsWith(".json")) {
         const rel = relative(dir, full);
         files[rel] = JSON.parse(await readFile(full, "utf8")) as unknown;
+      } else if (entry.isFile() && (lower.endsWith(".ts") || lower.endsWith(".js")) && !lower.endsWith(".d.ts") && !entry.name.startsWith(".")) {
+        scripts.push(full);
       }
     }
   };
   await walk(dir);
+  const root = resolve(dir).split("\\").join("/");
+  if (scripts.length > 0) {
+    const { readFileSync, readdirSync, existsSync } = await import("node:fs");
+    const { compileScript, staleGenerated } = await import("./scriptCompile.js");
+    const vfs: Vfs = options.vfs ?? {
+      read: (path) => {
+        try {
+          return existsSync(path) ? readFileSync(path, "utf8") : undefined;
+        } catch {
+          return undefined;
+        }
+      },
+      list: (d) => {
+        try {
+          return readdirSync(d);
+        } catch {
+          return [];
+        }
+      },
+    };
+    const byId = new Map<string, string>();
+    for (const rel of Object.keys(files)) byId.set(stateIdFromPath(rel.split("\\").join("/")), rel);
+    for (const script of scripts) {
+      const file = resolve(script).split("\\").join("/");
+      const stateId = file.slice(root.length + 1).replace(/\.[^./]+$/, "");
+      const compiled = await compileScript({ file, stateId, vfs, requirePath: [root], ...(options.roots !== undefined ? { roots: options.roots } : {}), defaultMode: "states" });
+      for (const [id, document] of Object.entries(compiled.documents)) {
+        const existing = byId.get(id);
+        if (existing !== undefined) {
+          const authored = files[existing] as StateDef;
+          if (authored.generated === undefined) {
+            throw new WorkflowLoadError(`'${existing}' and '${relative(dir, script)}' both define this state — keep one`, id);
+          }
+          const stale = staleGenerated(authored, compiled);
+          if (stale !== undefined) throw new WorkflowLoadError(stale, id);
+          delete files[existing];
+        }
+        files[`${id}.json`] = document;
+      }
+    }
+  }
   // The directory IS the default root, so a bare reference in any of these files means "under here".
   return loadBundle(files, rootId, { defaultRoot: resolve(dir), ...options });
 }

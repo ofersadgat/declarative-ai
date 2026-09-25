@@ -54,6 +54,44 @@ export const TERMINATE_TARGETS = [
   "terminate.timeout",
 ] as const;
 
+/**
+ * The function a compiled script's state runs (SCRIPTS.md §6.2) — `operation.script` desugars to a call
+ * of it. Handled by the engine itself, never looked up in the registry: the code it runs is the
+ * operation's own input, which is what makes the code part of the state's identity.
+ */
+export const SCRIPT_FUNCTION = "$script";
+/** The script operation's own inputs: its code, and the script it was compiled from. */
+export const SCRIPT_CODE_INPUT = "$code";
+export const SCRIPT_FILE_INPUT = "$file";
+/**
+ * How a compiled phase hands on (SCRIPTS.md §6.2): the phase it goes to next, the entry it goes in
+ * at, and — when it returned — what the script returned. Every other key of the continuation is a
+ * variable.
+ */
+export const SCRIPT_CONTROL = { next: "_next", entry: "_entry", returned: "_return" } as const;
+/** `_next` when the script returned rather than moving to another phase. */
+export const SCRIPT_RETURN = "$return";
+
+/** A compiled script's code, as `operation.script` carries it (SCRIPTS.md §12). */
+export interface ScriptDecl {
+  /** The module the state runs — the phase's own code, as the compiler emitted it. */
+  code: string;
+  /** The script it came from — where its imports resolve. */
+  file: string;
+}
+
+/** Where a generated state document came from (SCRIPTS.md §12). */
+export interface GeneratedDecl {
+  from: string;
+  /** Every file the compile read, by content hash — a change to any makes the document stale. */
+  inputs: Record<string, string>;
+  /**
+   * The output that holds the script function's WHOLE return, when its return is not a record —
+   * what a caller of the state gets back from `workflow()` or an imported call (SCRIPTS.md §10).
+   */
+  whole?: string;
+}
+
 /** State run statuses (SPEC §10.1). */
 export type RunStatus =
   | "queued"
@@ -640,6 +678,11 @@ export interface OperationFields extends ExecEnvironmentDecl {
    */
   body?: string;
   /**
+   * A compiled SCRIPT's code (SCRIPTS.md §6.2) — what a state generated from a workflow script runs.
+   * Desugars to a function operation calling {@link SCRIPT_FUNCTION} with the code as its input.
+   */
+  script?: ScriptDecl;
+  /**
    * What the operation RETURNS, by name — and, for a prompt op, the structured-output contract the
    * model is held to.
    *
@@ -762,7 +805,7 @@ export const CONFIG_FIELD_SCHEMAS: Readonly<Record<string, JsonSchema>> = {
 
 /** The fields that make an operation a PROMPT, and the ones that make it a FUNCTION. */
 const PROMPT_FIELDS = ["prompt", "system"] as const;
-const FUNCTION_FIELDS = ["function", "args"] as const;
+const FUNCTION_FIELDS = ["function", "args", "script"] as const;
 
 /**
  * What KIND of operation a layer declares — read off its fields, or taken from `kind` where the
@@ -818,6 +861,7 @@ export const OPERATION_OWN_FIELDS: ReadonlySet<string> = new Set([
   "tools",
   "conversation",
   "permissions",
+  "script",
 ]);
 
 /**
@@ -863,6 +907,12 @@ export type EnvironmentDecl = OperationFields;
 export interface ChildDecl {
   /** The child's state reference. Absent ⇒ `./<key>` — the state the child's own key names. */
   state?: string;
+  /**
+   * A state a compiled SCRIPT calls (SCRIPTS.md §10) — mounted so the bundle holds it and the
+   * validator sees it, and entered only by the script's calls, which hand it its inputs. So its
+   * inputs are not wired here, and nothing requires them to be.
+   */
+  called?: true;
   /** Wiring into the child's declared inputs — the same authored binding sugar (§2.1). */
   inputs?: Record<string, BindingDecl>;
   /**
@@ -1030,6 +1080,8 @@ export interface LimitsDecl {
   max_iterations?: number;
   /** State timeout in seconds → `terminate.timeout` when exceeded. */
   timeout?: number;
+  /** A script's spending ceiling, in USD — what its `budget.total` reports (SCRIPTS.md §6). */
+  budget?: number;
 }
 
 /**
@@ -1080,7 +1132,11 @@ export interface StateDef {
    * the mount, the round it is eligible in is already the one it is about.
    */
   transitions?: TransitionDecl[];
-  limits?: { max_iterations?: Bindable<number>; timeout?: Bindable<number> };
+  limits?: { max_iterations?: Bindable<number>; timeout?: Bindable<number>; budget?: Bindable<number> };
+  /** Claude's `whenToUse` — documentation for whatever chooses among workflows (SCRIPTS.md §4). */
+  whenToUse?: string;
+  /** Present on a document compiled from a script: where it came from (SCRIPTS.md §12). */
+  generated?: GeneratedDecl;
 }
 
 /**
@@ -1234,6 +1290,12 @@ export interface LoadedState
   functionDefaults?: Array<{ path: string; functions: Record<string, FunctionDefaults> }>;
   /** Unexpanded `prefix*` outputs, pending the child's slots — expanded by `loadBundle` (§3.4). */
   outputSpreads?: OutputSpread[];
+  /**
+   * For a state compiled from a script, what its `llm()` calls inherit (SCRIPTS.md §10): the
+   * environment chain it resolves in, as literals — model and knobs, tools, permissions, workspace,
+   * session — and nothing that makes it a prompt or a function.
+   */
+  scriptDefaults?: OperationFields;
   /** Always present when the state has children: the authored order, or declaration order (§6). */
   sequence?: string[];
   /** Whether `sequence` was written in the file rather than derived — the lint surface treats an
@@ -1340,6 +1402,8 @@ export interface LoadedChild {
   async?: boolean;
   /** A COMPUTED `async` (SPEC §5.3), lowered — resolved in the parent's scope at each entry. */
   asyncRef?: Ref<InlineFamily>;
+  /** Entered only by a compiled script's calls, which supply its inputs (SCRIPTS.md §10). */
+  called?: true;
   /** The per-mount defaults this child was declared with, carried through so the closure walk can
    *  fold them into the chain (and so a lint surface can see why a state loaded as two variants). */
   environment?: EnvironmentDecl;
