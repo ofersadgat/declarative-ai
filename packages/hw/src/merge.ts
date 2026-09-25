@@ -216,6 +216,18 @@ export function mergeOperationFields(base: OperationFields, over: OperationField
   const output = mergeSlotMap(base.output, over.output);
   if (output !== undefined) out.output = output;
 
+  // `conversation` is map-shaped: per key, nearer wins, its arrays replacing (the module header). It
+  // is in `MERGED_FIELDS`, so the generic loop above skips it — and with no branch here a nearer
+  // layer's `conversation`, or a sibling key overriding a `$ref`'d operation's, was DROPPED silently.
+  const conversation = (over as { conversation?: unknown }).conversation;
+  if (conversation !== undefined) {
+    const prior = (base as { conversation?: unknown }).conversation;
+    (out as { conversation?: unknown }).conversation =
+      isPlainObject(prior as JsonValue) && isPlainObject(conversation as JsonValue)
+        ? { ...(prior as Record<string, unknown>), ...(conversation as Record<string, unknown>) }
+        : conversation;
+  }
+
   if (over.permissions !== undefined) {
     const priorPerms = base.permissions;
     // A BOUND block (SPEC §5.3) on either side replaces wholesale: a binding has no keys to merge per

@@ -62,6 +62,7 @@ export * from "./shape.js";
 // Computed fields (SPEC §5.3): extraction at load, materialization at entry, the expression view.
 export * from "./fields.js";
 export * from "./expand.js";
+export { evaluateLoadExpression, type LoadExpressionOptions } from "./loadExpr.js";
 export * from "./loader.js";
 export * from "./resolve.js";
 export * from "./materialize.js";

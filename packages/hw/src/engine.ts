@@ -112,7 +112,7 @@ import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, 
 // Computed fields (SPEC §5.3): evaluated once at entry, written into a per-instance definition.
 import { fieldDependencies, fieldsView, materializeFields } from "./fields.js";
 import { bindIntoSlots } from "./loader.js";
-import { hasDefault, literalPermissions, SPAWN_DEFAULTS, type HostedEachKind, type LiteralPermissions, type LoadedField, type SpawnFields } from "./format.js";
+import { EVENT_NAMESPACE, hasDefault, literalPermissions, SPAWN_DEFAULTS, type HostedEachKind, type LiteralPermissions, type LoadedField, type SpawnFields } from "./format.js";
 import { isCallableKind, isCallableSchema } from "@declarative-ai/exec";
 import { isOperationValue } from "./resolve.js";
 import { uuidv7 } from "./ids.js";
@@ -143,6 +143,19 @@ const WAITING: unique symbol = Symbol("ai-exec/hw transition waiting");
  * wait, and nothing-matched, and "the question is broken" is none of those.
  */
 const GUARD_FAILED: unique symbol = Symbol("ai-exec/hw transition guard failed");
+
+/**
+ * The rule a round fired, with what only the firing knows: its own wiring, its name, and what its
+ * guard's deferred calls answered — `event` (the first answer, which `.event` reads) and `read`
+ * (every deferred result the guard read, which is what taking the rule CONSUMES).
+ */
+interface TakenRule {
+  to: string;
+  inputRefs?: Record<string, Ref<InlineFamily>>;
+  name?: string;
+  event?: ResolvedValue;
+  read: readonly string[];
+}
 
 /**
  * What a call's memo remembers: the value it produced, or the failure it produced.
@@ -702,6 +715,24 @@ interface Instance {
    */
   deferredKeys: Set<string>;
   /**
+   * The rule being TAKEN, while its own wiring resolves — what `.event` reads (`EVENT_NAMESPACE`).
+   *
+   * Set for exactly the span between a rule firing and the child it enters being wired, and cleared
+   * after, so `.event` is in scope nowhere else (the validator refuses it everywhere else anyway).
+   * `event` is the value the rule's first deferred call resolved to, absent when it read none.
+   */
+  firing?: { event?: ResolvedValue };
+  /**
+   * `notify.count` when the latest evaluation round STARTED. A wake signalled after it — a child
+   * ending, a wait settling — while the round was still running had nobody waiting to hear it, and a
+   * loop that then blocked would sit on news it had missed until something ELSE happened. The waits
+   * a loop blocks in compare against this and go straight to the next round instead. Absent before
+   * the first round.
+   */
+  roundMark?: number;
+  /** Whether any evaluation round has run — see the final check in `evaluationLoop`. */
+  evaluated?: boolean;
+  /**
    * The instance's SETTLED computed fields (SPEC §5.3), by authored path — what `value.settled`
    * journaled, and what a loaded instance is handed back. `def` is the definition with these written
    * in; this is the record of which were.
@@ -763,7 +794,17 @@ interface DeferredCall {
 
 class Notifier {
   private waiters: Array<() => void> = [];
+  private signals = 0;
+  /**
+   * How many times this has been signalled, ever. Not a latch — a signal with nobody waiting still
+   * reaches nobody — but what lets a waiter ask "has anything happened since I last looked"
+   * (`Instance.roundMark`), which is the question a latch would have answered.
+   */
+  get count(): number {
+    return this.signals;
+  }
   signal(): void {
+    this.signals++;
     const w = this.waiters;
     this.waiters = [];
     for (const resolve of w) resolve();
@@ -1606,6 +1647,8 @@ export class WorkflowEngine {
       // as an operation's input calls run before `resolveInputs`. The memo means a guard re-evaluated
       // over many rounds pays for its call once.
       if (evaluationDue) {
+        instance.roundMark = instance.notify.count;
+        instance.evaluated = true;
         eligible = this.finishedInRunOrder(instance);
         const guardFailure = await this.runGuardCalls(instance, eligible);
         if (guardFailure !== undefined) return this.finish(instance, "error", guardFailure);
@@ -1710,7 +1753,7 @@ export class WorkflowEngine {
         if (typeof entered === "object") return this.finish(instance, "error", entered.failure);
         if (entered === "parked") {
           // Dataflow join (SPEC §10.4): wait for a resolution, or deadlock → error.
-          if (await this.waitForAnyChild(instance)) {
+          if (await this.waitArmed(instance)) {
             evaluationDue = true; // a child completed → evaluation round first
             continue;
           }
@@ -1728,8 +1771,12 @@ export class WorkflowEngine {
 
       // (6) Nothing left to run: wait for running children; when none remain, run one
       // final evaluation round, then terminate.success.
+      //
+      // The wait is ARMED (`waitArmed`): the state's own rules register their deferred calls first,
+      // so an event a rule listens for wakes this wait while the children it started still run —
+      // rather than being unheard until one of them finishes.
       if (this.hasRunningChildren(instance)) {
-        await this.waitForAnyChild(instance);
+        await this.waitArmed(instance);
         evaluationDue = true;
         continue;
       }
@@ -1740,6 +1787,15 @@ export class WorkflowEngine {
         evaluationDue = true;
         continue;
       }
+      // A state that never had a round — no operation, and nothing entered that finished — gets a
+      // REAL one before it may end, for the same reason: the bare check runs no guard's calls, so a
+      // rule waiting on one (`on_event(…)` on a state that exists only to wait) would read as a rule
+      // that did not apply, and the state would succeed without ever having asked.
+      if (instance.evaluated !== true) {
+        evaluationDue = true;
+        continue;
+      }
+      instance.roundMark = instance.notify.count;
       const final = await this.takeTransition(instance, this.finishedInRunOrder(instance));
       if (typeof final === "object") return this.finish(instance, "error", final.failure);
       if (final === "guard-failed") return this.finish(instance, "error", guardFailureOf(instance));
@@ -1829,23 +1885,33 @@ export class WorkflowEngine {
     // journalled. A rule waiting on a value has not fired, so nothing here may act as though it had.
     // A transition's overrides are wiring too, and they resolve HERE rather than in `enterChild`, so
     // their calls are run here as well — same rule, same frame, same failure owner.
-    if (taken.inputRefs !== undefined) {
-      const handedFailure = await this.runEmbeddedOps(instance, this.wiresFor(taken.inputRefs, instance.def.children?.[taken.to]?.state));
-      if (handedFailure !== undefined) return { failure: handedFailure };
+    //
+    // `.event` is in scope for exactly this span — what the rule's deferred call answered — and
+    // nowhere else (`Instance.firing`).
+    instance.firing = taken.event !== undefined ? { event: taken.event } : {};
+    let handed: Record<string, ResolvedValue> | typeof PENDING | undefined;
+    try {
+      if (taken.inputRefs !== undefined) {
+        const handedFailure = await this.runEmbeddedOps(instance, this.wiresFor(taken.inputRefs, instance.def.children?.[taken.to]?.state));
+        if (handedFailure !== undefined) return { failure: handedFailure };
+      }
+      handed = this.resolveTransitionInputs(instance, taken.inputRefs);
+    } finally {
+      instance.firing = undefined;
     }
-    const handed = this.resolveTransitionInputs(instance, taken.inputRefs);
     if (handed === PENDING) {
       if (!this.hasRunningChildren(instance)) consumeEligibility();
       return "parked";
     }
     instance.index++;
     if (isPass) instance.iteration++;
-    this.consumeDeferred(instance);
+    this.consumeDeferred(instance, taken.read);
     this.emit({
       type: "transition.taken",
       instanceId: instance.id,
       stateId: instance.stateId,
       to: taken.to,
+      ...(taken.name !== undefined ? { name: taken.name } : {}),
       index: instance.index,
       iteration: instance.iteration,
     });
@@ -2191,14 +2257,40 @@ export class WorkflowEngine {
     eligible: readonly string[],
     // The RULE that fired travels with the answer, not just its target: a transition may carry its
     // own wiring for the child it enters, and which rule matched is the only thing that knows it.
-  ): { to: string; inputRefs?: Record<string, Ref<InlineFamily>> } | typeof WAITING | typeof GUARD_FAILED | undefined {
+  ): TakenRule | typeof WAITING | typeof GUARD_FAILED | undefined {
     // One flag, reset before each guard: whether resolving THIS guard reached a deferred call that is
     // still waiting. That is the difference between the two kinds of PENDING a guard can produce —
-    // see the WAITING branch below.
+    // see the WAITING branch below. `stops` says whether that wait is a QUESTION (it stops the list)
+    // rather than a LISTENING one (`HostCapabilities.listens`, which does not).
     let deferred = false;
-    const scope = this.scopeFor(instance, (_op, _key, inFlight) => {
-      if (inFlight) deferred = true;
-    });
+    let stops = false;
+    // The deferred results THIS guard read, in the order it read them: what the rule consumes if it
+    // fires, and the first of which is `.event`.
+    let read: Array<{ key: string; result: CallResult }> = [];
+    // Whether a rule behind a LISTENING wait was evaluated — so a round nothing fired in still WAITS.
+    let listening = false;
+    const scope = this.scopeFor(
+      instance,
+      (op, _key, inFlight) => {
+        if (!inFlight) return;
+        deferred = true;
+        if (!this.isListening(op)) stops = true;
+      },
+      undefined,
+      (key, result) => {
+        if (!read.some((r) => r.key === key)) read.push({ key, result });
+      },
+    );
+    const takenOf = (t: LoadedTransition): TakenRule => {
+      const first = read[0]?.result;
+      return {
+        to: t.to,
+        ...(t.inputRefs !== undefined ? { inputRefs: t.inputRefs } : {}),
+        ...(t.name !== undefined ? { name: t.name } : {}),
+        ...(first !== undefined && "value" in first ? { event: first.value } : {}),
+        read: read.map((r) => r.key),
+      };
+    };
     /**
      * A child's failure is answered only by a rule that NAMES its outcome (SPEC §3.3).
      *
@@ -2219,7 +2311,7 @@ export class WorkflowEngine {
     const firstOf = (
       transitions: readonly LoadedTransition[] | undefined,
       standing: boolean,
-    ): { to: string } | typeof WAITING | typeof GUARD_FAILED | undefined => {
+    ): TakenRule | typeof WAITING | typeof GUARD_FAILED | undefined => {
       for (const t of transitions ?? []) {
         if ((t.standing === true) !== standing) continue;
         // A guard that failed to lower never fires: validation blocks the run, and reading it as
@@ -2229,8 +2321,13 @@ export class WorkflowEngine {
         // A standing rule with no guard offers nothing anyone could take up; validation refuses it,
         // and firing it on every round would be the worst reading of the omission.
         if (standing && t.whenRef === undefined) continue;
-        if (t.whenRef === undefined) return { to: t.to, ...(t.inputRefs !== undefined ? { inputRefs: t.inputRefs } : {}) };
+        // A rule whose async target is still running sits out until it has finished (`targetBusy`):
+        // firing it would re-enter that child, and a re-entry aborts the record that is running.
+        if (this.targetBusy(instance, t)) continue;
+        read = [];
+        if (t.whenRef === undefined) return takenOf(t);
         deferred = false;
+        stops = false;
         const r = resolveRef(t.whenRef, scope);
         if (isPending(r)) {
           /**
@@ -2254,7 +2351,14 @@ export class WorkflowEngine {
           // A STANDING rule is the exception, and the whole of what `standing` means: its wait is an
           // offer beside the state's progress, so it stops nothing — the rules behind it, the
           // sequence and the state's own termination all carry on while it stands.
-          if (deferred && !standing) return WAITING;
+          //
+          // A LISTENING wait is the other (`HostCapabilities.listens`): nothing is being decided, so
+          // the rules behind it are evaluated too — but the state still waits on it, as it would on
+          // any other, if nothing fires.
+          if (deferred && !standing) {
+            if (stops) return WAITING;
+            listening = true;
+          }
           continue; // skipped this round (SPEC §6/§10.4)
         }
         // A guard that REFUSED stops the state; it does not quietly fail to match.
@@ -2277,7 +2381,7 @@ export class WorkflowEngine {
         }
         if (isResolvedValue(r) && r.value) {
           if (standing && held) continue;
-          return { to: t.to, ...(t.inputRefs !== undefined ? { inputRefs: t.inputRefs } : {}) };
+          return takenOf(t);
         }
       }
       return undefined;
@@ -2292,7 +2396,35 @@ export class WorkflowEngine {
       const taken = firstOf(instance.def.transitions, standing);
       if (taken) return taken;
     }
-    return undefined;
+    return listening ? WAITING : undefined;
+  }
+
+  /**
+   * Whether a STATE-LEVEL rule must sit out because the child it enters is still running.
+   *
+   * Entering a child whose record is running aborts that record and starts a fresh one (`enterChild`,
+   * SPEC §3.4). For a rule that fires on something outside the run — an event arriving twice while
+   * the chain the first one started is still at work — that would silently kill the first chain. So
+   * a state-level rule whose target is ASYNC is not armed (its deferred call is not registered, and
+   * it is not evaluated) while the target, or any child the target's own transitions lead on to — the
+   * chain it starts — has a running record. It is re-armed in the first round after that chain ends;
+   * an event that arrived meanwhile is the listener's to keep (the host queues it), so nothing is
+   * lost and the chains run one after another, in order.
+   *
+   * Only the state's OWN rules, and only an async target: a child's list and a sync target keep the
+   * re-entry semantics they always had.
+   */
+  private targetBusy(instance: Instance, t: LoadedTransition): boolean {
+    if (!(instance.def.transitions ?? []).includes(t)) return false;
+    const children = instance.def.children ?? {};
+    const decl = children[t.to];
+    if (decl === undefined || this.asyncOf(instance, decl) !== true) return false;
+    const chain = new Set<string>([t.to]);
+    for (const key of chain) {
+      for (const next of children[key]?.transitions ?? []) if (children[next.to] !== undefined) chain.add(next.to);
+    }
+    for (const key of chain) if (instance.children.get(key)?.status === "running") return true;
+    return false;
   }
 
   /** The children eligible this round, in the order the state runs them — see the caller. */
@@ -3076,8 +3208,15 @@ export class WorkflowEngine {
     // Both checks are synchronous and nothing is awaited between them and `wait()`, so a call that
     // settles "just now" cannot signal into the gap and be missed.
     if (!this.hasRunningChildren(instance) && this.deferredFor(instance).length === 0) return false;
+    // …and a wake that landed while the round was still evaluating is not waited for again.
+    if (this.missedWake(instance)) return true;
     await instance.notify.wait();
     return true;
+  }
+
+  /** Whether this instance was signalled after its latest round started (`Instance.roundMark`). */
+  private missedWake(instance: Instance): boolean {
+    return instance.roundMark !== undefined && instance.notify.count !== instance.roundMark;
   }
 
   /** Wait for any child completion signal. Returns false immediately when nothing is running. */
@@ -3221,11 +3360,20 @@ export class WorkflowEngine {
       // `.each.axis.<input>`. Absent everywhere else, so a read outside that wiring resolves to
       // nothing — and the validator has already refused it there.
       ...(each !== undefined ? { each } : {}),
+      // In scope ONLY while a taken rule's own wiring resolves (`Instance.firing`): what the rule's
+      // deferred call resolved to.
+      ...(instance.firing !== undefined ? { [EVENT_NAMESPACE]: instance.firing.event } : {}),
     };
   }
 
   /** The run-scoped view binding resolution needs (§7.4) — this instance's data addresses. */
-  private scopeFor(instance: Instance, demand?: CallDemand, each?: EachContext): ResolutionScope {
+  private scopeFor(
+    instance: Instance,
+    demand?: CallDemand,
+    each?: EachContext,
+    /** Told of every DEFERRED result resolution reads, in the order it reads them — see `.event`. */
+    observe?: (key: string, result: CallResult) => void,
+  ): ResolutionScope {
     return {
       exprContext: this.exprContext(instance, each),
       // A lowered CALL reads its result here, exactly as a child read reads `childOutputs`:
@@ -3233,7 +3381,9 @@ export class WorkflowEngine {
       operationResult: (op) => {
         const key = hashOperation(op);
         // The deferred half FIRST, and it is a different half on purpose — see `deferredResults`.
-        const hit = this.deferredResults.get(key) ?? this.answerFor(instance, key);
+        const deferred = this.deferredResults.get(key);
+        if (deferred !== undefined) observe?.(key, deferred);
+        const hit = deferred ?? this.answerFor(instance, key);
         // A MISS IS THE DEMAND. Resolution asked for a call's result and there is none, so this is
         // where the engine learns which calls the expression it is resolving actually needs — and
         // learning it HERE rather than by walking the tree up front is what makes the demand
@@ -4027,6 +4177,8 @@ export class WorkflowEngine {
       if (transition.whenError !== undefined) continue;
       // A standing rule with no guard never fires (`firstMatchingTransition`), so it ends nothing here.
       if (transition.standing === true && transition.whenRef === undefined) continue;
+      // A rule sitting out behind its running async target is not prepared either (`targetBusy`).
+      if (this.targetBusy(instance, transition)) continue;
       // Unconditional: it fires, and nothing behind it will be asked anything.
       if (transition.whenRef === undefined) return undefined;
       const binding = transition.whenRef;
@@ -4034,14 +4186,17 @@ export class WorkflowEngine {
       for (;;) {
         const fresh = new Map<string, Operation<InlineFamily>>();
         let waiting = false;
+        let stops = false;
         // HIGHER-ORDER stays eager (§3.5): its applications are demanded one element at a time —
         // `resolveRef` returns PENDING at the first element with no result — so a demand-driven pass
         // would run a `map` over twenty elements in twenty rounds instead of one.
         const higherFailure = await this.runHigherOrder(instance, binding);
         if (higherFailure !== undefined) return higherFailure;
         const resolved = resolveRef(binding, this.scopeFor(instance, (op, key, inFlight) => {
-          if (inFlight) waiting = true;
-          else if (!started.has(key)) fresh.set(key, op);
+          if (inFlight) {
+            waiting = true;
+            if (!this.isListening(op)) stops = true;
+          } else if (!started.has(key)) fresh.set(key, op);
         }));
 
         if (fresh.size === 0) {
@@ -4050,8 +4205,9 @@ export class WorkflowEngine {
           // deferred call HOLDS the round; pending on a running child is skipped, and the next rule
           // gets its turn.
           if (isPending(resolved)) {
-            // A STANDING rule's wait holds nothing, so the rules behind it are still prepared.
-            if (waiting && transition.standing !== true) return undefined;
+            // A STANDING rule's wait holds nothing, so the rules behind it are still prepared — and
+            // neither does a LISTENING one (`HostCapabilities.listens`): every rule behind it is armed.
+            if (waiting && stops && transition.standing !== true) return undefined;
             break;
           }
           // It fires — unless it is a standing rule held behind a running sync child.
@@ -4066,6 +4222,95 @@ export class WorkflowEngine {
       }
     }
     return undefined;
+  }
+
+  /**
+   * ARM the state's own rules while it waits on its children — register the deferred calls their
+   * guards wait on, and do nothing else (JaiRA decision 0010 §5.3).
+   *
+   * A round runs when a child finishes or a wait settles, and it is the round that registers a
+   * guard's wait. So a state that entered an async child and had nothing else to do blocked with NO
+   * wait registered: its rules were deaf until some child finished, and a second event arriving while
+   * the chain the first one started was at work went unheard. This pass is what closes that gap. It
+   * walks the state's own list as a round would (`orderedTransitions` with nothing eligible — a
+   * child's list is only ever about its own completion) and STARTS the deferred calls a round would
+   * start, stopping where a round would stop — at an unconditional rule, at one whose guard is
+   * already true, at a question still waiting to be answered (a listening wait stops nothing).
+   *
+   * It fires nothing and it runs no computation: a guard that needs a call computed is a guard only a
+   * real round may answer, so the walk ends there too. What it reports is whether a round is DUE
+   * rather than a wait — a guard already true on an answer that has arrived.
+   */
+  private armGuards(instance: Instance): boolean {
+    for (const transition of this.orderedTransitions(instance, [])) {
+      if (transition.whenError !== undefined) continue;
+      if (transition.standing === true && transition.whenRef === undefined) continue;
+      if (this.targetBusy(instance, transition)) continue;
+      // Unconditional: the next round takes it, and nothing behind it would be asked anything.
+      if (transition.whenRef === undefined) return false;
+      const started = new Set<string>();
+      for (;;) {
+        const fresh = new Map<string, Operation<InlineFamily>>();
+        let computes = false;
+        let waiting = false;
+        let stops = false;
+        let answered = false;
+        const resolved = resolveRef(
+          transition.whenRef,
+          this.scopeFor(
+            instance,
+            (op, key, inFlight) => {
+              if (inFlight) {
+                waiting = true;
+                if (!this.isListening(op)) stops = true;
+              } else if (!this.isDeferred(op)) computes = true;
+              else if (!started.has(key)) fresh.set(key, op);
+            },
+            undefined,
+            () => {
+              answered = true;
+            },
+          ),
+        );
+        // A computation this guard needs is a real round's to run: nothing behind it can be known.
+        if (computes) return false;
+        if (fresh.size === 0) {
+          if (isPending(resolved)) {
+            if (waiting && stops && transition.standing !== true) return false;
+            break;
+          }
+          // Already TRUE: a round is due if what made it true is an answer that has arrived — and
+          // otherwise the round the next child's end brings takes it, as it always would have.
+          if (isResolvedValue(resolved) && resolved.value && !(transition.standing === true && this.cursorHeld(instance))) return answered;
+          break;
+        }
+        for (const [key, op] of fresh) {
+          started.add(key);
+          this.startCall(instance, op).catch(() => undefined); // a failure to start is the next real round's to report
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Block until one of this instance's children finishes — with its own rules ARMED meanwhile.
+   *
+   * The waiter is registered BEFORE arming, so a wait that settles while the pass is still starting
+   * calls (a listener that already holds an event answers at once) wakes it rather than signalling
+   * into the gap — `Notifier` is not a latch. `false` when nothing is running, as `waitForAnyChild`.
+   *
+   * Armed only while the cursor is FREE — every running child async. A sync child holding the
+   * cursor is the state being IN that child: its rules are about what happens when it ends, which is
+   * the round its end brings, and a question put now could be answered, and acted on, halfway
+   * through it.
+   */
+  private async waitArmed(instance: Instance): Promise<boolean> {
+    if (!this.hasRunningChildren(instance)) return false;
+    const wake = instance.notify.wait();
+    if ((!this.cursorHeld(instance) && this.armGuards(instance)) || this.missedWake(instance)) return true;
+    await wake;
+    return true;
   }
 
   /**
@@ -4114,6 +4359,7 @@ export class WorkflowEngine {
     call.settled = settled;
     this.deferredCalls.set(key, call);
     instance.deferredKeys.add(key);
+    if (this.isListening(op)) this.listeningKeys.add(key);
     this.emit({ type: "call.waiting", instanceId: instance.id, stateId: instance.stateId, call: callName, operationId: key });
     return PENDING;
   }
@@ -4127,6 +4373,20 @@ export class WorkflowEngine {
     if (entry === undefined || entry.kind === "pure") return false;
     return entry.capabilities.deferred === true;
   }
+
+  /** Whether a deferred call LISTENS rather than asks — `HostCapabilities.listens` (see there). */
+  private isListening(op: Operation<InlineFamily>): boolean {
+    if (!this.isDeferred(op) || op.kind !== "function") return false;
+    const entry = this.config.registry.functions.get(op.functionRef);
+    return entry !== undefined && entry.kind !== "pure" && entry.capabilities.listens === true;
+  }
+
+  /**
+   * The keys of every LISTENING deferred call this run has started — content hashes, so one key is
+   * listening or not for the life of the run. Read by `consumeDeferred` after a call has settled and
+   * left `deferredCalls`, when its op is no longer in hand.
+   */
+  private readonly listeningKeys = new Set<string>();
 
   /** The deferred calls this instance is waiting on, oldest first. */
   private deferredFor(instance: Instance): DeferredCall[] {
@@ -4150,8 +4410,18 @@ export class WorkflowEngine {
    * what makes a rule like "let them drag it again" mean what it says rather than firing on the memory
    * of the last drag.
    */
-  private consumeDeferred(instance: Instance): void {
+  private consumeDeferred(
+    instance: Instance,
+    /**
+     * The deferred results the TAKEN rule's guard read. A LISTENING call (`HostCapabilities.listens`)
+     * is consumed only when it is among them: another rule firing answers nothing about it, so its
+     * wait stays armed — and an answer it already has is taken by the next round rather than lost.
+     */
+    read: readonly string[] = [],
+  ): void {
     for (const key of instance.deferredKeys) {
+      if (this.listeningKeys.has(key) && !read.includes(key)) continue;
+      instance.deferredKeys.delete(key);
       this.deferredResults.delete(key);
       // The SITE goes with the result. A site is reused so a re-evaluation finds the same record —
       // but a consumed wait's record is settled history, and a fresh wait re-dispatching under the
@@ -4172,7 +4442,6 @@ export class WorkflowEngine {
         void inFlight.cancel();
       }
     }
-    instance.deferredKeys.clear();
   }
 
   /** Consumed waits still winding down — awaited with the rest when their instance terminates. */

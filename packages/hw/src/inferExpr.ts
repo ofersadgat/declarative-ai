@@ -18,7 +18,7 @@ import type { CallableSchema, InlineFamily, JsonSchema, JsonValue, Ref } from "@
 import { callablePositionalOrder, callableSchemaOf, isCallableSchema } from "@declarative-ai/exec";
 import { isSubschema, type Schema } from "@declarative-ai/validate";
 import { BUILTIN_PARAMS } from "./builtins.js";
-import { applySugar, isSpread, OPERATOR_PARAMS, pathOf, receiverCallOf, selfPathOf, type Expr } from "./expr.js";
+import { applySugar, canonicalOperation, isSpread, OPERATOR_PARAMS, pathOf, receiverCallOf, selfPathOf, type Expr } from "./expr.js";
 import { RESOLVER_REF_SET, RESOLVER_REFS } from "./format.js";
 import { applyArgumentNames, pathOfRef } from "./lowerExpr.js";
 
@@ -359,7 +359,7 @@ function infer(expr: Expr, scope: ExprScope, report: Report): JsonSchema {
         // path says so, which inference cannot ask — so it is taken as one when the receiver's type
         // is known and has no such property, and otherwise keeps the older reading and its "untyped
         // callable" warning rather than vanishing into `any`.
-        const operation = OPERATOR_PARAMS[receiver.name] !== undefined || (!isUniversalSchema(recv) && projectProperty(recv, receiver.name) === undefined);
+        const operation = OPERATOR_PARAMS[canonicalOperation(receiver.name)] !== undefined || (!isUniversalSchema(recv) && projectProperty(recv, receiver.name) === undefined);
         if (!declared && operation) {
           return infer(applySugar(receiver.name, [receiver.recv, ...expr.args]), scope, report);
         }
@@ -381,6 +381,17 @@ function infer(expr: Expr, scope: ExprScope, report: Report): JsonSchema {
       // The same schema the lowered walk builds, from the same helper — the two paths type an object
       // literal identically because there is one place that says what its type is.
       return recordSchema(expr.entries.map((entry) => [entry.key, infer(entry.value, scope, report)]));
+    case "array": {
+      // An array of the JOIN of its items — what the lowered `append` chain computes, typed the way
+      // the two lazy operators type their operands.
+      const items = expr.items.map((item) => infer(item, scope, report));
+      const joined = items.length === 0 ? ANY_SCHEMA : items.reduce((a, b) => joinSchemas(a, b));
+      return { type: "array", items: joined as JsonValue };
+    }
+    case "lambda":
+      // Lowering refuses a lambda at run time, so a load that got this far never runs one; nothing
+      // can be said about it as a value.
+      return ANY_SCHEMA;
   }
 }
 

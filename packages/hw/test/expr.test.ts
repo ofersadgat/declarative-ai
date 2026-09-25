@@ -381,8 +381,10 @@ describe("arithmetic", () => {
 
 describe("purity — rejected constructs", () => {
   // `a[0]` left this list when bracket indexing became sugar for `at`, and `a + b` / `a - b` /
-  // `a * b` left it when arithmetic became sugar for `add` / `sub` / `mul` — see the block above.
-  const bad = ["a = 1", "new X", "a; b", "() => 1", "a?.b", "`t`"];
+  // `a * b` left it when arithmetic became sugar for `add` / `sub` / `mul` — see the block above —
+  // and `() => 1` left it when arrow lambdas joined the grammar for load-time `$ref` expressions,
+  // where alone they are applied (refExpressions.test.ts); lowering still refuses one.
+  const bad = ["a = 1", "new X", "a; b", "a?.b", "`t`", "(a, 1) => a", "(a.b) => a"];
   for (const src of bad) {
     it(`rejects: ${src}`, () => {
       expect(() => parseExpression(src)).toThrow(ExprError);

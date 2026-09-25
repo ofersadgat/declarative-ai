@@ -935,6 +935,16 @@ export interface ChildDecl {
 }
 
 export interface TransitionDecl {
+  /**
+   * The rule's NAME — optional, and unique within the one list it is written in.
+   *
+   * A label for the rule, not a part of what it does: it is what a layer that `$ref`s this list
+   * filters by (`filter(…, (t) => t.name !== 'push_main')`, SPEC §5.4), what an editor
+   * shows, and what `transition.taken` reports as the rule that fired. It is deliberately NOT part of
+   * any call's identity — the `transition` input a guard's call may declare carries only `to` — so
+   * naming or renaming a rule changes no operation hash, no memo and no deferred call's key.
+   */
+  name?: string;
   /** A declared child key, or one of `terminate.*`. */
   to: string;
   /** Guard expression; absent = unconditional. Must INFER to boolean (§7.2) — strict, no
@@ -954,7 +964,9 @@ export interface TransitionDecl {
    * rather than guessed.
    *
    * Resolved in the PARENT's scope, exactly as `children[].inputs` is, and merged over it per NAME:
-   * a transition restates only what it changes.
+   * a transition restates only what it changes. Here — and nowhere else — `.event` reads what the
+   * rule's deferred call resolved to (`EVENT_NAMESPACE`), so a rule woken by an event can hand the
+   * event on: `"inputs": { "request": ".event.merge_request" }`.
    */
   inputs?: Record<string, BindingDecl>;
   /**
@@ -1344,6 +1356,14 @@ export const GUARD_NAMESPACES = ["run", "limits"] as const;
  * that are evaluated once per element, and the validator refuses it everywhere else.
  */
 export const EACH_NAMESPACE = "each" as const;
+/**
+ * The one namespace readable ONLY in a transition's own `inputs`: `.event` is the value the rule's
+ * deferred call resolved to — `on_event('git.push')`'s event, `on_user_event(…)`'s answer — so the
+ * rule can hand the child it enters what woke it (`"inputs": { "push": ".event" }`). With several
+ * deferred calls in one guard it is the FIRST one the guard read; with none, it is absent.
+ * Refused everywhere else, as `.each` is outside a fanned-out mount's wiring.
+ */
+export const EVENT_NAMESPACE = "event" as const;
 export const CONTEXT_NAMESPACES = [...REF_NAMESPACES, ...GUARD_NAMESPACES, ...FIELD_NAMESPACES] as const;
 
 /**

@@ -321,6 +321,18 @@ describe("the environment merge", () => {
     expect(mergeOperationFields({ session: "planning" }, { model: "sonnet" }).session).toBe("planning");
   });
 
+  it("keeps a nearer `conversation` — per key, arrays replacing — rather than dropping it", () => {
+    // `conversation` has a merge rule of its own, and for a while it had no branch implementing it:
+    // the generic loop skipped the field and nothing else wrote it, so a sibling key beside a `$ref`
+    // or a nearer layer's value simply vanished.
+    const merged = mergeOperationFields(
+      { conversation: { mode: "full", artifacts: ["a"] } } as OperationFields,
+      { conversation: { artifacts: ["b"] } } as OperationFields,
+    ) as { conversation?: unknown };
+    expect(merged.conversation).toEqual({ mode: "full", artifacts: ["b"] });
+    expect((mergeOperationFields({}, { conversation: { mode: "fresh" } } as OperationFields) as { conversation?: unknown }).conversation).toEqual({ mode: "fresh" });
+  });
+
   it("replaces a session WHOLE, so fork cannot arrive from a different layer than the name", () => {
     const merged = mergeOperationFields({ session: { $ref: "a", $fork: true } }, { session: { $ref: "b" } });
     expect(merged.session).toEqual({ $ref: "b" });

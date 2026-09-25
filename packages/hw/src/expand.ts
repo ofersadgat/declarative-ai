@@ -25,7 +25,9 @@
  * so the loader finds every use by shape without knowing which positions could have held one.
  */
 import { mergeOperationFields } from "./merge.js";
-import { bindingForDocument } from "./format.js";
+import { bindingForDocument, RESOLVER_REFS } from "./format.js";
+import { canonicalOperation, ExprError, isSpread, parseExpression, pathOf, type Expr } from "./expr.js";
+import { evaluateAt, holdsLambda } from "./loadExpr.js";
 import {
   isDataFile,
   isPathSpelling,
@@ -98,6 +100,18 @@ export function expandReferences(document: unknown, options: ExpandOptions): unk
 function peekNames(environment: unknown, walk: Walk): string[] {
   const follow = (value: unknown, at: Walk, depth: number): unknown => {
     const reference = typeof value === "string" ? value : isPlainObject(value) && typeof value[REF_KEY] === "string" ? value[REF_KEY] : undefined;
+    // An explicit `$ref` EXPRESSION is evaluated as expansion will evaluate it, over raw documents —
+    // its target's own references do not matter to which KEYS it has.
+    if (reference !== undefined && isPlainObject(value) && !isPathSpelling(reference) && !reference.startsWith("...") && depth <= 8) {
+      try {
+        const target = evaluateAt(parseExpression(reference), new Map(), {
+          reference: (spelling) => loadReferenced(resolveReference(spelling, refOptions(at)), spelling, at, undefined),
+        });
+        return isPlainObject(target) ? { ...target, ...value } : target;
+      } catch {
+        return undefined;
+      }
+    }
     if (reference === undefined || !reference.startsWith("$") || depth > 8) return value;
     try {
       const resolved = resolveReference(reference, refOptions(at));
@@ -262,7 +276,17 @@ function expandNode(value: unknown, shape: Shape, options: Walk, path: string[],
 
   if (Array.isArray(value)) {
     const of = shape.t === "array" ? shape.of : { t: "any" as const };
-    return value.map((item, i) => expandNode(item, of, options, [...path, String(i)], active));
+    const list: Shape = shape.t === "array" ? shape : { t: "array", of };
+    const out: unknown[] = [];
+    value.forEach((item, i) => {
+      const at = [...path, String(i)];
+      // `{ "$ref": "...<reference or expression>" }` as an ITEM splices the list it names into this
+      // one (SPEC §5.4) — which is how a project's list says "mine, then the base layer's".
+      const spread = spreadOf(item);
+      if (spread === undefined) out.push(expandNode(item, of, options, at, active));
+      else out.push(...expandSpread(spread, item as Record<string, unknown>, list, options, at, active));
+    });
+    return out;
   }
 
   if (!isPlainObject(value)) return value;
@@ -273,6 +297,22 @@ function expandNode(value: unknown, shape: Shape, options: Walk, path: string[],
     const reference = value[REF_KEY];
     const overrides = { ...value };
     delete overrides[REF_KEY];
+    if (reference.startsWith(SPREAD)) {
+      throw new ReferenceError(
+        `${path.join(".")}: '$ref': '${reference}' — a leading '${SPREAD}' splices a list into the list it is an item of, and this '$ref' is not an item of a list`,
+      );
+    }
+    // An EXPRESSION over documents (SPEC §5.4): evaluated now, at load, and its value
+    // stands here exactly as a referenced node would — overridden by sibling keys the same way.
+    if (!isPathSpelling(reference)) {
+      const computed = expandExpression(reference, shape, options, path, active);
+      if (Object.keys(overrides).length === 0) return computed;
+      if (!isPlainObject(computed)) {
+        throw new ReferenceError(`${path.join(".")}: '$ref' expression '${reference}' evaluated to ${describe(computed)} but sibling keys were given to override it`);
+      }
+      const expandedOverrides = expandNode(overrides, shape, options, path, active) as Record<string, unknown>;
+      return mergeOperationFields(computed as never, expandedOverrides as never) as unknown;
+    }
     // A scoped name stays a use. Its sibling keys configure the NAME rather than override this
     // position, so they are expanded as the untyped block a `names` entry is, not by this shape.
     if (isScopedName(reference, shape, options)) {
@@ -316,6 +356,199 @@ function expandNode(value: unknown, shape: Shape, options: Walk, path: string[],
   return out;
 }
 
+// --- `$ref` expressions (SPEC §5.4) ---------------------------------------------------
+
+/** The prefix that makes a `$ref` item SPLICE its list into the list it stands in. */
+const SPREAD = "...";
+
+/** The body of a spread item — `{ "$ref": "...x" }` → `x` — or `undefined` for any other item. */
+function spreadOf(item: unknown): string | undefined {
+  if (!isPlainObject(item) || typeof item[REF_KEY] !== "string") return undefined;
+  const reference = item[REF_KEY];
+  return reference.startsWith(SPREAD) ? reference.slice(SPREAD.length).trim() : undefined;
+}
+
+/**
+ * Expand one spread item to the items it splices in.
+ *
+ * The body is a reference or an expression, read as the LIST it stands in — so a reference to
+ * another layer's `transitions` expands with the transitions shape, in its own file's scope, exactly
+ * as `{ "$ref": "$BASE/x.transitions" }` in place of the whole list would. Whatever it produces must
+ * be a list: splicing anything else has no meaning, and is refused rather than wrapped.
+ */
+function expandSpread(body: string, item: Record<string, unknown>, list: Shape, options: Walk, path: string[], active: Set<string>): unknown[] {
+  const siblings = Object.keys(item).filter((k) => k !== REF_KEY);
+  if (siblings.length > 0) {
+    throw new ReferenceError(`${path.join(".")}: a spread '$ref' splices a list, so it takes no sibling keys to override it (found ${siblings.map((k) => `'${k}'`).join(", ")})`);
+  }
+  if (body.length === 0) throw new ReferenceError(`${path.join(".")}: '$ref': '${SPREAD}' names nothing to splice`);
+  const value = isPathSpelling(body)
+    ? asUndefinedName(body, path, options, () => expandReferenced(body, list, options, path, active, undefined))
+    : expandExpression(body, list, options, path, active);
+  if (!Array.isArray(value)) {
+    throw new ReferenceError(`${path.join(".")}: '$ref': '${SPREAD}${body}' splices a list into this one, but it is ${describe(value)}`);
+  }
+  return value;
+}
+
+/**
+ * Evaluate a `$ref` EXPRESSION at load, for a position of this shape.
+ *
+ * A reference inside it is resolved exactly as a path `$ref` is — found along the same roots, its
+ * target expanded in its OWN file's scope, cycles refused — and read with the shape its VALUE will
+ * have in the result (`referenceShapes`): the reference `filter` keeps items of is read as the list
+ * this position holds; one read only to test something against is read as plain data.
+ *
+ * What comes back must fit the position: a list where a list belongs, an object where an object
+ * does. A lambda cannot be a document value, so a result holding one is refused too.
+ */
+function expandExpression(source: string, shape: Shape, options: Walk, path: string[], active: Set<string>): unknown {
+  const where = path.length > 0 ? `${path.join(".")}: ` : "";
+  let parsed: Expr;
+  try {
+    parsed = parseExpression(source);
+  } catch (e) {
+    throw new ReferenceError(`${where}'$ref' '${source}' is neither a path nor an expression that parses: ${(e as Error).message}`);
+  }
+  const shapes = referenceShapes(parsed, shape);
+  let value: unknown;
+  try {
+    value = evaluateAt(parsed, new Map(), {
+      reference: (spelling) => expandReferenced(spelling, shapes.get(spelling) ?? { t: "any" }, options, path, active, undefined),
+    });
+  } catch (e) {
+    const cause = e instanceof ExprError || e instanceof ReferenceError ? e.message : String(e);
+    throw new ReferenceError(`${where}'$ref' expression '${source}' could not be evaluated: ${cause}`);
+  }
+  if (holdsLambda(value)) throw new ReferenceError(`${where}'$ref' expression '${source}' evaluated to a lambda, which is not a document value`);
+  if (value === undefined) throw new ReferenceError(`${where}'$ref' expression '${source}' evaluated to nothing`);
+  if (shape.t === "array" && !Array.isArray(value)) {
+    throw new ReferenceError(`${where}'$ref' expression '${source}' must produce a list here, but produced ${describe(value)}`);
+  }
+  if (shape.t === "object" && !isPlainObject(value)) {
+    throw new ReferenceError(`${where}'$ref' expression '${source}' must produce an object here, but produced ${describe(value)}`);
+  }
+  return value;
+}
+
+/**
+ * The shape each REFERENCE in an expression is read with — the position's own shape for a reference
+ * whose value is (a selection of) the result, and plain data for every other.
+ *
+ * Why it matters: expansion reads a node by what belongs where it lands (a string where an object
+ * belongs is a reference). A list `filter` keeps items of lands HERE, so it is read as this position
+ * is; a list of names the lambda only tests membership in lands nowhere, and reading it as a list of
+ * transitions would resolve every name in it as a file.
+ */
+function referenceShapes(expr: Expr, position: Shape): Map<string, Shape> {
+  const out = new Map<string, Shape>();
+  const any: Shape = { t: "any" };
+  const elementOf = (s: Shape): Shape => (s.t === "array" ? s.of : any);
+  const listOf = (s: Shape): Shape => (s.t === "any" ? any : { t: "array", of: s });
+  const visit = (e: Expr, at: Shape, bound: ReadonlySet<string>): void => {
+    const note = (spelling: string): void => {
+      if (!out.has(spelling) || out.get(spelling)!.t === "any") out.set(spelling, at);
+    };
+    switch (e.type) {
+      case "ident":
+        if (!bound.has(e.name)) note(e.name);
+        return;
+      case "member": {
+        const p = pathOf(e);
+        if (p !== undefined) {
+          if (!bound.has(p[0]!)) note(p.join("."));
+          return;
+        }
+        visit(e.obj, any, bound);
+        return;
+      }
+      case "lit":
+      case "self":
+        return;
+      case "array":
+        for (const item of e.items) visit(item, elementOf(at), bound);
+        return;
+      case "object":
+        for (const entry of e.entries) visit(entry.value, any, bound);
+        return;
+      case "lambda": {
+        const inner = new Set([...bound, ...e.params]);
+        visit(e.body, any, inner);
+        return;
+      }
+      case "call": {
+        if (e.callee.type === "member") {
+          const args = [e.callee.obj, ...e.args.map((a) => (isSpread(a) ? a.value : a))];
+          visitApplied(e.callee.prop, args, at, bound);
+          return;
+        }
+        visit(e.callee, any, bound);
+        for (const a of e.args) visit(isSpread(a) ? a.value : a, any, bound);
+        return;
+      }
+      case "apply": {
+        const args = e.args.map((a) => (isSpread(a) ? a.value : a));
+        const dot = e.op.lastIndexOf(".");
+        const name = dot > 0 ? e.op.slice(dot + 1) : e.op;
+        // A dotted callee is a receiver call on its head (see `loadExpr.ts`): the head is argument 0.
+        if (dot > 0 && SELECTING.has(canonicalOperation(name))) {
+          const head = e.op.slice(0, dot);
+          if (!bound.has(head.split(".")[0]!)) {
+            if (!out.has(head) || out.get(head)!.t === "any") out.set(head, argumentShape(canonicalOperation(name), 0, at));
+          }
+          args.forEach((a, i) => visit(a, argumentShape(canonicalOperation(name), i + 1, at), bound));
+          return;
+        }
+        visitApplied(e.op, args, at, bound);
+        return;
+      }
+    }
+  };
+  const visitApplied = (op: string, args: readonly Expr[], at: Shape, bound: ReadonlySet<string>): void => {
+    const name = canonicalOperation(op);
+    args.forEach((a, i) => visit(a, argumentShape(name, i, at), bound));
+  };
+  const argumentShape = (op: string, i: number, at: Shape): Shape => {
+    switch (op) {
+      case RESOLVER_REFS.cond:
+        return i === 0 ? any : at;
+      case RESOLVER_REFS.and:
+      case RESOLVER_REFS.or:
+      case "coalesce":
+      case "concat":
+        return at;
+      case "filter":
+      case "slice":
+      case "reverse":
+      case "sort":
+      case "sortBy":
+      case "unique":
+        return i === 0 ? at : any;
+      case "append":
+        return i === 0 ? at : elementOf(at);
+      case "first":
+      case "last":
+      case "at":
+      case "find":
+        return i === 0 ? listOf(at) : any;
+      default:
+        return any;
+    }
+  };
+  visit(expr, position, new Set());
+  return out;
+}
+
+/** The operations whose result is (a selection of) their first argument — see `referenceShapes`. */
+const SELECTING: ReadonlySet<string> = new Set(["filter", "slice", "reverse", "sort", "sortBy", "unique", "concat", "append", "first", "last", "at", "find", "coalesce"]);
+
+function describe(value: unknown): string {
+  if (value === null) return "null";
+  if (value === undefined) return "nothing";
+  if (Array.isArray(value)) return "a list";
+  return typeof value === "object" ? "an object" : `a ${typeof value}`;
+}
+
 /** The key that lists alternatives. */
 const ANY_KEY = "$any";
 
@@ -338,7 +571,7 @@ function expandAlternatives(alternatives: unknown[], options: Walk, path: string
     // ABSENCE is asked of the alternative's OWN reference and of nothing below it: a role file that
     // is there and itself points at something missing is a mistake in that file, and skipping it
     // would turn a typo into a silent change of model.
-    if (isPlainObject(alternative) && typeof alternative[REF_KEY] === "string" && alternative[REF_KEY].startsWith("$")) {
+    if (isPlainObject(alternative) && typeof alternative[REF_KEY] === "string" && alternative[REF_KEY].startsWith("$") && isPathSpelling(alternative[REF_KEY])) {
       const reference = alternative[REF_KEY];
       try {
         loadReferenced(resolveReference(reference, refOptions(options)), reference, options, undefined);
@@ -373,7 +606,7 @@ function expandNames(value: unknown, options: Walk, path: string[], active: Set<
   for (const [name, entry] of Object.entries(value)) {
     const reference = typeof entry === "string" ? entry : isPlainObject(entry) && typeof entry[REF_KEY] === "string" ? entry[REF_KEY] : undefined;
     const at = [...path, name];
-    if (reference === undefined || reference.startsWith("$") || (reference !== name && options.enclosing?.[reference] === undefined)) {
+    if (reference === undefined || reference.startsWith("$") || !isPathSpelling(reference) || (reference !== name && options.enclosing?.[reference] === undefined)) {
       out[name] = expandNode(entry, typeof entry === "string" ? { t: "object", rest: { t: "any" } } : { t: "any" }, options, at, active);
       continue;
     }

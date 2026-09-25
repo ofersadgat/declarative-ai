@@ -635,7 +635,12 @@ Registration always produces an entry, and the record an `Executor` advertises i
 
 ```ts
 interface PureCapabilities { memoizable: boolean }
-interface HostCapabilities { interactive: boolean; readOnly: boolean; memoizable: boolean }
+interface HostCapabilities {
+  interactive: boolean; readOnly: boolean; memoizable: boolean;
+  deferred?: boolean;   // the call WAITS: started by a round, read by a later one (SPEC §3.3)
+  listens?: boolean;    // with deferred: a SUBSCRIPTION, not a question — its wait stops no rule list and
+                        // is withdrawn only by the rule that read its answer (SPEC §3.3, "Listening waits")
+}
 interface RuntimeCapabilities extends HostCapabilities {
   structuredOutput: boolean; mutatesWorkspace: boolean;
   policyEnforcement: "callback" | "config" | "none";
@@ -2544,7 +2549,7 @@ The ports (apps implement these). Source: `ports.ts`.
 | --- | --- |
 | `Persistence` | `record(event: EngineEvent, atMs: number): void` — the durable run-record sink (SPEC §10.2). |
 | `InMemoryPersistence` | the bundled buffering implementation (embedding & tests); exposes `events`. |
-| `EngineEvent` | the run-record event union: `instance.entered`, `instance.blocked`, `operation.started`, `operation.dispatched` (the record for a call exists — emitted from the record layer's callback after the row is inserted and before the provider call; carries the scoped `operationId`), `operation.completed`, `operation.failed`, `call.waiting`, `call.settled`, `value.settled` (a computed field settled — `field` path, `outcome`, its `value`, and `error`/`fallback` when a `failureValue` stood in; SPEC §5.3), `transition.taken`, `child.superseded`, `instance.terminated`. Settled events' `operationId` is the SCOPED id (`scopedOperationId(hashOperation(op), scope)`), the same key `withRecord` files the record under. |
+| `EngineEvent` | the run-record event union: `instance.entered`, `instance.blocked`, `operation.started`, `operation.dispatched` (the record for a call exists — emitted from the record layer's callback after the row is inserted and before the provider call; carries the scoped `operationId`), `operation.completed`, `operation.failed`, `call.waiting`, `call.settled`, `value.settled` (a computed field settled — `field` path, `outcome`, its `value`, and `error`/`fallback` when a `failureValue` stood in; SPEC §5.3), `transition.taken` (with the fired rule's `name` when it has one), `child.superseded`, `instance.terminated`. Settled events' `operationId` is the SCOPED id (`scopedOperationId(hashOperation(op), scope)`), the same key `withRecord` files the record under. |
 | `OperationKind` | `"prompt" \| "function"` — the two operation types (the event `op` field). |
 | `ArtifactRef` / `isArtifactRef` | `{ artifact: true; name; format?; content?; path? }` — an artifact value flowing through workflow inputs/outputs. |
 
@@ -2717,7 +2722,14 @@ interface ChildDecl {
   // one HANDLES this child's error/timeout termination.
   transitions?: TransitionDecl[];
 }
-interface TransitionDecl { to: string; when?: string; }        // `when` must INFER to boolean
+interface TransitionDecl {
+  name?: string;        // a label, unique within its list — filtered by (`$ref` expressions, SPEC §5.4) and
+                        // reported on `transition.taken`; never part of a call's identity
+  to: string;
+  when?: string;        // must INFER to boolean
+  inputs?: Record<string, BindingDecl>;   // over the mount's wiring; `.event` readable here only
+  standing?: boolean;
+}
 interface LimitsDecl { max_iterations?: number; timeout?: number; }
 ```
 
@@ -2918,6 +2930,9 @@ function evaluateExpression(src: string, context: Record<string, unknown>): Expr
 function parseExpression(src: string): Expr;
 function evaluate(expr: Expr, context: Record<string, unknown>): ExprValue;   // value may be PENDING
 function referencesOf(expr: Expr): string[][];      // the paths an expression reads
+// The LOAD-TIME evaluator a `$ref` expression runs on (SPEC §5.4): references read through `reference`,
+// lambdas applied by filter/map/flatMap/find/some/every/reduce, built-ins as at run time.
+function evaluateLoadExpression(src: string, options: { reference: (spelling: string) => unknown }): unknown;
 class ExprError extends Error {}
 const PENDING: unique symbol;                        // an async child's not-yet-resolved reference
 function isPending(v: unknown): v is Pending;
@@ -2955,6 +2970,11 @@ the end. And `/` is the callee-path separator where a NAME sits to its left, div
 else — so `$/lib/classify(x)` is a reference and `.total / 2` is arithmetic, at the cost that two
 bare names cannot be divided. A bare name is a document and never a number, so that is the right way
 round.
+
+The AST also has ARRAY literals (`{ type: "array"; items }`, lowered to an `append` chain) and ARROW
+LAMBDAS (`{ type: "lambda"; params; body }`). A lambda is applied only by `evaluateLoadExpression` —
+`lowerExpression` and `evaluate` refuse one — because a run-time callee is an operation the engine
+dispatches by name.
 
 `referencesOf` (AST) and `referencePathsOf` (tree) power the dataflow join — waiting on the inputs an
 expression reads, a call's arguments included.

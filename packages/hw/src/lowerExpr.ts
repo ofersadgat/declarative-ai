@@ -21,7 +21,7 @@
  * is still a walk over the tree rather than a second parse.
  */
 import type { InlineFamily, JsonValue, Operation, Parameter, Ref } from "@declarative-ai/exec";
-import { applySugar, ExprError, isSpread, OPERATOR_PARAMS, pathOf, receiverCallOf, type Argument, type Expr } from "./expr.js";
+import { applySugar, canonicalOperation, ExprError, isSpread, OPERATOR_PARAMS, pathOf, receiverCallOf, type Argument, type Expr } from "./expr.js";
 
 /** The operations whose `op` argument is an operation REFERENCE rather than a data path (§3.5). */
 const HIGHER_ORDER_NAMES: ReadonlySet<string> = new Set(["map", "filter", "flatMap", "reduce"]);
@@ -120,6 +120,14 @@ export function lowerExpression(expr: Expr, options: LowerOptions = {}): Ref<Inl
         RESOLVER_REFS.record,
         Object.fromEntries(expr.entries.map((entry) => [entry.key, down(entry.value)])),
       );
+    case "array":
+      // `[a, b]` is `append(append([], a), b)` — the tree an array with computed parts in a binding
+      // already lowers to (`lowerLiteral`), so no resolver needs a case for it.
+      return expr.items.reduce<Ref<InlineFamily>>((list, item) => edge("append", { value: list, item: down(item) }), { json: [] });
+    case "lambda":
+      // Applied only at LOAD, by a `$ref` expression (`loadExpr.ts`). A run-time callee is an
+      // operation the engine dispatches by name, and a lambda has none.
+      throw new ExprError("a lambda is applied only in a load-time '$ref' expression — at run time, name an operation instead", 0);
     case "apply": {
       const builtin = OPERATOR_PARAMS[expr.op];
       // `indexOf(xs, op)` with an operation only the search path knows. The parser rewrote the
@@ -150,6 +158,9 @@ export function lowerExpression(expr: Expr, options: LowerOptions = {}): Ref<Inl
           const applied = expr.args[1] as Expr | undefined;
           const name = applied !== undefined ? pathOf(applied) : undefined;
           if (name === undefined) {
+            if (applied?.type === "lambda") {
+              throw new ExprError(`'${expr.op}' with a lambda runs only in a load-time '$ref' expression — at run time, name the operation to apply`, 0);
+            }
             throw new ExprError(`'${expr.op}' takes an operation to apply, named — not an expression`, 0);
           }
           const resolved = options.resolveOperation?.(name.join("."));
@@ -187,7 +198,7 @@ export function lowerExpression(expr: Expr, options: LowerOptions = {}): Ref<Inl
 
 /** Is this word an OPERATION — a built-in, or something the search path resolves to one? */
 function isOperationName(name: string, options: LowerOptions): boolean {
-  return OPERATOR_PARAMS[name] !== undefined || options.resolveOperation?.(name) !== undefined;
+  return OPERATOR_PARAMS[canonicalOperation(name)] !== undefined || options.resolveOperation?.(name) !== undefined;
 }
 
 /** What lowering needs from its caller: how to turn a NAME into the thing it names. */
@@ -223,7 +234,7 @@ export interface LowerOptions {
 
 /** The runtime namespaces, for the one diagnostic that has to survive the dot becoming required. */
 const RUNTIME_ROOTS: ReadonlySet<string> = new Set([
-  "inputs", "outputs", "children", "artifacts", "conversations", "run", "limits", "each",
+  "inputs", "outputs", "children", "artifacts", "conversations", "run", "limits", "each", "event",
   // The state's own fields (SPEC §6.1) — read back under their authored names.
   "operation", "environment", "title", "label", "description",
 ]);

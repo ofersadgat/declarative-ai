@@ -369,6 +369,42 @@ Its wait is started like any other, and it holds nothing:
 A standing rule needs a `when` and must enter a child; validation refuses one with
 no guard, or whose `to` is a `terminate.*` outcome.
 
+**Listening waits.** A deferred function may also declare `listens`
+(`HostCapabilities.listens`): its wait is a SUBSCRIPTION to the world — "the next push" — rather than
+a question put to someone, and nobody answers it `false`. A guard waiting on one:
+
+- stops nothing — the rules behind it are prepared, their waits registered, and evaluated; the first
+  rule in list order whose guard comes true fires, while every other listening wait stays armed;
+- is not withdrawn when a DIFFERENT rule fires. A taken rule consumes only the deferred answers its
+  own guard read; a listening call it did not read keeps its registration, and an answer it already
+  holds is taken by the next round rather than lost;
+- still keeps the state waiting when nothing fires — the state neither terminates nor walks its
+  sequence while it listens, exactly as with any other wait.
+
+So a state whose rules are all `{ "when": "on_event('…')", "to": … }` listens for every one of them at
+once, and hears whichever arrives first. A state that has never had a round — no operation, nothing
+entered that finished — gets a real one before it may end, so a state that exists only to wait on
+such rules registers them rather than succeeding at once.
+
+**Waits stay armed while async children run.** A round is what registers a guard's wait, and a round
+runs when a child finishes or a wait settles. So before a state blocks on its running async children —
+the cursor free; a sync child holding it is the state being IN that child, and its rules wait for its
+end — it ARMS its own rules: it walks the state's list as a round would, with nothing eligible, and
+starts the deferred calls a round would start, stopping where a round would stop (an unconditional
+rule, a guard already true, a question still waiting), while firing nothing and running no
+computation. A question a taken rule withdrew is therefore asked again while the child it entered
+still runs, and an event a rule listens for wakes the state rather than going unheard until some child
+finishes. A wake that lands while a round is still evaluating is not waited for again: the next round
+runs.
+
+**A rule does not re-enter its running async chain.** Entering a child whose record is still running
+aborts that record (§3.4). A STATE-LEVEL rule whose `to` is an `async` child therefore sits out —
+its wait is not registered and it is not evaluated — while that child, or any child the child's own
+transitions lead on to (the chain it starts), has a running record. It is armed again in the first
+round after the chain ends. A second event that arrives meanwhile is the listener's to keep (a host
+queues it), so the chains it starts run one after another, in order, and none is cut short. A child's
+own list, and a sync target, keep the re-entry semantics above.
+
 **Directed transitions.** Every transition above is taken because a rule fired. A
 DIRECTED transition is one the HOST injects on somebody's behalf — a person who
 dragged a card, or a conversation that holds the workflow as a tool and was told
@@ -911,7 +947,15 @@ limits
 `transitions`
 : Transition rules that apply to the state as a whole — a decision from its own
   operation output, an entry into a child, an iteration limit. A rule about one
-  child belongs on that child's mount instead (§3.3), which is the default.
+  child belongs on that child's mount instead (§3.3), which is the default. A rule is
+  `{ name?, to, when?, inputs?, standing? }`. `name` is an optional label, unique within
+  its list: what a layer that references the list filters by (§5.4), what an editor
+  shows, and what `transition.taken` reports — never part of any call's identity.
+  `inputs` hands the child the rule enters values over the mount's wiring, per name,
+  resolved in the world the guard saw; there, and only there, `.event` reads what the
+  rule's deferred call resolved to (the first one's, when the guard read several), so
+  `{ "when": "on_event('git.merge_request.opened')", "to": "triage", "inputs": { "mr":
+  ".event.merge_request" } }` hands `triage` the merge request that woke the rule.
 
 `limits`
 : Iteration and timeout limits.
@@ -988,6 +1032,41 @@ different the second time.
 `config.model` differently and are still runs of the same workflow; the run record says which model
 each call was actually made with.
 
+### 5.4 `$ref` Expressions
+
+A `{ "$ref": … }` whose string is not a path — it holds a parenthesis, a bracket, a quote, a
+comparison or logical operator, a comma or whitespace (the characters a path never contains) — is an
+EXPRESSION, evaluated at load over the documents it names. It is how one layer
+of a workflow says "the other layer's, changed": nothing has run yet, so the language here reads
+DOCUMENTS and plain values and nothing else.
+
+- A reference spelling inside it (`$BASE/workflows/system/events.transitions`, `$/lib/rules`, a bare
+  `lib.rules`) is the value that reference names — resolved along the same roots and layers as a
+  path `$ref`, its target expanded in its own file's scope. A `/`-segment that is not an identifier
+  is quoted: `$BASE/workflows/'my-flow'.transitions`.
+- Arrow lambdas — `(t) => …`, `t => …`, `(acc, x) => …` — are values, applied by `filter`, `map`,
+  `flatMap`, `find`, `some`, `every` and `reduce` (`reduce(xs, (acc, x) => …, seed)`). Inside
+  one, a parameter is read by its bare name and `t.name` is its property: a parameter shadows a
+  document of the same name.
+- Every built-in and operator means what it means at run time; `recv.name(args)` is
+  `name(recv, args)`, and `includes` is `contains` — so list membership reads
+  `['a', 'b'].includes(t.name)`. A leading-dot read (`.inputs.x`) is refused: there is no instance.
+- A leading `...` on a `$ref` that is an ITEM of a list SPLICES the list it produces into that list —
+  a path (`"...$BASE/wf.transitions"`) or an expression. Anywhere else it is refused, and so are
+  sibling keys beside it.
+
+```jsonc
+"transitions": [
+  { "name": "release_push", "when": "on_event('git.push', { branch: 'release/*' })", "to": "release_build" },
+  { "$ref": "...filter($BASE/workflows/system/events.transitions, (t) => !['push_main'].includes(t.name))" }
+]
+```
+
+The project's own line comes first, then every line of the base layer's list but `push_main`. What
+an expression produces must fit its position — a list where a list belongs, an object where an
+object does (sibling keys then override it, as they override a referenced node) — and one that fails,
+produces the wrong shape, or produces a lambda is a load error naming the expression.
+
 ## 6. Transition Expressions
 
 Expressions use a small language with JavaScript evaluation semantics:
@@ -1029,13 +1108,19 @@ The expression language should support:
   values are full expressions. The aggregate literal, standing beside the scalar ones — its use is
   an OPTIONS BAG at a call site, where naming what an argument means beats counting positions, and
   where a call whose options grow renumbers nobody.
+- Array literals — `['push_main', 'nightly']`, a trailing comma allowed. Sugar for `append` folded
+  over the items, so nothing downstream needs a case for it.
+- Arrow lambdas — `(t) => t.name`, `t => …` — which only a load-time `$ref` expression applies
+  (§5.4). A run-time callee is an operation named along the search path, so lowering refuses a
+  lambda anywhere else.
 
 **Receiver calls.** `recv.name(args)` is sugar for `name(recv, args)` and lowers to the same tree,
 as `xs[i]` already lowers to `at(xs, i)` — so `.any.map('remaining').indexOf(max)` is
 `indexOf(map(.any, 'remaining'), max)`. It applies when `recv` is a RUNTIME value — a leading-dot
 read, or a call's result — and `name` is an operation. A bare `confidence.score(…)` stays a module
 symbol (a bare dotted path is one name), and `.inputs.f(x)` stays a call of a callable VALUE when the
-declared type of `.inputs` has a property `f`.
+declared type of `.inputs` has a property `f`. `includes` is JavaScript's spelling of `contains`, so
+`['a', 'b'].includes(x)` reads as written.
 
 Two builtin spellings make that read as written: `map(xs, 'key')` with a STRING plucks the property
 off each element (it is `pluck(xs, 'key')`), and `indexOf(xs, v)` answers where `v` is (`-1` for

@@ -373,6 +373,11 @@ function desugarRuntimeReference(reference: string, where: string, stateId: stri
       if (rest.length === 0) bad("must name what it reads, as '.each.index' or '.each.axis.<input>'");
       return desugarBinding({ $expr: reference }, where, stateId);
     }
+    case "event":
+      // What a taken rule's deferred call resolved to (`EVENT_NAMESPACE`) — `.event` whole, or a
+      // path into it. A `context` read like `.each`, put in scope by the engine only while it wires
+      // the child that rule enters; WHERE it may be read is the validator's rule.
+      return desugarBinding({ $expr: reference }, where, stateId);
     case "title":
     case "label":
     case "description":

@@ -100,7 +100,29 @@ export type Expr =
    * what the second argument means at the call site, and a call whose options grow do not renumber
    * anybody's positions.
    */
-  | { type: "object"; entries: { key: string; value: Expr }[] };
+  | { type: "object"; entries: { key: string; value: Expr }[] }
+  /**
+   * An ARRAY LITERAL — `['push_main', 'nightly']`.
+   *
+   * The other aggregate literal, beside `object`. It lowers to the tree `append` folded over its
+   * items (the same tree an array literal in a binding with computed parts lowers to), so nothing
+   * downstream needs a case of its own for it.
+   */
+  | { type: "array"; items: Expr[] }
+  /**
+   * An ARROW LAMBDA — `(t) => t.name`, `t => t.name`, `(a, b) => a + b`.
+   *
+   * A value that is an operation written in place, so `filter(xs, (t) => …)` can say what to keep
+   * without a document to name. It is APPLIED only by the load-time evaluator (`loadExpr.ts`), which
+   * is where a `$ref` expression runs (SPEC §5.4): a lambda there binds its parameters and
+   * evaluates its body over plain values. A run-time expression has no way to apply one — a callee
+   * there is an operation the engine dispatches, named — so lowering refuses a lambda outright rather
+   * than half-supporting it.
+   *
+   * Inside the body a parameter is read as a bare name, and a dotted read off one is a property:
+   * `t.name` is the parameter's `name`, not a document called `t.name`. Parameters shadow documents.
+   */
+  | { type: "lambda"; params: string[]; body: Expr };
 
 /**
  * The two call spellings that ARE another call (NAMES.md §8), rewritten to it — so everything
@@ -231,11 +253,20 @@ type Token =
  */
 const OPERATION_ALIASES: Readonly<Record<string, string>> = {
   messages: RESOLVER_REFS.conversation,
+  // JavaScript's spelling of list membership, so `['a', 'b'].includes(x)` reads as written. The
+  // meaning is `contains` — membership for an array, substring for a string — and one operation with
+  // two names is sugar, not a second definition.
+  includes: "contains",
 };
+
+/** The operation an authored name MEANS — itself, unless it is one of {@link OPERATION_ALIASES}. */
+export function canonicalOperation(name: string): string {
+  return OPERATION_ALIASES[name] ?? name;
+}
 
 // Longest match first — the loop below takes the first entry that matches, so `...` has to precede
 // `.` or a spread would lex as three property accesses with nothing between them.
-const PUNCT = ["...", "===", "!==", "==", "!=", "<=", ">=", "&&", "||", "<", ">", "!", "?", ":", "(", ")", "[", "]", "{", "}", ".", ",", "/", "*", "+", "-"];
+const PUNCT = ["...", "===", "!==", "==", "!=", "=>", "<=", ">=", "&&", "||", "<", ">", "!", "?", ":", "(", ")", "[", "]", "{", "}", ".", ",", "/", "*", "+", "-"];
 const IDENT_START = /[A-Za-z_$]/;
 const IDENT_PART = /[A-Za-z0-9_$]/;
 
@@ -363,8 +394,20 @@ class Parser {
     return e;
   }
 
-  /** Lowest precedence: `?:` (right-associative). */
+  /**
+   * Lowest precedence: an arrow lambda, then `?:` (right-associative).
+   *
+   * A lambda is recognized by LOOKAHEAD, never by backtracking: `t =>` or a parenthesized list of
+   * bare names followed by `=>`. Anything else in parentheses is the grouping it always was, so
+   * `(a) + 1` and `(a ? b : c)` parse exactly as before. The body extends as far right as it can —
+   * JavaScript's rule — so `t => t.a ? 1 : 2` is one lambda.
+   */
   private ternary(): Expr {
+    const params = this.lambdaParams();
+    if (params !== undefined) {
+      this.i = params.after;
+      return { type: "lambda", params: params.names, body: this.ternary() };
+    }
     const test = this.or();
     if (!this.atPunct("?")) return test;
     this.next();
@@ -372,6 +415,39 @@ class Parser {
     this.expectPunct(":");
     const alt = this.ternary();
     return { type: "apply", op: RESOLVER_REFS.cond, args: [test, cons, alt] };
+  }
+
+  /** The parameter list of a lambda starting here, and where its body starts — or `undefined`. */
+  private lambdaParams(): { names: string[]; after: number } | undefined {
+    const at = (k: number): Token | undefined => this.tokens[k];
+    const isArrow = (t: Token | undefined): boolean => t?.kind === "punct" && t.value === "=>";
+    const first = at(this.i);
+    // `t => …`
+    if (first?.kind === "ident" && isArrow(at(this.i + 1))) {
+      return { names: [first.value], after: this.i + 2 };
+    }
+    if (first?.kind !== "punct" || first.value !== "(") return undefined;
+    // `(…) => …` — only bare names, comma-separated, may stand between the parentheses.
+    const names: string[] = [];
+    let k = this.i + 1;
+    if (at(k)?.kind === "punct" && (at(k) as { value: string }).value === ")") {
+      return isArrow(at(k + 1)) ? { names, after: k + 2 } : undefined;
+    }
+    for (;;) {
+      const name = at(k);
+      if (name?.kind !== "ident") return undefined;
+      names.push(name.value);
+      const sep = at(k + 1);
+      if (sep?.kind !== "punct") return undefined;
+      if (sep.value === ",") {
+        k += 2;
+        continue;
+      }
+      if (sep.value !== ")" || !isArrow(at(k + 2))) return undefined;
+      const duplicate = names.find((n, i) => names.indexOf(n) !== i);
+      if (duplicate !== undefined) throw new ExprError(`duplicate lambda parameter '${duplicate}'`, name.pos);
+      return { names, after: k + 3 };
+    }
   }
 
   private or(): Expr {
@@ -495,7 +571,9 @@ class Parser {
         if (reference === undefined && !base.startsWith("$")) return e;
         this.next();
         const t = this.next();
-        if (t.kind !== "ident") throw new ExprError("expected a path segment after '/'", t.pos);
+        // A QUOTED segment carries a file or directory name an identifier cannot — `'my-flow'`, whose
+        // `-` would otherwise be a subtraction — exactly as a quoted `.` segment carries a key.
+        if (t.kind !== "ident" && t.kind !== "str") throw new ExprError("expected a path segment after '/'", t.pos);
         reference = `${base}/${t.value}`;
         continue;
       }
@@ -603,7 +681,28 @@ class Parser {
       return e;
     }
     if (t.kind === "punct" && t.value === "{") return this.objectLiteral();
+    // An array literal. A `[` can only be INDEXING after a value (the member loop owns that case),
+    // so one in primary position is unambiguous.
+    if (t.kind === "punct" && t.value === "[") return this.arrayLiteral();
     throw new ExprError("unexpected token", t.pos);
+  }
+
+  /** An array literal's items, already past the `[`. A trailing comma is allowed, as in an object. */
+  private arrayLiteral(): Expr {
+    const items: Expr[] = [];
+    for (;;) {
+      if (this.atPunct("]")) {
+        this.next();
+        return { type: "array", items };
+      }
+      items.push(this.ternary());
+      if (this.atPunct(",")) {
+        this.next();
+        continue;
+      }
+      this.expectPunct("]");
+      return { type: "array", items };
+    }
   }
 
   /**
@@ -794,6 +893,20 @@ export function evaluate(expr: Expr, context: Record<string, unknown>): ExprValu
       }
       return out;
     }
+    case "array": {
+      // Strict in every item, for the reason an object literal is.
+      const out: unknown[] = [];
+      for (const item of expr.items) {
+        const v = evaluate(item, context);
+        if (isPending(v)) return PENDING;
+        out.push(v);
+      }
+      return out;
+    }
+    case "lambda":
+      // A lambda is applied by the LOAD-TIME evaluator (`loadExpr.ts`) and nowhere else — see the
+      // node's own note. Here it could only be a value nothing can call.
+      throw new ExprError("a lambda is applied only in a load-time '$ref' expression", 0);
   }
 }
 
@@ -955,6 +1068,14 @@ export function referencesOf(expr: Expr): string[][] {
       case "object":
         // The VALUES read data; the KEYS are names the author wrote, not paths into anything.
         for (const entry of e.entries) collect(entry.value);
+        return undefined;
+      case "array":
+        for (const item of e.items) collect(item);
+        return undefined;
+      case "lambda":
+        // A parameter is a bare name, so it contributes nothing; a leading-dot read in the body is a
+        // read like any other.
+        collect(e.body);
         return undefined;
     }
   };

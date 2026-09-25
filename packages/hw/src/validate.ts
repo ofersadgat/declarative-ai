@@ -35,6 +35,7 @@ import {
   BOUND_CALLEE,
   CONFIG_FIELD_SCHEMAS,
   EACH_NAMESPACE,
+  EVENT_NAMESPACE,
   FIELD_NAMESPACES,
   GUARD_NAMESPACES,
   hasDefault,
@@ -62,6 +63,8 @@ export interface ValidationReport {
 
 const NAMESPACES: ReadonlySet<string> = new Set([...REF_NAMESPACES, ...GUARD_NAMESPACES, ...FIELD_NAMESPACES]);
 const TERMINATES: ReadonlySet<string> = new Set(TERMINATE_TARGETS);
+/** Where `.event` may be read, said once for the two checks that refuse it elsewhere. */
+const EVENT_ONLY = "'.event' is only readable in a transition's own inputs — it is what that rule's deferred call resolved to";
 /** The termination outcomes a child's `outcome` can carry (SPEC §3.6) — the four an author can
  *  transition to, and `skipped`, which only a directed transition records (SPEC §3.3). */
 const TERMINATE_OUTCOMES = TERMINATION_OUTCOMES;
@@ -344,6 +347,16 @@ function validateState(
    */
   const checkTransitions = (list: readonly LoadedTransition[] | undefined, where: string, mountKey?: string): void =>
     (list ?? []).forEach((t, i) => {
+      // A rule's NAME is a label, unique within its own list — it is how a layer that `$ref`s the
+      // list picks lines out of it, and two lines answering to one name make that pick ambiguous.
+      const name = (t as { name?: unknown }).name;
+      if (name !== undefined) {
+        if (typeof name !== "string" || name.length === 0) err(`${where}[${i}].name`, "`name` must be a non-empty string");
+        else {
+          const first = (list ?? []).findIndex((other) => (other as { name?: unknown }).name === name);
+          if (first !== i) err(`${where}[${i}].name`, `'${name}' already names ${where}[${first}] — a rule's name is unique within its list`);
+        }
+      }
       if (!TERMINATES.has(t.to) && !childKeys.has(t.to)) {
         err(`${where}[${i}].to`, `'${t.to}' is neither a declared child nor a terminate.* outcome`);
       }
@@ -382,7 +395,8 @@ function validateState(
         // well as everything before it; on the state's own list it proves what always runs.
         const at = mountKey === undefined ? reachable : reachable.enteredAt(mountKey);
         const proven = mountKey === undefined ? at : { ...at, always: new Set([...at.always, mountKey]) };
-        checkBinding(binding, consumer?.schema, path, id, def, bundle, scope, proven, errors, isOptOut(meta), undefined, consumer?.kind, warnings);
+        // `.event` is readable here, and only here: what this rule's own deferred call resolved to.
+        checkBinding(binding, consumer?.schema, path, id, def, bundle, scope, proven, errors, isOptOut(meta), undefined, consumer?.kind, warnings, true);
       }
       let ast: Expr | undefined;
       if (t.when !== undefined) {
@@ -1012,8 +1026,14 @@ function checkBinding(
   kind?: RefKind,
   /** Where inference's warnings go — a call through an untyped callable (§7.5.2). */
   warnings?: ValidationIssue[],
+  /**
+   * Whether this is a TAKEN RULE's wiring, the one place `.event` — what the rule's deferred call
+   * resolved to — may be read. Its type is whatever that call returns, which is not known here.
+   */
+  event = false,
 ): void {
-  const bindingScope: ExprScope = eachAxes === undefined ? scope : { ...scope, [EACH_NAMESPACE]: eachSchema(eachAxes) };
+  const withEach: ExprScope = eachAxes === undefined ? scope : { ...scope, [EACH_NAMESPACE]: eachSchema(eachAxes) };
+  const bindingScope: ExprScope = event ? { ...withEach, [EVENT_NAMESPACE]: ANY_SCHEMA } : withEach;
   // Reference and reachability checks run over the WHOLE binding, once, before the type check.
   //
   // They used to live inside the expression branch of `resolverSchema`, which made them depend on
@@ -1030,6 +1050,10 @@ function checkBinding(
       if (eachAxes === undefined) {
         errors.push({ stateId, path, message: `'.each' is only readable in the wiring of a child mount that fans out (an input marked each)` });
       }
+      continue;
+    }
+    if (root === EVENT_NAMESPACE) {
+      if (!event) errors.push({ stateId, path, message: EVENT_ONLY });
       continue;
     }
     if (!NAMESPACES.has(root)) {
@@ -1242,6 +1266,10 @@ function resolverSchema(
       // the scope is what says where it may be read, so a read anywhere else is refused here.
       if (root === EACH_NAMESPACE) {
         if (!(EACH_NAMESPACE in scope)) err(`'.each' is only readable in the wiring of a child mount that fans out (an input marked each)`);
+        continue;
+      }
+      if (root === EVENT_NAMESPACE) {
+        if (!(EVENT_NAMESPACE in scope)) err(EVENT_ONLY);
         continue;
       }
       if (!NAMESPACES.has(root)) {

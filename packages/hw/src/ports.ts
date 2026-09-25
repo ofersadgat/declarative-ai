@@ -208,12 +208,16 @@ export type EngineEvent =
    * (artifact content elided). The target is entered with nothing but a standing rule's wiring and
    * takes the next step as soon as it is entered; a run that died between the two is loaded with the
    * step still owed (`LoadedInstance.descent`).
+   *
+   * `name` is the fired rule's own `name` (`TransitionDecl.name`), when it has one — which line of
+   * the list this was, in the words the author gave it.
    */
   | {
       type: "transition.taken";
       instanceId: string;
       stateId: string;
       to: string;
+      name?: string;
       index: number;
       iteration: number;
       by?: TransitionAsker;

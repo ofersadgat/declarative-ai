@@ -143,6 +143,25 @@ export interface HostCapabilities {
    * a computation over its arguments.
    */
   deferred?: boolean;
+  /**
+   * Only with {@link deferred}: the wait LISTENS to the world rather than asking a question.
+   *
+   * An ordinary deferred call is a DECISION someone has been asked for — a drop target shown, an
+   * approval requested — and a transition guard waiting on one stops its rule list: every rule behind
+   * it is a rule about that decision, and offering two for one would put an offer on a board that the
+   * engine could not act on. A listening call (`on_event('git.push')`) is a SUBSCRIPTION: nothing is
+   * being decided, and "the next push" is not a question anybody answers `false`. So its wait:
+   *
+   *  - does not stop the list — the rules behind it are prepared and armed too, and the first rule
+   *    whose guard comes true fires, in list order, while the others keep waiting;
+   *  - is not withdrawn when a DIFFERENT rule fires — only the rule that read its answer consumes it,
+   *    so an answer that arrived in the same round as another rule's is taken in the next one;
+   *  - still keeps its state waiting, as any wait does, rather than letting it terminate.
+   *
+   * Absent means `false`: a deferred call is a question, which is what every one written before this
+   * field was.
+   */
+  listens?: boolean;
 }
 
 /**

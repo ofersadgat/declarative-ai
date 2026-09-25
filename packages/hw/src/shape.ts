@@ -131,7 +131,7 @@ const environment: Shape = {
 };
 
 /** A transition list, in the one shape both the state level and a child mount write it. */
-const transitions: Shape = { t: "array", of: { t: "object", fields: { to: scalar, when: scalar } } };
+const transitions: Shape = { t: "array", of: { t: "object", fields: { name: scalar, to: scalar, when: scalar } } };
 
 const child: Shape = {
   t: "object",
