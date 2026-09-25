@@ -59,18 +59,25 @@ export interface Modalities {
  * Everything the runtime knows about ONE model. The rate fields ({@link RateSet}) drive cost; the
  * capability fields drive routing and the structured-output decision. Identity is `route` + `model`
  * (the project's `{route}/{model}` structure), and the catalog keys on the combined `${route}/${model}`.
- * Every non-rate, non-identity field is OPTIONAL — a row that only knows a price still works (cost
- * computes; capabilities fall back to heuristics), and the §5 refresh fills the rest in over time.
+ * Every non-identity field is OPTIONAL — a row that only knows a price still works (cost computes;
+ * capabilities fall back to heuristics), and the §5 refresh fills the rest in over time.
+ *
+ * The RATES are optional too, because not every route has its own price list: an agent's row (what
+ * `claude` or `codex` reports it runs) and a model a provider lists before any price source does. Such a
+ * row is priced by the row with the same {@link canonicalId} that has rates — see
+ * {@link ModelInfo.pricedRow} (JaiRA decision 0009 §2). A zero rate is a CLAIM (local inference is
+ * free); an absent one is "priced elsewhere, or not at all".
  *
  * (Was `ModelInfo`; renamed so the `ModelInfo` name is free for the catalog CLASS below.)
  */
-export interface ModelInfoInterface extends RateSet {
+export interface ModelInfoInterface extends Partial<RateSet> {
   /**
-   * Serving ROUTE — the route the call takes: "anthropic" (native Anthropic API) or "openrouter". This
-   * is what distinguishes an OpenRouter-served Opus row from a Claude-API-served one (they carry
-   * different prices). Same set as {@link ModelRoute} / the router's `{route}/…` prefix.
+   * Serving ROUTE — the route the call takes: a provider route ({@link ModelRoute}: "anthropic",
+   * "openai", "openrouter", "local", "embedded") or an AGENT's ("claude-cli", "codex-cli", …), whose rows
+   * say what that transport takes for a model. This is what distinguishes an OpenRouter-served Opus row
+   * from a Claude-API-served one, or from what the `claude` binary offers. The router's `{route}/…` prefix.
    */
-  route: ModelRoute;
+  route: ModelRoute | (string & {});
   /**
    * Provider-native model id (the part after the `{route}/` prefix) — e.g. `claude-opus-4-8` on the
    * anthropic route, or `openai/gpt-5` / `anthropic/claude-opus-4.8` on the openrouter route. Together
@@ -233,6 +240,11 @@ export function keyForModel(row: Pick<ModelInfoInterface, "route" | "model">): s
   return `${row.route}/${row.model}`;
 }
 
+/** A row that carries its own base rates — the half of {@link RateSet} a price needs. */
+export function hasRates(row: ModelInfoInterface): row is ModelInfoInterface & RateSet {
+  return typeof row.inputPerMillion === "number" && typeof row.outputPerMillion === "number";
+}
+
 /** Drop any `vendor/` prefix from a provider-native `model` id (e.g. `openai/gpt-5` → `gpt-5`). */
 function bareModel(model: string): string {
   return model.includes("/") ? model.slice(model.lastIndexOf("/") + 1) : model;
@@ -250,10 +262,18 @@ export function isReasoningModel(modelId: string): boolean {
   return /^gpt-5/.test(bare) || /^o[1-9]/.test(bare);
 }
 
-/** Provider-NEUTRAL canonical id for a `model` id (drop any `vendor/` prefix, dots→hyphens) — the key
- *  that collapses the same model's native + OpenRouter routes (see {@link ModelInfoInterface.canonicalId}). */
+/**
+ * Provider-NEUTRAL canonical id for a `model` id — the key that collapses the same model across its
+ * routes (see {@link ModelInfoInterface.canonicalId}): drop any `vendor/` prefix, dots→hyphens, and the
+ * two suffixes that name a SNAPSHOT or a variant of one model rather than another model — a release date
+ * (`claude-haiku-4-5-20251001`, `gpt-4o-2024-08-06`) and claude's context-window mark (`[1m]`).
+ */
 export function canonicalIdFor(model: string): string {
-  return bareModel(model).toLowerCase().replace(/\./g, "-");
+  return bareModel(model)
+    .toLowerCase()
+    .replace(/\[[^\]]*\]$/, "")
+    .replace(/-(?:\d{8}|\d{4}-\d{2}-\d{2})$/, "")
+    .replace(/\./g, "-");
 }
 
 /**
@@ -639,6 +659,7 @@ export class ModelInfo<const Rows extends readonly ModelInfoInterface[] = readon
    *  against the seed keys — the compile-time guarantee is about the CONSTRUCTOR data (§generic). */
   upsert(row: ModelInfoInterface): void {
     this.rows.set(keyForModel(row), row);
+    this.donors = undefined;
   }
 
   /** Bulk upsert — e.g. hydrate from a store at startup. */
@@ -648,6 +669,37 @@ export class ModelInfo<const Rows extends readonly ModelInfoInterface[] = readon
 
   remove(model: ModelKeyOf<Rows>): void {
     this.rows.delete(model);
+    this.donors = undefined;
+  }
+
+  /** Priced rows by canonical id, best donor first — built on first use after a change. */
+  private donors: Map<string, ModelInfoInterface> | undefined;
+
+  /**
+   * The row whose rates price `model`: its own when it has them, else the priced row with the same
+   * {@link ModelInfoInterface.canonicalId} — an agent's row priced by the API that serves the same
+   * model (JaiRA decision 0009 §2). A native route's price beats OpenRouter's relay of it; a local or
+   * embedded row never prices anything but itself, since "free on my machine" says nothing about a
+   * remote model's price.
+   */
+  pricedRow(model: ModelKeyOf<Rows>): ModelInfoInterface | undefined {
+    const row = this.rows.get(model);
+    if (row === undefined) return undefined;
+    if (hasRates(row)) return row;
+    this.donors ??= this.indexDonors();
+    return this.donors.get(row.canonicalId ?? canonicalIdFor(row.model));
+  }
+
+  private indexDonors(): Map<string, ModelInfoInterface> {
+    const rank = (route: string): number => (route === "anthropic" || route === "openai" ? 0 : route === "openrouter" ? 1 : 2);
+    const best = new Map<string, ModelInfoInterface>();
+    for (const row of this.rows.values()) {
+      if (!hasRates(row) || row.route === "local" || row.route === "embedded") continue;
+      const id = row.canonicalId ?? canonicalIdFor(row.model);
+      const held = best.get(id);
+      if (held === undefined || rank(row.route) < rank(held.route)) best.set(id, row);
+    }
+    return best;
   }
 
   list(): ModelInfoInterface[] {
@@ -661,8 +713,9 @@ export class ModelInfo<const Rows extends readonly ModelInfoInterface[] = readon
     return this.rows.get(model);
   }
 
+  /** Whether a call on `model` can be priced — by its own rates or a donor's (see {@link pricedRow}). */
   hasPricing(model: ModelKeyOf<Rows>): boolean {
-    return this.rows.has(model);
+    return this.pricedRow(model) !== undefined;
   }
 
   /**
@@ -700,7 +753,8 @@ export class ModelInfo<const Rows extends readonly ModelInfoInterface[] = readon
   // --- Cost -----------------------------------------------------------------
 
   /**
-   * Billing-accurate USD cost from a token breakdown, or `null` for an unknown model.
+   * Billing-accurate USD cost from a token breakdown, or `null` for a model nothing prices (see
+   * {@link pricedRow}).
    *
    * Models every Anthropic pricing dimension exactly (the API reports all of them):
    *  - uncached input at the base rate, output (incl. reasoning) at the output rate;
@@ -713,8 +767,8 @@ export class ModelInfo<const Rows extends readonly ModelInfoInterface[] = readon
    * tier's base input rate, so a row normally only specifies input/output.
    */
   computeCost(model: ModelKeyOf<Rows>, usage: UsageForCost): number | null {
-    const p = this.rows.get(model);
-    if (!p) return null;
+    const p = this.pricedRow(model);
+    if (!p || !hasRates(p)) return null;
     const rates = this.effectiveRates(p, usage.inputTokens ?? 0);
 
     const { noCacheTokens, cacheReadTokens, cacheWriteTokens, cacheWrite1hTokens } = usage;
@@ -738,7 +792,7 @@ export class ModelInfo<const Rows extends readonly ModelInfoInterface[] = readon
 
   /** Resolve concrete per-million rates, applying the long-context tier when the input crosses it. */
   private effectiveRates(
-    row: ModelInfoInterface,
+    row: ModelInfoInterface & RateSet,
     totalInputTokens: number,
   ): { input: number; output: number; cacheRead: number; cacheWrite: number; cacheWrite1h: number } {
     const lc = row.longContext;
@@ -773,129 +827,22 @@ export class ModelInfo<const Rows extends readonly ModelInfoInterface[] = readon
 }
 
 /**
- * Seed catalog — a STARTING point, kept current by the §5 refresh (scrapes the Anthropic docs
- * pricing table + OpenRouter models API, which hydrates `ModelInfo.instance` at startup). Values
- * verified against https://platform.claude.com/docs/en/about-claude/pricing (2026-06-02). The seed
- * carries PRICE only; capabilities (`parameters` / `structuredOutput` / `schemaProfile`) are filled by
- * the refresh, with heuristic fallbacks until then.
+ * What the runtime starts from: the committed snapshot written by `npm run update:model-info`
+ * ({@link GENERATED_MODELS}) — the first-launch and offline SEED, nothing more. A client keeps its table
+ * current itself, from what each route reports (`refreshModelCatalog`, JaiRA decision 0009), and loads
+ * what it learned over this at startup.
  *
- * Identity is `{route}/{model}`: native Claude → route "anthropic"; everything else routes via
- * OpenRouter, so OpenAI/embeddings use route "openrouter" and the OpenRouter-native `openai/…` model id
- * (there is no native OpenAI route in this project — routes are only "anthropic" | "openrouter").
+ * There is no hand-maintained list beside it. The native `anthropic` and `openai` rows the old seed
+ * carried by hand are in the snapshot as OpenRouter's mirrors of them (`nativeMirrors`), so a
+ * regeneration no longer empties a route no source covered.
  *
- * NB current Anthropic models (Opus 4.6+/Sonnet 4.6) include the full 1M context window at
- * STANDARD pricing — there is NO long-context premium today, so no row seeds `longContext`
- * (the tier mechanism stays for when a model reintroduces one). Opt-in modifiers NOT seeded
- * (applied by the caller when used): data-residency ×1.1, Fast mode, Batch ×0.5.
- *
- * This is the hand-maintained CORE seed. It is the fallback base for the snapshot generator
- * (`scripts/updateModelInfo.ts`, run by `npm run update:model-info`): the generator seeds a catalog with
- * these (completed) rows and then overlays the live refresh, so the core models survive even if a source
- * is down. The generator's output — {@link DEFAULT_MODELS} — is what the runtime actually uses.
+ * WEAKLY typed by annotation: `ModelInfo.instance` is the string-keyed case anyway, and
+ * {@link KnownModelKey} is where the compile-time enum lives.
  */
-export const CORE_SEED_MODELS = [
-  // OpenAI — native route (input / output $/MTok). Hand-seeded like the Anthropic rows below, and it
-  // has to be: the generator refreshes from Anthropic's docs and OpenRouter's API, and neither of
-  // those publishes OpenAI's own catalog. A hand row still prices correctly and still lets the picker
-  // offer the model.
-  //
-  // Every cache rate is EXPLICIT here, unlike the Anthropic rows, because the class defaults are
-  // Anthropic's ratios and OpenAI does not share them. Two divergences, both silent:
-  //  - the cached-read discount is 0.1x on the GPT-5 family but 0.25x on 4.1/o3/o4-mini and 0.5x on
-  //    4o, so the inherited 0.1x would under-report a cached call by up to fivefold;
-  //  - there is NO cache-WRITE charge at all — caching is automatic and free — while the inherited
-  //    multipliers would bill a write at 1.25x/2x of input for tokens nobody was charged for.
-  { route: "openai", model: "gpt-5", inputPerMillion: 1.25, outputPerMillion: 10,
-    cacheReadPerMillion: 0.125, cacheWritePerMillion: 0, cacheWrite1hPerMillion: 0 },
-  { route: "openai", model: "gpt-5-mini", inputPerMillion: 0.25, outputPerMillion: 2,
-    cacheReadPerMillion: 0.025, cacheWritePerMillion: 0, cacheWrite1hPerMillion: 0 },
-  { route: "openai", model: "gpt-5-nano", inputPerMillion: 0.05, outputPerMillion: 0.4,
-    cacheReadPerMillion: 0.005, cacheWritePerMillion: 0, cacheWrite1hPerMillion: 0 },
-  { route: "openai", model: "gpt-4.1", inputPerMillion: 2, outputPerMillion: 8,
-    cacheReadPerMillion: 0.5, cacheWritePerMillion: 0, cacheWrite1hPerMillion: 0 },
-  { route: "openai", model: "gpt-4.1-mini", inputPerMillion: 0.4, outputPerMillion: 1.6,
-    cacheReadPerMillion: 0.1, cacheWritePerMillion: 0, cacheWrite1hPerMillion: 0 },
-  { route: "openai", model: "gpt-4o", inputPerMillion: 2.5, outputPerMillion: 10,
-    cacheReadPerMillion: 1.25, cacheWritePerMillion: 0, cacheWrite1hPerMillion: 0 },
-  { route: "openai", model: "gpt-4o-mini", inputPerMillion: 0.15, outputPerMillion: 0.6,
-    cacheReadPerMillion: 0.075, cacheWritePerMillion: 0, cacheWrite1hPerMillion: 0 },
-  { route: "openai", model: "o3", inputPerMillion: 2, outputPerMillion: 8,
-    cacheReadPerMillion: 0.5, cacheWritePerMillion: 0, cacheWrite1hPerMillion: 0 },
-  { route: "openai", model: "o4-mini", inputPerMillion: 1.1, outputPerMillion: 4.4,
-    cacheReadPerMillion: 0.275, cacheWritePerMillion: 0, cacheWrite1hPerMillion: 0 },
-  // Anthropic — native route (input / output $/MTok; cache rates derive 0.1x/1.25x/2x).
-  { route: "anthropic", model: "claude-opus-4-8", inputPerMillion: 5, outputPerMillion: 25 },
-  { route: "anthropic", model: "claude-opus-4-7", inputPerMillion: 5, outputPerMillion: 25 },
-  { route: "anthropic", model: "claude-opus-4-6", inputPerMillion: 5, outputPerMillion: 25 },
-  { route: "anthropic", model: "claude-opus-4-5", inputPerMillion: 5, outputPerMillion: 25 },
-  { route: "anthropic", model: "claude-opus-4-1", inputPerMillion: 15, outputPerMillion: 75 },
-  { route: "anthropic", model: "claude-opus-4-0", inputPerMillion: 15, outputPerMillion: 75 },
-  { route: "anthropic", model: "claude-sonnet-4-8", inputPerMillion: 3, outputPerMillion: 15 },
-  { route: "anthropic", model: "claude-sonnet-4-6", inputPerMillion: 3, outputPerMillion: 15 },
-  { route: "anthropic", model: "claude-sonnet-4-5", inputPerMillion: 3, outputPerMillion: 15 },
-  { route: "anthropic", model: "claude-sonnet-4-2", inputPerMillion: 3, outputPerMillion: 15 },
-  { route: "anthropic", model: "claude-sonnet-4-0", inputPerMillion: 3, outputPerMillion: 15 },
-  { route: "anthropic", model: "claude-haiku-4-5", inputPerMillion: 1, outputPerMillion: 5 },
-  { route: "anthropic", model: "claude-haiku-3-5", inputPerMillion: 0.8, outputPerMillion: 4 },
-  { route: "anthropic", model: "claude-3-haiku", inputPerMillion: 0.25, outputPerMillion: 1.25 },
+export const DEFAULT_MODELS: readonly ModelInfoInterface[] = GENERATED_MODELS;
 
-  // OpenAI — via OpenRouter (route "openrouter", OpenRouter-native `openai/…` ids).
-  { route: "openrouter", model: "openai/gpt-4o-mini", inputPerMillion: 0.15, outputPerMillion: 0.6 },
-  { route: "openrouter", model: "openai/gpt-4o", inputPerMillion: 2.5, outputPerMillion: 10 },
-  { route: "openrouter", model: "openai/gpt-4.1-nano", inputPerMillion: 0.1, outputPerMillion: 0.4 },
-  { route: "openrouter", model: "openai/gpt-4.1-mini", inputPerMillion: 0.4, outputPerMillion: 1.6 },
-  { route: "openrouter", model: "openai/gpt-4.1", inputPerMillion: 2, outputPerMillion: 8 },
-  { route: "openrouter", model: "openai/gpt-5-nano", inputPerMillion: 0.25, outputPerMillion: 1 },
-  { route: "openrouter", model: "openai/gpt-5-mini", inputPerMillion: 1, outputPerMillion: 4 },
-  { route: "openrouter", model: "openai/gpt-5", inputPerMillion: 3.75, outputPerMillion: 15 },
-  { route: "openrouter", model: "openai/o3-mini", inputPerMillion: 1.1, outputPerMillion: 4.4 },
-  { route: "openrouter", model: "openai/o3", inputPerMillion: 10, outputPerMillion: 40 },
-  { route: "openrouter", model: "openai/o4-mini", inputPerMillion: 1.1, outputPerMillion: 4.4 },
-
-  // NB other providers (Google, Meta, DeepSeek, Amazon, Mistral, xAI, …) are intentionally NOT
-  // seeded here: their authoritative prices + ids + `releasedAt` + capabilities come from the §5
-  // OpenRouter refresh (model-catalog-source.ts). Hand-seeding them would risk a fabricated price the
-  // refresh never corrects (when its real `vendor/model` id differs from the guess).
-
-  // Embeddings (§3.6 kernel) — via OpenRouter.
-  { route: "openrouter", model: "openai/text-embedding-3-small", inputPerMillion: 0.02, outputPerMillion: 0 },
-  { route: "openrouter", model: "openai/text-embedding-3-large", inputPerMillion: 0.13, outputPerMillion: 0 },
-] as const satisfies readonly ModelInfoInterface[];
-
-/**
- * What the runtime uses: the committed snapshot produced by `npm run update:model-info`
- * ({@link GENERATED_MODELS}), plus any {@link CORE_SEED_MODELS} row it does not already carry.
- *
- * The union matters for a route the GENERATOR cannot see. It refreshes from Anthropic's docs and
- * OpenRouter's API, so a native OpenAI row exists only in the seed — and a plain
- * `= GENERATED_MODELS` would drop it on every regeneration, silently emptying the `openai` route
- * while the code that added it still looked right.
- *
- * The seed half is passed through {@link deriveIdentity}, which the GENERATED half already went
- * through on the way in (`model-catalog-source`). Without it a folded-in row reaches the catalog
- * with no `provider`, `label` or `canonicalId` — so it prices correctly and then shows up in a picker
- * that groups by vendor as an unnamed row under no heading. That was invisible while the only seed
- * rows were Anthropic ones, because a generated row of the same key masked every one of them.
- *
- * This is a WEAKLY-typed array by annotation, unlike the two tuples it is built from: a value spliced
- * at runtime has no literal type to offer, and {@link KnownModelKey} is where the compile-time enum
- * lives instead. `ModelInfo.instance` is the weak (string-keyed) case anyway, so nothing regresses —
- * a caller who wants checked keys constructs `new ModelInfo(GENERATED_MODELS)` from a tuple directly.
- */
-export const DEFAULT_MODELS: readonly ModelInfoInterface[] = (() => {
-  const have = new Set(GENERATED_MODELS.map((row) => keyForModel(row)));
-  const seeded = CORE_SEED_MODELS.filter((row) => !have.has(keyForModel(row))).map((row) => deriveIdentity(row));
-  return [...GENERATED_MODELS, ...seeded];
-})();
-
-/**
- * The union of every `${route}/${model}` key the runtime knows out of the box — a compile-time enum.
- *
- * BOTH halves of {@link DEFAULT_MODELS}, which is why `CORE_SEED_MODELS` is `as const`: a key that
- * exists only in the seed — every native `openai/…` id — is as known as one the refresh wrote, and a
- * union naming only the snapshot would call it unknown.
- */
-export type KnownModelKey = ModelKeyOf<typeof GENERATED_MODELS> | ModelKeyOf<typeof CORE_SEED_MODELS>;
+/** The union of every `${route}/${model}` key the snapshot ships with — a compile-time enum. */
+export type KnownModelKey = ModelKeyOf<typeof GENERATED_MODELS>;
 
 /** Seed rows (a fresh copy per call). */
 export function modelsSeed(): ModelInfoInterface[] {

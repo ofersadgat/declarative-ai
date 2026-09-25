@@ -48,6 +48,7 @@
     "@declarative-ai/agents-api": "^0.1.0",
     "@declarative-ai/exec": "^0.1.0",
     "@declarative-ai/json": "^0.1.0",
+    "@declarative-ai/llm": "^0.1.0",
     "@declarative-ai/ops": "^0.1.0"
   },
   "peerDependencies": {

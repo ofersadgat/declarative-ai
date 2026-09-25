@@ -54,7 +54,7 @@ import type {
   ToolCall,
   ToolResult,
 } from "@declarative-ai/llm";
-import { entriesOfMessages } from "@declarative-ai/llm";
+import { entriesOfMessages, fitReasoning, ModelInfo } from "@declarative-ai/llm";
 
 /**
  * Whose vocabulary a delegated agent's `providerData` and block types belong to.
@@ -331,6 +331,17 @@ export const AGENT_DEFAULT_MODEL = "agent/default";
  * a person, a price table, a session's provider half — can tell an unknown from a claim.
  */
 export const UNREPORTED_MODEL = "unreported";
+
+/**
+ * The call's reasoning request fitted to the agent's catalog row for `definition.model` — the
+ * transport's own report of what that model takes — as the query option to spread, or nothing when the
+ * call asks for none or fitting leaves none.
+ */
+function fittedReasoningOf(definition: LlmCallDefinition): { reasoning?: NonNullable<AgentQueryOptions["reasoning"]> } {
+  if (!("reasoning" in definition) || definition.reasoning === undefined) return {};
+  const fitted = fitReasoning(definition.reasoning, ModelInfo.instance.paramAcceptance(definition.model)).spec;
+  return fitted !== undefined ? { reasoning: fitted } : {};
+}
 
 export interface AgentExecutorOptions extends PromptExecutorOptions {
   /** The agent-query seam. Default: {@link sdkAgentQuery} (lazily loads `@anthropic-ai/claude-agent-sdk`). */
@@ -1052,7 +1063,12 @@ export class AgentExecutor extends PromptExecutor {
       // the lowered declaration and drop everything else — so a state authored with `reasoning: {effort:
       // "xhigh"}` and a step budget ran at the agent's own defaults, silently, and cost what the deeper
       // run would have cost only if you were unlucky.
-      ...("reasoning" in definition && definition.reasoning !== undefined ? { reasoning: definition.reasoning } : {}),
+      //
+      // FITTED to what this transport takes for this model (JaiRA decision 0009): the agent's own
+      // catalog row — what `claude` or codex reported it runs — lists its levels, so a level above them
+      // is clamped and one the model has none of is dropped before the binary could refuse it. A model
+      // with no row goes as asked.
+      ...fittedReasoningOf(definition),
       ...(definition.maxSteps !== undefined ? { maxSteps: definition.maxSteps } : {}),
       ...(definition.toolChoice === "none" || definition.toolChoice === "auto" ? { toolChoice: definition.toolChoice } : {}),
       // The output SCHEMA, which is what makes a delegated agent able to serve a state that declares

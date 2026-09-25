@@ -20,7 +20,7 @@ describe("pricing (default catalog)", () => {
     // Read the rates off the row so this stays correct across snapshot refreshes — it verifies the default
     // catalog is WIRED + computes, not a specific price (the arithmetic is pinned in the local-table blocks).
     const id = "anthropic/claude-haiku-4-5";
-    const { inputPerMillion: i, outputPerMillion: o } = catalog.lookup(id)!;
+    const { inputPerMillion: i = NaN, outputPerMillion: o = NaN } = catalog.lookup(id)!;
     expect(catalog.computeCostUsd(id, 1_000_000, 1_000_000)).toBeCloseTo(i + o, 10);
     expect(catalog.computeCostUsd(id, 10, 5)).toBeCloseTo((10 * i + 5 * o) / 1e6, 12);
   });
@@ -33,7 +33,7 @@ describe("pricing (default catalog)", () => {
 
   it("prices an OpenAI model on its OpenRouter route id", () => {
     const id = "openrouter/openai/gpt-4.1-mini";
-    const { inputPerMillion: i } = catalog.lookup(id)!;
+    const { inputPerMillion: i = NaN } = catalog.lookup(id)!;
     expect(catalog.computeCostUsd(id, 1_000_000, 0)).toBeCloseTo(i, 10);
   });
 
@@ -345,45 +345,68 @@ describe("model identity derivation (canonical id / display)", () => {
   });
 });
 
-describe("DEFAULT_MODELS — the snapshot folded together with the seed rows it cannot see", () => {
+describe("DEFAULT_MODELS — the snapshot is the whole seed", () => {
   const keyed = new Map(DEFAULT_MODELS.map((row) => [`${row.route}/${row.model}`, row] as const));
 
-  it("carries the native openai rows, which exist ONLY in the seed", () => {
-    // The generator refreshes from Anthropic's docs and OpenRouter's API; neither publishes OpenAI's
-    // own catalog, so a plain `= GENERATED_MODELS` empties this route on every regeneration.
-    expect(keyed.get("openai/gpt-5")).toBeDefined();
-    // And keeps it as its OWN row beside the same model relayed by OpenRouter. Two rows, not one:
-    // another endpoint, another key, another price row — even in a week when the two prices agree.
-    expect(keyed.get("openrouter/openai/gpt-5")).toBeDefined();
+  it("carries the native openai and anthropic rows, as OpenRouter's mirrors of them", () => {
+    // No hand list beside the snapshot any more: a native row is OpenRouter's row restated
+    // (`nativeMirrors`), so a regeneration cannot empty a route no source covered.
     expect(keyed.get("openai/gpt-5")?.route).toBe("openai");
     expect(keyed.get("openrouter/openai/gpt-5")?.route).toBe("openrouter");
-  });
-
-  it("gives a folded-in seed row the identity a generated row arrives with", () => {
-    // Without this a native openai row prices correctly and then shows up in a vendor-grouped picker
-    // as an unnamed row under no heading. It stayed invisible while every seed row had a generated twin.
+    expect(keyed.get("anthropic/claude-opus-4-8")?.route).toBe("anthropic");
     const row = keyed.get("openai/gpt-5")!;
     expect(row.provider).toBe("OpenAI");
-    expect(row.label).toBe("gpt-5");
     expect(row.canonicalId).toBe("gpt-5");
   });
 
   it("prices OpenAI's cache the way OpenAI does, not the way Anthropic does", () => {
     // The class defaults are Anthropic's ratios (read 0.1x, write 1.25x/2x). OpenAI's cached-read
-    // discount varies by family and its cache WRITE is free, so the inherited defaults would bill a
-    // write nobody was charged for and under-report a 4o cached read fivefold.
+    // discount varies by family and its cache WRITE is free — OpenRouter states the reads and no write.
     const rates = (id: string) => ModelInfo.instance.lookup(id)!;
     expect(rates("openai/gpt-5").cacheReadPerMillion).toBeCloseTo(0.125, 10); // 0.1x
     expect(rates("openai/gpt-4o").cacheReadPerMillion).toBeCloseTo(1.25, 10); // 0.5x — NOT 0.1x
-    expect(rates("openai/o4-mini").cacheReadPerMillion).toBeCloseTo(0.275, 10); // 0.25x
-    for (const id of ["openai/gpt-5", "openai/gpt-4o", "openai/o4-mini"]) {
+    for (const id of ["openai/gpt-5", "openai/gpt-4o"]) {
       expect(rates(id).cacheWritePerMillion, `${id} cache write`).toBe(0);
       expect(rates(id).cacheWrite1hPerMillion, `${id} 1h cache write`).toBe(0);
     }
   });
 
-  it("lets the REFRESH win where a key is in both halves — the seed is a fallback, not an override", () => {
-    expect(keyed.get("anthropic/claude-opus-4-8")?.source).toBe("anthropic-docs");
+  it("carries Anthropic's own report of a model over the mirror's price", () => {
+    const opus = keyed.get("anthropic/claude-opus-5-5")!;
+    expect(opus.source).toBe("anthropic-models");
+    expect(opus.inputPerMillion).toBeGreaterThan(0); // the mirror's price, kept under the native report
+    expect(acceptanceOf(opus.parameters).acceptsBudget).toBe(false); // adaptive-only, as Anthropic says
+  });
+});
+
+describe("pricing a row that has no price of its own", () => {
+  const catalog = new ModelInfo([
+    { route: "anthropic", model: "claude-opus-5", inputPerMillion: 5, outputPerMillion: 25 },
+    { route: "openrouter", model: "anthropic/claude-opus-5", inputPerMillion: 6, outputPerMillion: 30 },
+    { route: "claude-cli", model: "claude-opus-5[1m]", canonicalId: "claude-opus-5" },
+    { route: "codex-cli", model: "gpt-9" },
+    { route: "local", model: "claude-opus-5", inputPerMillion: 0, outputPerMillion: 0 },
+  ]);
+
+  it("takes the price of the row with the same canonical id — the native route over the relay", () => {
+    expect(catalog.pricedRow("claude-cli/claude-opus-5[1m]")?.route).toBe("anthropic");
+    expect(catalog.computeCostUsd("claude-cli/claude-opus-5[1m]", 1_000_000, 0)).toBeCloseTo(5, 10);
+    expect(catalog.hasPricing("claude-cli/claude-opus-5[1m]")).toBe(true);
+  });
+
+  it("is unpriced when nothing shares its id — and a local row never prices a remote one", () => {
+    expect(catalog.hasPricing("codex-cli/gpt-9")).toBe(false);
+    expect(catalog.computeCostUsd("codex-cli/gpt-9", 1_000_000, 0)).toBeNull();
+  });
+
+  it("a row with its own price keeps it", () => {
+    expect(catalog.pricedRow("openrouter/anthropic/claude-opus-5")?.inputPerMillion).toBe(6);
+  });
+
+  it("canonical ids drop a snapshot date and claude's context mark", () => {
+    expect(canonicalIdFor("claude-haiku-4-5-20251001")).toBe("claude-haiku-4-5");
+    expect(canonicalIdFor("gpt-4o-2024-08-06")).toBe("gpt-4o");
+    expect(canonicalIdFor("claude-opus-5[1m]")).toBe("claude-opus-5");
   });
 });
 

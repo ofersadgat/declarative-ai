@@ -23,6 +23,9 @@
       "path": "../json/tsconfig.build.json"
     },
     {
+      "path": "../llm/tsconfig.build.json"
+    },
+    {
       "path": "../ops/tsconfig.build.json"
     }
   ]

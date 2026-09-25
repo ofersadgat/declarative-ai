@@ -1,113 +1,26 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { keyForModel, ModelInfo, parametersFromNames, type ModelInfoInterface } from "../src/model-catalog.js";
+import { acceptanceOf, keyForModel, ModelInfo, type ModelInfoInterface } from "../src/model-catalog.js";
+import {
+  anthropicRejectsSampling,
+  makeAnthropicModelsSource,
+  makeOpenRouterSources,
+  mergeRow,
+  nativeMirrors,
+  parseAnthropicModels,
+  parseOpenRouterModels,
+  refreshModelCatalog,
+  sanitizeCatalogRows,
+  validateCatalogRows,
+  type CatalogSource,
+} from "../src/model-catalog-source.js";
 
-/** The call fields a row's `parameters` schema accepts — what the old name list said, in the new vocabulary. */
+/** The call fields a row's `parameters` schema accepts. */
 function fields(row: ModelInfoInterface | undefined): string[] {
   return Object.keys((row?.parameters?.["properties"] as Record<string, unknown> | undefined) ?? {});
 }
-import {
-  anthropicRejectsSampling,
-  claudeSupportedParameters,
-  claudeSupportsThinking,
-  completeSeedRow,
-  makeAnthropicDocsSource,
-  makeOpenRouterSource,
-  parseAnthropicDocsPricing,
-  parseOpenRouterModels,
-  refreshModelCatalog,
-  sanitizePricingRows,
-  validatePricingRows,
-  type PricingSource,
-} from "../src/model-catalog-source.js";
 
-const fixture = readFileSync(
-  fileURLToPath(new URL("./fixtures/anthropic-pricing.md", import.meta.url)),
-  "utf8",
-);
-
-describe("parseAnthropicDocsPricing", () => {
-  it("parses the docs table into rows with exact cache rates", () => {
-    const rows = parseAnthropicDocsPricing(fixture);
-    const byId = Object.fromEntries(rows.map((r) => [r.model, r]));
-
-    expect(byId["claude-opus-4-8"]).toEqual({
-      route: "anthropic",
-      model: "claude-opus-4-8",
-      inputPerMillion: 5,
-      outputPerMillion: 25,
-      cacheReadPerMillion: 0.5,
-      cacheWritePerMillion: 6.25,
-      cacheWrite1hPerMillion: 10,
-      provider: "Anthropic",
-      label: "claude-opus-4-8",
-      canonicalId: "claude-opus-4-8",
-      // Stamped family defaults — the docs table has no modality/capability columns. Opus 4.8 supports
-      // extended thinking (`reasoning`) but REJECTS the sampling knobs (temperature/top_p/top_k) — mirrors
-      // the AI SDK's rejectsSamplingParameters, so the refresh can't re-introduce the ignored-param warning.
-      modalities: { input: ["text", "image", "file"], output: ["text"] },
-      parameters: parametersFromNames(["max_tokens", "stop", "tools", "tool_choice", "reasoning"]),
-      structuredOutput: "schema",
-      source: "anthropic-docs",
-    });
-    expect(byId["claude-haiku-4-5"]).toMatchObject({ inputPerMillion: 1, outputPerMillion: 5 });
-    // Claude 4.5 Haiku supports extended thinking → reasoning is in its supported params.
-    expect(fields(byId["claude-haiku-4-5"])).toContain("reasoning");
-    // The name→prefix map drops "([deprecated])" notes and dots → hyphens.
-    expect(byId["claude-sonnet-4"]).toMatchObject({ inputPerMillion: 3 });
-    expect(fields(byId["claude-sonnet-4"])).toContain("reasoning");
-    expect(byId["claude-haiku-3-5"]).toMatchObject({ inputPerMillion: 0.8, outputPerMillion: 4 });
-    // Claude 3.5 Haiku does NOT support extended thinking → no reasoning branch (sampling-only).
-    expect(fields(byId["claude-haiku-3-5"])).not.toContain("reasoning");
-    expect(fields(byId["claude-haiku-3-5"])).toContain("temperature");
-  });
-
-  it("collapses date-scheduled price rows onto the canonical model id (no bogus dated id)", () => {
-    const rows = parseAnthropicDocsPricing(fixture);
-    const byId = Object.fromEntries(rows.map((r) => [r.model, r]));
-    // The docs list a price change as two rows ("… through August 31, 2026" / "… starting September 1,
-    // 2026"); both must collapse to `claude-sonnet-5`, NOT become their own dated ids — else a caller
-    // declaring `anthropic/claude-sonnet-5` misses the catalog entirely.
-    expect(byId["claude-sonnet-5"]).toBeDefined();
-    expect(rows.some((r) => /starting|through|,|\d{4}/.test(r.model))).toBe(false);
-    // Exactly one row survives the collapse, and the first (currently-effective) price wins.
-    expect(rows.filter((r) => r.model === "claude-sonnet-5")).toHaveLength(1);
-    expect(byId["claude-sonnet-5"]?.inputPerMillion).toBe(3);
-    // A Claude-5 model supports extended thinking → reasoning stays in its supported params.
-    expect(fields(byId["claude-sonnet-5"])).toContain("reasoning");
-  });
-
-  it("fills capabilities for a NEW family (fable) the family list didn't hardcode", () => {
-    const byId = Object.fromEntries(parseAnthropicDocsPricing(fixture).map((r) => [r.model, r]));
-    // `claudeSupportsThinking` gates on the MAJOR version, not the family word, so a Claude-5 model in a
-    // family beyond opus/sonnet/haiku still gets `reasoning` — the whole point of recording caps per row.
-    expect(byId["claude-fable-5"]).toMatchObject({ inputPerMillion: 10, outputPerMillion: 50 });
-    expect(fields(byId["claude-fable-5"])).toContain("reasoning");
-  });
-
-  it("parses an HTML <table> form too (production fetch may return HTML)", () => {
-    const html = `
-      <table>
-        <tr><th>Model</th><th>Base Input Tokens</th><th>5m Cache Writes</th><th>1h Cache Writes</th><th>Cache Hits</th><th>Output Tokens</th></tr>
-        <tr><td>Claude Haiku 4.5</td><td>$1 / MTok</td><td>$1.25 / MTok</td><td>$2 / MTok</td><td>$0.10 / MTok</td><td>$5 / MTok</td></tr>
-        <tr><td>Claude Sonnet 4.6</td><td>$3 / MTok</td><td>$3.75 / MTok</td><td>$6 / MTok</td><td>$0.30 / MTok</td><td>$15 / MTok</td></tr>
-        <tr><td>Claude Opus 4.8</td><td>$5 / MTok</td><td>$6.25 / MTok</td><td>$10 / MTok</td><td>$0.50 / MTok</td><td>$25 / MTok</td></tr>
-      </table>`;
-    const rows = parseAnthropicDocsPricing(html);
-    expect(rows.find((r) => r.model === "claude-haiku-4-5")).toMatchObject({
-      route: "anthropic",
-      inputPerMillion: 1,
-      outputPerMillion: 5,
-      cacheReadPerMillion: 0.1,
-      cacheWrite1hPerMillion: 2,
-    });
-  });
-
-  it("returns [] when no recognizable pricing table is present", () => {
-    expect(parseAnthropicDocsPricing("# Some page\n\nNo table here.")).toEqual([]);
-  });
-});
+/** A source that answers with fixed rows — the orchestrator's view of any source. */
+const fixed = (name: string, rows: ModelInfoInterface[], extra: Partial<CatalogSource> = {}): CatalogSource => ({ name, fetchRows: async () => rows, ...extra });
 
 describe("parseOpenRouterModels", () => {
   const json = JSON.stringify({
@@ -134,8 +47,6 @@ describe("parseOpenRouterModels", () => {
       label: "claude-opus-4.8", // vendor/ prefix dropped
       canonicalId: "claude-opus-4-8", // dots→hyphens: collapses onto the native `claude-opus-4-8` row
       source: "openrouter-models",
-      // No parameters/modalities stamped: the feed omitted them and OR rows are NOT given
-      // native-Claude caps (the read-time fallback resolves them if needed).
     });
     expect(byId["openai/gpt-4.1-mini"]).toMatchObject({ inputPerMillion: 0.4, outputPerMillion: 1.6 });
     expect(byId["openai/gpt-4.1-mini"]?.releasedAt).toBeUndefined(); // no `created` → unset
@@ -143,20 +54,44 @@ describe("parseOpenRouterModels", () => {
     expect(byId["broken"]).toBeUndefined();
   });
 
-  it("captures capabilities: supported_parameters, context_length, max output, modalities", () => {
-    const withCaps = JSON.stringify({
-      data: [
-        {
-          id: "openai/gpt-5-nano",
-          pricing: { prompt: "0.00000025", completion: "0.000001" },
-          context_length: 400000,
-          supported_parameters: ["reasoning", "response_format", "structured_outputs", "max_tokens"],
-          top_provider: { max_completion_tokens: 128000 },
-          architecture: { input_modalities: ["text", "image"], output_modalities: ["text"] },
-        },
-      ],
+  it("reads the 1-hour cache write and the long-context tier", () => {
+    // MEASURED 2026-09-24: anthropic/claude-opus-5.5's 1h write, and openai/gpt-5.6-luna-pro's override.
+    const [row] = parseOpenRouterModels(
+      JSON.stringify({
+        data: [
+          {
+            id: "openai/gpt-5.6-luna-pro",
+            pricing: {
+              prompt: "0.0000002",
+              completion: "0.0000012",
+              input_cache_write_1h: "0.0000004",
+              overrides: [{ min_prompt_tokens: 272000, prompt: "0.0000004", completion: "0.0000018", input_cache_read: "0.00000004" }],
+            },
+          },
+        ],
+      }),
+    );
+    expect(row).toMatchObject({
+      cacheWrite1hPerMillion: 0.4,
+      longContext: { thresholdTokens: 272000, inputPerMillion: 0.4, outputPerMillion: 1.8, cacheReadPerMillion: 0.04 },
     });
-    const [row] = parseOpenRouterModels(withCaps);
+  });
+
+  it("captures capabilities: supported_parameters, context_length, max output, modalities", () => {
+    const [row] = parseOpenRouterModels(
+      JSON.stringify({
+        data: [
+          {
+            id: "openai/gpt-5-nano",
+            pricing: { prompt: "0.00000025", completion: "0.000001" },
+            context_length: 400000,
+            supported_parameters: ["reasoning", "response_format", "structured_outputs", "max_tokens"],
+            top_provider: { max_completion_tokens: 128000 },
+            architecture: { input_modalities: ["text", "image"], output_modalities: ["text"] },
+          },
+        ],
+      }),
+    );
     expect(row).toMatchObject({
       route: "openrouter",
       model: "openai/gpt-5-nano",
@@ -169,23 +104,24 @@ describe("parseOpenRouterModels", () => {
     expect(fields(row)).toEqual(["maxOutputTokens", "reasoning"]);
     expect(row?.parameters?.["properties"]).toMatchObject({ maxOutputTokens: { maximum: 128000 } });
     // The reasoning model does NOT list temperature/top_p/top_k — exactly why require_parameters would
-    // 404 it if we sent them; the executor filters them out (see llmStep / param-filter test).
+    // 404 it if we sent them; the executor filters them out.
     expect(fields(row)).not.toContain("temperature");
   });
 
   it("reads the per-model `reasoning` object into the levels the model takes", () => {
     // MEASURED 2026-09-24 on anthropic/claude-opus-5.5 (trimmed).
-    const feed = JSON.stringify({
-      data: [
-        {
-          id: "anthropic/claude-opus-5.5",
-          pricing: { prompt: "0.000004", completion: "0.00002" },
-          supported_parameters: ["include_reasoning", "max_tokens", "reasoning", "reasoning_effort", "structured_outputs", "temperature", "verbosity"],
-          reasoning: { mandatory: true, supported_efforts: ["max", "xhigh", "high", "medium", "low"], default_effort: "high" },
-        },
-      ],
-    });
-    const [row] = parseOpenRouterModels(feed);
+    const [row] = parseOpenRouterModels(
+      JSON.stringify({
+        data: [
+          {
+            id: "anthropic/claude-opus-5.5",
+            pricing: { prompt: "0.000004", completion: "0.00002" },
+            supported_parameters: ["include_reasoning", "max_tokens", "reasoning", "reasoning_effort", "structured_outputs", "temperature", "verbosity"],
+            reasoning: { mandatory: true, supported_efforts: ["max", "xhigh", "high", "medium", "low"], default_effort: "high" },
+          },
+        ],
+      }),
+    );
     expect(fields(row).sort()).toEqual(["maxOutputTokens", "reasoning", "temperature"]);
     expect(row?.parameters?.["required"]).toEqual(["reasoning"]);
     expect(row?.parameters?.["properties"]).toMatchObject({
@@ -199,9 +135,113 @@ describe("parseOpenRouterModels", () => {
   });
 });
 
-describe("sanitizePricingRows (lenient per-row drop)", () => {
+describe("nativeMirrors — OpenRouter's rows for a provider's own models, as that provider's route", () => {
+  const rows = parseOpenRouterModels(
+    JSON.stringify({
+      data: [
+        { id: "anthropic/claude-opus-4.8", pricing: { prompt: "0.000005", completion: "0.000025" } },
+        { id: "anthropic/claude-3.7-sonnet:thinking", pricing: { prompt: "0.000003", completion: "0.000015" } },
+        {
+          id: "openai/gpt-5.6-terra",
+          pricing: { prompt: "0.000002", completion: "0.000012" },
+          supported_parameters: ["reasoning", "max_tokens"],
+          reasoning: { supported_efforts: ["low", "high"] },
+        },
+        { id: "qwen/qwen3-max", pricing: { prompt: "0.000001", completion: "0.000004" } },
+      ],
+    }),
+  );
+
+  it("restates anthropic/ and openai/ rows under the native id each API takes, and nothing else", () => {
+    const mirrors = nativeMirrors(rows);
+    expect(mirrors.map(keyForModel)).toEqual(["anthropic/claude-opus-4-8", "openai/gpt-5.6-terra"]);
+    expect(mirrors[0]).toMatchObject({ inputPerMillion: 5, outputPerMillion: 25, canonicalId: "claude-opus-4-8" });
+  });
+
+  it("drops the budget from an openai mirror — OpenAI's own API has only levels", () => {
+    const openai = nativeMirrors(rows).find((r) => r.route === "openai");
+    const gate = acceptanceOf(openai?.parameters);
+    expect(gate.efforts).toEqual(["low", "high"]);
+    expect(gate.acceptsBudget).toBe(false);
+  });
+});
+
+describe("parseAnthropicModels — Anthropic's /v1/models", () => {
+  // MEASURED 2026-09-24 (trimmed to the fields read): an adaptive-only model and a dated budget-only one.
+  const page = JSON.stringify({
+    data: [
+      {
+        id: "claude-opus-5-5",
+        created_at: "2026-09-21T16:24:00Z",
+        max_input_tokens: 1000000,
+        max_tokens: 128000,
+        capabilities: {
+          effort: { supported: true, low: { supported: true }, medium: { supported: true }, high: { supported: true }, xhigh: { supported: true }, max: { supported: true } },
+          thinking: { supported: true, types: { enabled: { supported: false }, adaptive: { supported: true } } },
+          structured_outputs: { supported: true },
+          image_input: { supported: true },
+          pdf_input: { supported: true },
+        },
+      },
+      {
+        id: "claude-haiku-4-5-20251001",
+        max_input_tokens: 200000,
+        max_tokens: 64000,
+        capabilities: { effort: { supported: false }, thinking: { supported: true, types: { enabled: { supported: true } } } },
+      },
+    ],
+    has_more: true,
+    last_id: "claude-haiku-4-5-20251001",
+  });
+
+  it("reads exact levels and no budget for an adaptive-only model", () => {
+    const { rows } = parseAnthropicModels(page);
+    const opus = rows.find((r) => r.model === "claude-opus-5-5");
+    expect(opus).toMatchObject({ route: "anthropic", contextLength: 1000000, maxOutputTokens: 128000, structuredOutput: "schema", releasedAt: 1790007840 });
+    expect(opus?.modalities).toEqual({ input: ["text", "image", "file"], output: ["text"] });
+    expect(opus?.inputPerMillion).toBeUndefined(); // no prices here — the mirror has them
+    const gate = acceptanceOf(opus?.parameters);
+    expect(gate.efforts).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(gate.acceptsBudget).toBe(false);
+  });
+
+  it("reads a budget-only model, and adds the alias a dated id is also reached by", () => {
+    const { rows } = parseAnthropicModels(page);
+    expect(rows.map((r) => r.model)).toEqual(["claude-opus-5-5", "claude-haiku-4-5-20251001", "claude-haiku-4-5"]);
+    const gate = acceptanceOf(rows[2]?.parameters);
+    expect(gate.efforts).toEqual([]);
+    expect(gate.acceptsBudget).toBe(true);
+    expect(gate.maxBudget).toBe(63999);
+    expect(rows[2]?.canonicalId).toBe("claude-haiku-4-5");
+  });
+
+  it("says where the next page starts", () => {
+    expect(parseAnthropicModels(page)).toMatchObject({ hasMore: true, lastId: "claude-haiku-4-5-20251001" });
+  });
+
+  it("pages through the listing with the account's key", async () => {
+    const asked: Array<{ url: string; headers?: Record<string, string> }> = [];
+    const source = makeAnthropicModelsSource(async (url, init) => {
+      asked.push({ url, ...(init?.headers !== undefined ? { headers: init.headers } : {}) });
+      return asked.length === 1 ? page : JSON.stringify({ data: [], has_more: false });
+    }, "sk-test");
+    await source.fetchRows();
+    expect(asked.map((a) => a.url)).toEqual([
+      "https://api.anthropic.com/v1/models?limit=100",
+      "https://api.anthropic.com/v1/models?limit=100&after_id=claude-haiku-4-5-20251001",
+    ]);
+    expect(asked[0]?.headers).toMatchObject({ "x-api-key": "sk-test", "anthropic-version": "2023-06-01" });
+  });
+
+  it("keeps the sampling knobs off the models the AI SDK says reject them", () => {
+    for (const id of ["claude-opus-4-8", "claude-opus-4-7", "anthropic/claude-opus-4.8"]) expect(anthropicRejectsSampling(id)).toBe(true);
+    expect(anthropicRejectsSampling("claude-opus-5-5")).toBe(false);
+  });
+});
+
+describe("sanitizeCatalogRows (lenient per-row drop)", () => {
   it("keeps the good rows and drops the bad ones", () => {
-    const { rows, dropped } = sanitizePricingRows([
+    const { rows, dropped } = sanitizeCatalogRows([
       { route: "openrouter", model: "ok", inputPerMillion: 1, outputPerMillion: 5 },
       { route: "openrouter", model: "bad-output", inputPerMillion: 10, outputPerMillion: 1 },
       { route: "openrouter", model: "ok", inputPerMillion: 1, outputPerMillion: 5 }, // duplicate
@@ -210,34 +250,36 @@ describe("sanitizePricingRows (lenient per-row drop)", () => {
     expect(dropped.map((d) => d.model).sort()).toEqual(["openrouter/bad-output", "openrouter/ok"]);
   });
 
-  it("KEEPS a zero-output embedding model (input-only billing is legitimate, not a bad scrape)", () => {
-    // Carve-out (review finding #2): embedding / input-only models bill $0 output. They must
-    // NOT be flagged by the output>0 or output<input heuristics, or a lenient feed would drop
-    // every embedding model.
-    const { rows, dropped } = sanitizePricingRows([
-      { route: "openrouter", model: "openai/text-embedding-3-small", inputPerMillion: 0.02, outputPerMillion: 0 },
-    ]);
+  it("KEEPS a zero-output embedding model (input-only billing is legitimate, not a bad read)", () => {
+    const { rows, dropped } = sanitizeCatalogRows([{ route: "openrouter", model: "openai/text-embedding-3-small", inputPerMillion: 0.02, outputPerMillion: 0 }]);
     expect(rows.map((r) => r.model)).toEqual(["openai/text-embedding-3-small"]);
     expect(dropped).toEqual([]);
   });
 
-  it("still drops a NEGATIVE-output row (zero is fine, negative is a bad scrape)", () => {
-    const { rows, dropped } = sanitizePricingRows([
-      { route: "openrouter", model: "broken", inputPerMillion: 1, outputPerMillion: -1 },
-    ]);
+  it("still drops a NEGATIVE-output row (zero is fine, negative is a bad read)", () => {
+    const { rows, dropped } = sanitizeCatalogRows([{ route: "openrouter", model: "broken", inputPerMillion: 1, outputPerMillion: -1 }]);
     expect(rows).toEqual([]);
     expect(dropped[0]?.model).toBe("openrouter/broken");
   });
+
+  it("keeps a row with NO price (priced elsewhere), and drops one with half a price", () => {
+    const { rows, dropped } = sanitizeCatalogRows([
+      { route: "anthropic", model: "claude-opus-5-5" },
+      { route: "anthropic", model: "half", inputPerMillion: 1 },
+    ]);
+    expect(rows.map(keyForModel)).toEqual(["anthropic/claude-opus-5-5"]);
+    expect(dropped[0]?.problems).toEqual(["half a price (input or output rate missing)"]);
+  });
 });
 
-describe("validatePricingRows", () => {
+describe("validateCatalogRows", () => {
   it("accepts a sane batch", () => {
-    expect(validatePricingRows(parseAnthropicDocsPricing(fixture)).ok).toBe(true);
+    expect(validateCatalogRows(parseAnthropicModels(JSON.stringify({ data: [{ id: "a" }, { id: "b" }, { id: "c" }] })).rows).ok).toBe(true);
   });
 
   it("rejects a too-small / inconsistent batch", () => {
-    expect(validatePricingRows([]).ok).toBe(false);
-    const bad = validatePricingRows([
+    expect(validateCatalogRows([]).ok).toBe(false);
+    const bad = validateCatalogRows([
       { route: "openrouter", model: "x", inputPerMillion: 10, outputPerMillion: 1 }, // output < input
       { route: "openrouter", model: "y", inputPerMillion: -1, outputPerMillion: 5 }, // non-positive input
       { route: "openrouter", model: "z", inputPerMillion: 1, outputPerMillion: 2, cacheReadPerMillion: 5 }, // read ≥ input
@@ -247,35 +289,53 @@ describe("validatePricingRows", () => {
   });
 });
 
+describe("mergeRow — a source's row laid over the table's", () => {
+  const current: ModelInfoInterface = { route: "anthropic", model: "m", inputPerMillion: 5, outputPerMillion: 25, contextLength: 1000000, source: "anthropic-models" };
+
+  it("keeps every field the incoming row does not state", () => {
+    expect(mergeRow(current, { route: "anthropic", model: "m", maxOutputTokens: 128000 })).toEqual({ ...current, maxOutputTokens: 128000 });
+  });
+
+  it("a FILLING row refreshes rates and fills gaps, and overwrites nothing else", () => {
+    const merged = mergeRow(current, { route: "anthropic", model: "m", inputPerMillion: 4, outputPerMillion: 20, contextLength: 200000, releasedAt: 1, source: "openrouter-models" }, true);
+    expect(merged).toEqual({ ...current, inputPerMillion: 4, outputPerMillion: 20, releasedAt: 1 });
+  });
+});
+
 describe("refreshModelCatalog", () => {
-  const sourceFrom = (text: string): PricingSource =>
-    makeAnthropicDocsSource(async () => text, "https://example/pricing");
-
-  it("applies only changed rows and reports added/updated", async () => {
-    const table = new ModelInfo([
-      { route: "anthropic", model: "claude-haiku-4-5", inputPerMillion: 0.8, outputPerMillion: 4 }, // stale → updated
-    ]);
-    const report = await refreshModelCatalog({ sources: [sourceFrom(fixture)], table });
-
-    expect(report.bySource[0]).toMatchObject({ name: "anthropic-docs", skipped: false });
-    expect(report.updated).toContain("anthropic/claude-haiku-4-5");
-    expect(report.added).toContain("anthropic/claude-opus-4-8");
-    // The stale row was corrected to the scraped value.
-    expect(table.computeCostUsd("anthropic/claude-haiku-4-5", 1_000_000, 0)).toBeCloseTo(1, 10);
+  it("merges each source over the table in order, and reports what it wrote", async () => {
+    const table = new ModelInfo([{ route: "anthropic", model: "claude-haiku-4-5", inputPerMillion: 0.8, outputPerMillion: 4 }]);
+    const report = await refreshModelCatalog({
+      table,
+      minRows: 1,
+      sources: [
+        fixed("prices", [{ route: "anthropic", model: "claude-haiku-4-5", inputPerMillion: 1, outputPerMillion: 5 }]),
+        fixed("caps", [
+          { route: "anthropic", model: "claude-haiku-4-5", contextLength: 200000 },
+          { route: "anthropic", model: "claude-opus-5-5", contextLength: 1000000 },
+        ]),
+      ],
+    });
+    expect(report.updated).toEqual(["anthropic/claude-haiku-4-5"]);
+    expect(report.added).toEqual(["anthropic/claude-opus-5-5"]);
+    expect(report.changed.map(keyForModel).sort()).toEqual(["anthropic/claude-haiku-4-5", "anthropic/claude-opus-5-5"]);
+    // Both sources' facts on one row: the price from the first, the context from the second.
+    expect(table.lookup("anthropic/claude-haiku-4-5")).toMatchObject({ inputPerMillion: 1, contextLength: 200000 });
   });
 
   it("a second refresh with identical data applies nothing (idempotent diff)", async () => {
     const table = new ModelInfo([]);
-    await refreshModelCatalog({ sources: [sourceFrom(fixture)], table });
-    const second = await refreshModelCatalog({ sources: [sourceFrom(fixture)], table });
+    const source = fixed("s", [{ route: "openrouter", model: "a/b", inputPerMillion: 1, outputPerMillion: 5 }]);
+    await refreshModelCatalog({ sources: [source], table, minRows: 1 });
+    const second = await refreshModelCatalog({ sources: [source], table, minRows: 1 });
     expect(second.added).toEqual([]);
     expect(second.updated).toEqual([]);
-    expect(second.bySource[0]!.applied).toBe(0);
+    expect(second.changed).toEqual([]);
   });
 
-  it("NEVER overwrites good prices when a source fails to fetch", async () => {
+  it("NEVER overwrites good data when a source fails to fetch", async () => {
     const table = new ModelInfo([{ route: "anthropic", model: "claude-haiku-4-5", inputPerMillion: 1, outputPerMillion: 5 }]);
-    const failing: PricingSource = {
+    const failing: CatalogSource = {
       name: "boom",
       fetchRows: async () => {
         throw new Error("network down");
@@ -283,13 +343,11 @@ describe("refreshModelCatalog", () => {
     };
     const report = await refreshModelCatalog({ sources: [failing], table });
     expect(report.bySource[0]).toMatchObject({ skipped: true, error: "network down" });
-    // Existing price is untouched.
     expect(table.computeCostUsd("anthropic/claude-haiku-4-5", 1_000_000, 0)).toBeCloseTo(1, 10);
   });
 
   it("a lenient source applies its good rows even when the batch has bad ones", async () => {
     const table = new ModelInfo([]);
-    // 2 good rows + 1 unpriceable (-1, dropped) + 1 inconsistent (output<input, dropped).
     const json = JSON.stringify({
       data: [
         { id: "a/good-1", pricing: { prompt: "0.000001", completion: "0.000005" } },
@@ -298,79 +356,30 @@ describe("refreshModelCatalog", () => {
         { id: "a/weird", pricing: { prompt: "0.00001", completion: "0.000001" } }, // output<input
       ],
     });
-    const report = await refreshModelCatalog({
-      sources: [makeOpenRouterSource(async () => json, "https://example/models")],
-      table,
-      minRows: 1,
-    });
+    const [own] = makeOpenRouterSources(async () => json, "https://example/models");
+    const report = await refreshModelCatalog({ sources: [own], table, minRows: 1 });
     expect(report.bySource[0]).toMatchObject({ name: "openrouter-models", skipped: false });
-    expect(report.added.sort()).toEqual(["openrouter/a/good-1", "openrouter/a/good-2"]); // weird + dyn dropped, not fatal
+    expect(report.added.sort()).toEqual(["openrouter/a/good-1", "openrouter/a/good-2"]);
     expect(table.hasPricing("openrouter/a/weird")).toBe(false);
   });
 
-  it("NEVER overwrites good prices when a scrape fails validation", async () => {
+  it("the OpenRouter mirrors never undo what the native route's own list said, on a later refresh too", async () => {
+    const json = JSON.stringify({
+      data: [{ id: "anthropic/claude-opus-5.5", pricing: { prompt: "0.000004", completion: "0.00002" }, context_length: 200000, supported_parameters: ["temperature"] }],
+    });
+    const table = new ModelInfo([]);
+    const anthropic = fixed("anthropic-models", [{ route: "anthropic", model: "claude-opus-5-5", contextLength: 1000000, source: "anthropic-models" }], { fills: false });
+    await refreshModelCatalog({ sources: [...makeOpenRouterSources(async () => json), anthropic], table, minRows: 1 });
+    // A later refresh that could not reach Anthropic: the mirror refreshes the price, and leaves the rest.
+    const json2 = json.replace('"0.000004"', '"0.000003"');
+    await refreshModelCatalog({ sources: makeOpenRouterSources(async () => json2), table, minRows: 1 });
+    expect(table.lookup("anthropic/claude-opus-5-5")).toMatchObject({ inputPerMillion: 3, contextLength: 1000000, source: "anthropic-models" });
+  });
+
+  it("NEVER overwrites good data when a strict source fails validation", async () => {
     const table = new ModelInfo([{ route: "anthropic", model: "claude-haiku-4-5", inputPerMillion: 1, outputPerMillion: 5 }]);
-    // A garbled page → parser yields nothing → validation fails → skip.
-    const report = await refreshModelCatalog({ sources: [sourceFrom("garbled, no table")], table });
+    const report = await refreshModelCatalog({ sources: [fixed("tiny", [])], table });
     expect(report.bySource[0]!.skipped).toBe(true);
     expect(table.computeCostUsd("anthropic/claude-haiku-4-5", 1_000_000, 0)).toBeCloseTo(1, 10);
-  });
-});
-
-describe("claudeSupportedParameters — the ingestion path's Claude capability authority", () => {
-  const has = (id: string, p: string): boolean => claudeSupportedParameters(id).includes(p);
-
-  it("opus-4-7/4-8 REJECT the sampling knobs but keep stop + reasoning (mirrors the AI SDK)", () => {
-    for (const id of ["claude-opus-4-8", "claude-opus-4-7", "anthropic/claude-opus-4.8", "claude-opus-4-8-20260115"]) {
-      expect(anthropicRejectsSampling(id)).toBe(true);
-      expect(has(id, "temperature")).toBe(false);
-      expect(has(id, "top_p")).toBe(false);
-      expect(has(id, "top_k")).toBe(false);
-      expect(has(id, "stop")).toBe(true);
-      expect(has(id, "reasoning")).toBe(true);
-    }
-  });
-
-  it("Claude 4+ (non-opus-4-7/4-8) accept sampling AND thinking", () => {
-    for (const id of ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6", "claude-opus-4-5"]) {
-      expect(anthropicRejectsSampling(id)).toBe(false);
-      expect(has(id, "temperature")).toBe(true);
-      expect(has(id, "reasoning")).toBe(true);
-    }
-  });
-
-  it("thinking gates on the MAJOR version, not the family word — a NEW Claude-5 family still gets it", () => {
-    for (const id of ["claude-fable-5", "claude-mythos-5", "claude-sonnet-5"]) {
-      expect(claudeSupportsThinking(id)).toBe(true);
-      expect(has(id, "reasoning")).toBe(true);
-    }
-  });
-
-  it("pre-4 Claude (3.5 / 3) accept sampling but NOT thinking", () => {
-    for (const id of ["claude-haiku-3-5", "claude-3-haiku"]) {
-      expect(has(id, "temperature")).toBe(true);
-      expect(claudeSupportsThinking(id)).toBe(false);
-      expect(has(id, "reasoning")).toBe(false);
-    }
-  });
-});
-
-describe("completeSeedRow — identity always, Claude caps for native rows only", () => {
-  it("stamps identity + correct Claude caps on a native price-only row", () => {
-    const row = completeSeedRow({ route: "anthropic", model: "claude-opus-4-8", inputPerMillion: 5, outputPerMillion: 25 });
-    expect(row.canonicalId).toBe("claude-opus-4-8");
-    expect(row.route).toBe("anthropic");
-    expect(row.provider).toBe("Anthropic");
-    expect(fields(row)).not.toContain("temperature"); // opus-4-8 rejects sampling
-    expect(fields(row)).toContain("reasoning");
-    expect(row.modalities).toEqual({ input: ["text", "image", "file"], output: ["text"] });
-  });
-
-  it("stamps identity only (no caps) on a NON-Claude row — the feed/refresh owns those", () => {
-    const row = completeSeedRow({ route: "openrouter", model: "openai/gpt-4o", inputPerMillion: 2.5, outputPerMillion: 10 });
-    expect(row.canonicalId).toBe("gpt-4o");
-    expect(row.route).toBe("openrouter");
-    expect(row.parameters).toBeUndefined();
-    expect(row.modalities).toBeUndefined();
   });
 });

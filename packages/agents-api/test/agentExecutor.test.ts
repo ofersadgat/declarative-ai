@@ -11,7 +11,7 @@
  * vocabulary — so a test like this could not be written at all.
  */
 import { describe, expect, it } from "vitest";
-import { thinkingOfEntries, toolResultsOfEntries, toolUsesOfEntries } from "@declarative-ai/llm";
+import { ModelInfo, parametersFromNames, thinkingOfEntries, toolResultsOfEntries, toolUsesOfEntries } from "@declarative-ai/llm";
 import { isOk, sessionOutcomeOf, promptOp, resolveSessionRef, type ExecEvent, type ExecServices, type ResolvedSession, type Tool } from "@declarative-ai/exec";
 import type { LlmOutput, ModelMessage } from "@declarative-ai/llm";
 import { PromptExecutor } from "@declarative-ai/promptop";
@@ -562,6 +562,18 @@ describe("lossless input — what the caller configured reaches the transport", 
     const { query, seen } = capturing();
     await new AgentExecutor({ query }).start(op("do it", { reasoning: { effort: "xhigh" } }), {}).result;
     expect(seen()?.reasoning).toEqual({ effort: "xhigh" });
+  });
+
+  it("fits the reasoning request to the agent's own row for the model (decision 0009)", async () => {
+    // What the binary reported it takes — a clamp to its top level, and a drop where it takes none.
+    ModelInfo.instance.upsert({ route: "claude-cli", model: "test-three-levels", parameters: parametersFromNames([], { reasoning: { efforts: ["low", "medium", "high"], budget: false } }) });
+    ModelInfo.instance.upsert({ route: "claude-cli", model: "test-no-levels", parameters: parametersFromNames([]) });
+    const clamped = capturing();
+    await new AgentExecutor({ query: clamped.query }).start(op("do it", { model: "claude-cli/test-three-levels", reasoning: { effort: "max" } }), {}).result;
+    expect(clamped.seen()?.reasoning).toEqual({ effort: "high" });
+    const dropped = capturing();
+    await new AgentExecutor({ query: dropped.query }).start(op("do it", { model: "claude-cli/test-no-levels", reasoning: { effort: "high" } }), {}).result;
+    expect(dropped.seen()?.reasoning).toBeUndefined();
   });
 
   it("forwards a step budget and a tool choice", async () => {
