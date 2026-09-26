@@ -86,6 +86,11 @@ export interface GeneratedDecl {
   /** Every file the compile read, by content hash — a change to any makes the document stale. */
   inputs: Record<string, string>;
   /**
+   * The code modules the compiled states import and RUN (SCRIPTS.md §13) — what a host gates and
+   * freezes as it does a function module (SPEC §7.5.5). A type-only import runs nothing and is not here.
+   */
+  modules?: string[];
+  /**
    * The output that holds the script function's WHOLE return, when its return is not a record —
    * what a caller of the state gets back from `workflow()` or an imported call (SCRIPTS.md §10).
    */

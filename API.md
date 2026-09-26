@@ -3061,7 +3061,8 @@ state's identity and its snapshot. The code returns a continuation (`SCRIPT_CONT
 `_return`, and the live variables), which the state's outputs and its mount's rules read. `LoadedState`
 gains `scriptDefaults` (the literal environment chain a script's `llm()` calls inherit); `StateDef` gains
 `generated` (provenance, and `whole` — the output holding a non-record return) and `whenToUse`;
-`LimitsDecl` gains `budget` (USD); `ChildDecl`/`LoadedChild` gain `called` — a mount a script calls, whose inputs
+`generated.modules` lists the code modules the compiled states import and run (not type-only imports), for a
+host's approval gate and freeze. `LimitsDecl` gains `budget` (USD); `ChildDecl`/`LoadedChild` gain `called` — a mount a script calls, whose inputs
 each call hands over and the validator does not require wired — and `failureValue` (above).
 
 In `"calls"` mode each non-deterministic call is a state of its own: `<machine>/call_<n>`, whose operation is

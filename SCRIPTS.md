@@ -548,8 +548,10 @@ them, and the ownership bookkeeping (the nearest-owner rule, `sync.json`), belon
 - **Integrity.** A state's code is carried IN its document (`operation.script.code`), so it is part
   of the snapshot hash like an embedded body, and a changed script is a different workflow. Imported
   modules go through the module loader, and so through the host's approval gate
-  (`EngineConfig.scripts.approved`). A `type`-only import runs nothing. Its effect is the schema it
-  produced, which is in the compiled documents and their hash.
+  (`EngineConfig.scripts.approved`); `generated.modules` names the ones the compiled states run, so a
+  host can ask for approval and freeze them before a run starts, as it does a function module. A
+  `type`-only import runs nothing and is not listed. Its effect is the schema it produced, which is
+  in the compiled documents and their hash.
 
 ## 14. The superset, precisely
 

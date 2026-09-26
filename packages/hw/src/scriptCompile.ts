@@ -107,6 +107,8 @@ const REFUSED_META: Readonly<Record<string, string>> = {
 export interface GeneratedProvenance {
   from: string;
   inputs: Record<string, string>;
+  /** The code modules the compiled states import and run — see `GeneratedDecl.modules`. */
+  modules?: string[];
 }
 
 /** A line of the script a generated document answers to — the source map (SCRIPTS.md §12). */
@@ -404,6 +406,8 @@ class Compiler {
     if (this.mode === "function") return { mode: this.mode, meta, documents: {}, warnings: this.warnings, generated, sourceMap: {} };
 
     for (const s of statements) if (ts.isImportDeclaration(s)) this.classifyImport(s);
+    const modules = this.runModules();
+    if (modules.length > 0) generated.modules = modules;
 
     const entry = this.entryFunction(body);
     this.bodyMode = entry === undefined;
@@ -2610,6 +2614,25 @@ class Compiler {
       if (file !== undefined && text !== undefined) inputs[file] = sha256Hex(text);
     }
     return { from: this.file, inputs };
+  }
+
+  /**
+   * The code the compiled states RUN when they import it — a host gates and freezes these as it does
+   * a function module (SPEC §7.5.5). A type-only import, a state, a prompt or data runs nothing.
+   */
+  private runModules(): string[] {
+    const modules = new Set<string>();
+    for (const declaration of this.codeImports) {
+      if (!this.ts.isStringLiteral(declaration.moduleSpecifier) || declaration.moduleSpecifier.text === HOOK_MODULE) continue;
+      let file: string | undefined;
+      try {
+        file = resolveSpecifier(declaration.moduleSpecifier.text, dirOf(this.file.replace(/\\/g, "/")), this.options);
+      } catch {
+        file = undefined;
+      }
+      if (file !== undefined) modules.add(file);
+    }
+    return [...modules].sort();
   }
 
   // --- errors and lines ----------------------------------------------------------------------------

@@ -280,8 +280,14 @@ return { fixes: fixes.filter(Boolean) }
   it("runs imported code inline", async () => {
     const source = `import { shout } from "./lib";\nexport default async function f(x: string) { phase("One"); const y = shout(x); phase("Two"); return await llm(y); }`;
     const lib = `export function shout(s: string): string { return s.toUpperCase() + "!"; }`;
-    const { calls } = await run(source, { x: "hi" }, () => ok("ok"), { extra: { [`${ROOT}/lib.ts`]: lib } });
+    const { calls, compiled } = await run(source, { x: "hi" }, () => ok("ok"), { extra: { [`${ROOT}/lib.ts`]: lib } });
     expect(textOf(calls[0]!)).toBe("HI!");
+    // The module it runs is named for a host to gate and freeze; a type-only import runs nothing and is not.
+    expect(compiled.documents.s!.generated?.modules).toEqual([`${ROOT}/lib.ts`]);
+    const typed = await compile(`import type { T } from "./types";
+export default async function f(): Promise<T> { return { n: 1 }; }`, { [`${ROOT}/types.ts`]: `export type T = { n: number };` });
+    expect(typed.documents.s!.generated?.modules).toBeUndefined();
+    expect(Object.keys(typed.generated.inputs)).toContain(`${ROOT}/types.ts`);
   });
 
   it("refuses Date.now() and Math.random() in the script's own code, and offers the recorded ones", async () => {
