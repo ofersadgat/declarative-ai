@@ -1145,7 +1145,7 @@ export class WorkflowEngine {
   async run(options: WorkflowRunOptions): Promise<WorkflowRunResult> {
     // The async context the script hooks find their caller through — loaded before anything runs,
     // so dispatching a call never waits on it (SCRIPTS.md §6).
-    await loadScriptContext();
+    if (this.usesScripts()) await loadScriptContext();
     const start = this.clock.now();
     const rootDef = this.config.bundle.states[this.config.bundle.rootId];
     if (!rootDef) throw new Error(`root state '${this.config.bundle.rootId}' missing from bundle`);
@@ -1200,7 +1200,7 @@ export class WorkflowEngine {
    * and the tree keeps the very ids the conversation records point at.
    */
   async loadRun(loaded: LoadedInstance, options: WorkflowRunOptions = { inputs: {} }): Promise<WorkflowRunResult> {
-    await loadScriptContext();
+    if (this.usesScripts()) await loadScriptContext();
     const start = this.clock.now();
     const abort = new AbortController();
     if (options.abortSignal) {
@@ -4857,6 +4857,21 @@ export class WorkflowEngine {
    * prefixed with the call's own — so a function module's `llm()` calls are recorded under the state
    * that called it, and two calls of one function keep their calls apart (SCRIPTS.md §11).
    */
+  /**
+   * Whether this engine can reach the script hooks at all: the host configured `scripts`, the bundle
+   * holds a compiled script's code, or a registered function makes model calls of its own
+   * (`callsModels`). Loading the hooks' async context is an import, which a run with none of these
+   * does not wait on before it starts.
+   */
+  private usesScripts(): boolean {
+    this.scriptsUsed ??=
+      this.config.scripts !== undefined ||
+      Object.values(this.config.bundle.states).some((def) => operationsOf(def).some((op) => op.kind === "function" && op.functionRef === SCRIPT_FUNCTION)) ||
+      [...this.config.registry.functions.values()].some((entry) => entry.kind !== "pure" && entry.capabilities.callsModels === true);
+    return this.scriptsUsed;
+  }
+  private scriptsUsed: boolean | undefined;
+
   private functionHost(instance: Instance, prefix: string): <T>(fn: () => T) => T {
     // Loaded by `run`/`loadRun`; a caller that dispatched without either has no scripts to serve.
     if (!hasScriptContext()) return (fn) => fn();
