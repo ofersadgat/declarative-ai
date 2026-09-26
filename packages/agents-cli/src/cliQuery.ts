@@ -38,7 +38,7 @@
 import type { AgentQuery, AgentQueryOptions, AgentRun, AgentStreamMessage, BinaryDeps } from "@declarative-ai/agents-api";
 import { claudeOptionsRefusal, contextDetailOfClaude, DEFAULT_SETTING_SOURCES, defaultBinaryDeps, readAgentMessage, resolveAgentBinary } from "@declarative-ai/agents-api";
 import { defaultStartMcpBridge, type McpBridge, type StartMcpBridge } from "./mcpBridge.js";
-import { mcpConfigJson, PERMISSION_PROMPT_TOOL } from "./mcpProtocol.js";
+import { mcpConfigJson, mcpToolName, PERMISSION_PROMPT_TOOL } from "./mcpProtocol.js";
 import { defaultSpawn, exitMessage, type AgentProcess, type SpawnProcess } from "./process.js";
 
 /** One line of the agent's stdout, already parsed. */
@@ -244,7 +244,13 @@ function settingsJson(opts: AgentQueryOptions): string | undefined {
 }
 
 export function cliArgv(opts: AgentQueryOptions, config: CliAgentOptions = {}, bridgeUrl?: string): string[] {
-  const allowed = opts.allowedTools ?? [];
+  // A pre-approved tool this run SERVES is named to the CLI the way the CLI calls it. The caller's list
+  // speaks logical names — `bash`, which is what codex reads — and the CLI addresses a served tool as
+  // `mcp__dai__bash`, so a bare name matched nothing: a tool the caller had already settled (a host's
+  // pre-gated tool, which its wrapper decides when it runs) was put to the permission prompt as well,
+  // one call asked about twice (JaiRA, 2026-09-26). Only what the caller listed is translated; what it
+  // did not list is still asked about.
+  const allowed = (opts.allowedTools ?? []).map((name) => (opts.mcpTools !== undefined && Object.hasOwn(opts.mcpTools, name) ? mcpToolName(name) : name));
   const denied = opts.disallowedTools ?? [];
   const custom = optionString(opts, "systemPrompt");
   const append = optionString(opts, "appendSystemPrompt");

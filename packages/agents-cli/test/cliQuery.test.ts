@@ -71,6 +71,15 @@ describe("cliArgv — the flags one run is configured with", () => {
     ]);
   });
 
+  it("pre-approves a tool the run SERVES under the name the CLI calls it by — a bare name matched nothing", () => {
+    // The caller lists logical names (codex reads them so). The CLI addresses a served tool as
+    // `mcp__dai__<name>`; named `open` the pre-approval was a no-op, and a tool the caller had settled
+    // went to the permission prompt too — one call, two prompts. A native it does not serve is untouched.
+    const served = { open: { description: "open", inputSchema: { type: "object" }, run: () => "ok" } } as never;
+    const argv = cliArgv({ prompt: "hi", allowedTools: ["open", "Read"], mcpTools: served });
+    expect(argv[argv.indexOf("--allowedTools") + 1]).toBe("mcp__dai__open,Read");
+  });
+
   it("omits flags the caller did not ask for", () => {
     expect(cliArgv({ prompt: "hi", allowedTools: [] })).toEqual([
       "-p",
