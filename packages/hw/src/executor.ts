@@ -31,6 +31,7 @@ import { WorkflowEngine, type CallResult, type FanOutHost, type SplitEntry } fro
 import type { WorkflowBundle } from "./format.js";
 import type { LoadedInstance } from "./load.js";
 import type { DirectedTransitions } from "./directed.js";
+import type { ScriptModuleOptions } from "./scriptRun.js";
 import { isByteStream, materialize, MaterializeError } from "./materialize.js";
 import { snapshotHash } from "./loader.js";
 import type { Persistence, WorkflowMetrics } from "./ports.js";
@@ -99,6 +100,8 @@ export interface WorkflowExecutorOptions {
    * host keeps the port and the engine attaches to it, because the engine itself is built in here.
    */
   directed?: DirectedTransitions;
+  /** Where a compiled script's code and imports come from — see {@link EngineConfig.scripts}. Forwarded for the same reason. */
+  scripts?: ScriptModuleOptions;
 }
 
 const CAPABILITIES: Capabilities = {
@@ -243,6 +246,7 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
       ...(this.options.fanOut !== undefined ? { fanOut: this.options.fanOut } : {}),
       ...(this.options.split !== undefined ? { split: this.options.split } : {}),
       ...(this.options.directed !== undefined ? { directed: this.options.directed } : {}),
+      ...(this.options.scripts !== undefined ? { scripts: this.options.scripts } : {}),
       services: ctx,
       clock: ctx.clock,
       onEvent: (event) => {

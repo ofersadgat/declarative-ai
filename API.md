@@ -2441,6 +2441,7 @@ interface WorkflowExecutorOptions {
   registry: CapabilityRegistry;                  // functions / skills / tools
   prompt?: Executor;                             // what a PromptOp inside the workflow dispatches to
   persistence?: Persistence;
+  scripts?: ScriptModuleOptions;                 // EngineConfig.scripts, forwarded (like answers, sessions, fanOut, …)
 }
 interface HierarchicalWorkflowDefinition { rootId: string; states: Record<string, StateDef>; }
 ```
