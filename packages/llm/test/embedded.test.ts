@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { EmbeddedModelStore, embeddedLanguageModel, mergeEmbeddedConfig, flattenPrompt, mapFinishReason } from "../src/embedded.js";
+import { EmbeddedModelStore, embeddedLanguageModel, mergeEmbeddedConfig, flattenPrompt, loadLlamaModule, mapFinishReason, setLlamaModuleLoader } from "../src/embedded.js";
 import { executeLlmCall } from "../src/call.js";
 import { createModelRouter } from "../src/router.js";
 import { errorOf, outputOf } from "./fakes.js";
@@ -23,6 +23,42 @@ const GGUF =
   );
 const hasWeights = existsSync(GGUF);
 const withWeights = hasWeights ? it : it.skip;
+
+describe("where node-llama-cpp comes from", () => {
+  it("is the host's loader when one is set, loaded once, and forgotten when the loader changes", async () => {
+    const first = { getLlama: async () => ({}) };
+    const second = { getLlama: async () => ({}) };
+    let loads = 0;
+    setLlamaModuleLoader(async () => {
+      loads += 1;
+      return first;
+    });
+    try {
+      expect(await loadLlamaModule()).toBe(first);
+      await loadLlamaModule();
+      expect(loads).toBe(1); // loaded once per process, as native code is
+      setLlamaModuleLoader(async () => second);
+      expect(await loadLlamaModule()).toBe(second);
+    } finally {
+      setLlamaModuleLoader(undefined);
+    }
+  });
+
+  it("passes the host loader's own failure through, and tries again next time", async () => {
+    let attempt = 0;
+    setLlamaModuleLoader(async () => {
+      attempt += 1;
+      if (attempt === 1) throw new Error("the local models plugin is not installed");
+      return { getLlama: async () => ({}) };
+    });
+    try {
+      await expect(loadLlamaModule()).rejects.toThrow("the local models plugin is not installed");
+      await expect(loadLlamaModule()).resolves.toBeDefined();
+    } finally {
+      setLlamaModuleLoader(undefined);
+    }
+  });
+});
 
 describe("embedded prompt flattening", () => {
   it("splits system turns out and joins the rest into one user turn", () => {

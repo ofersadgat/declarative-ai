@@ -2148,7 +2148,15 @@ function mergeEmbeddedConfig(base, override): EmbeddedModelConfig;
 function catalogRowForGguf(o: { model; source; downloads? }): Promise<ModelInfoInterface>;
 function classifyPlacement(resolved, totalLayers, free): Placement;
 function embeddedPlacementProbe(store, providerIdOf): PlacementProbe;
+function loadLlamaModule(): Promise<LlamaModule>;                      // once per process
+function setLlamaModuleLoader(load: (() => Promise<unknown>) | undefined): void;
 ```
+
+Where the peer comes from is the host's to say: `setLlamaModuleLoader` replaces the import of the package
+name with the host's loader (a copy downloaded on demand, kept in a directory of its own), and this
+package never learns where that is. Process-wide, like the loaded module, and a new loader forgets the
+module already loaded. The host's loader explains its own failure, so its error passes through as it is;
+`undefined` goes back to the import.
 
 The handle is returned **synchronously** and the GGUF is mapped on the first `doStream` — the lazy-handle
 pattern, since `resolveModel` cannot await seconds of I/O. Concurrency is **bought with memory**: a
@@ -3206,6 +3214,11 @@ interface AgentStreamMessage { type: "result" | "assistant" | "other"; result?: 
 `sdkAgentQuery` is the default implementation mapping this onto the SDK's `query()`. Keeping the adapter
 written against this interface rather than the SDK's is what lets the package be built and tested with
 neither the SDK installed nor an API key.
+
+`createSdkAgentQuery({ binaryDeps?, warn?, loadSdk? })` builds one with other seams. `loadSdk` is where the
+SDK comes from: by default the import of `@anthropic-ai/claude-agent-sdk` from wherever this package is
+resolved; a host that keeps the SDK elsewhere (downloaded on demand) hands its loader here, and its
+loader's error passes through as it is, since the host knows why the SDK is missing.
 
 ---
 

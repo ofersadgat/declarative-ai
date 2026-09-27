@@ -420,6 +420,13 @@ export interface SdkAgentOptions {
    *  still proceeds with what the caller wrote, because a resolution we could not complete is not the
    *  same claim as a binary that is definitely absent. */
   warn?: (message: string) => void;
+  /**
+   * Where the Agent SDK comes from. Default: the import of `@anthropic-ai/claude-agent-sdk` from wherever
+   * this package is resolved. A host that keeps the SDK somewhere else — downloaded on demand, in a
+   * directory of its own — hands the loader here, and this package never learns where that is. The
+   * host's loader explains its own failure, so its error passes through as it is.
+   */
+  loadSdk?: () => Promise<unknown>;
 }
 
 /**
@@ -526,7 +533,8 @@ async function* sdkMessages(
   done: () => void,
 ): AsyncIterable<AgentStreamMessage> {
   let sdk: SdkModule;
-  try {
+  if (config.loadSdk !== undefined) sdk = (await config.loadSdk()) as SdkModule;
+  else try {
     // Variable specifier: TS won't resolve (or require) the module at build time — it's optional.
     sdk = (await import(/* @vite-ignore */ SDK_SPECIFIER)) as unknown as SdkModule;
   } catch {

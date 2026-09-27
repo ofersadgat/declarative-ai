@@ -124,13 +124,28 @@ interface LlamaSession {
  */
 const PEER = ["node", "llama", "cpp"].join("-");
 
+/**
+ * Where `node-llama-cpp` comes from: by default, the import of its name from wherever this package is
+ * resolved. A host that keeps the package somewhere else (downloaded on demand, in a directory of its
+ * own) hands this the loader instead, and this package never learns where that is; the host's loader
+ * also explains its own failure, so its error passes through as it is. Process-wide, as the loaded
+ * module is: native code is loaded into a process once. `undefined` goes back to the default.
+ */
+let moduleLoader: (() => Promise<unknown>) | undefined;
+export function setLlamaModuleLoader(load: (() => Promise<unknown>) | undefined): void {
+  moduleLoader = load;
+  modulePromise = undefined;
+}
+
 /** Load `node-llama-cpp`, or explain how to get it. */
 let modulePromise: Promise<LlamaModule> | undefined;
 export function loadLlamaModule(): Promise<LlamaModule> {
-  modulePromise ??= import(/* webpackIgnore: true */ /* @vite-ignore */ PEER).then(
+  const hosted = moduleLoader;
+  modulePromise ??= (hosted ?? (() => import(/* webpackIgnore: true */ /* @vite-ignore */ PEER)))().then(
     (m) => m as unknown as LlamaModule,
     (cause: unknown) => {
       modulePromise = undefined; // a transient failure must not poison the process
+      if (hosted !== undefined) throw cause;
       throw new Error(
         "the `embedded` route needs the optional peer dependency `node-llama-cpp` — install it with " +
           "`npm i node-llama-cpp` (it ships prebuilt binaries for win/mac/linux, including CUDA and Vulkan). " +

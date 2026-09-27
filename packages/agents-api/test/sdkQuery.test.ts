@@ -18,6 +18,7 @@ import { readAgentMessage } from "../src/streamMessages.js";
 import type { McpToolResult } from "../src/mcpTools.js";
 import {
   claudeOptionsRefusal,
+  createSdkAgentQuery,
   InputQueue,
   MCP_SDK_MISSING,
   readSdkResult,
@@ -239,6 +240,37 @@ describe("what a delegated agent LOADS — decided, not inherited", () => {
     const seen = [];
     for await (const m of sdkAgentQuery({ prompt: "x", providerOptions: { fasMode: true } })) seen.push(m);
     expect(seen).toEqual([{ type: "other", error: expect.stringMatching(/unknown key\(s\): fasMode/) }]);
+  });
+});
+
+describe("loadSdk — where the SDK comes from is the host's to say", () => {
+  it("runs on the module the host's loader hands over, not on an import of the package name", async () => {
+    const asked: Array<{ prompt: unknown; options?: Record<string, unknown> }> = [];
+    const query = createSdkAgentQuery({
+      loadSdk: async () => ({
+        query: (arg: { prompt: unknown; options?: Record<string, unknown> }) => {
+          asked.push(arg);
+          return (async function* () {
+            yield { type: "result", subtype: "success", result: "from the host's copy", session_id: "s-1", total_cost_usd: 0 };
+          })();
+        },
+      }),
+    });
+    const seen = [];
+    for await (const m of query({ prompt: "x" })) seen.push(m);
+    expect(asked).toHaveLength(1);
+    expect(seen.at(-1)).toMatchObject({ type: "result", result: { text: "from the host's copy", sessionId: "s-1" } });
+  });
+
+  it("lets the loader's own failure through, because the host knows why the SDK is missing", async () => {
+    const query = createSdkAgentQuery({
+      loadSdk: async () => {
+        throw new Error("the Claude plugin is not installed — download it on the Connections page");
+      },
+    });
+    await expect(async () => {
+      for await (const _ of query({ prompt: "x" })) void _;
+    }).rejects.toThrow("the Claude plugin is not installed — download it on the Connections page");
   });
 });
 
