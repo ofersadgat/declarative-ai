@@ -123,6 +123,18 @@ describe("core — cancel", () => {
     const out = await createPromptExecutor({ runner }).start(promptOp(), { abortSignal: controller.signal }).result;
     expect(errorOf(out)?.classification).toBe("interrupted");
   });
+
+  it("keeps a permanent failure permanent when a cancel happens to land beside it", async () => {
+    // A refused key that arrives as a sibling's failure aborts the run is still a refused key:
+    // relabeled `interrupted`, a resume would re-dispatch a call certain to fail the same way.
+    const controller = new AbortController();
+    controller.abort();
+    for (const classification of ["permanent", "out-of-credits", "policy-denied"] as const) {
+      const { runner } = fakeRunner([okOutcome({ error: { classification, reason: "401 invalid x-api-key" } })]);
+      const out = await createPromptExecutor({ runner }).start(promptOp(), { abortSignal: controller.signal }).result;
+      expect(errorOf(out)?.classification).toBe(classification);
+    }
+  });
 });
 
 describe("core — tools and blob outputs", () => {

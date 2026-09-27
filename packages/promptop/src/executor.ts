@@ -49,6 +49,9 @@ import {
 } from "@declarative-ai/llm";
 import { lowerPromptOp, type LoweringOptions } from "./lowering.js";
 
+/** The failures a cut can cause: a transport cut short, a deadline, a cancel — what a cancel relabels `interrupted`. */
+const CUT_SHAPED: ReadonlySet<string> = new Set(["network-retriable", "api-retriable", "deadline", "canceled", "interrupted"]);
+
 // `modelRouter` is llm's seam, so llm's own type is what names it — and this is the package that can
 // (§1.2). `exec` therefore never declares an opaque `ModelHandle` it cannot describe.
 declare module "@declarative-ai/exec" {
@@ -614,8 +617,13 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
     // INTERRUPTED, not canceled: the call was RUNNING when it was cut, so its turns may already
     // exist remotely, which is exactly the promise `interrupted` makes and `canceled` does not.
     // A cancel that never reached dispatch still lands `canceled`, on the paths that never get here.
+    // Only a failure the cut could have CAUSED is relabeled — a transport cut, a deadline, a cancel. A
+    // permanent answer (a refused key, a 400, a validation error), an empty balance or a policy refusal
+    // that happened to land while the signal fired — a sibling failing the run, say — is still what it
+    // was: relabeled `interrupted`, a resume would re-dispatch a call certain to fail the same way.
     const canceled = wasCanceled() || ctx.abortSignal?.aborted === true;
-    const error = canceled ? { ...call.error, classification: "interrupted" as const } : call.error;
+    const causedByCut = CUT_SHAPED.has(call.error.classification);
+    const error = canceled && causedByCut ? { ...call.error, classification: "interrupted" as const } : call.error;
     // Reported on failure TOO: turns the provider appended before it failed exist remotely whether or
     // not we kept them, and not recording them is divergence on the very next call.
     return { error, ...(value !== undefined ? { value } : {}), metrics, ...reported, ...record };

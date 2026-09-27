@@ -1607,48 +1607,10 @@ export class WorkflowEngine {
       if (instance.abort.signal.aborted) childAbort.abort(instance.abort.signal.reason);
       else instance.abort.signal.addEventListener("abort", onParentAbort, { once: true });
       const record: ChildRecord = { instanceId: child.id, status: "running", inputs: child.inputs, abort: childAbort, promise: Promise.resolve() };
-      const run = async (): Promise<void> => {
-        let term: TerminationRecord;
-        if (!childDef) {
-          term = { outcome: "error", failure: { classification: "permanent", reason: `unknown state '${child.stateId}'` } };
-        } else {
-          term = await this.resumeInstance(child, childDef, childAbort, instance);
-          term = await this.materializeFanOut(instance, key, term);
-        }
-        if (record.skipped === true) term = { outcome: "skipped", ...(term.operation !== undefined ? { operation: term.operation } : {}) };
-        record.status = "done";
-        record.outcome = term.outcome;
-        record.outputs = term.outputs;
-        record.failure = term.failure;
-        record.operation = term.operation;
-        if (instance.children.get(key) === record && record.skipped !== true) {
-          if (!instance.justFinished.includes(key)) instance.justFinished.push(key);
-          if (term.outcome === "error" || term.outcome === "timeout") instance.unhandledFailures.add(key);
-        }
-        instance.notify.signal();
-      };
-      instance.children.set(key, record);
-      record.promise = run().catch((e: unknown) => {
-        const failure: Failure = {
-          classification: "permanent",
-          reason: `child '${key}' crashed: ${e instanceof Error ? e.message : String(e)}`,
-        };
-        record.status = "done";
-        record.outcome = "error";
-        record.failure = failure;
-        try {
-          if (record.skipped !== true) this.emit({ type: "instance.terminated", instanceId: record.instanceId, stateId: child.stateId, outcome: "error", failure });
-        } catch {
-          // Nothing left to report it with.
-        }
-        if (instance.children.get(key) === record && record.skipped !== true) {
-          if (!instance.justFinished.includes(key)) instance.justFinished.push(key);
-          instance.unhandledFailures.add(key);
-        }
-        instance.notify.signal();
-      });
-      void record.promise.finally(() => {
-        instance.abort.signal.removeEventListener("abort", onParentAbort);
+      this.runChild(instance, key, child.stateId, record, onParentAbort, async () => {
+        if (!childDef) return { outcome: "error", failure: { classification: "permanent", reason: `unknown state '${child.stateId}'` } };
+        const term = await this.resumeInstance(child, childDef, childAbort, instance);
+        return this.materializeFanOut(instance, key, term);
       });
       // The cursor holds for a running SYNC child, exactly as it did when the child first entered.
       // `instance.entered` is NOT set here: `buildLoadedInstance` already read it off the last child
@@ -2622,11 +2584,9 @@ export class WorkflowEngine {
       promise: Promise.resolve(),
     };
 
-    const run = async (): Promise<void> => {
-      let term: TerminationRecord;
-      if (!childDef) {
-        term = { outcome: "error", failure: { classification: "permanent", reason: `unknown state '${decl.state}'` } };
-      } else if ("error" in resolved && typeof resolved.error === "string") {
+    this.runChild(instance, key, decl.state, record, onParentAbort, async (): Promise<TerminationRecord> => {
+      if (!childDef) return { outcome: "error", failure: { classification: "permanent", reason: `unknown state '${decl.state}'` } };
+      if ("error" in resolved && typeof resolved.error === "string") {
         // A WIRING failure — the caller could not produce an argument, so the callee never happened.
         //
         // The blame is the CALLER's and the message says so (`resolveChildInputs` writes it), but the
@@ -2646,14 +2606,33 @@ export class WorkflowEngine {
           parentInstanceId: instance.id,
           reason: resolved.error,
         });
-        term = { outcome: "error", failure: { classification: "permanent", reason: resolved.error } };
-      } else {
-        term = await this.runInstance(decl.state, childDef, resolved.values!, childAbort, key, instance, record.instanceId);
-        // Fan-out (§7.3, rule 2) is decided at BIND time: if this producer's blob output feeds two
-        // consumers, drain it ONCE here, at the producer's completion, so both siblings read the bytes
-        // rather than racing to read one stream. A single-consumer output is left a live stream to pipe.
-        term = await this.materializeFanOut(instance, key, term);
+        return { outcome: "error", failure: { classification: "permanent", reason: resolved.error } };
       }
+      const term = await this.runInstance(decl.state, childDef, resolved.values!, childAbort, key, instance, record.instanceId);
+      // Fan-out (§7.3, rule 2) is decided at BIND time: if this producer's blob output feeds two
+      // consumers, drain it ONCE here, at the producer's completion, so both siblings read the bytes
+      // rather than racing to read one stream. A single-consumer output is left a live stream to pipe.
+      return this.materializeFanOut(instance, key, term);
+    });
+    return "started";
+  }
+
+  /**
+   * Run one child's body under its record — the ONE way a child runs, whether it is entered fresh
+   * (`enterChild`) or continued on a resume (`resumeInstance`). Two copies of this had drifted: the
+   * resume's crash handler failed a child a move had already stepped past, and its cleanup was not
+   * chained onto the record's promise. `body` computes how the child ended; everything after is here.
+   */
+  private runChild(
+    instance: Instance,
+    key: string,
+    stateId: string,
+    record: ChildRecord,
+    onParentAbort: () => void,
+    body: () => Promise<TerminationRecord>,
+  ): void {
+    const run = async (): Promise<void> => {
+      let term = await body();
       // Stepped past by a directed transition while it ran: whatever its own run came back with —
       // an interrupted call may well have COMPLETED — the record is `skipped`, as already journaled.
       if (record.skipped === true) term = { outcome: "skipped", ...(term.operation !== undefined ? { operation: term.operation } : {}) };
@@ -2707,7 +2686,7 @@ export class WorkflowEngine {
           this.emit({
             type: "instance.terminated",
             instanceId: record.instanceId,
-            stateId: decl.state,
+            stateId,
             outcome: "error",
             failure,
           });
@@ -2728,7 +2707,6 @@ export class WorkflowEngine {
     record.promise = record.promise.finally(() => {
       instance.abort.signal.removeEventListener("abort", onParentAbort);
     });
-    return "started";
   }
 
   // --- fan-out: one child, entered once per element (WORKFLOWS.md §6.2) -----
