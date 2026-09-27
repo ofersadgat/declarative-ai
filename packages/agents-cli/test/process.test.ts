@@ -11,7 +11,7 @@
  * machine that is not Windows.
  */
 import { describe, expect, it } from "vitest";
-import { resolveProgram, type ProgramDeps } from "../src/process.js";
+import { hostNode, resolveProgram, type ProgramDeps } from "../src/process.js";
 
 const NPM = "C:\\Users\\me\\AppData\\Roaming\\npm";
 /** The stable, documented npm shim format: its last line names the JS entry it runs. */
@@ -77,10 +77,65 @@ describe("resolveProgram", () => {
     expect(resolveProgram("codex", fs({}))).toEqual({ file: "codex", prefix: [] });
   });
 
+  it("runs a shim under the node.exe beside it when there is one — the shim's own first choice", () => {
+    expect(resolveProgram("codex", fs({ [`${NPM}\\codex.cmd`]: SHIM, [`${NPM}\\node.exe`]: true }))).toEqual({
+      file: `${NPM}\\node.exe`,
+      prefix: [`${NPM}\\node_modules\\@openai\\codex\\bin\\codex.js`],
+    });
+  });
+
+  it("tells an Electron interpreter to run as Node, and only an Electron one", () => {
+    // Without it, Electron treats the entry as an APP to open — and a packaged app ignores it entirely.
+    const electron = { ...fs({ [`${NPM}\\codex.cmd`]: SHIM }), node: "C:\\Apps\\JaiRA\\JaiRA.exe", runAsNode: true };
+    expect(resolveProgram("codex", electron)).toEqual({
+      file: "C:\\Apps\\JaiRA\\JaiRA.exe",
+      prefix: [`${NPM}\\node_modules\\@openai\\codex\\bin\\codex.js`],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+    });
+    expect(resolveProgram("tool.mjs", electron).env).toEqual({ ELECTRON_RUN_AS_NODE: "1" });
+    expect(resolveProgram("codex", fs({ [`${NPM}\\codex.cmd`]: SHIM })).env).toBeUndefined();
+  });
+
   it("searches the directory a command NAMES, rather than the PATH", () => {
     expect(resolveProgram("D:\\tools\\codex", fs({ "D:\\tools\\codex.cmd": SHIM }))).toEqual({
       file: "C:\\Program Files\\nodejs\\node.exe",
       prefix: ["D:\\tools\\node_modules\\@openai\\codex\\bin\\codex.js"],
+    });
+  });
+});
+
+describe("hostNode", () => {
+  // Electron has no console, so a console program a shim's entry starts (codex.js → codex.exe) got a new,
+  // VISIBLE one — a terminal window per call. A real node.exe keeps the whole chain on a hidden console.
+  const withElectron = (version: string | undefined, run: () => void): void => {
+    const versions = process.versions as Record<string, string | undefined>;
+    const before = versions["electron"];
+    if (version === undefined) delete versions["electron"];
+    else versions["electron"] = version;
+    try {
+      run();
+    } finally {
+      if (before === undefined) delete versions["electron"];
+      else versions["electron"] = before;
+    }
+  };
+
+  it("is this process's own executable outside Electron", () => {
+    withElectron(undefined, () => {
+      expect(hostNode(["C:\\nodejs"], () => true)).toEqual({ node: process.execPath, runAsNode: false });
+    });
+  });
+
+  it("prefers a node.exe on the PATH inside Electron", () => {
+    withElectron("39.0.0", () => {
+      const found = hostNode(["C:\\Windows", "C:\\Program Files\\nodejs\\"], (p) => p === "C:\\Program Files\\nodejs\\node.exe");
+      expect(found).toEqual({ node: "C:\\Program Files\\nodejs\\node.exe", runAsNode: false });
+    });
+  });
+
+  it("falls back to Electron run as Node when the PATH has no node.exe", () => {
+    withElectron("39.0.0", () => {
+      expect(hostNode(["C:\\Windows"], () => false)).toEqual({ node: process.execPath, runAsNode: true });
     });
   });
 });

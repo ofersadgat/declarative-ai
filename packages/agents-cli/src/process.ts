@@ -139,8 +139,38 @@ export interface ProgramDeps {
   pathDirs?: readonly string[];
   /** Extensions Windows can spawn directly, most-preferred first. */
   binaryExtensions?: readonly string[];
-  /** The interpreter a resolved shim is run with. */
+  /** The interpreter a resolved shim is run with, when the shim's directory has no `node.exe` of its own. */
   node?: string;
+  /** `node` is Electron, which runs a script as Node only when told to — see {@link hostNode}. */
+  runAsNode?: boolean;
+}
+
+/** A command made spawnable: the program, the arguments that go before the caller's, and any variables it needs. */
+export interface ResolvedProgram {
+  file: string;
+  prefix: string[];
+  /** Set only when the interpreter is Electron, which needs `ELECTRON_RUN_AS_NODE` to behave as Node. */
+  env?: Record<string, string>;
+}
+
+/**
+ * The interpreter a shim's JS entry runs under, from THIS process: {@link ProgramDeps.node} and
+ * {@link ProgramDeps.runAsNode}.
+ *
+ * Outside Electron that is `process.execPath`. Inside Electron it is a real `node.exe` from the PATH
+ * when there is one, and not Electron, for a reason that shows on screen: Electron is a GUI-subsystem
+ * program, so it has no console, and a console program it starts gets a NEW, VISIBLE one — past any
+ * `windowsHide`, which only reaches the direct child. An npm entry usually starts one: `codex.js`
+ * launches the native `codex.exe` with inherited stdio, so every `codex --version` the app ran popped a
+ * terminal window. `node.exe` is a console program; started hidden, its console is hidden and its
+ * children share it. It is also what the `.cmd` itself would have run. Electron, told to run as Node,
+ * is the fallback for a machine without one.
+ */
+export function hostNode(pathDirs: readonly string[], exists: (path: string) => boolean): { node: string; runAsNode: boolean } {
+  if (typeof process === "undefined") return { node: "node", runAsNode: false };
+  if (process.versions.electron === undefined) return { node: process.execPath, runAsNode: false };
+  const found = pathDirs.map((dir) => `${dir.replace(/[\\/]+$/, "")}\\node.exe`).find((candidate) => exists(candidate));
+  return found !== undefined ? { node: found, runAsNode: false } : { node: process.execPath, runAsNode: true };
 }
 
 /** The JS entry an npm `.cmd` shim delegates to, relative to the shim's own directory. */
@@ -174,8 +204,13 @@ const JS_ENTRY = /\.[cm]?js$/i;
  * Pure string work, no `node:path`: this is win32-only by definition, and staying dependency-free
  * keeps the module edge-importable and the function trivially testable.
  */
-export function resolveProgram(command: string, deps: ProgramDeps): { file: string; prefix: string[] } {
+export function resolveProgram(command: string, deps: ProgramDeps): ResolvedProgram {
   if ((deps.platform ?? "win32") !== "win32") return { file: command, prefix: [] };
+  const interpreted = (entry: string): ResolvedProgram => ({
+    file: deps.node ?? "node",
+    prefix: [entry],
+    ...(deps.runAsNode === true ? { env: { ELECTRON_RUN_AS_NODE: "1" } } : {}),
+  });
   const binary = deps.binaryExtensions ?? [".exe", ".com"];
   const named = command.includes("/") || command.includes("\\");
   const dirs = named ? [""] : (deps.pathDirs ?? []);
@@ -185,7 +220,7 @@ export function resolveProgram(command: string, deps: ProgramDeps): { file: stri
   // A JS entry — what `resolveAgentBinary` falls back to for an older `@anthropic-ai/claude-code`, and
   // what a caller may pin directly. It is not a program: run it under the interpreter, exactly as a
   // resolved shim is, rather than handing Windows a file it cannot execute.
-  if (JS_ENTRY.test(lower)) return { file: deps.node ?? "node", prefix: [command] };
+  if (JS_ENTRY.test(lower)) return interpreted(command);
   if (binary.some((ext) => lower.endsWith(ext))) return { file: command, prefix: [] };
   if (binary.some((ext) => candidates(ext).some((candidate) => deps.exists(candidate)))) return { file: command, prefix: [] };
 
@@ -194,7 +229,10 @@ export function resolveProgram(command: string, deps: ProgramDeps): { file: stri
     if (entry === undefined) continue;
     const cut = Math.max(candidate.lastIndexOf("\\"), candidate.lastIndexOf("/"));
     const dir = cut >= 0 ? candidate.slice(0, cut) : ".";
-    return { file: deps.node ?? "node", prefix: [`${dir}\\${entry}`] };
+    // The shim's own first choice, before whichever interpreter this process would offer.
+    const own = `${dir}\\node.exe`;
+    if (deps.exists(own)) return { file: own, prefix: [`${dir}\\${entry}`] };
+    return interpreted(`${dir}\\${entry}`);
   }
   // Nothing found: hand the name back and let the spawn fail, which at least names the command.
   return { file: command, prefix: [] };
@@ -207,23 +245,26 @@ export async function defaultSpawn(): Promise<SpawnProcess> {
   const fs = await import("node:fs");
   // Resolved per launch rather than once: a host may install an agent mid-session, and this costs a
   // stat per spawn against a process that is about to take seconds.
-  const program = (command: string): { file: string; prefix: string[] } =>
-    resolveProgram(command, {
+  const program = (command: string): ResolvedProgram => {
+    const pathDirs = (process.env["PATH"] ?? "").split(";").filter((d) => d.length > 0);
+    const exists = (p: string): boolean => fs.existsSync(p);
+    return resolveProgram(command, {
       platform: process.platform,
-      pathDirs: (process.env["PATH"] ?? "").split(";").filter((d) => d.length > 0),
-      node: process.execPath,
-      exists: (p) => fs.existsSync(p),
+      pathDirs,
+      ...hostNode(pathDirs, exists),
+      exists,
       readText: (p) => (fs.existsSync(p) ? fs.readFileSync(p, "utf8") : undefined),
     });
+  };
   return (argv, opts) => {
     const [command, ...args] = argv;
-    const { file, prefix } = program(command!);
+    const { file, prefix, env: needs } = program(command!);
     const child = spawn(file, [...prefix, ...args], {
       cwd: opts.cwd,
       // Spread only when the caller supplied one: `env: undefined` is what `child_process` reads as
       // "inherit", but stating it explicitly invites a later `{...opts.env}` that hands the child an
       // EMPTY environment and strips its PATH and credentials.
-      ...(opts.env !== undefined ? { env: opts.env } : {}),
+      ...(opts.env !== undefined || needs !== undefined ? { env: { ...(opts.env ?? process.env), ...needs } } : {}),
       stdio: [opts.stdin === undefined && opts.keepInputOpen !== true ? "ignore" : "pipe", "pipe", "pipe"],
       windowsHide: true,
     });

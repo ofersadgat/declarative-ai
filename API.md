@@ -3256,13 +3256,20 @@ function defaultSpawn(): Promise<SpawnProcess>;           // lazy `node:child_pr
 
 // Windows: Node refuses to spawn a `.cmd` without a shell, and a shell would eat these argv (a bearer
 // token, a TOML table). An npm-installed CLI IS a `.cmd` shim, and the shim names the JS entry it runs —
-// so this resolves it to `node <entry>`. A real executable wins and is returned untouched.
-function resolveProgram(command: string, deps: ProgramDeps): { file: string; prefix: string[] };
+// so this resolves it to `node <entry>` (the shim's own `node.exe` first). A real executable wins and is
+// returned untouched.
+function resolveProgram(command: string, deps: ProgramDeps): ResolvedProgram;
+interface ResolvedProgram { file: string; prefix: string[]; env?: Record<string, string> }  // env: ELECTRON_RUN_AS_NODE
 interface ProgramDeps {
   exists: (path: string) => boolean;
   readText: (path: string) => string | undefined;
   platform?: string; pathDirs?: readonly string[]; binaryExtensions?: readonly string[]; node?: string;
+  runAsNode?: boolean;            // `node` is Electron
 }
+
+// The interpreter for THIS process. Inside Electron, a PATH `node.exe` rather than Electron: Electron has
+// no console, so a console program an entry starts (codex.js → codex.exe) gets a new, visible window.
+function hostNode(pathDirs: readonly string[], exists: (path: string) => boolean): { node: string; runAsNode: boolean };
 ```
 
 **The `claude` adapter's enforcement model is `callback`, the same guarantee as the SDK adapter's** — the
