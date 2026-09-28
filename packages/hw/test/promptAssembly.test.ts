@@ -203,7 +203,7 @@ describe("template substitution", () => {
     const { engine, fake } = makeEngine(substitutionFiles("nodot=[{{inputs.s}}]"), "root", () => ok({ r: "A" }));
     const result = await engine.run({ inputs: values });
     expect(result.outcome).toBe("error");
-    expect(result.failure?.reason).toMatch(/'inputs\.s' resolves to no document.*did you mean '\.inputs\.s'/);
+    expect(result.failure?.reason).toMatch(/'inputs\.s' resolves to no document on the search path/);
     expect(fake.calls).toHaveLength(0); // and nothing was sent
   });
 

@@ -31,6 +31,8 @@ import { emptyWorkflowMetrics, mergeWorkflowMetrics, type WorkflowMetrics } from
 const CAPS: Capabilities = {
   structuredOutput: true,
   sessionResume: false,
+
+  sessionFork: false,
   streaming: false,
   interactive: false,
   readOnly: true,

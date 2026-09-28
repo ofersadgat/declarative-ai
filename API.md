@@ -1371,7 +1371,6 @@ class AdaptiveRateController implements RateLimiter {
 interface AdaptiveRateControllerOptions {
   initialConcurrency?; maxConcurrency?; minConcurrency?;
   increaseEvery?;              // +1 concurrency after this many consecutive successes (default 8)
-  tokensPerMinute?;           // legacy combined bucket
   modelLimits?: ModelLimitResolver;   // per-model RPM/ITPM/OTPM buckets
   now?; wait?;
 }

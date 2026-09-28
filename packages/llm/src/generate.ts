@@ -152,8 +152,7 @@ function num(v: unknown): number | undefined {
 /**
  * Extract counts + the cache/reasoning breakdown from an AI SDK `LanguageModelUsage`
  * (the flat, post-mapping shape on `finish.totalUsage` / `finish-step.usage` /
- * `onAbort` step usage). The detail fields come off `inputTokenDetails`/`outputTokenDetails`;
- * the deprecated flat aliases (`cachedInputTokens`, `reasoningTokens`) are read as a fallback.
+ * `onAbort` step usage). The detail fields come off `inputTokenDetails`/`outputTokenDetails`.
  * Missing detail just means the provider didn't report it — never fabricated.
  */
 export function extractTokenCounts(usage: unknown): TokenCounts {
@@ -162,8 +161,6 @@ export function extractTokenCounts(usage: unknown): TokenCounts {
     inputTokens?: unknown;
     outputTokens?: unknown;
     totalTokens?: unknown;
-    cachedInputTokens?: unknown;
-    reasoningTokens?: unknown;
     inputTokenDetails?: { noCacheTokens?: unknown; cacheReadTokens?: unknown; cacheWriteTokens?: unknown };
     outputTokenDetails?: { reasoningTokens?: unknown };
   };
@@ -174,9 +171,9 @@ export function extractTokenCounts(usage: unknown): TokenCounts {
     outputTokens: num(u.outputTokens),
     totalTokens: num(u.totalTokens),
     noCacheTokens: num(inDet.noCacheTokens),
-    cacheReadTokens: num(inDet.cacheReadTokens) ?? num(u.cachedInputTokens),
+    cacheReadTokens: num(inDet.cacheReadTokens),
     cacheWriteTokens: num(inDet.cacheWriteTokens),
-    reasoningTokens: num(outDet.reasoningTokens) ?? num(u.reasoningTokens),
+    reasoningTokens: num(outDet.reasoningTokens),
   };
 }
 

@@ -232,27 +232,11 @@ export interface LowerOptions {
   userFunctions?: import("./userFunctions.js").UserFunctions;
 }
 
-/** The runtime namespaces, for the one diagnostic that has to survive the dot becoming required. */
-const RUNTIME_ROOTS: ReadonlySet<string> = new Set([
-  "inputs", "outputs", "children", "artifacts", "conversations", "run", "limits", "each", "event",
-  // The state's own fields (SPEC §6.1) — read back under their authored names.
-  "operation", "environment", "title", "label", "description",
-]);
-
-/**
- * Lower a bare name to what it names, or fail saying so.
- *
- * The error carries the migration hint deliberately. `children.a.outputs.n` was the spelling for a
- * runtime read until the dot became required, so the overwhelmingly likely cause of "no document
- * called `children.a.outputs.n`" is a missing dot rather than a missing file — and a resolver
- * message about the filesystem would send the reader looking in the wrong place entirely.
- */
+/** Lower a bare name to the document it names, or fail saying so. */
 function resolveName(name: string, options: LowerOptions): Ref<InlineFamily> {
   const resolved = options.resolveName?.(name) ?? asRef(options.resolveOperation?.(name));
   if (resolved !== undefined) return resolved;
-  const root = name.split(".")[0]!;
-  const hint = RUNTIME_ROOTS.has(root) ? ` — did you mean '.${name}', which reads this state's data?` : "";
-  throw new ExprError(`'${name}' resolves to no document on the search path${hint}`, 0);
+  throw new ExprError(`'${name}' resolves to no document on the search path`, 0);
 }
 
 function asRef(op: Operation<InlineFamily> | undefined): Ref<InlineFamily> | undefined {

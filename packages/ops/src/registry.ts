@@ -188,11 +188,8 @@ export interface RuntimeCapabilities extends HostCapabilities {
   /** Supports session continuation. */
   sessionResume: boolean;
   /**
-   * Supports BRANCHING a conversation server-side, as distinct from continuing one.
-   *
-   * Optional, and absent means "the same as {@link RuntimeCapabilities.sessionResume}" — which is what
-   * every adapter written before this field meant by declaring resume: Claude Code's `resume` +
-   * `forkSession` gives both at once, and the Messages API replays, so both halves are free.
+   * Supports BRANCHING a conversation server-side, as distinct from continuing one. Claude Code's
+   * `resume` + `forkSession` gives both at once, and the Messages API replays, so both halves are free.
    *
    * Codex is what splits them: `codex exec resume <id>` appends natively, and there is no fork
    * primitive at all. An adapter in that position declares `{ sessionResume: true, sessionFork: false }`
@@ -202,7 +199,7 @@ export interface RuntimeCapabilities extends HostCapabilities {
    * unless the adapter can really branch, because two branches writing into one remote session is
    * silent and unrecoverable (SESSIONS.md §6).
    */
-  sessionFork?: boolean;
+  sessionFork: boolean;
   /**
    * Supports branching a conversation at an ARBITRARY point, not only from where it now stands.
    *
@@ -251,6 +248,8 @@ export const RUNTIME_CAPABILITIES: RuntimeCapabilities = {
   mutatesWorkspace: false,
   policyEnforcement: "none",
   sessionResume: false,
+
+  sessionFork: false,
   streaming: false,
   runtime: "node",
 };

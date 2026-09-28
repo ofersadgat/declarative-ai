@@ -141,6 +141,8 @@ function defaultContextLength(model: string): number | undefined {
 const CAPABILITIES: Capabilities = {
   structuredOutput: true,
   sessionResume: false,
+
+  sessionFork: false,
   streaming: true,
   interactive: false,
   readOnly: true,
@@ -330,9 +332,8 @@ export class PromptExecutor<Out = ResolvedValue> implements Executor<ExecService
     // injects history into the config, so nothing here is already in `prior`.
     const sent = this.requestTurns(definition);
     // Can this transport BRANCH a conversation server-side? Read off its own declared capabilities, so
-    // there is one answer and it is the one the engine also reads. Absent means "the same as resume",
-    // which is what every adapter predating the split meant by `sessionResume: true`.
-    const nativeFork = this.capabilities.sessionFork ?? this.capabilities.sessionResume;
+    // there is one answer and it is the one the engine also reads.
+    const nativeFork = this.capabilities.sessionFork;
     // The FORK-WITHOUT-A-FORK-PRIMITIVE case (SESSIONS.md §6, "Strategies") folded into the general
     // rule: replay when the remote holds nothing for us (no native resume at all), or when it holds a
     // conversation we are not allowed to branch. `messages()` is a LAZY accessor and this is the only

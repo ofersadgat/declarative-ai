@@ -423,39 +423,7 @@ describe("a function's default arguments (§7)", () => {
   });
 });
 
-describe("the `$`-key renames (§2)", () => {
-  const refused = (states: Record<string, unknown>): string => {
-    try {
-      const errors = errorsOf(states, "root");
-      return errors.join("\n");
-    } catch (e) {
-      return (e as Error).message;
-    }
-  };
-
-  it("refuses `expr`, naming `$expr`", () => {
-    expect(refused({ root: { outputs: { n: { schema: {}, binding: { expr: "1 + 1" } } } } })).toMatch(/'expr' is spelled '\$expr'/);
-    expect(refused({ root: leaf({ model: { expr: ".inputs.m" } }) })).toMatch(/operation\.model: 'expr' is spelled '\$expr'/);
-  });
-
-  it("refuses the `{ binding }` wrapper in an argument bag, naming `$binding`", () => {
-    expect(refused({ root: { inputs: { t: { schema: {} } }, outputs: {}, operation: { function: "record", args: { text: { binding: ".inputs.t" } } } } })).toMatch(
-      /operation\.args\.text: the '\{ "binding": … \}' wrapper is spelled '\{ "\$binding": … \}'/,
-    );
-  });
-
-  it("refuses the old session keys, each naming its replacement", () => {
-    for (const [old, now, decl] of [
-      ["name", "$ref", { name: "review" }],
-      ["in", "$in", { $ref: "review", in: "parent" }],
-      ["join", "$join", { join: "nearest" }],
-      ["fork", "$fork", { $ref: "review", fork: true }],
-      ["expr", "$expr", { expr: ".inputs.thread" }],
-    ] as const) {
-      expect(refused({ root: leaf({ session: decl }) })).toContain(`session declares '${old}'; the key is spelled '${now}'`);
-    }
-  });
-
+describe("the `$`-keys (§2)", () => {
   it("leaves a slot's own `binding` key bare — it is structure, not payload", () => {
     expect(errorsOf({ root: { inputs: { t: { schema: {} } }, outputs: { o: { schema: {}, binding: ".inputs.t" } } } }, "root")).toEqual([]);
   });

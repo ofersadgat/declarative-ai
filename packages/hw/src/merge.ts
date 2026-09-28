@@ -125,35 +125,8 @@ function mergeSlotMap(
  */
 const KIND_SPECIFIC = ["args", "prompt", "system", "function", "script"] as const;
 
-/**
- * Refuse the two spellings that are no longer fields: `sessionId`, and a top-level `fork`.
- *
- * A refusal rather than a silent drop. An unrecognized field is passed through to the LLM call
- * configuration, so ignoring `sessionId` would ship the author's session declaration to the model as
- * a call parameter and start a fresh conversation without saying so; ignoring `fork` would drop a
- * branch the author asked for and append to a shared thread instead. Both failures look like success.
- */
-export function refuseSynonyms<T extends OperationFields>(fields: T): T {
-  if ((fields as { sessionId?: unknown }).sessionId !== undefined) {
-    throw new Error("operation declares 'sessionId'; the field is called 'session'");
-  }
-  if ((fields as { fork?: unknown }).fork !== undefined) {
-    // `fork` was a sibling of `session`, and being a sibling is what made it wrong: it inherited
-    // down the environment chain on its own, so a root that wrote `fork: true` branched every
-    // descendant's conversation whatever each of them had declared. It belongs to the session it
-    // is about (DESIGN.md §1.6), which also makes the whole declaration replace as one value.
-    throw new Error(
-      "operation declares 'fork' beside 'session'; fork is a property OF the session — write "
-      + '{"session": {"$ref": "…", "$fork": true}} (or {"$join": …, "$fork": true})',
-    );
-  }
-  return fields;
-}
-
 /** Merge `over` onto `base`, field by field. `over` is the NEARER layer and wins. */
 export function mergeOperationFields(base: OperationFields, over: OperationFields): OperationFields {
-  base = refuseSynonyms(base);
-  over = refuseSynonyms(over);
   // Read off each layer's OWN fields rather than off `kind`, because `kind` is optional now and the
   // drop below is the reason that matters. `environment: {prompt, model}` over `operation: {function}`
   // never writes the word "kind" anywhere, and if the change went unnoticed the gate would inherit

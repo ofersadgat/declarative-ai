@@ -854,11 +854,8 @@ class Notifier {
 }
 
 /**
- * A template hole. The leading dot is optional HERE and required by the grammar — deliberately.
- *
- * Recognizing `{{inputs.x}}` and then failing to lower it is what turns an unmigrated hole into a
- * load-time error naming the fix. A regex that demanded the dot would leave the hole unrecognized
- * and render it as literal text into the prompt, which is the same mistake silently.
+ * A template hole: a dotted path (`{{.inputs.x}}`) reads this state's data, and a bare name is a
+ * document on the search path — the expression grammar's two roots.
  */
 const TEMPLATE_REF = /\{\{\s*(\.?[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)\s*\}\}/g;
 
@@ -5933,7 +5930,7 @@ export class WorkflowEngine {
     const scope: ResolutionScope = { ...this.scopeFor(instance), exprContext: ctx };
     return template.replace(TEMPLATE_REF, (_m, path: string) => {
       // Lowering happens OUTSIDE the catch: a hole that cannot be lowered is an authoring error
-      // (`{{inputs.x}}` missing its dot, a name that resolves nowhere), while a hole that lowers and
+      // (a name that resolves nowhere), while a hole that lowers and
       // does not resolve is legitimately empty for this render. Swallowing both made the first look
       // like the second — an empty substitution where the prompt silently lost a variable.
       const ref = this.exprRef(path);

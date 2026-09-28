@@ -28,7 +28,6 @@ import {
   isNameUse,
   isPick,
   isWrappedBinding,
-  refusedBindingSpelling,
   kindIsAmbiguous,
   RESOLVER_REFS,
   type BindingDecl,
@@ -212,8 +211,6 @@ export function desugarBinding(
     if (binding.$in === undefined) throw new WorkflowLoadError(`${where}: the name '${binding.$ref}' reached lowering with no scope`, stateId);
     return resolverEdge(RESOLVER_REFS.name, { name: { text: binding.$ref }, in: { text: binding.$in } });
   }
-  const refused = refusedBindingSpelling(binding);
-  if (refused !== undefined) throw new WorkflowLoadError(`${where}: ${refused}`, stateId);
   throw new WorkflowLoadError(`${where}: unrecognized binding form ${JSON.stringify(binding)}`, stateId);
 }
 
@@ -433,8 +430,6 @@ function desugarParameter(
   // `text` or `json` key is the value it always was: a literal default IS a literal, and there is
   // nothing a literal binding form could add except a way to misread one.
   if (decl.default !== undefined) {
-    const refused = refusedBindingSpelling(decl.default, true);
-    if (refused !== undefined) throw new WorkflowLoadError(`${where}.default: ${refused}`, stateId);
     const computed = isWrappedBinding(decl.default)
       ? decl.default.$binding
       : typeof decl.default === "object" && decl.default !== null && !Array.isArray(decl.default) && "$expr" in decl.default

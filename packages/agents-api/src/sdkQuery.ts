@@ -321,15 +321,6 @@ export function sdkOptions(opts: AgentQueryOptions, binaryPath: string | undefin
   };
 }
 
-/**
- * The stream mapping, kept under its old name.
- *
- * It is now {@link readAgentMessage}, shared with the CLI sibling — the two transports carry the SAME
- * messages, because the SDK drives that binary as a subprocess and hands its `stream-json` lines
- * through with their field names untouched. Two mappings were two chances to drop the same field, and
- * both dropped every field: everything but the terminal `result` collapsed to `{type: "other"}`.
- */
-export const readSdkResult: (msg: Record<string, unknown>) => AgentStreamMessage = readAgentMessage;
 
 /**
  * Our approver, in the SDK's own calling convention.
@@ -597,7 +588,7 @@ async function* sdkMessages(
 
   try {
     for await (const msg of q) {
-      const next = readSdkResult(msg as Record<string, JsonValue>);
+      const next = readAgentMessage(msg as Record<string, JsonValue>);
       // Before the result goes out and the input closes: ask how full the context is now. Bounded —
       // an SDK that never answers settles the turn exactly as it did before there was a question.
       if (next.type === "result" && typeof q.getContextUsage === "function") {

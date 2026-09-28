@@ -23,7 +23,7 @@ import {
 } from "../src/session.js";
 import { scopedKeyOf } from "../src/scope.js";
 import { RUN_RESOURCE_KEY } from "../src/workspace.js";
-import { mergeOperationFields, refuseSynonyms } from "../src/merge.js";
+import { mergeOperationFields } from "../src/merge.js";
 import { loadBundle } from "../src/loader.js";
 import { validateBundle } from "../src/validate.js";
 import type { OperationFields, StateDef } from "../src/format.js";
@@ -337,29 +337,6 @@ describe("the environment merge", () => {
   it("replaces a session WHOLE, so fork cannot arrive from a different layer than the name", () => {
     const merged = mergeOperationFields({ session: { $ref: "a", $fork: true } }, { session: { $ref: "b" } });
     expect(merged.session).toEqual({ $ref: "b" });
-  });
-
-  /**
-   * `sessionId` was a synonym for `session` so an `LlmConfiguration`-shaped block could paste in
-   * unchanged. It is refused now — and refused rather than IGNORED, because anything unrecognized is
-   * passed through to the LLM call config. A silently dropped `sessionId` would therefore be sent to
-   * the model as a call parameter while the operation quietly started a fresh conversation.
-   */
-  it("refuses `sessionId`, rather than shipping it to the model as a call parameter", () => {
-    expect(() => refuseSynonyms({ sessionId: null } as OperationFields)).toThrow(/the field is called 'session'/);
-    expect(() => mergeOperationFields({ session: "planning" }, { sessionId: null } as OperationFields)).toThrow(
-      /the field is called 'session'/,
-    );
-    expect(() => refuseSynonyms({ session: "planning" })).not.toThrow();
-  });
-
-  /**
-   * A top-level `fork` inherited down the environment chain on its own, so a root that wrote it
-   * branched every descendant's conversation whatever each of them had declared — a cross-field
-   * interaction no author ever asks for. It belongs to the session it is about.
-   */
-  it("refuses a `fork` written beside the session, and names the new spelling", () => {
-    expect(() => refuseSynonyms({ fork: true } as OperationFields)).toThrow(/fork is a property OF the session/);
   });
 
   it("survives the split into the loaded execution environment", () => {

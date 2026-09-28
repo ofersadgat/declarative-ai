@@ -20,7 +20,7 @@ const op = (model?: string) =>
 function named(name: string, capabilities?: Partial<{ structuredOutput: boolean }>) {
   const seen: Array<Operation<InlineFamily>> = [];
   const executor: Executor<ExecServices, LlmMetrics, Operation<InlineFamily>, ResolvedValue> = {
-    capabilities: { structuredOutput: true, mutatesWorkspace: false, policyEnforcement: "none", sessionResume: false, streaming: false, runtime: "node", interactive: false, readOnly: true, memoizable: true, ...capabilities } as never,
+    capabilities: { structuredOutput: true, mutatesWorkspace: false, policyEnforcement: "none", sessionResume: false, sessionFork: false, streaming: false, runtime: "node", interactive: false, readOnly: true, memoizable: true, ...capabilities } as never,
     metrics: { merge: (a) => a, empty: () => ({ durationMs: 0, costUsd: 0, costSource: "unknown" }) },
     start: (o, _ctx): ExecHandle<ResolvedValue, LlmMetrics> => {
       seen.push(o);

@@ -36,7 +36,6 @@ import {
   isWrappedBinding,
   literalPermissions,
   OPERATION_OWN_FIELDS,
-  refusedBindingSpelling,
   type BindingDecl,
   type EnvironmentDecl,
   type ExecEnvironmentDecl,
@@ -82,18 +81,6 @@ const TOP_LEVEL: ReadonlyArray<{ path: string; schema: JsonSchema; kind: RefKind
   { path: "limits.max_iterations", schema: INTEGER, kind: "json" },
   { path: "limits.timeout", schema: NUMBER, kind: "json" },
 ];
-
-/**
- * Refuse a value still written in a spelling that used to make it a binding (`refusedBindingSpelling`).
- *
- * Every position this module reads is one where the old spelling WAS a binding, so finding it means
- * an unmigrated document rather than a literal — and passing it through as one would hand a model id
- * of `{ "expr": … }` to the provider.
- */
-function refuseOldSpelling(value: unknown, where: string, wrapped = false): void {
-  const complaint = refusedBindingSpelling(value, wrapped);
-  if (complaint !== undefined) throw new Error(`${where}: ${complaint}`);
-}
 
 function readPath(root: unknown, path: readonly string[]): unknown {
   let at: unknown = root;
@@ -141,7 +128,6 @@ export function extractTopLevelFields(def: StateDef): { def: StateDef; found: Ex
   for (const { path, schema, kind } of TOP_LEVEL) {
     const segments = path.split(".");
     const value = readPath(def, segments);
-    refuseOldSpelling(value, path);
     if (value === undefined || !isBindingDecl(value)) continue;
     // A bare string in one of these positions is the value, not a reference: `"label": "Planning"`
     // has always meant the words. Only the object forms are bindings here.
@@ -163,7 +149,6 @@ export function extractTopLevelFields(def: StateDef): { def: StateDef; found: Ex
 export function extractOperationFields(merged: OperationFields): { op: OperationFields; found: Extracted[] } {
   const found: Extracted[] = [];
   let op: OperationFields = { ...merged };
-  for (const key of ["prompt", "system", "function", "tools", "permissions"] as const) refuseOldSpelling(merged[key], `operation.${key}`);
 
   if (merged.prompt !== undefined && typeof merged.prompt !== "string") {
     // A prompt-kind value, or a template string computed at entry (SPEC §7.1). Typed by kind alone:
@@ -198,7 +183,6 @@ export function extractOperationFields(merged: OperationFields): { op: Operation
       const block = permissions as PermissionsDecl;
       for (const key of ["profile", "default", "other"] as const) {
         const value = block[key];
-        refuseOldSpelling(value, `operation.permissions.${key}`);
         if (value === undefined || typeof value === "string" || !isBindingDecl(value)) continue;
         found.push({ path: `environment.permissions.${key}`, binding: value as BindingDecl, schema: STRING, kind: "text" });
         op = deletePath(op, ["permissions", key]);
@@ -210,7 +194,6 @@ export function extractOperationFields(merged: OperationFields): { op: Operation
   for (const [key, value] of Object.entries(merged)) {
     if (OPERATION_OWN_FIELDS.has(key) || value === undefined) continue;
     const known = CONFIG_FIELD_SCHEMAS[key];
-    if (known !== undefined) refuseOldSpelling(value, `operation.${key}`);
     if (known !== undefined && isBindingDecl(value) && typeof value !== "string") {
       // A model ROLE is the one value here that is not its field's scalar: an alternative may be
       // the id alone, or the id with the configuration that goes with it (`{ "model": "…",
@@ -223,7 +206,6 @@ export function extractOperationFields(merged: OperationFields): { op: Operation
       continue;
     }
     const walk = (at: unknown, path: string[]): void => {
-      refuseOldSpelling(at, `operation.${path.join(".")}`, true);
       if (isWrappedBinding(at)) {
         found.push({ path: `operation.config.${path.join(".")}`, binding: at.$binding, kind: "json" });
         op = deletePath(op, path);
@@ -257,7 +239,6 @@ export function liftWrappedArgs(decl: OperationFields): OperationFields {
   let input = decl.input;
   let moved = false;
   for (const [name, value] of Object.entries(decl.args)) {
-    refuseOldSpelling(value, `operation.args.${name}`, true);
     // A scoped name is a computed value too — read per instance — so it moves with the wrapped ones.
     // So does a literal with one INSIDE it: an argument is one slot with one binding, and the binding
     // of `{ "options": { "remote": { "$ref": "review" } } }` is the whole object, assembled around

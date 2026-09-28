@@ -168,9 +168,6 @@ export interface AdaptiveRateControllerOptions {
   minConcurrency?: number;
   /** Additively raise concurrency by 1 after this many consecutive successes. Default 8. */
   increaseEvery?: number;
-  /** LEGACY combined TPM cap — one shared input+output bucket (test seam / explicit override).
-   *  Prefer `modelLimits`, which carries the split per-model shape providers actually publish. */
-  tokensPerMinute?: number;
   /** Per-model buckets: model id → its rate-limit family (RPM/ITPM/OTPM). Buckets are created lazily
    *  per family key, so models sharing one published limit share one set of buckets. Omit → pool only. */
   modelLimits?: ModelLimitResolver;
@@ -186,7 +183,6 @@ export interface AdaptiveRateControllerOptions {
  */
 export class AdaptiveRateController implements RateLimiter {
   private readonly limiter: ConcurrencyLimiter;
-  private readonly bucket?: TokenBucket;
   private readonly modelLimits?: ModelLimitResolver;
   /** Lazily-created per-family bucket sets — one per distinct `ModelLimitResolver` key. */
   private readonly familyBuckets = new Map<string, { req?: TokenBucket; input?: TokenBucket; output?: TokenBucket }>();
@@ -206,9 +202,6 @@ export class AdaptiveRateController implements RateLimiter {
     this.now = opts.now;
     this.waitFn = opts.wait;
     this.modelLimits = opts.modelLimits;
-    if (opts.tokensPerMinute && opts.tokensPerMinute > 0) {
-      this.bucket = new TokenBucket(opts.tokensPerMinute / 60_000, opts.tokensPerMinute, opts.now, opts.wait);
-    }
   }
 
   get concurrency(): number {
@@ -235,7 +228,6 @@ export class AdaptiveRateController implements RateLimiter {
   async schedule<T>(est: CallEstimate, run: () => Promise<T>): Promise<T> {
     return this.limiter.run(async () => {
       // Slot held across every bucket wait — the wait is itself the throttle.
-      if (this.bucket) await this.bucket.remove(est.inputTokens + est.outputTokens);
       const fam = this.bucketsFor(est.modelId);
       if (fam) {
         if (fam.req) await fam.req.remove(1);

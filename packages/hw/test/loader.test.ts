@@ -216,10 +216,10 @@ describe("validateBundle failure modes", () => {
    * validator reports. `bogusroot.x` is a reference to a document that does not exist, which the
    * loader cannot finish lowering at all. Two spellings, two failures, neither of them silent.
    */
-  it("fails at LOAD for a bare name that resolves nowhere, naming the missing dot", () => {
+  it("fails at LOAD for a bare name that resolves nowhere", () => {
     const files = specPlanningFiles();
     files[PLAN_ID]!.outputs!["outcome"]!.binding = { $expr: "children.critique.outputs.outcome" };
-    expect(() => loadBundle(files, PLAN_ID)).toThrow(/did you mean '\.children\.critique\.outputs\.outcome'/);
+    expect(() => loadBundle(files, PLAN_ID)).toThrow(/'children\.critique\.outputs\.outcome' resolves to no document on the search path/);
   });
 
   it("flags unwired required child inputs and unknown wired names", () => {

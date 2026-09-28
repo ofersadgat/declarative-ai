@@ -107,6 +107,8 @@ export interface WorkflowExecutorOptions {
 const CAPABILITIES: Capabilities = {
   structuredOutput: true,
   sessionResume: false, // v1: a canceled workflow is re-run (DESIGN §7)
+
+  sessionFork: false,
   streaming: true,
   interactive: true, // supported via interactive `function` states (registry.functions)
   readOnly: false,

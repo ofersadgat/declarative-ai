@@ -389,31 +389,6 @@ export function isPick(value: unknown): value is { $any: JsonValue[]; $pick?: st
  */
 export const WRAPPED_BINDING_KEY = "$binding";
 
-/**
- * The spellings `$expr` and `$binding` had before instructions were `$`-keys — refused by name.
- *
- * Refused rather than accepted beside the new ones, for the reason `sessionId` is (`refuseSynonyms`):
- * a second spelling costs a rule about which one wins, and here it would cost more than that, because
- * the old spelling is exactly what a LITERAL looks like. `{ "expr": … }` in an argument bag now means
- * an object with an `expr` key, so a document that still says it would hand a function its own
- * expression source as data and report success.
- *
- * Returns the complaint, or `undefined`. `wrapped` asks about the `{ "binding": … }` wrapper, which
- * is only a mistake where a wrapper was legal — a slot's own `binding` key is structure and stays bare.
- */
-export function refusedBindingSpelling(value: unknown, wrapped = false): string | undefined {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const o = value as Record<string, unknown>;
-  if (typeof o.expr === "string" && o.$expr === undefined) return `'expr' is spelled '$expr' — write { "$expr": ${JSON.stringify(o.expr)} }`;
-  if (wrapped) {
-    const keys = Object.keys(o);
-    if (keys.length === 1 && keys[0] === "binding" && (isBindingDecl(o.binding) || refusedBindingSpelling(o.binding) !== undefined)) {
-      return `the '{ "binding": … }' wrapper is spelled '{ "$binding": … }'`;
-    }
-  }
-  return undefined;
-}
-
 export function isWrappedBinding(value: unknown): value is { $binding: BindingDecl } {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const keys = Object.keys(value);

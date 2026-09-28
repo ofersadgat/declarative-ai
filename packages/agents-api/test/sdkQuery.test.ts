@@ -21,7 +21,6 @@ import {
   createSdkAgentQuery,
   InputQueue,
   MCP_SDK_MISSING,
-  readSdkResult,
   sdkAgentQuery,
   sdkMcpServer,
   sdkOptions,
@@ -104,15 +103,15 @@ describe("sdkOptions — the request the SDK is handed", () => {
   });
 });
 
-describe("readSdkResult — the answer read back", () => {
+describe("readAgentMessage — the answer read back", () => {
   it("normalizes the terminal result, cost and all", () => {
-    expect(readSdkResult({ type: "result", result: "done", total_cost_usd: 0.02 })).toEqual({ type: "result", result: { text: "done", costUsd: 0.02 } });
+    expect(readAgentMessage({ type: "result", result: "done", total_cost_usd: 0.02 })).toEqual({ type: "result", result: { text: "done", costUsd: 0.02 } });
   });
 
   it("records the session the run ENDED in — a new id after a fork, the resumed one otherwise", () => {
     // Recording it is not optional: a fork that kept its parent's handle would put two branches into
     // one remote session, and a run whose id is dropped leaves the next call nothing to resume.
-    expect(readSdkResult({ type: "result", result: "ZEPHYR", session_id: "51caeb77" })).toEqual({
+    expect(readAgentMessage({ type: "result", result: "ZEPHYR", session_id: "51caeb77" })).toEqual({
       type: "result",
       result: { text: "ZEPHYR", costUsd: undefined, sessionId: "51caeb77" },
     });
@@ -122,20 +121,20 @@ describe("readSdkResult — the answer read back", () => {
     // Observed on the binary this SDK drives: `is_error` is independent of `subtype` AND of the exit
     // code, so reading only the discriminator reported "Not logged in · Please run /login" as a
     // successful answer — indistinguishable from a review that found nothing.
-    expect(readSdkResult({ type: "result", subtype: "success", is_error: true, result: "Not logged in · Please run /login" })).toEqual({
+    expect(readAgentMessage({ type: "result", subtype: "success", is_error: true, result: "Not logged in · Please run /login" })).toEqual({
       type: "other",
       error: "Not logged in · Please run /login",
     });
   });
 
   it("names the failure even when the SDK supplied no text to explain it", () => {
-    expect(readSdkResult({ type: "result", is_error: true })).toEqual({ type: "other", error: expect.stringMatching(/reported a failed run/) });
+    expect(readAgentMessage({ type: "result", is_error: true })).toEqual({ type: "other", error: expect.stringMatching(/reported a failed run/) });
   });
 
   it("is the shared mapping, so the two transports cannot disagree about a field", () => {
-    // `readSdkResult` is now `readAgentMessage` under its old name. Two mappings were two chances to
+    // `readAgentMessage` is now `readAgentMessage` under its old name. Two mappings were two chances to
     // drop the same field, and both dropped every field but the terminal result.
-    expect(readSdkResult).toBe(readAgentMessage);
+    expect(readAgentMessage).toBe(readAgentMessage);
   });
 });
 

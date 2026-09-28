@@ -235,12 +235,6 @@ export function validateSessionDecl(value: unknown): string | undefined {
     const got = Array.isArray(value) ? "an array" : typeof value;
     return `session must be a name, {"$join": …}, a session ref, {"$expr": …}, or null — got ${got}`;
   }
-  // The spellings these keys had before instructions were `$`-keys (NAMES.md §2). Refused by name
-  // rather than read as synonyms: `{ "name": "review" }` would otherwise fall through to "declares
-  // none of…", which says what is missing and not what to write.
-  for (const [old, now] of RENAMED_KEYS) {
-    if (value[old] !== undefined && value[now] === undefined) return `session declares '${old}'; the key is spelled '${now}'`;
-  }
   const stray = Object.keys(value).find((key) => key.startsWith("$") && !SESSION_KEYS.has(key));
   if (stray !== undefined) return `'${stray}' means nothing on a session — it takes '$ref', '$in', '$join', '$fork', '$expr', and beside a '$ref' plain keys that configure the name`;
   const forms = (["$ref", "$join", "id", "$expr"] as const).filter((key) => value[key] !== undefined);
@@ -290,14 +284,6 @@ export function validateSessionDecl(value: unknown): string | undefined {
 /** The `$`-keys a session declaration may carry. */
 const SESSION_KEYS: ReadonlySet<string> = new Set(["$ref", "$in", "$join", "$fork", "$expr"]);
 
-/** Old spelling → the `$`-key that replaced it. `id` is not here: a ref's `id` is its value, not an instruction. */
-const RENAMED_KEYS: ReadonlyArray<readonly [string, string]> = [
-  ["name", "$ref"],
-  ["in", "$in"],
-  ["join", "$join"],
-  ["fork", "$fork"],
-  ["expr", "$expr"],
-];
 
 /** The state a declaration is being canonicalized FOR — the two ids are {@link ScopeLink}'s. */
 export type SessionWriter = ScopeLink;

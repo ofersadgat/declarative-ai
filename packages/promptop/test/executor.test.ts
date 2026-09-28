@@ -9,6 +9,8 @@ describe("PromptExecutor (core) — outcome mapping", () => {
     expect(new PromptExecutor().capabilities).toEqual({
       structuredOutput: true,
       sessionResume: false,
+
+      sessionFork: false,
       streaming: true,
       interactive: false,
       readOnly: true,

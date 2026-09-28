@@ -100,7 +100,7 @@ export type EngineEvent =
    * several keys in several parents (`explore` sits under all six phases of the feature workflow).
    * Without the parent and the key, a reader is told a block happened somewhere and not where.
    */
-  | { type: "instance.blocked"; stateId: string; childKey?: string; parentInstanceId?: string; reason: string }
+  | { type: "instance.blocked"; stateId: string; childKey: string; parentInstanceId: string; reason: string }
   /**
    * `index` on every `operation.*` event names which call of an operation LIST it is about (SPEC
    * §7.1d) — absent for a single operation, so a journal reader tells the two shapes apart by it.
