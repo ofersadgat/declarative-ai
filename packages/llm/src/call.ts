@@ -15,7 +15,7 @@
  * the old lowering to smuggle the output schema through `spec.outputSchema` and cast the phantom away.
  */
 import { jsonSchema, stepCountIs, type FilePart, type ModelMessage, type StopCondition, type TextPart, type ToolCallOptions, type ToolChoice, type ToolSet } from "ai";
-import type { JsonValue, OutputValidator } from "@declarative-ai/json";
+import { splitToolImages, type JsonValue, type OutputValidator } from "@declarative-ai/json";
 import type { LlmCallDefinition, ProviderOptions, ToolDefinition } from "./llmConfig.js";
 import type { FileInput } from "./files.js";
 import { generateStructured, type GenerateEnvironment } from "./generate.js";
@@ -229,6 +229,23 @@ export async function executeRequest<T = JsonValue>(req: LlmCallRequest<T>): Pro
   return executeLlmCall<T>(def, { ...env, modelRouter: env.modelRouter });
 }
 
+/** What a tool's `toModelOutput` answers — the SDK's own type, which `ai` does not export by name. */
+type ToolResultOutput = Awaited<ReturnType<NonNullable<ToolSet[string]["toModelOutput"]>>>;
+
+/**
+ * What the model is handed of a tool's result: the SDK's own default — text for a string, JSON for the
+ * rest — unless the result carries pictures (`$images`, `json`'s `splitToolImages`), which go as
+ * `image-data` parts beside the value as text.
+ */
+function toolModelOutput({ output }: { output: unknown }): ToolResultOutput {
+  const { value, images } = splitToolImages(output);
+  if (images.length === 0) return typeof output === "string" ? { type: "text", value: output } : { type: "json", value: (output ?? null) as never };
+  return {
+    type: "content",
+    value: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value ?? null) }, ...images.map((image) => ({ type: "image-data" as const, data: image.data, mediaType: image.mimeType }))],
+  };
+}
+
 /** Build the SDK `ToolSet` from the serializable declarations + injected `execute` impls. A FUNCTION
  *  tool becomes a `tool({ inputSchema, execute? })` — with `execute` it runs in-loop, without it the
  *  model's call is returned single-turn. A PROVIDER tool becomes a `{type:"provider", id, args}`
@@ -249,7 +266,7 @@ function buildToolSet(defs: ToolDefinition[] | undefined, executors: Record<stri
       set[d.name] = {
         ...(d.description !== undefined ? { description: d.description } : {}),
         inputSchema: jsonSchema(d.inputSchema as never),
-        ...(execute ? { execute } : {}),
+        ...(execute ? { execute, toModelOutput: toolModelOutput } : {}),
         ...(d.strict !== undefined ? { strict: d.strict } : {}),
       } as ToolSet[string];
     }

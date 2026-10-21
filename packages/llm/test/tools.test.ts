@@ -121,6 +121,27 @@ describe("executeLlmCall — tool declarations + injected executors", () => {
     expect(toolResultsOfEntries(out.value?.entries ?? [])[0]?.data).toMatchObject({ tempF: 72 });
   });
 
+  it("hands the model a tool's `$images` as pictures, and the rest as the tool's text", async () => {
+    let step = 0;
+    const prompts: unknown[] = [];
+    const model = new MockLanguageModelV3({
+      doStream: async (options) => {
+        prompts.push(options.prompt);
+        return stream(step++ === 0 ? TOOL_CALL_STEP : TEXT_STEP);
+      },
+    });
+    const out = await executeLlmCall(
+      { model: "anthropic/claude-haiku-4-5", prompt: "weather in NYC?", tools: [{ name: "get_weather", inputSchema: weatherSchema }], maxSteps: 4, timeoutMs: 30_000 },
+      { modelRouter: fakeRouter(model), toolExecutors: { get_weather: async () => ({ tempF: 72, $images: [{ mimeType: "image/png", data: "iVBORw0KGgo=" }] }) } },
+    );
+    expect(errorOf(out)).toBeUndefined();
+    const second = JSON.stringify(prompts[1]);
+    // The picture went as an image part, and the text the model reads has no base64 in it.
+    expect(second).toContain('"type":"image-data"');
+    expect(second).toContain('"data":"iVBORw0KGgo="');
+    expect(second).toContain(JSON.stringify(JSON.stringify({ tempF: 72 })));
+  });
+
   it("declaration WITHOUT an injected executor is single-turn (call returned, not run)", async () => {
     const model = new MockLanguageModelV3({ doStream: async () => stream(TOOL_CALL_STEP) });
 

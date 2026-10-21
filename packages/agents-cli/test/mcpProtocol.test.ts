@@ -28,7 +28,7 @@ import {
 } from "../src/mcpProtocol.js";
 
 /** Decode what the CLI would actually read: the JSON string inside `content[0].text`. */
-const decode = (result: { content: Array<{ text: string }> }) => JSON.parse(result.content[0]!.text) as Record<string, unknown>;
+const decode = (result: { content: ReadonlyArray<{ type?: string; text?: string }> }) => JSON.parse(result.content[0]!.text!) as Record<string, unknown>;
 
 describe("naming and config", () => {
   it("qualifies a tool the way the CLI addresses it", () => {

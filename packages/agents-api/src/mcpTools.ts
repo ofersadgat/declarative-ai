@@ -19,6 +19,7 @@
  * given and validates nothing. Validation is therefore ours, and it is {@link runInjectedTool}'s.
  */
 import type { JsonValue, SchemaDocument, SyncOutputValidator } from "@declarative-ai/exec";
+import { splitToolImages } from "@declarative-ai/json";
 import type { InjectedTool, InjectedToolCall, McpServerSpec } from "./seam.js";
 
 /** The MCP server name our injected tools are exposed under; the agent sees `mcp__dai__<tool>`. */
@@ -74,15 +75,25 @@ export function mcpServersRefusal(servers: Record<string, McpServerSpec> | undef
   return undefined;
 }
 
-/** One MCP tool result. */
+/** One MCP tool result: its text, first, and the pictures a tool handed back for the model to see. */
 export interface McpToolResult {
-  content: Array<{ type: "text"; text: string }>;
+  content: [{ type: "text"; text: string }, ...Array<{ type: "image"; data: string; mimeType: string }>];
   isError?: boolean;
 }
 
 /** The one-line result shape both transports answer with. */
 export function textResult(text: string, isError?: boolean): McpToolResult {
   return { content: [{ type: "text", text }], ...(isError === true ? { isError: true } : {}) };
+}
+
+/**
+ * A tool's value as an MCP result: the value as text, and its pictures (`$images`, see `json`'s
+ * `splitToolImages`) as `image` content beside it — which the agent hands its model as images.
+ */
+export function valueResult(output: unknown): McpToolResult {
+  const { value, images } = splitToolImages(output);
+  const text = typeof value === "string" ? value : JSON.stringify(value ?? null);
+  return { content: [{ type: "text", text }, ...images.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mimeType }))] };
 }
 
 /** The `tools/list` entries for a set of injected tools. */
@@ -139,8 +150,7 @@ export async function runInjectedTool(spec: InjectedToolSpec, name: string, args
   const invalid = validateToolInput(spec.validator, tool, input);
   if (invalid) return textResult(`tool '${name}' input is invalid: ${invalid}`, true);
   try {
-    const value = await tool.run(input, call);
-    return textResult(typeof value === "string" ? value : JSON.stringify(value ?? null));
+    return valueResult(await tool.run(input, call));
   } catch (e) {
     return textResult(`tool '${name}' failed: ${e instanceof Error ? e.message : String(e)}`, true);
   }

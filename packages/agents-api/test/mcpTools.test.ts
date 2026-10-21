@@ -36,6 +36,27 @@ describe("mcpToolName — the name an agent actually addresses", () => {
   });
 });
 
+describe("runInjectedTool — a tool's pictures", () => {
+  it("hands the model a tool's `$images` as image content beside the value, and keeps them out of the text", async () => {
+    const result = await runInjectedTool(
+      { tools: { screenshot: { inputSchema: schema, run: () => ({ width: 2, path: "s.png", $images: [{ mimeType: "image/png", data: "iVBORw0KGgo=" }] }) } } },
+      "screenshot",
+      { path: "x" },
+    );
+    expect(result).toEqual({
+      content: [
+        { type: "text", text: JSON.stringify({ width: 2, path: "s.png" }) },
+        { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+      ],
+    });
+  });
+
+  it("passes a malformed `$images` over rather than sending it as a picture", async () => {
+    const result = await runInjectedTool({ tools: { t: { inputSchema: schema, run: () => ({ a: 1, $images: [{ mimeType: "text/plain", data: "x" }, "nope"] }) } } }, "t", { path: "x" });
+    expect(result.content).toEqual([{ type: "text", text: JSON.stringify({ a: 1 }) }]);
+  });
+});
+
 describe("runInjectedTool — one call, whatever carried it", () => {
   it("runs the host impl and returns its value as text", async () => {
     const seen: unknown[] = [];

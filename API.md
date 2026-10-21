@@ -1297,6 +1297,14 @@ reacts to, so it is deliberately *not* the classified-failure channel that `Resu
 `NativeToolRef` names a black-box agent's own tool, which we cannot execute ourselves; a tool rename
 binding is therefore `Tool | NativeToolRef`.
 
+**Pictures in a result.** JSON has no picture in it, and a screenshot handed back as a base64 string reaches
+the model as text it cannot see. A tool with pictures answers `{ …, "$images": [{ mimeType, data }] }`
+(`TOOL_IMAGES`, `data` base64, `json`'s `ToolImage`), and every route that hands a result to a model
+splits them off with `splitToolImages(output) → { value, images }` and sends them as images beside the
+value: the MCP bridge as `image` content (`agents-api`'s `valueResult`, which `runInjectedTool`
+answers with), the in-process route as `image-data` parts (`llm`'s tool set, through the AI SDK's
+`toModelOutput`). A malformed entry is passed over, not sent.
+
 Ready-made workspace tools ship in **[`@declarative-ai/tools`](#declarative-aitools)**.
 
 ### Sessions
@@ -3291,6 +3299,7 @@ The MCP protocol pieces are exported too, so a host can stand up its own bridge:
 | `MCP_SERVER_NAME` / `APPROVAL_TOOL` / `PERMISSION_PROMPT_TOOL` / `mcpToolName(tool, server?)` | the server + tool naming the CLI is pointed at. |
 | `mcpConfigJson(url, server?)` | the `--mcp-config` payload. |
 | `APPROVAL_INPUT_SCHEMA`, `ApprovalRequest`, `parseApprovalRequest`, `approvalResponseText`, `malformedApprovalResponseText` | the approval tool's wire contract. |
+| `valueResult(output)` | a tool's value as an MCP result: its text, and its `$images` as `image` content. |
 | `McpToolDescriptor` / `toolDescriptors(spec)` / `injectedToolAllowEntries(tools)` / `handleToolCall(...)` | exposing host tools over the bridge, and the `--allowedTools` entries their MCP-qualified names need. |
 | `McpBridge` / `McpBridgeSpec` / `StartMcpBridge` / `defaultStartMcpBridge` / `SDK_MISSING` | the bridge seam and its default loopback-HTTP implementation. |
 
