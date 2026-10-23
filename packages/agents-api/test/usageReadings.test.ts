@@ -176,7 +176,8 @@ describe("the executor carries the readings", () => {
     };
 
   async function run(query: AgentQuery, ctx: ExecServices = {}) {
-    const handle = new AgentExecutor({ query, label: "claude-cli" }).start(op(), { ...ctx, returnRecord: true });
+    // An instant clock: a `server_error` before any work is launched again after a real wait otherwise.
+    const handle = new AgentExecutor({ query, label: "claude-cli", relaunch: { wait: async () => {} } }).start(op(), { ...ctx, returnRecord: true });
     const events: ExecEvent[] = [];
     const drain = (async () => {
       for await (const e of handle.events) events.push(e);

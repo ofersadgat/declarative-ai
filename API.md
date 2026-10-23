@@ -3176,6 +3176,13 @@ Two behaviors worth noting:
   what it cost on the `Result`'s `metrics` — `cost`, `childCost`, `childLlmCalls: 1`, `costSource: "provider"`
   — which is the channel `Result.metrics` exists for. Without it an agent's spend simply vanished once
   dispatch moved to the function registry.
+- **A launch that failed before the agent did anything is launched again.** `AgentExecutor` relaunches a
+  call that failed with `server_error` or `overloaded` while it had called no tool, run no subagent and
+  said nothing but its own `<synthetic>` failure turn (`AgentError.beforeWork`) — claude's lost sign-in
+  refresh is the case. The waits are `DEFAULT_RELAUNCH_DELAYS_MS` (5s, 15s, 40s); `relaunch: { delaysMs,
+  wait }` changes them, `delaysMs: []` turns it off. Each wait is a `progress` event, pinned to the
+  answering turn's record too. Not `rate_limit` (the limiter's to see) or `bridge_unreachable` (also said
+  by a bridge that cannot start at all).
 
 Tool resolution: each logical tool is either **MCP-injected** (our impl, ctx-bound — so a `bash`/`read_file`
 behaves identically to a composed prompt operation with the same tools) or **native** (the agent's own

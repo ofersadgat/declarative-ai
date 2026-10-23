@@ -755,7 +755,7 @@ describe("present but not usable — detection and classification", () => {
     const limited = await new AgentExecutor({ query: authFailure("rate_limit", "rate limited") }).start(op(), {}).result;
     expect(!isOk(limited) && limited.error.classification).toBe("network-retriable");
     expect(!isOk(limited) && limited.error.rateLimited).toBe(true);
-    const overloaded = await new AgentExecutor({ query: authFailure("overloaded", "overloaded") }).start(op(), {}).result;
+    const overloaded = await new AgentExecutor({ query: authFailure("overloaded", "overloaded"), relaunch: { delaysMs: [] } }).start(op(), {}).result;
     expect(!isOk(overloaded) && overloaded.error.classification).toBe("network-retriable");
   });
 
@@ -767,6 +767,131 @@ describe("present but not usable — detection and classification", () => {
   it("names WHICH transport produced it, so three wired agents are tellable apart", async () => {
     const result = await new AgentExecutor({ query: authFailure(), label: "claude-cli" }).start(op(), {}).result;
     expect(!isOk(result) && result.error.reason).toMatch(/^claude-cli:/);
+  });
+});
+
+/**
+ * A launch that failed before the agent did anything is launched again.
+ *
+ * ✅ The failing turn is claude 2.1.287's, from its session file on 2026-10-23: the sign-in had expired
+ * while another process sharing `~/.claude` held its refresh, and the CLI answered with a `<synthetic>`
+ * turn coded `server_error`, having sent nothing. Forty seconds later a new token was on disk and calls
+ * went through — so the chat turn that died on it had only needed to wait.
+ */
+describe("a launch that failed before the agent did anything", () => {
+  const REFRESH_RACE =
+    "Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh. This is usually transient; retry in a minute, and if it persists close other Claude Code processes or sign in again";
+
+  /** The CLI's failing turn, exactly as the stream reads it. */
+  async function* refreshRace() {
+    yield {
+      type: "assistant",
+      message: { role: "assistant", model: "<synthetic>", content: [{ type: "text", text: REFRESH_RACE }] },
+      text: REFRESH_RACE,
+      errorCode: "server_error",
+    } as const;
+    yield { type: "other", error: REFRESH_RACE } as const;
+  }
+
+  /** Fails with `first` for the first `failures` launches, then answers. */
+  function failingThen(failures: number, first: () => AsyncGenerator<never | Record<string, unknown>> = refreshRace as never) {
+    let launches = 0;
+    const query: AgentQuery = (async function* () {
+      launches += 1;
+      if (launches <= failures) {
+        yield* first();
+        return;
+      }
+      yield { type: "result", result: { text: "the answer", finishReason: "stop" } };
+    }) as AgentQuery;
+    return { query, launches: () => launches };
+  }
+
+  /** A clock that records each wait and ends it at once. */
+  function instant() {
+    const waits: number[] = [];
+    return { waits, wait: async (ms: number) => void waits.push(ms) };
+  }
+
+  async function run(executor: AgentExecutor, ctx: ExecServices = {}) {
+    const handle = executor.start(op(), { ...ctx, returnRecord: true });
+    const events: ExecEvent[] = [];
+    const drain = (async () => {
+      for await (const e of handle.events) events.push(e);
+    })();
+    const result = await handle.result;
+    await drain;
+    return { result, events, record: (result as { record?: LlmOutput }).record };
+  }
+
+  it("launches again after the wait, and the second launch answers", async () => {
+    const { query, launches } = failingThen(1);
+    const clock = instant();
+    const { result } = await run(new AgentExecutor({ query, label: "claude-cli", relaunch: { wait: clock.wait } }));
+    expect(isOk(result) && result.value).toBe("the answer");
+    expect(launches()).toBe(2);
+    expect(clock.waits).toEqual([5_000]);
+  });
+
+  it("says each wait on the live stream and keeps it in the record", async () => {
+    const { query } = failingThen(2);
+    const { events, record } = await run(new AgentExecutor({ query, label: "claude-cli", relaunch: { wait: instant().wait } }));
+    const said = events.flatMap((e) => (e.type === "progress" ? [e.message] : []));
+    expect(said).toEqual([
+      `claude-cli agent error: ${REFRESH_RACE} — trying again in 5s`,
+      `claude-cli agent error: ${REFRESH_RACE} — trying again in 15s`,
+    ]);
+    const pinned = (record?.entries ?? []).flatMap((entry) =>
+      entry.kind === "event" ? [(entry.event.data as { message?: string }).message] : [],
+    );
+    expect(pinned).toEqual(said);
+  });
+
+  it("gives up after the last wait with the agent's own failure, still retriable", async () => {
+    const { query, launches } = failingThen(99);
+    const clock = instant();
+    const { result } = await run(new AgentExecutor({ query, relaunch: { wait: clock.wait } }));
+    expect(launches()).toBe(4);
+    expect(clock.waits).toEqual([5_000, 15_000, 40_000]);
+    expect(!isOk(result) && result.error).toMatchObject({ classification: "network-retriable", code: "server_error" });
+    expect(!isOk(result) && result.error.reason).toContain("Failed to refresh OAuth token");
+  });
+
+  it("does NOT launch again once the agent had called a tool — a second launch would repeat it", async () => {
+    async function* afterWork() {
+      yield {
+        type: "assistant",
+        message: { role: "assistant", model: "claude-sonnet-5", content: [{ type: "tool_use", id: "t1", name: "Write", input: {} }] },
+        toolCalls: [{ toolCallId: "t1", toolName: "Write", input: {} }],
+      } as const;
+      yield* refreshRace();
+    }
+    const { query, launches } = failingThen(1, afterWork as never);
+    const { result } = await run(new AgentExecutor({ query, relaunch: { wait: instant().wait } }));
+    expect(isOk(result)).toBe(false);
+    expect(launches()).toBe(1);
+  });
+
+  it("does NOT launch again on a code a launch cannot get past, or on a throttle", async () => {
+    for (const code of ["authentication_failed", "rate_limit", "bridge_unreachable"]) {
+      async function* refused() {
+        yield { type: "assistant", message: { role: "assistant", model: "<synthetic>", content: [] }, errorCode: code } as const;
+        yield { type: "other", error: code } as const;
+      }
+      const { query, launches } = failingThen(1, refused as never);
+      await run(new AgentExecutor({ query, relaunch: { wait: instant().wait } }));
+      expect(launches(), code).toBe(1);
+    }
+  });
+
+  it("stops waiting when the call is canceled, and launches nothing more", async () => {
+    const { query, launches } = failingThen(1);
+    const abort = new AbortController();
+    const executor = new AgentExecutor({ query, relaunch: { wait: async () => abort.abort() } });
+    const { result } = await run(executor, { abortSignal: abort.signal });
+    // `interrupted`, as every aborted agent call reads (a chat turn shows it as canceled).
+    expect(!isOk(result) && result.error.classification).toBe("interrupted");
+    expect(launches()).toBe(1);
   });
 });
 

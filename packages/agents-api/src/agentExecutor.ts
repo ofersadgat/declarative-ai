@@ -20,6 +20,7 @@
  * deny floor, and routing the agent's own approval callback to `ctx.approve`.
  */
 import {
+  abortableDelay,
   EventQueue,
   syncOnly,
   type ExecControl,
@@ -235,8 +236,10 @@ export class AgentError extends Error {
    * one. Without it every delegated failure classified as `permanent` — including a transient overload
    * inside the agent's own loop, which is precisely the case {@link AgentExecutor.invoke} promises to
    * classify rather than flatten.
+   * @param beforeWork the agent had done nothing when it failed: no tool ran and nothing was said but
+   * its own synthetic failure turn — so launching it again repeats no work (see `relaunching`).
    */
-  constructor(message: string, readonly canceled = false, readonly code?: string) {
+  constructor(message: string, readonly canceled = false, readonly code?: string, readonly beforeWork = false) {
     super(message);
     this.name = canceled ? "AbortError" : "AgentError";
     if (code !== undefined) {
@@ -460,6 +463,43 @@ export interface AgentExecutorOptions extends PromptExecutorOptions {
    * the base class actually drives.
    */
   label?: string;
+  /**
+   * How a launch that failed BEFORE THE AGENT DID ANYTHING is tried again (see `relaunching`).
+   * `delaysMs` is the wait before each further launch, so its length is how many there are — `[]` turns
+   * it off. Default {@link DEFAULT_RELAUNCH_DELAYS_MS}. `wait` is a test's clock.
+   */
+  relaunch?: { delaysMs?: readonly number[]; wait?: (ms: number, signal: AbortSignal) => Promise<void> };
+}
+
+/**
+ * The agent codes a fresh LAUNCH can get past, when the agent failed before it did anything.
+ *
+ * ✅ OBSERVED (claude 2.1.287, 2026-10-23): the stored sign-in had expired while another Claude Code
+ * process sharing `~/.claude` held its refresh (or had died holding it), and the CLI gave up after eight
+ * seconds with `server_error` — "Failed to refresh OAuth token: another Claude Code process is
+ * refreshing it or exited mid-refresh. This is usually transient; retry in a minute" — on a
+ * `<synthetic>` turn that sent nothing. Forty seconds later a new token was on disk, and calls after it
+ * went through.
+ *
+ * Not `rate_limit`: a throttle is the rate limiter's to see, and relaunching here would hide it. Not
+ * `bridge_unreachable` either: it is also what a bridge that cannot start at all says (the MCP SDK not
+ * installed), which no number of launches fixes.
+ */
+const RELAUNCH_CODES: ReadonlySet<string> = new Set(["server_error", "overloaded"]);
+
+/** The waits before each further launch — about the minute the CLI itself says its refresh race takes. */
+export const DEFAULT_RELAUNCH_DELAYS_MS: readonly number[] = [5_000, 15_000, 40_000];
+
+/**
+ * Whether a failed turn had done nothing yet: no tool was called, no subagent ran, and every turn it
+ * said is the agent's own `<synthetic>` failure turn (the one that carries the error code).
+ */
+function nothingDone(turn: AgentTurn): boolean {
+  return (
+    turn.toolCalls.length === 0 &&
+    turn.sidechains.size === 0 &&
+    turn.messages.every((message) => (message as { model?: unknown }).model === "<synthetic>")
+  );
 }
 
 export class AgentExecutor extends PromptExecutor {
@@ -614,7 +654,7 @@ export class AgentExecutor extends PromptExecutor {
       const window = tightestWindow(limits);
       return new UsageLimitError(message, limits, window?.resetsAt ?? null);
     }
-    return new AgentError(message, false, code);
+    return new AgentError(message, false, code, nothingDone(turn));
   }
 
   /** What this transport is called in a failure reason — see {@link AgentExecutorOptions.label}. */
@@ -636,7 +676,7 @@ export class AgentExecutor extends PromptExecutor {
   protected override async invoke(definition: LlmCallDefinition, env: CallDeps, ctx: ExecServices): Promise<LlmCallResult> {
     const startMs = Date.now();
     try {
-      const turn = await this.runAgent(definition, ctx);
+      const turn = await this.relaunching(definition, ctx);
       const result = turn.result;
       // NOT charged here. A delegated agent spends real money inside its own loop, and this used to
       // reach for `ctx.meter` and debit it — an executor doing a wrapper's job, and a DOUBLE CHARGE
@@ -799,6 +839,45 @@ export class AgentExecutor extends PromptExecutor {
       // wrong or incomplete — the same reason the provider path keeps it.
       ...(result?.rawUsage !== undefined ? { rawUsage: result.rawUsage } : {}),
     } as LlmMetrics;
+  }
+
+  /**
+   * {@link runAgent}, LAUNCHED AGAIN when it failed, before the agent did anything, on a condition that
+   * passes by itself (see {@link RELAUNCH_CODES}).
+   *
+   * Safe exactly then: no tool ran and no answer was written, so a second launch repeats no work. That
+   * is a fact only this layer holds — the turn — which is why it is not left to `withRetry`, whose
+   * transient axis re-sends an op whatever the first attempt did: the wrong default for an agent that
+   * may have edited files before it failed, and the reason nothing composes it over one.
+   *
+   * Each wait is said on the live stream as `progress`, and the notes are pinned to the front of the
+   * turn that answers, so the record shows the same waits the person watched.
+   */
+  private async relaunching(definition: LlmCallDefinition, ctx: ExecServices): Promise<AgentTurn> {
+    const delays = this.agent.relaunch?.delaysMs ?? DEFAULT_RELAUNCH_DELAYS_MS;
+    const wait = this.agent.relaunch?.wait ?? abortableDelay;
+    const signal = ctx.abortSignal ?? new AbortController().signal;
+    const channel = this.sink(ctx);
+    const notes: JsonValue[] = [];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const turn = await this.runAgent(definition, ctx);
+        turn.providerEvents.unshift(...notes.map((event) => ({ index: 0, event })));
+        return turn;
+      } catch (e) {
+        const delay = delays[attempt];
+        const relaunch = e instanceof AgentError && e.beforeWork && e.code !== undefined && RELAUNCH_CODES.has(e.code);
+        if (!relaunch || delay === undefined || signal.aborted) throw e;
+        const note = { type: "progress", message: `${e.message} — trying again in ${Math.round(delay / 1000)}s` } as const;
+        notes.push(note);
+        channel?.events.push(note);
+        // The dead run is not the one to steer any more: a Stop pressed during the wait queues for the
+        // next launch, exactly as one pressed before the first launch does.
+        if (channel !== undefined) channel.run = undefined;
+        await wait(delay, signal);
+        if (signal.aborted) throw new AgentError("aborted", true);
+      }
+    }
   }
 
   /** Build the query options from the lowered call, run the agent, and accumulate everything its
