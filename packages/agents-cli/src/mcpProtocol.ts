@@ -305,6 +305,55 @@ export async function handleToolCall(
   return runInjectedTool(spec, name, args, injectedToolCallOf(meta));
 }
 
+// --- A call the host is still working on -------------------------------------------
+
+/**
+ * How often a call the host is still working on tells the agent so: well inside the claude CLI's idle
+ * limit for an HTTP server, which ABORTS a call it has had no response or progress from in 300 s
+ * (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`; claude 2.1.287 checks every 30 s).
+ */
+export const CALL_HEARTBEAT_MS = 30_000;
+
+/** What the MCP SDK hands a request handler, as far as {@link withHeartbeat} reads it. */
+export interface CallExtra {
+  /** The request's `_meta` — where a client that wants progress puts its `progressToken`. */
+  _meta?: unknown;
+  /** A notification on the request's own stream. */
+  sendNotification?: (notification: { method: string; params: Record<string, unknown> }) => Promise<void>;
+  /** Aborted when the request's connection goes — the agent gave up on the call. */
+  signal?: AbortSignal;
+}
+
+/**
+ * Serve a call while telling the agent, every `everyMs`, that it is still being worked on: MCP progress
+ * against the request's own `progressToken`, counting up.
+ *
+ * A call the host holds is not a silent one — a tool that runs long, and above all a permission
+ * question waiting on a PERSON, which has no deadline. Unheard, the claude CLI aborted every such call
+ * after five minutes ("sent no response or progress for 300s; aborting"), and the host never learned
+ * it: its question stayed asked of somebody nobody was waiting for (JaiRA, 2026-10-24). A request with
+ * no `progressToken` asked for no progress, and is sent none.
+ */
+export async function withHeartbeat<T>(work: Promise<T>, extra: CallExtra | undefined, everyMs: number = CALL_HEARTBEAT_MS): Promise<T> {
+  const token = (extra?._meta as { progressToken?: unknown } | undefined)?.progressToken;
+  const send = extra?.sendNotification;
+  if ((typeof token !== "string" && typeof token !== "number") || send === undefined) return work;
+  let beats = 0;
+  const timer = setInterval(() => {
+    beats += 1;
+    void send({ method: "notifications/progress", params: { progressToken: token, progress: beats } }).catch(() => undefined);
+  }, everyMs);
+  (timer as { unref?: () => void }).unref?.();
+  const stop = (): void => clearInterval(timer);
+  extra?.signal?.addEventListener("abort", stop, { once: true });
+  try {
+    return await work;
+  } finally {
+    stop();
+    extra?.signal?.removeEventListener("abort", stop);
+  }
+}
+
 // --- Proxied servers ------------------------------------------------------------
 
 /**

@@ -35,6 +35,8 @@ export interface McpBridgeHostOptions {
    * something else, which is why a bundled host emits the worker as its own entry and names it here.
    */
   workerFile?: string | URL;
+  /** How often a call still being answered tells the agent so (`CALL_HEARTBEAT_MS`). A test's knob. */
+  heartbeatMs?: number;
 }
 
 export interface McpBridgeHost {
@@ -176,7 +178,7 @@ export function createMcpBridgeHost(options: McpBridgeHostOptions = {}): McpBrid
         registering.set(token, { resolve, reject });
         const w = spawn();
         retain();
-        w.postMessage({ type: "register", token, path, descriptors, servers } satisfies ToWorker);
+        w.postMessage({ type: "register", token, path, descriptors, servers, ...(options.heartbeatMs !== undefined ? { heartbeatMs: options.heartbeatMs } : {}) } satisfies ToWorker);
       });
     } catch (e) {
       runs.delete(token);

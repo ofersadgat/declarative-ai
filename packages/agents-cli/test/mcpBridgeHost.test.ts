@@ -113,6 +113,43 @@ describe.skipIf(!sdkInstalled)("the persistent bridge host — one worker-thread
     await run.close();
   });
 
+  it("tells the agent a call it is still answering is alive — a question waiting on a person is not a silent call", async () => {
+    // The claude CLI aborts an HTTP server's call after 300 s with no response or progress, and a
+    // permission question waits as long as the person takes. Progress, counting up, on the call's own
+    // stream, against the token the client asked for it with — and none for a client that asked none.
+    host = createMcpBridgeHost({ workerFile, heartbeatMs: 20 });
+    let answer: (decision: { allow: true }) => void = () => undefined;
+    const run = await host.start({ approve: () => new Promise((resolve) => (answer = resolve)) });
+    await rpc(run.url, "initialize", INITIALIZE);
+    const response = fetch(run.url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: APPROVAL_TOOL, arguments: { tool_name: "Bash", input: { command: "ls" } }, _meta: { progressToken: 9 } } }),
+    }).then((r) => r.text());
+    await new Promise((r) => setTimeout(r, 150));
+    answer({ allow: true });
+    const messages = (await response)
+      .split("\n")
+      .filter((l) => l.startsWith("data:"))
+      .map((l) => JSON.parse(l.slice("data:".length)) as { method?: string; params?: { progressToken?: number; progress?: number }; result?: { content: Array<{ text: string }> } });
+    const beats = messages.filter((m) => m.method === "notifications/progress");
+    expect(beats.length).toBeGreaterThanOrEqual(2);
+    expect(beats.every((m) => m.params?.progressToken === 9)).toBe(true);
+    expect(beats.map((m) => m.params?.progress)).toEqual(beats.map((_, i) => i + 1));
+    expect(JSON.parse(messages.at(-1)!.result!.content[0]!.text)).toMatchObject({ behavior: "allow" });
+
+    const quiet = await host.start({ approve: () => new Promise((resolve) => setTimeout(() => resolve({ allow: true }), 80)) });
+    await rpc(quiet.url, "initialize", INITIALIZE);
+    const unasked = await fetch(quiet.url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: APPROVAL_TOOL, arguments: { tool_name: "Bash", input: { command: "ls" } } } }),
+    }).then((r) => r.text());
+    expect(unasked).not.toContain("notifications/progress");
+    await run.close();
+    await quiet.close();
+  });
+
   it("carries the call's `_meta` across the port, so the impl hears the CLI's tool-use id", async () => {
     host = createMcpBridgeHost({ workerFile });
     const calls: unknown[] = [];

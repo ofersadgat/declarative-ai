@@ -6,7 +6,7 @@
  * shipping CLI's own code rather than from a published spec, so they are pinned here — if a future CLI
  * changes the contract, these tests are the tripwire, and they say exactly which field moved.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   APPROVAL_INPUT_SCHEMA,
   APPROVAL_TOOL,
@@ -25,6 +25,7 @@ import {
   newBridgeToken,
   parseApprovalRequest,
   toolDescriptors,
+  withHeartbeat,
 } from "../src/mcpProtocol.js";
 
 /** Decode what the CLI would actually read: the JSON string inside `content[0].text`. */
@@ -486,5 +487,47 @@ describe("serving an injected tool", () => {
   it("passes a non-object argument bag through as an empty input rather than crashing", async () => {
     const spec = { tools: { peek: { inputSchema: {} as never, run: (i: unknown) => i as never } } };
     expect(JSON.parse((await handleToolCall(spec, "peek", "not-an-object")).content[0]!.text)).toEqual({});
+  });
+});
+
+describe("a call the host is still working on", () => {
+  it("tells the agent so every beat, counting up on the call's own token, and stops when the call settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const sent: unknown[] = [];
+      let settle: (value: string) => void = () => undefined;
+      const work = new Promise<string>((resolve) => (settle = resolve));
+      const answered = withHeartbeat(work, { _meta: { progressToken: "p1" }, sendNotification: async (n: unknown) => void sent.push(n) }, 1000);
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(sent).toEqual([
+        { method: "notifications/progress", params: { progressToken: "p1", progress: 1 } },
+        { method: "notifications/progress", params: { progressToken: "p1", progress: 2 } },
+      ]);
+      settle("done");
+      await expect(answered).resolves.toBe("done");
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(sent).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends nothing to a client that asked for no progress, and stops when the agent gives up on the call", async () => {
+    vi.useFakeTimers();
+    try {
+      const sent: unknown[] = [];
+      const never = new Promise<string>(() => undefined);
+      void withHeartbeat(never, { sendNotification: async (n: unknown) => void sent.push(n) }, 1000);
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(sent).toEqual([]);
+      const gone = new AbortController();
+      void withHeartbeat(never, { _meta: { progressToken: 7 }, sendNotification: async (n: unknown) => void sent.push(n), signal: gone.signal }, 1000);
+      await vi.advanceTimersByTimeAsync(1500);
+      gone.abort();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(sent).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -27,7 +27,7 @@
  *
  * ## Messages
  *
- * parent → worker: `register {token, path, descriptors, servers}`, `unregister {token}`,
+ * parent → worker: `register {token, path, descriptors, servers, heartbeatMs?}`, `unregister {token}`,
  * `result {id, result | error}`, `close`. worker → parent: `registered {token, port}` |
  * `failed {token, message}`, `ready {token}` (the run's first `tools/list` was served),
  * `call {id, token, server?, name, args}`, `closed`.
@@ -52,6 +52,8 @@ export interface RegisterMessage {
   descriptors: unknown[];
   /** Each proxied server's `tools/list` entries, by server name — served at `<path>/<server>`. */
   servers: Record<string, unknown[]>;
+  /** How often a call still being answered tells the agent so — `CALL_HEARTBEAT_MS` unless a host says. */
+  heartbeatMs?: number;
 }
 export interface UnregisterMessage {
   type: "unregister";
@@ -115,10 +117,43 @@ function secretEquals(a: string, b: string): boolean {
   return diff === 0;
 }
 
+/** `mcpProtocol`'s `CALL_HEARTBEAT_MS`. */
+const CALL_HEARTBEAT_MS = 30_000;
+
+/**
+ * `mcpProtocol`'s `withHeartbeat`: MCP progress on the request's own stream while the host is still
+ * answering it, so the claude CLI does not abort a call it has heard nothing from in 300 s — a
+ * permission question waiting on a person above all.
+ */
+async function withHeartbeat<T>(work: Promise<T>, extra: CallExtra | undefined, everyMs: number): Promise<T> {
+  const token = (extra?._meta as { progressToken?: unknown } | undefined)?.progressToken;
+  const send = extra?.sendNotification;
+  if ((typeof token !== "string" && typeof token !== "number") || send === undefined) return work;
+  let beats = 0;
+  const timer = setInterval(() => {
+    beats += 1;
+    void send({ method: "notifications/progress", params: { progressToken: token, progress: beats } }).catch(() => undefined);
+  }, everyMs);
+  timer.unref();
+  const stop = (): void => clearInterval(timer);
+  extra?.signal?.addEventListener("abort", stop, { once: true });
+  try {
+    return await work;
+  } finally {
+    stop();
+    extra?.signal?.removeEventListener("abort", stop);
+  }
+}
+
 // --- The minimal SDK surface, cast to rather than imported --------------------------
 
+interface CallExtra {
+  _meta?: unknown;
+  sendNotification?: (notification: { method: string; params: Record<string, unknown> }) => Promise<void>;
+  signal?: AbortSignal;
+}
 interface SdkServer {
-  setRequestHandler(schema: unknown, handler: (request: { params: { name: string; arguments?: unknown } }) => unknown): void;
+  setRequestHandler(schema: unknown, handler: (request: { params: { name: string; arguments?: unknown } }, extra: CallExtra) => unknown): void;
   connect(transport: unknown): Promise<void>;
   close(): Promise<void>;
 }
@@ -140,6 +175,7 @@ interface Run {
   servers: Record<string, unknown[]>;
   /** `ready` is posted ONCE per run: the CLI may list tools again later, and that is not news. */
   readySent: boolean;
+  heartbeatMs: number;
 }
 
 const runs = new Map<string, Run>();
@@ -241,8 +277,8 @@ async function handle(sdk: SdkModules, req: IncomingMessage, res: ServerResponse
     }
     return { tools: run.descriptors };
   });
-  server.setRequestHandler(sdk.CallToolRequestSchema, (request) =>
-    forward(token, target, request.params.name, request.params.arguments, (request.params as { _meta?: unknown })._meta),
+  server.setRequestHandler(sdk.CallToolRequestSchema, (request, extra) =>
+    withHeartbeat(forward(token, target, request.params.name, request.params.arguments, (request.params as { _meta?: unknown })._meta), extra, run.heartbeatMs),
   );
   const transport = new sdk.StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   res.on("close", () => {
@@ -260,7 +296,7 @@ async function handle(sdk: SdkModules, req: IncomingMessage, res: ServerResponse
 port.on("message", (message: ToWorker) => {
   switch (message.type) {
     case "register": {
-      runs.set(message.token, { path: message.path, descriptors: message.descriptors, servers: message.servers, readySent: false });
+      runs.set(message.token, { path: message.path, descriptors: message.descriptors, servers: message.servers, readySent: false, heartbeatMs: message.heartbeatMs ?? CALL_HEARTBEAT_MS });
       listen().then(
         (p) => post({ type: "registered", token: message.token, port: p }),
         (e: unknown) => {

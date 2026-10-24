@@ -28,7 +28,7 @@
  *    automatically, so the engine-driven path is checked without anyone opting in.
  */
 import type { AgentPermissionDecision, AgentToolRequest, InjectedTool, SyncOutputValidator } from "./deps.js";
-import { bridgePath, bridgeTargetOf, handleServerToolCall, handleToolCall, newBridgeToken, toolDescriptors, type ProxiedServers } from "./mcpProtocol.js";
+import { bridgePath, bridgeTargetOf, handleServerToolCall, handleToolCall, newBridgeToken, toolDescriptors, withHeartbeat, type CallExtra, type ProxiedServers } from "./mcpProtocol.js";
 
 /** What a bridge exposes to the CLI. */
 export interface McpBridge {
@@ -72,7 +72,7 @@ export type StartMcpBridge = (spec: McpBridgeSpec) => Promise<McpBridge>;
 /** The minimal SDK surface used here — cast to, never imported, so the missing optional dependency
  *  stays off the type graph. */
 interface SdkServer {
-  setRequestHandler(schema: unknown, handler: (request: { params: { name: string; arguments?: unknown } }) => unknown): void;
+  setRequestHandler(schema: unknown, handler: (request: { params: { name: string; arguments?: unknown } }, extra: CallExtra) => unknown): void;
   connect(transport: unknown): Promise<void>;
   close(): Promise<void>;
 }
@@ -146,10 +146,14 @@ export const defaultStartMcpBridge: StartMcpBridge = async (spec) => {
       markReady();
       return { tools: descriptors };
     });
-    server.setRequestHandler(typesModule.CallToolRequestSchema, (request) =>
-      target !== undefined
-        ? handleServerToolCall(spec, target, request.params.name, request.params.arguments)
-        : handleToolCall(spec, request.params.name, request.params.arguments, (request.params as { _meta?: unknown })._meta),
+    // Heard from while it is being worked on — see `withHeartbeat`.
+    server.setRequestHandler(typesModule.CallToolRequestSchema, (request, extra) =>
+      withHeartbeat(
+        target !== undefined
+          ? handleServerToolCall(spec, target, request.params.name, request.params.arguments)
+          : handleToolCall(spec, request.params.name, request.params.arguments, (request.params as { _meta?: unknown })._meta),
+        extra,
+      ),
     );
     return server;
   };
