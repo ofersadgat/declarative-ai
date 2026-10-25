@@ -285,6 +285,18 @@ export interface ExecPolicy {
    * the agent the same thing about the same refusal.
    */
   refusal?: RefusalWords;
+  /**
+   * The permissions block a call is decided under, asked at EACH decision — the host's current word on
+   * that call's operation, or `stated`, the block the operation declared, to leave it as it is.
+   *
+   * What lets the permissions of an operation that is already running change: a person who switches
+   * a conversation to another permission set in the middle of its answer wants the next call decided
+   * under the new one, not the rest of the answer under the old. Asked for every gate and every wrapped
+   * tool the engine builds, with the operation's session and the instance it belongs to, so a host can
+   * change one state's calls and leave the rest of the run alone. Absent ⇒ every call is decided under
+   * the block its operation declared.
+   */
+  permissionsOf?: (call: { sessionId: string; instanceId: string }, stated: AuthoredPermissions | undefined) => AuthoredPermissions | undefined;
   /** DELEGATED adapters only: the black-box agent's OWN tools this operation may use, by native name
    *  (a `Tool | NativeToolRef` rename binding's `native` side) — an allow-list, not an impl set. */
   nativeTools?: string[];
@@ -583,17 +595,16 @@ function profileScopeOf(
  * `allow` runs it, `deny` returns a {@link PermissionDenied} result, `ask` invokes the approver and applies
  * the returned decision before allowing or denying. The wrapped tool is itself a `Tool` (same
  * `description`/`inputSchema`), so it drops into a runtime's tool set unchanged.
+ *
+ * `opts` may be a FUNCTION, called at each call — see {@link Live}.
  */
-export function withPermission(
-  tool: Tool,
-  opts: Omit<ToolDecisionOptions, "authoredMode"> & { toolName: string; authoredMode?: PermissionMode },
-): Tool {
-  const { toolName, ...decision } = opts;
+export function withPermission(tool: Tool, opts: Live<WithPermissionOptions>): Tool {
   const wrapped: Tool = {
     description: tool.description,
     inputSchema: tool.inputSchema,
     readOnly: tool.readOnly,
     async run(input: FunctionInputs, ctx: ExecServices): Promise<JsonValue> {
+      const { toolName, ...decision } = now(opts);
       const verdict = await decideToolCall({ name: toolName, readOnly: tool.readOnly }, input, decision);
       if (!verdict.allow) return { denied: true, tool: toolName, reason: verdict.reason } satisfies PermissionDenied;
       return tool.run(input, ctx);
@@ -601,6 +612,25 @@ export function withPermission(
   };
   PERMISSION_WRAPPED.add(wrapped);
   return wrapped;
+}
+
+/** What {@link withPermission} decides a call with: {@link ToolDecisionOptions}, and the name the call is decided as. */
+export type WithPermissionOptions = Omit<ToolDecisionOptions, "authoredMode"> & { toolName: string; authoredMode?: PermissionMode };
+
+/**
+ * Options given as they are, or as a function that returns them — called at EACH decision, never
+ * once and kept.
+ *
+ * The function form is how a host changes the permissions of an operation that is already running and
+ * has the very next call decided under the new ones: a person switching a conversation to another
+ * permission set in the middle of its turn. With values only, the wrapper and the gate held what they
+ * were built with until the operation ended, and every call after the switch was decided as before it.
+ */
+export type Live<T> = T | (() => T);
+
+/** The options as they stand right now. */
+function now<T extends object>(opts: Live<T>): T {
+  return typeof opts === "function" ? opts() : opts;
 }
 
 /** Every tool {@link withPermission} built — see {@link isPermissionWrapped}. Weak, so a finished run's
@@ -705,58 +735,66 @@ export interface ToolGateOptions {
   preGated?: readonly string[];
 }
 
-/** Build the {@link ToolGate} for one delegated call. */
-export function createToolGate(opts: ToolGateOptions): ToolGate {
+/**
+ * Build the {@link ToolGate} for one delegated call.
+ *
+ * `opts` may be a FUNCTION, called at each `check`, `modeOf` and `profile` read — see {@link Live}.
+ */
+export function createToolGate(opts: Live<ToolGateOptions>): ToolGate {
   // OWN entries only, throughout. These maps are keyed by TOOL NAME, so a tool called `constructor`
   // would otherwise resolve its mode — and its smart rule — to a prototype member.
   const own = <T>(map: Record<string, T> | undefined, name: string): T | undefined =>
     map !== undefined && Object.hasOwn(map, name) ? map[name] : undefined;
   // `other` for a name the host never registered; `default` for one it did. Two questions, and the
   // gap between them is where an agent's built-ins used to fall.
-  const authoredMode = (name: string): PermissionMode | undefined =>
-    own(opts.authored?.tools, name) ??
-    (own(opts.tools, name) !== undefined ? opts.authored?.default : (opts.authored?.other ?? opts.authored?.default));
+  const authoredMode = (o: ToolGateOptions, name: string): PermissionMode | undefined =>
+    own(o.authored?.tools, name) ??
+    (own(o.tools, name) !== undefined ? o.authored?.default : (o.authored?.other ?? o.authored?.default));
   /** The registered tool's `readOnly` when we have it; the caller's claim otherwise. */
-  const known = (tool: { name: string; readOnly?: boolean }): { name: string; readOnly?: boolean } => {
-    const registered = own(opts.tools, tool.name);
+  const known = (o: ToolGateOptions, tool: { name: string; readOnly?: boolean }): { name: string; readOnly?: boolean } => {
+    const registered = own(o.tools, tool.name);
     return registered !== undefined ? { name: tool.name, readOnly: registered.readOnly } : tool;
   };
-  const decisionFor = (name: string): ToolDecisionOptions => ({
-    ledger: opts.ledger,
-    sessionId: opts.sessionId,
-    approve: opts.approve,
-    ...(authoredMode(name) !== undefined ? { authoredMode: authoredMode(name) } : {}),
-    ...(own(opts.smart, name) !== undefined ? { smart: own(opts.smart, name) } : {}),
-    ...(opts.profiles !== undefined ? { profiles: opts.profiles } : {}),
-    registered: own(opts.tools, name) !== undefined,
-    ...(opts.authored !== undefined ? { authored: opts.authored } : {}),
-    ...(opts.scopeOf !== undefined ? { scopeOf: opts.scopeOf } : {}),
-    ...(opts.refusal !== undefined ? { refusal: opts.refusal } : {}),
+  const decisionFor = (o: ToolGateOptions, name: string): ToolDecisionOptions => ({
+    ledger: o.ledger,
+    sessionId: o.sessionId,
+    approve: o.approve,
+    ...(authoredMode(o, name) !== undefined ? { authoredMode: authoredMode(o, name) } : {}),
+    ...(own(o.smart, name) !== undefined ? { smart: own(o.smart, name) } : {}),
+    ...(o.profiles !== undefined ? { profiles: o.profiles } : {}),
+    registered: own(o.tools, name) !== undefined,
+    ...(o.authored !== undefined ? { authored: o.authored } : {}),
+    ...(o.scopeOf !== undefined ? { scopeOf: o.scopeOf } : {}),
+    ...(o.refusal !== undefined ? { refusal: o.refusal } : {}),
   });
-  const preGated = new Set(opts.preGated ?? []);
   return {
     // A GETTER: a plan-mode exit rebinds the session's profile mid-run, and a snapshot taken when the
     // gate was built would go on reporting `plan` after the door had been opened.
     get profile(): PermissionProfile {
-      return opts.ledger.resolveProfile(opts.sessionId);
+      const o = now(opts);
+      return o.ledger.resolveProfile(o.sessionId);
     },
     // NOT short-circuited for a pre-gated tool. `preGated` is a statement about where the decision is
     // made, not that there is none — an adapter that asks anyway must still get the true answer.
-    check: (tool, input) => decideToolCall(known(tool), input, decisionFor(tool.name)),
+    check: (tool, input) => {
+      const o = now(opts);
+      return decideToolCall(known(o, tool), input, decisionFor(o, tool.name));
+    },
     modeOf: (tool) => {
-      const it = known(tool);
+      const o = now(opts);
+      const it = known(o, tool);
       // Pre-approved AT CONFIGURATION so the adapter's callback does not fire — see `preGated`. The
       // wrapper underneath decides the call for real when the tool runs.
-      if (preGated.has(it.name)) return "allow";
-      const profile = opts.ledger.resolveProfile(opts.sessionId);
-      const mode = opts.ledger.resolve(it.name, opts.sessionId, authoredMode(it.name));
-      const rule = opts.profiles?.[profile];
+      if (o.preGated?.includes(it.name) === true) return "allow";
+      const profile = o.ledger.resolveProfile(o.sessionId);
+      const mode = o.ledger.resolve(it.name, o.sessionId, authoredMode(o, it.name));
+      const rule = o.profiles?.[profile];
       if (isTable(rule)) {
         // A table has an opinion about every name, so there is nothing to escalate for want of one.
-        const said = profileTableMode(rule, it.name, own(opts.tools, it.name) !== undefined);
+        const said = profileTableMode(rule, it.name, own(o.tools, it.name) !== undefined);
         return said === undefined ? mode : strictestMode(mode, said);
       }
-      const scoped = profileScopeOf(profile, it, opts.profiles);
+      const scoped = profileScopeOf(profile, it, o.profiles);
       if (scoped === "out") return "deny";
       // Same escalation as `decideToolCall`, and it has to be here too: this is the answer that
       // decides whether the tool is PRE-APPROVED, so resolving it to `allow` would skip the gate

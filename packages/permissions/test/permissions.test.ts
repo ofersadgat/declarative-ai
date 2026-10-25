@@ -9,6 +9,7 @@ import {
   type PermissionDecision,
   type ProfilePredicate,
   type SmartApprover,
+  type ToolGateOptions,
 } from "../src/permissions.js";
 import type { ExecServices, FunctionInputs, Tool } from "@declarative-ai/exec";
 
@@ -249,7 +250,7 @@ describe("the delegated gate — the same decision, reached by the other route",
    * three of the four modes without failing: `smart` never ran its policy, `allow` asked anyway, and
    * the session profile was never consulted at all.
    */
-  const gateFor = (opts: Partial<Parameters<typeof createToolGate>[0]> = {}) => {
+  const gateFor = (opts: Partial<ToolGateOptions> = {}) => {
     const approve = scriptedApprover({ decision: "allow", scope: "once" });
     const ledger = opts.ledger ?? new PermissionLedger({});
     return {
@@ -399,6 +400,63 @@ describe("preGated — a tool already wrapped, so the gate must not gate it twic
     });
     expect(await gate.check({ name: "bash" }, {})).toMatchObject({ allow: false });
     expect(approve.asked).toBe(0);
+  });
+});
+
+/**
+ * Options as a FUNCTION, read at each decision.
+ *
+ * What lets a host change the permissions of an operation that is already running: a person switches a
+ * conversation from asking to allowing everything in the middle of its turn, and the next call must not
+ * be asked about. Built from values, the wrapper and the gate kept what they were built with until the
+ * operation ended.
+ */
+describe("live options — the next call is decided under what the options say now", () => {
+  it("a wrapped tool reads its mode at each call", async () => {
+    const tool = recordingTool();
+    const ledger = new PermissionLedger({});
+    const approve = scriptedApprover({ decision: "deny", scope: "once" });
+    let mode: "ask" | "allow" | "deny" = "ask";
+    const wrapped = withPermission(tool, () => ({ ledger, sessionId: "s1", toolName: "bash", approve, authoredMode: mode }));
+
+    expect(isPermissionDenied(await wrapped.run({ n: 1 }, CTX))).toBe(true);
+    expect(approve.asked).toBe(1);
+    mode = "allow";
+    expect(await wrapped.run({ n: 2 }, CTX)).toEqual({ ok: true });
+    expect(approve.asked).toBe(1);
+    mode = "deny";
+    expect(isPermissionDenied(await wrapped.run({ n: 3 }, CTX))).toBe(true);
+    expect(approve.asked).toBe(1);
+    expect(tool.runs).toEqual([{ n: 2 }]);
+  });
+
+  it("a gate reads its authored block at each check and each modeOf", async () => {
+    const ledger = new PermissionLedger({});
+    const approve = scriptedApprover({ decision: "allow", scope: "once" });
+    let authored: ToolGateOptions["authored"] = { tools: { bash: "ask" }, other: "ask" };
+    const gate = createToolGate(() => ({ ledger, sessionId: "s1", approve, tools: { bash: { readOnly: false } }, authored }));
+
+    expect(gate.modeOf({ name: "bash" })).toBe("ask");
+    expect(await gate.check({ name: "bash" }, {})).toEqual({ allow: true });
+    expect(approve.asked).toBe(1);
+    authored = { tools: { bash: "allow" }, other: "deny" };
+    expect(gate.modeOf({ name: "bash" })).toBe("allow");
+    expect(gate.modeOf({ name: "Write" })).toBe("deny");
+    expect(await gate.check({ name: "bash" }, {})).toEqual({ allow: true });
+    expect(await gate.check({ name: "Write" }, {})).toMatchObject({ allow: false });
+    expect(approve.asked).toBe(1);
+  });
+
+  it("an answer remembered for the session still stands over a mode changed after it", async () => {
+    // The person said "no, for this conversation" — a later switch of the whole map does not unsay it.
+    const ledger = new PermissionLedger({});
+    const approve = scriptedApprover({ decision: "deny", scope: "session" });
+    let authored: ToolGateOptions["authored"] = { tools: { bash: "ask" } };
+    const gate = createToolGate(() => ({ ledger, sessionId: "s1", approve, tools: { bash: { readOnly: false } }, authored }));
+    expect(await gate.check({ name: "bash" }, {})).toMatchObject({ allow: false });
+    authored = { tools: { bash: "allow" } };
+    expect(await gate.check({ name: "bash" }, {})).toMatchObject({ allow: false });
+    expect(approve.asked).toBe(1);
   });
 });
 

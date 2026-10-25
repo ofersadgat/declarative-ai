@@ -1130,6 +1130,66 @@ describe("tool permissions (DESIGN §5.1, \"Permissions: two orthogonal axes\")"
     expect(await seen!.ctx.gate!.check({ name: "write" }, {})).toEqual({ allow: false, reason: "Not run: write (mode)" });
   });
 
+  it("asks the policy's `permissionsOf` at EACH decision — the gate and a wrapped tool both decide the next call under the block as it stands", async () => {
+    // A person switches a running conversation from asking to allowing: the call after the switch is
+    // decided under the new block, not the one the state was entered with.
+    let seen: FakeCall | undefined;
+    const script: Script = (call) => {
+      seen = call;
+      return ok({ r: "done" });
+    };
+    const inner = new FakePromptExecutor(script);
+    const delegatedPrompt: Executor<ExecServices, WorkflowMetrics> = {
+      metrics: inner.metrics,
+      capabilities: { ...inner.capabilities, policyEnforcement: "callback" },
+      start: (o, c) => inner.start(o, c),
+    };
+    let asked = 0;
+    const denyAll = () => {
+      asked++;
+      return { decision: "deny" as const, scope: "once" as const };
+    };
+    let now: Record<string, unknown> | undefined;
+    const handed: { call: { sessionId: string; instanceId: string }; stated: unknown }[] = [];
+    const permissionsOf = (call: { sessionId: string; instanceId: string }, stated: unknown) => {
+      handed.push({ call, stated });
+      return (now ?? stated) as never;
+    };
+    const stated = { tools: { write: "ask" } };
+    const delegated = makeEngine(invokeWriteFiles(stated as never), "s", script, {
+      tools: { write: writeTool },
+      prompt: delegatedPrompt,
+      extra: { services: { approve: denyAll, policy: { permissionsOf } } as unknown as ExecServices },
+    });
+    expect((await delegated.engine.run({ inputs: {} })).outcome).toBe("success");
+    const gate = seen!.ctx.gate!;
+    expect(gate.modeOf({ name: "write" })).toBe("ask");
+    expect(await gate.check({ name: "write" }, {})).toMatchObject({ allow: false });
+    expect(asked).toBe(1);
+    now = { tools: { write: "allow" } };
+    expect(gate.modeOf({ name: "write" })).toBe("allow");
+    expect(await gate.check({ name: "write" }, {})).toEqual({ allow: true });
+    expect(asked).toBe(1);
+    // Told whose call it is, and what the state itself declared.
+    expect(handed[0]!.stated).toEqual(stated);
+    expect(typeof handed[0]!.call.sessionId).toBe("string");
+    expect(typeof handed[0]!.call.instanceId).toBe("string");
+
+    now = undefined;
+    asked = 0;
+    const composed = makeEngine(invokeWriteFiles(stated as never), "s", script, {
+      tools: { write: writeTool },
+      extra: { permissions: { approve: denyAll, permissionsOf } },
+    });
+    expect((await composed.engine.run({ inputs: {} })).outcome).toBe("success");
+    const wrapped = seen!.ctx.tools!["write"]!;
+    expect(isPermissionDenied(await wrapped.run({}, {}))).toBe(true);
+    expect(asked).toBe(1);
+    now = { tools: { write: "allow" } };
+    expect(await wrapped.run({}, {})).toEqual({ wrote: true });
+    expect(asked).toBe(1);
+  });
+
   it("publishes the block with NO approver, and nothing for an environment that carries none", async () => {
     let seen: FakeCall | undefined;
     const script: Script = (call) => {

@@ -296,6 +296,8 @@ export interface EngineConfig {
     scopeOf?: ExecPolicy["scopeOf"];
     /** The words an agent reads for a refused call — see `ExecPolicy.refusal`. */
     refusal?: ExecPolicy["refusal"];
+    /** The block a call is decided under, asked at each decision — see `ExecPolicy.permissionsOf`. */
+    permissionsOf?: ExecPolicy["permissionsOf"];
   };
   /** Per-BUNDLE workspace resolver (DESIGN §5.1, NAMES.md §10): maps a resource key — the `workspace` an author
    *  named, as `name#<instance address>`, or the run's own — to the workspace its tools act within, so a subtree
@@ -5442,16 +5444,29 @@ export class WorkflowEngine {
     // And what the agent is told when a call is refused, the same way: one refusal reads the same
     // through the gate and through a wrapped tool.
     const refusal = this.config.permissions?.refusal ?? this.config.services?.policy?.refusal;
-    const gate = createToolGate({
-      ledger: this.permissions,
-      sessionId,
-      approve: escalate,
-      tools: Object.fromEntries(Object.entries(tools).map(([name, tool]) => [name, { readOnly: tool.readOnly }])),
-      ...(permissions !== undefined ? { authored: permissions } : {}),
-      ...(smart !== undefined ? { smart } : {}),
-      ...(customProfiles !== undefined ? { profiles: customProfiles } : {}),
-      ...(scopeOf !== undefined ? { scopeOf } : {}),
-      ...(refusal !== undefined ? { refusal } : {}),
+    /**
+     * The block a call is decided under, asked at EACH decision — the host's word on this operation
+     * as it stands now (`ExecPolicy.permissionsOf`), else what the state declared. Read through by the
+     * gate and by every wrapped tool below, so a host that changes a running state's permissions has
+     * the very next call decided under them.
+     */
+    const permissionsOf = this.config.permissions?.permissionsOf ?? this.config.services?.policy?.permissionsOf;
+    const blockNow = (): LiteralPermissions | undefined =>
+      permissionsOf === undefined ? permissions : (permissionsOf({ sessionId, instanceId }, permissions) as LiteralPermissions | undefined);
+    const registered = Object.fromEntries(Object.entries(tools).map(([name, tool]) => [name, { readOnly: tool.readOnly }]));
+    const gate = createToolGate(() => {
+      const block = blockNow();
+      return {
+        ledger: this.permissions,
+        sessionId,
+        approve: escalate,
+        tools: registered,
+        ...(block !== undefined ? { authored: block } : {}),
+        ...(smart !== undefined ? { smart } : {}),
+        ...(customProfiles !== undefined ? { profiles: customProfiles } : {}),
+        ...(scopeOf !== undefined ? { scopeOf } : {}),
+        ...(refusal !== undefined ? { refusal } : {}),
+      };
     });
 
     if (delegatesPermissions) return { ...(some ? { tools } : {}), gate, ...stated };
@@ -5464,26 +5479,28 @@ export class WorkflowEngine {
     // `constructor` or `toString` used to resolve its permission mode — and its smart-approval rule
     // — to a prototype member, handing a FUNCTION to a permission decision. Far-fetched input, but
     // "does it fail open?" is not a question worth leaving open on this path.
-    const authoredTools = permissions?.tools;
-    const authoredMode = (name: string): PermissionMode | undefined =>
-      (authoredTools !== undefined && Object.hasOwn(authoredTools, name) ? authoredTools[name] : undefined) ?? permissions?.default;
+    const authoredMode = (block: LiteralPermissions | undefined, name: string): PermissionMode | undefined =>
+      (block?.tools !== undefined && Object.hasOwn(block.tools, name) ? block.tools[name] : undefined) ?? block?.default;
     const guarded: Record<string, Tool> = {};
     for (const [name, tool] of Object.entries(tools)) {
-      guarded[name] = withPermission(tool, {
-        ledger: this.permissions,
-        sessionId,
-        toolName: name,
-        approve,
-        authoredMode: authoredMode(name),
-        smart: smart !== undefined && Object.hasOwn(smart, name) ? smart[name] : undefined,
-        profiles: customProfiles,
-        // The SAME narrowing the gate applies — a wrapped tool and a delegated one are two routes to
-        // one decision, and binding only one would be a sandbox with a door in it.
-        scopeOf,
-        ...(refusal !== undefined ? { refusal } : {}),
-        // This state's own authored block, so a host layering a floor under a per-state table can
-        // see both at the moment of decision.
-        ...(permissions !== undefined ? { authored: permissions } : {}),
+      guarded[name] = withPermission(tool, () => {
+        const block = blockNow();
+        return {
+          ledger: this.permissions,
+          sessionId,
+          toolName: name,
+          approve,
+          authoredMode: authoredMode(block, name),
+          smart: smart !== undefined && Object.hasOwn(smart, name) ? smart[name] : undefined,
+          profiles: customProfiles,
+          // The SAME narrowing the gate applies — a wrapped tool and a delegated one are two routes to
+          // one decision, and binding only one would be a sandbox with a door in it.
+          scopeOf,
+          ...(refusal !== undefined ? { refusal } : {}),
+          // This state's own authored block, so a host layering a floor under a per-state table can
+          // see both at the moment of decision.
+          ...(block !== undefined ? { authored: block } : {}),
+        };
       });
     }
     if (this.permissions.resolveProfile(sessionId) === "plan") {
