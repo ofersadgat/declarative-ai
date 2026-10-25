@@ -597,3 +597,46 @@ describe("authored `other`", () => {
     expect(gate.modeOf({ name: "Glob" })).toBe("deny");
   });
 });
+
+describe("the words for a refused call", () => {
+  const deny = () => scriptedApprover({ decision: "deny", scope: "once" });
+  /** Words that say which step refused, and record every call they were asked about. */
+  function words(): ((refused: { tool: string; cause: string; profile?: string }) => string) & { told: Array<{ tool: string; cause: string; profile?: string }> } {
+    const told: Array<{ tool: string; cause: string; profile?: string }> = [];
+    const fn = ((refused: { tool: string; cause: string; profile?: string }) => {
+      told.push({ tool: refused.tool, cause: refused.cause, ...(refused.profile !== undefined ? { profile: refused.profile } : {}) });
+      return `refused by ${refused.cause}`;
+    }) as ((refused: { tool: string; cause: string; profile?: string }) => string) & { told: typeof told };
+    fn.told = told;
+    return fn;
+  }
+
+  it("says which step refused: the mode, the narrowing, smart, the approver, the profile", async () => {
+    const refusal = words();
+    const gate = (over: Partial<Parameters<typeof createToolGate>[0]>) =>
+      createToolGate({ ledger: new PermissionLedger({}), sessionId: "s1", approve: deny(), tools: { write_file: { readOnly: false } }, refusal, ...over });
+    expect(await gate({ authored: { tools: { write_file: "deny" } } }).check({ name: "write_file" }, {})).toEqual({ allow: false, reason: "refused by mode" });
+    expect(await gate({ authored: { tools: { write_file: "allow" } }, scopeOf: () => "deny" }).check({ name: "write_file" }, {})).toEqual({ allow: false, reason: "refused by narrowed" });
+    expect(await gate({ authored: { tools: { write_file: "smart" } }, smart: { write_file: () => "deny" } }).check({ name: "write_file" }, {})).toEqual({ allow: false, reason: "refused by smart" });
+    expect(await gate({ authored: { tools: { write_file: "ask" } } }).check({ name: "write_file" }, {})).toEqual({ allow: false, reason: "refused by approver" });
+    const readOnly = createToolGate({ ledger: new PermissionLedger({ baseline: { profile: "read-only" } }), sessionId: "s1", approve: deny(), tools: { write_file: { readOnly: false } }, refusal });
+    expect(await readOnly.check({ name: "write_file", readOnly: false }, {})).toEqual({ allow: false, reason: "refused by profile" });
+    expect(refusal.told.at(-1)).toEqual({ tool: "write_file", cause: "profile", profile: "read-only" });
+  });
+
+  it("puts the same words on a wrapped tool's PermissionDenied, and keeps its own sentence without any", async () => {
+    const tool = recordingTool();
+    const worded = withPermission(tool, { ledger: new PermissionLedger({}), sessionId: "s1", toolName: "write_file", approve: deny(), authoredMode: "ask", refusal: words() });
+    expect(await worded.run({}, CTX)).toEqual({ denied: true, tool: "write_file", reason: "refused by approver" });
+    const plain = withPermission(tool, { ledger: new PermissionLedger({}), sessionId: "s1", toolName: "write_file", approve: deny(), authoredMode: "ask" });
+    expect(await plain.run({}, CTX)).toEqual({ denied: true, tool: "write_file", reason: "tool 'write_file' denied by permission policy" });
+    expect(tool.runs).toEqual([]);
+  });
+
+  it("is asked nothing about a call that runs", async () => {
+    const refusal = words();
+    const gate = createToolGate({ ledger: new PermissionLedger({}), sessionId: "s1", approve: deny(), tools: { read_file: { readOnly: true } }, authored: { tools: { read_file: "allow" } }, refusal });
+    expect(await gate.check({ name: "read_file" }, {})).toEqual({ allow: true });
+    expect(refusal.told).toEqual([]);
+  });
+});

@@ -9,4 +9,4 @@ export type { AgentPermissionDecision, AgentToolRequest, InjectedTool, InjectedT
 // so the descriptor shape, the input gate, and the dispatch are ONE implementation rather than two that
 // drift. What stays here is the part that really is the CLI's: the permission-prompt protocol.
 export type { McpToolDescriptor, McpToolResult } from "@declarative-ai/agents-api";
-export { MCP_SERVER_NAME, injectedToolCallOf, injectedToolDescriptors, mcpToolName, mcpServersRefusal, runInjectedTool, sdkServerEntries, textResult } from "@declarative-ai/agents-api";
+export { MCP_SERVER_NAME, deniedResult, injectedToolCallOf, injectedToolDescriptors, mcpToolName, mcpServersRefusal, runInjectedTool, sdkServerEntries, textResult } from "@declarative-ai/agents-api";

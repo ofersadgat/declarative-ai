@@ -69,6 +69,15 @@ describe("runInjectedTool — one call, whatever carried it", () => {
     expect(result).toEqual(textResult("ZEPHYR"));
   });
 
+  it("answers a call the gate refused as an error reading the refusal's sentence", async () => {
+    const result = await runInjectedTool(
+      { tools: { edit: { inputSchema: schema, run: () => ({ denied: true, tool: "edit", reason: "Not run: the person denied this call." }) } } },
+      "edit",
+      { path: "a.txt" },
+    );
+    expect(result).toEqual({ content: [{ type: "text", text: "Not run: the person denied this call." }], isError: true });
+  });
+
   it("hands the impl what the transport said about the call — its tool-use id, when there is one", async () => {
     const calls: unknown[] = [];
     await runInjectedTool({ tools: { t: { inputSchema: schema, run: (_input, call) => (calls.push(call), "") } } }, "t", {}, { toolCallId: "toolu_1" });

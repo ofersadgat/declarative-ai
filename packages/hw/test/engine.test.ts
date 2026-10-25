@@ -1104,6 +1104,32 @@ describe("tool permissions (DESIGN §5.1, \"Permissions: two orthogonal axes\")"
     expect(narrowedWith).toEqual([block]);
   });
 
+  it("hands the policy's words for a refused call to the gate it builds", async () => {
+    let seen: FakeCall | undefined;
+    const script: Script = (call) => {
+      seen = call;
+      return ok({ r: "done" });
+    };
+    const inner = new FakePromptExecutor(script);
+    const delegatedPrompt: Executor<ExecServices, WorkflowMetrics> = {
+      metrics: inner.metrics,
+      capabilities: { ...inner.capabilities, policyEnforcement: "callback" },
+      start: (o, c) => inner.start(o, c),
+    };
+    const { engine } = makeEngine(invokeWriteFiles({ tools: { write: "deny" } } as never), "s", script, {
+      tools: { write: writeTool },
+      prompt: delegatedPrompt,
+      extra: {
+        services: {
+          approve: allowSession,
+          policy: { refusal: (refused: { tool: string; cause: string }) => `Not run: ${refused.tool} (${refused.cause})` },
+        } as unknown as ExecServices,
+      },
+    });
+    expect((await engine.run({ inputs: {} })).outcome).toBe("success");
+    expect(await seen!.ctx.gate!.check({ name: "write" }, {})).toEqual({ allow: false, reason: "Not run: write (mode)" });
+  });
+
   it("publishes the block with NO approver, and nothing for an environment that carries none", async () => {
     let seen: FakeCall | undefined;
     const script: Script = (call) => {

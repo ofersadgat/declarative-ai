@@ -1585,14 +1585,21 @@ class PermissionLedger {                    // scope chain: session → workflow
   resolveProfile(sessionId): PermissionProfile; setProfile(sessionId, p): void; seedProfile(sessionId, p): void;
 }
 function withPermission(tool: Tool, opts: { ledger; sessionId; toolName; approve: Approver;
-                                            authoredMode?; smart?: SmartApprover; profiles? }): Tool;
+                                            authoredMode?; smart?: SmartApprover; profiles?;
+                                            scopeOf?: ScopeNarrowing; refusal?: RefusalWords }): Tool;
 function planExitTool(opts: { ledger; sessionId; approve: Approver }): Tool;   // plan → full on approval
 type PermissionDenied = { denied: true; tool: string; reason: string };        // isPermissionDenied(v)
+type RefusalCause = "profile" | "mode" | "narrowed" | "smart" | "approver";   // which step said no
+interface RefusedCall { tool: string; input: FunctionInputs; cause: RefusalCause; sessionId: string; profile?: PermissionProfile }
+type RefusalWords = (refused: RefusedCall) => string | undefined;            // the host's words, else ours
 ```
 
 `plan` mode blocks mutating tools until the agent calls the injected `exit_plan` tool and a human approves.
 `withPermission` gates the profile first (an out-of-scope tool is refused regardless of mode), then the
-mode; a refusal is returned to the model as a `PermissionDenied` JSON result, not thrown.
+mode; a refusal is returned as a `PermissionDenied` value, not thrown, its `reason` the host's
+`refusal` words for the step that refused (else `tool 'X' denied by permission policy`). Where it
+reaches a MODEL it is an error: the MCP bridge answers it as an `isError` result reading `reason`
+(`deniedResult`), and the composed loop throws it, so the model reads that the call did not run.
 
 #### `ExecPolicy` — the compiled policy on `ctx.policy`
 
@@ -1601,6 +1608,8 @@ interface ExecPolicy {
   baseline?: PermissionBaseline;                   // authored, durable: per-tool modes, default, profile
   profiles?: Record<string, ProfilePredicate>;     // custom profile predicates by name
   smart?: Record<string, SmartApprover>;           // per-tool arg-inspecting policies
+  scopeOf?: ScopeNarrowing;                        // the host's per-call narrowing
+  refusal?: RefusalWords;                          // what the agent reads for a refused call — every gate
   nativeTools?: string[];                          // DELEGATED adapters: the agent's own tools, allow-listed
 }
 

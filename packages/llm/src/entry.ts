@@ -380,7 +380,10 @@ export function blockOfPart(part: unknown): Block {
     case "tool-result":
     case "tool_result": {
       const content = unwrapToolOutput(p["content"] ?? p["output"]);
-      const isError = p["is_error"] === true || p["isError"] === true;
+      // An AI SDK result says it failed by its output's tag (a tool that threw is `error-text`), which
+      // unwrapping the value would otherwise drop.
+      const tag = str(rec(p["output"])?.["type"]);
+      const isError = p["is_error"] === true || p["isError"] === true || tag === "error-text" || tag === "error-json";
       return {
         type: "tool_result",
         toolUseId: str(p["tool_use_id"]) ?? str(p["toolCallId"]) ?? "",

@@ -279,6 +279,12 @@ export interface ExecPolicy {
    * answer is the listing.
    */
   scopeOf?: ScopeNarrowing;
+  /**
+   * The words an agent reads for a call this policy refuses — see {@link RefusalWords}. On the policy
+   * beside {@link scopeOf} for the same reason: every gate and every wrapped tool under it should tell
+   * the agent the same thing about the same refusal.
+   */
+  refusal?: RefusalWords;
   /** DELEGATED adapters only: the black-box agent's OWN tools this operation may use, by native name
    *  (a `Tool | NativeToolRef` rename binding's `native` side) — an allow-list, not an impl set. */
   nativeTools?: string[];
@@ -398,6 +404,8 @@ export interface ToolDecisionOptions {
    * `undefined` ⇒ the caller has nothing to say about this call.
    */
   scopeOf?: ScopeNarrowing;
+  /** The words for a refused call — see {@link RefusalWords}. Absent ⇒ this package's own sentence. */
+  refusal?: RefusalWords;
 }
 
 /**
@@ -429,6 +437,45 @@ export function strictestMode(a: PermissionMode, b: PermissionMode): PermissionM
 
 /** Why a call was refused, or that it may proceed. */
 export type ToolDecision = { allow: true } | { allow: false; reason: string };
+
+/**
+ * Which step of the one decision ({@link decideToolCall}) refused a call:
+ *
+ *  - `profile`: the session's profile leaves the tool out;
+ *  - `mode`: the tool's resolved mode is `deny` — authored, or an answer remembered in the ledger;
+ *  - `narrowed`: the caller's own narrowing ({@link ToolDecisionOptions.scopeOf}) said `deny` about this call;
+ *  - `smart`: the tool's `smart` policy said `deny`;
+ *  - `approver`: it was put to the approver, which said `deny` — a person, or whatever the host answers with.
+ */
+export type RefusalCause = "profile" | "mode" | "narrowed" | "smart" | "approver";
+
+/** One refused call, as {@link RefusalWords} is told it. */
+export interface RefusedCall {
+  tool: string;
+  input: FunctionInputs;
+  cause: RefusalCause;
+  /** The ledger session the decision was made in — whose remembered answers a `mode` refusal may be. */
+  sessionId: string;
+  /** The session's profile, when it is what refused. */
+  profile?: PermissionProfile;
+}
+
+/**
+ * The words the agent reads for a refused call, in the host's terms — or `undefined` to keep this
+ * package's own sentence.
+ *
+ * The refusal is the AGENT's answer: it reads it in place of the tool's result, and what it does next
+ * depends on being told whether anybody can change the answer and who. This package knows only which
+ * step said no; who stands behind that step — a person, a permission set, a function, a stop — is the
+ * host's, which is why the words are a callback beside {@link ToolDecisionOptions.scopeOf}.
+ */
+export type RefusalWords = (refused: RefusedCall) => string | undefined;
+
+/** The sentence for a refused call: the host's, else this package's own. */
+function refusal(opts: ToolDecisionOptions, tool: { name: string }, input: FunctionInputs, cause: RefusalCause, fallback: string, profile?: PermissionProfile): ToolDecision {
+  const words = opts.refusal?.({ tool: tool.name, input, cause, sessionId: opts.sessionId, ...(profile !== undefined ? { profile } : {}) });
+  return { allow: false, reason: words ?? fallback };
+}
 
 /**
  * Decide ONE tool call — profile, then mode, then `smart`, then the human.
@@ -466,7 +513,7 @@ export async function decideToolCall(
     // Profile gate first: an out-of-scope tool is refused regardless of mode (a mutating tool under
     // `read-only`/`plan`, or one a custom profile's predicate excludes).
     const scoped = profileScopeOf(profile, tool, profiles);
-    if (scoped === "out") return { allow: false, reason: `tool '${tool.name}' is out of the '${profile}' profile` };
+    if (scoped === "out") return refusal(opts, tool, input, "profile", `tool '${tool.name}' is out of the '${profile}' profile`, profile);
     if (scoped === "unknown") {
       // An UNCLASSIFIABLE tool under a narrowing profile is escalated rather than resolved either
       // way. It must not slip through on an `allow` the profile would have refused — and a profile
@@ -475,7 +522,7 @@ export async function decideToolCall(
       if (resolved !== "deny") return finish("ask", tool, input, opts);
     }
   } else if (table === "deny") {
-    return { allow: false, reason: `tool '${tool.name}' is denied by the '${profile}' profile` };
+    return refusal(opts, tool, input, "profile", `tool '${tool.name}' is denied by the '${profile}' profile`, profile);
   }
 
   // The caller's own narrowing — a path scope, a URL allow-list, whatever it models. Composed as a
@@ -484,7 +531,10 @@ export async function decideToolCall(
   let mode = ledger.resolve(tool.name, sessionId, authoredMode);
   if (table !== undefined) mode = strictestMode(mode, table);
   if (narrowed !== undefined) mode = strictestMode(mode, narrowed);
-  if (mode === "deny") return { allow: false, reason: `tool '${tool.name}' denied by permission policy` };
+  if (mode === "deny") {
+    // The caller's narrowing, or the mode itself — a profile table's `deny` was answered above.
+    return refusal(opts, tool, input, narrowed === "deny" ? "narrowed" : "mode", `tool '${tool.name}' denied by permission policy`);
+  }
   return finish(mode, tool, input, opts);
 }
 
@@ -497,16 +547,19 @@ async function finish(
 ): Promise<ToolDecision> {
   const { ledger, sessionId, approve, smart } = opts;
   let mode = start;
+  let cause: RefusalCause = "mode";
   if (mode === "smart") {
     // The smart policy decides directly, or returns `ask` to escalate to the human gate below.
     mode = smart ? await smart({ tool: tool.name, input, sessionId }) : "ask";
+    cause = "smart";
   }
   if (mode === "ask") {
     const decision = await approve({ tool: tool.name, input, sessionId });
     ledger.apply(tool.name, decision, sessionId);
     mode = decision.decision === "allow" ? "allow" : "deny";
+    cause = "approver";
   }
-  return mode === "deny" ? { allow: false, reason: `tool '${tool.name}' denied by permission policy` } : { allow: true };
+  return mode === "deny" ? refusal(opts, tool, input, cause, `tool '${tool.name}' denied by permission policy`) : { allow: true };
 }
 
 /**
@@ -634,6 +687,8 @@ export interface ToolGateOptions {
   profiles?: Record<string, ProfileRule>;
   /** Passed to every decision — see {@link ToolDecisionOptions.scopeOf}. */
   scopeOf?: ToolDecisionOptions["scopeOf"];
+  /** Passed to every decision — see {@link ToolDecisionOptions.refusal}. */
+  refusal?: ToolDecisionOptions["refusal"];
   /**
    * Tools ALREADY wrapped with {@link withPermission}, which this gate must therefore not gate again.
    *
@@ -676,6 +731,7 @@ export function createToolGate(opts: ToolGateOptions): ToolGate {
     registered: own(opts.tools, name) !== undefined,
     ...(opts.authored !== undefined ? { authored: opts.authored } : {}),
     ...(opts.scopeOf !== undefined ? { scopeOf: opts.scopeOf } : {}),
+    ...(opts.refusal !== undefined ? { refusal: opts.refusal } : {}),
   });
   const preGated = new Set(opts.preGated ?? []);
   return {

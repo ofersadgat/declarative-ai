@@ -20,6 +20,7 @@
  */
 import type { JsonValue, SchemaDocument, SyncOutputValidator } from "@declarative-ai/exec";
 import { splitToolImages } from "@declarative-ai/json";
+import { isPermissionDenied } from "@declarative-ai/permissions";
 import type { InjectedTool, InjectedToolCall, McpServerSpec } from "./seam.js";
 
 /** The MCP server name our injected tools are exposed under; the agent sees `mcp__dai__<tool>`. */
@@ -86,6 +87,11 @@ export function textResult(text: string, isError?: boolean): McpToolResult {
   return { content: [{ type: "text", text }], ...(isError === true ? { isError: true } : {}) };
 }
 
+/** A call the permission gate refused, as the agent reads it: the refusal's sentence, as an error. */
+export function deniedResult(reason: string): McpToolResult {
+  return textResult(reason, true);
+}
+
 /**
  * A tool's value as an MCP result: the value as text, and its pictures (`$images`, see `json`'s
  * `splitToolImages`) as `image` content beside it — which the agent hands its model as images.
@@ -142,6 +148,11 @@ export interface InjectedToolSpec {
  *
  * A tool that THROWS becomes an `isError` result rather than a transport fault: a tool failure is
  * something the AGENT reads and reacts to (DESIGN §5.1, "Functions and tools"), not a failure of the run.
+ *
+ * A call the permission gate REFUSED is an error too, and reads as its refusal's own sentence rather
+ * than the `{denied, tool, reason}` value a wrapped tool returns: the agent's own refusals arrive that
+ * way (a permission callback's `deny` is an error result in every agent), and one refusal that read as
+ * an ordinary result told the agent, and everything drawing the call, that it had worked.
  */
 export async function runInjectedTool(spec: InjectedToolSpec, name: string, args: unknown, call: InjectedToolCall = {}): Promise<McpToolResult> {
   const tool = spec.tools?.[name];
@@ -150,7 +161,8 @@ export async function runInjectedTool(spec: InjectedToolSpec, name: string, args
   const invalid = validateToolInput(spec.validator, tool, input);
   if (invalid) return textResult(`tool '${name}' input is invalid: ${invalid}`, true);
   try {
-    return valueResult(await tool.run(input, call));
+    const value = (await tool.run(input, call)) as JsonValue;
+    return isPermissionDenied(value) ? deniedResult(value.reason) : valueResult(value);
   } catch (e) {
     return textResult(`tool '${name}' failed: ${e instanceof Error ? e.message : String(e)}`, true);
   }

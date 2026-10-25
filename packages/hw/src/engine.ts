@@ -294,6 +294,8 @@ export interface EngineConfig {
     profiles?: Record<string, ProfileRule>;
     /** The host's own per-call narrowing — see `ExecPolicy.scopeOf`. */
     scopeOf?: ExecPolicy["scopeOf"];
+    /** The words an agent reads for a refused call — see `ExecPolicy.refusal`. */
+    refusal?: ExecPolicy["refusal"];
   };
   /** Per-BUNDLE workspace resolver (DESIGN §5.1, NAMES.md §10): maps a resource key — the `workspace` an author
    *  named, as `name#<instance address>`, or the run's own — to the workspace its tools act within, so a subtree
@@ -5437,6 +5439,9 @@ export class WorkflowEngine {
     // same way `smart` and `profiles` are. It composes as a narrowing inside `decideToolCall`, so a
     // policy that supplies none changes nothing.
     const scopeOf = this.config.permissions?.scopeOf ?? this.config.services?.policy?.scopeOf;
+    // And what the agent is told when a call is refused, the same way: one refusal reads the same
+    // through the gate and through a wrapped tool.
+    const refusal = this.config.permissions?.refusal ?? this.config.services?.policy?.refusal;
     const gate = createToolGate({
       ledger: this.permissions,
       sessionId,
@@ -5446,6 +5451,7 @@ export class WorkflowEngine {
       ...(smart !== undefined ? { smart } : {}),
       ...(customProfiles !== undefined ? { profiles: customProfiles } : {}),
       ...(scopeOf !== undefined ? { scopeOf } : {}),
+      ...(refusal !== undefined ? { refusal } : {}),
     });
 
     if (delegatesPermissions) return { ...(some ? { tools } : {}), gate, ...stated };
@@ -5474,6 +5480,7 @@ export class WorkflowEngine {
         // The SAME narrowing the gate applies — a wrapped tool and a delegated one are two routes to
         // one decision, and binding only one would be a sandbox with a door in it.
         scopeOf,
+        ...(refusal !== undefined ? { refusal } : {}),
         // This state's own authored block, so a host layering a floor under a per-state table can
         // see both at the moment of decision.
         ...(permissions !== undefined ? { authored: permissions } : {}),

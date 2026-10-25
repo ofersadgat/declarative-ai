@@ -160,13 +160,14 @@ function throughTheBridge(label: string, start: () => (spec: McpBridgeSpec) => P
       expect(((await rpc(bridge!.url, "tools/list")).result as { tools: unknown[] }).tools).toEqual([]);
     });
 
-    it("answers a DENY as PermissionDenied, and the real tool never runs", async () => {
+    it("answers a DENY as an error reading its sentence, and the real tool never runs", async () => {
       const g = gate();
       g.answer(async () => ({ allow: false, reason: "not in this state's permission set" }));
       const url = await serve(g);
       const marker = join(root, `denied-${label.replace(/\W/g, "")}`);
       const answered = (await callTool(url, "touch", { path: marker })).result as { content: Array<{ text: string }>; isError?: boolean };
-      expect(JSON.parse(answered.content[0]!.text)).toEqual({ denied: true, tool: "mcp__fixture__touch", reason: "not in this state's permission set" });
+      expect(answered.content[0]!.text).toBe("not in this state's permission set");
+      expect(answered.isError).toBe(true);
       expect(existsSync(marker)).toBe(false);
     });
 

@@ -155,6 +155,13 @@ describe("core — tools and blob outputs", () => {
     expect(await exec({ a: 1 }, {} as never)).toEqual({ sum: 2 });
   });
 
+  it("throws a call the gate refused, so the model reads the refusal's sentence as the tool's error", async () => {
+    const { runner, calls } = fakeRunner([okOutcome()]);
+    const tool: Tool = { inputSchema: { type: "object" }, readOnly: false, run: () => ({ denied: true, tool: "edit", reason: "Not run: auto denied it." }) };
+    await createPromptExecutor({ runner }).start(promptOp(), { tools: { edit: tool } }).result;
+    await expect(calls[0]!.env.toolExecutors!.edit!({}, {} as never)).rejects.toThrow("Not run: auto denied it.");
+  });
+
   it("runs a tool with the model's call id as `ctx.toolCallId`, beside the services it closes over", async () => {
     const { runner, calls } = fakeRunner([okOutcome()]);
     const seen: Array<[string | undefined, unknown]> = [];

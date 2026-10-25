@@ -39,6 +39,7 @@
  * if a future CLI rejects our decisions.
  */
 import {
+  deniedResult,
   injectedToolCallOf,
   injectedToolDescriptors,
   MCP_SERVER_NAME,
@@ -384,12 +385,12 @@ export interface ProxiedServers {
 }
 
 /**
- * The answer a gated call that was REFUSED gets: `PermissionDenied`, the shape the executor answers a
- * refused injected tool with, so the agent reads one refusal whichever server the tool was on. Not an
- * `isError` for the same reason: it is the policy's answer, not the tool's failure.
+ * The answer a gated call that was REFUSED gets: the refusal's sentence, as an error — what a refused
+ * injected tool answers ({@link deniedResult}), so the agent reads one refusal whichever server the tool
+ * was on, and reads that the call did not do its work.
  */
-export function deniedResult(tool: string, reason: string | undefined): McpToolResult {
-  return textResult(JSON.stringify({ denied: true, tool, ...(reason !== undefined ? { reason } : {}) }));
+function refused(tool: string, reason: string | undefined): McpToolResult {
+  return deniedResult(reason ?? `tool '${tool}' denied by permission policy`);
 }
 
 /**
@@ -414,9 +415,9 @@ export async function handleServerToolCall(spec: ProxiedServers, server: string,
     try {
       decision = await spec.serverToolGate({ toolName: subject, input });
     } catch {
-      return deniedResult(subject, "the permission check failed; denying");
+      return refused(subject, "the permission check failed; denying");
     }
-    if (!decision.allow) return deniedResult(subject, decision.reason);
+    if (!decision.allow) return refused(subject, decision.reason);
   }
   return proxy.call(name, input);
 }

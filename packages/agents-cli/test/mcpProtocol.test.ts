@@ -145,14 +145,14 @@ describe("a proxied server's call — the gate first, then the real server", () 
     expect(result).toEqual({ content: [{ type: "image", data: "AA==", mimeType: "image/png" }], structuredContent: { ok: true } });
   });
 
-  it("answers a refusal as PermissionDenied and never forwards the call", async () => {
+  it("answers a refusal as an error reading its sentence, and never forwards the call", async () => {
     const { proxy, calls } = proxyOf();
     const result = (await handleServerToolCall({ servers: { figma: proxy }, serverToolGate: async () => ({ allow: false, reason: "no" }) }, "figma", "get_code", {})) as {
       content: Array<{ text: string }>;
       isError?: boolean;
     };
-    expect(decode(result)).toEqual({ denied: true, tool: "mcp__figma__get_code", reason: "no" });
-    expect(result.isError).toBeUndefined();
+    expect(result.content[0]!.text).toBe("no");
+    expect(result.isError).toBe(true);
     expect(calls).toEqual([]);
   });
 
@@ -168,8 +168,9 @@ describe("a proxied server's call — the gate first, then the real server", () 
       "figma",
       "get_code",
       {},
-    )) as { content: Array<{ text: string }> };
-    expect(decode(result)).toMatchObject({ denied: true });
+    )) as { content: Array<{ text: string }>; isError?: boolean };
+    expect(result.content[0]!.text).toBe("the permission check failed; denying");
+    expect(result.isError).toBe(true);
     expect(calls).toEqual([]);
   });
 

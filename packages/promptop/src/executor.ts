@@ -188,16 +188,32 @@ export function projectLlmOutput(op: PromptOp<InlineFamily>, output: LlmOutput |
 
 /** Adapt core {@link Tool}s (`run(input, ctx)`) into llm {@link ToolExecutor}s (`(input, options)`),
  *  closing over the call ctx. The tool's `run` IS its `execute`; of the SDK's per-call `options` only
- *  the call's id is kept, as `ctx.toolCallId` (see {@link ExecServices.toolCallId}). */
+ *  the call's id is kept, as `ctx.toolCallId` (see {@link ExecServices.toolCallId}).
+ *
+ *  A call the permission gate refused comes back as a `PermissionDenied` value (`{denied, tool,
+ *  reason}`); it is THROWN here, so the model reads the refusal's sentence as the tool's error — what
+ *  every agent route hands it (the bridge's `deniedResult`) — rather than as a result that worked. */
 function adaptTools(tools: Record<string, Tool> | undefined, ctx: ExecServices): Record<string, ToolExecutor> | undefined {
   if (!tools) return undefined;
   const entries = Object.entries(tools);
   if (entries.length === 0) return undefined;
   const out: Record<string, ToolExecutor> = {};
   for (const [name, tool] of entries) {
-    out[name] = (input, options) => tool.run(input, typeof options?.toolCallId === "string" ? { ...ctx, toolCallId: options.toolCallId } : ctx);
+    out[name] = async (input, options) => {
+      const value = await tool.run(input, typeof options?.toolCallId === "string" ? { ...ctx, toolCallId: options.toolCallId } : ctx);
+      const refused = refusalOf(value);
+      if (refused !== undefined) throw new Error(refused);
+      return value;
+    };
   }
   return out;
+}
+
+/** The sentence of a refused call's `PermissionDenied` value, or `undefined` for any other value. */
+function refusalOf(value: unknown): string | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const v = value as { denied?: unknown; reason?: unknown };
+  return v.denied === true && typeof v.reason === "string" ? v.reason : undefined;
 }
 
 /**
