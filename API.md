@@ -2615,6 +2615,12 @@ interface EngineConfig {
   // loaded run builds it — which reopens a terminated instance to take it. Also on
   // `WorkflowExecutorOptions`, since the executor builds the engine.
   directed?: DirectedTransitions;
+  // Whether a child may be entered NOW, asked at every entry by the mounted state's id: the reason it
+  // may not, or undefined. A refused child is BLOCKED (`instance.blocked` with the host's words; its
+  // record fails permanent) through the seam a wiring failure takes, so a rule on the mount naming the
+  // failure may handle it. Nothing of it is resolved or called; a fan-out is refused once, for the
+  // mount. The run's root is never asked. Also on `WorkflowExecutorOptions`.
+  entryRefusal?: (stateId: string) => string | undefined;
 }
 // A move the host injects on somebody's behalf. `instanceId` absent => the root instance; `to` is a
 // declared child of it. Held while a sync child holds the cursor unless `skip`, which interrupts —

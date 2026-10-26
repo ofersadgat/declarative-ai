@@ -320,6 +320,18 @@ export interface EngineConfig {
    */
   fanOut?: FanOutHost;
   /**
+   * Whether a child may be entered NOW — asked of the host at every entry, by the mounted state's id
+   * (a variant id as the bundle holds it), and answered with the reason it may not, or `undefined`.
+   *
+   * A refused entry is a BLOCKED child: `instance.blocked` with the host's words, and the child's
+   * record fails permanent, through the seam a wiring failure takes — so a rule on the mount that
+   * names the failure may handle it, and with none the parent fails (SPEC §3.4). Nothing is resolved
+   * or called for a refused child, and a fan-out is refused once, for the mount. Asked at the entry
+   * and never cached, so a host's answer changing mid-run reaches the next entry. A run's ROOT is not
+   * asked: whether a run may start at all is the host's to decide before it constructs one.
+   */
+  entryRefusal?: (stateId: string) => string | undefined;
+  /**
    * The lists THIS run is split on, when it is a run a `"split"` made — see {@link SplitEntry}. A
    * mount whose `each: "split"` wire names one of these resolves the list to this run's element and
    * runs it INLINE: the run is already on the far side of that split, and a second one over the same
@@ -2524,9 +2536,13 @@ export class WorkflowEngine {
       }
     }
 
+    // A child the host refuses is blocked before anything of it is resolved or called — see
+    // `EngineConfig.entryRefusal`. After the reset, which the entry still is: the cursor moved.
+    const refused = this.config.entryRefusal?.(decl.state);
+
     // A mount that FANS OUT (§6.2) is entered once per element, under one record — its own path,
     // after the reset both share, because "resolve, then enter" happens N times there.
-    if (decl.each !== undefined && decl.each.length > 0) return this.enterFanOut(instance, key, decl, overrides);
+    if (refused === undefined && decl.each !== undefined && decl.each.length > 0) return this.enterFanOut(instance, key, decl, overrides);
 
     // A mount's wiring may CALL — `renderTemplate($/prompts/turns/revise.md, {…})` — and a call is
     // the engine's to run, never resolution's. Run them here, AFTER the reset so they read the same
@@ -2535,12 +2551,14 @@ export class WorkflowEngine {
     // computed, and the child parked forever — reported as `parked on unresolvable inputs (dataflow
     // deadlock)`, which names neither the call nor the reason.
     //
-    const wiringFailure = await this.runEmbeddedOps(instance, this.wiresFor(decl.inputs ?? {}, decl.state));
-    if (wiringFailure !== undefined) return { failure: wiringFailure };
+    if (refused === undefined) {
+      const wiringFailure = await this.runEmbeddedOps(instance, this.wiresFor(decl.inputs ?? {}, decl.state));
+      if (wiringFailure !== undefined) return { failure: wiringFailure };
+    }
 
     // The transition's own wiring, over the mount's, per NAME. Only a TAKEN transition supplies
     // any: the sequence cursor reaches a child by walking, which says nothing about why.
-    const resolved = this.resolveChildInputs(instance, key, decl, overrides);
+    const resolved = refused !== undefined ? { error: refused } : this.resolveChildInputs(instance, key, decl, overrides);
     if (resolved === PENDING) return "parked";
 
     const isAsync = this.asyncOf(instance, decl);

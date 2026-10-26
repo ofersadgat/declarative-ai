@@ -95,6 +95,8 @@ export interface WorkflowExecutorOptions {
   fanOut?: FanOutHost;
   /** The lists this run is split on — see {@link EngineConfig.split}. Forwarded for the same reason. */
   split?: readonly SplitEntry[];
+  /** Whether a child may be entered now — see {@link EngineConfig.entryRefusal}. Forwarded for the same reason. */
+  entryRefusal?: (stateId: string) => string | undefined;
   /**
    * The port DIRECTED transitions reach the run through — see {@link EngineConfig.directed}. The
    * host keeps the port and the engine attaches to it, because the engine itself is built in here.
@@ -247,6 +249,7 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
       ...(this.options.newInstanceId !== undefined ? { newInstanceId: this.options.newInstanceId } : {}),
       ...(this.options.fanOut !== undefined ? { fanOut: this.options.fanOut } : {}),
       ...(this.options.split !== undefined ? { split: this.options.split } : {}),
+      ...(this.options.entryRefusal !== undefined ? { entryRefusal: this.options.entryRefusal } : {}),
       ...(this.options.directed !== undefined ? { directed: this.options.directed } : {}),
       ...(this.options.scripts !== undefined ? { scripts: this.options.scripts } : {}),
       services: ctx,
