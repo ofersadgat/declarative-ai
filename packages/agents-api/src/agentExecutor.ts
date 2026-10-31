@@ -75,6 +75,7 @@ import { isPermissionWrapped, type Approver, type PermissionDenied, type Permiss
 import { mcpToolName } from "./mcpTools.js";
 import { sdkAgentQuery } from "./sdkQuery.js";
 import { isRetriableAgentError } from "./streamMessages.js";
+import { laterResult } from "./turnHold.js";
 import { contextOfClaude, contextTokensOfUsage, contextWindowOf, limitReadingOfRateLimitEvent } from "./claudeUsage.js";
 import type { AgentPermissionMode, AgentQuery, AgentQueryOptions, AgentResult, AgentRun, AgentSessionReader, InjectedTool, McpServerSpec } from "./seam.js";
 
@@ -1261,7 +1262,7 @@ export class AgentExecutor extends PromptExecutor {
         if (msg.error) throw this.failedCall(`${this.label()} agent error: ${msg.error}`, msg.errorCode ?? errorCode, turn);
         switch (msg.type) {
           case "result":
-            if (msg.result) result = msg.result;
+            if (msg.result) result = laterResult(result, msg.result);
             break;
           case "partial":
             // The answer as it is written. This is what makes the declared `streaming` capability true.

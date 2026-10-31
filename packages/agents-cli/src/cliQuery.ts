@@ -36,7 +36,7 @@
  * believes it is gated.
  */
 import type { AgentQuery, AgentQueryOptions, AgentRun, AgentStreamMessage, BinaryDeps } from "@declarative-ai/agents-api";
-import { claudeOptionsRefusal, contextDetailOfClaude, DEFAULT_SETTING_SOURCES, defaultBinaryDeps, readAgentMessage, resolveAgentBinary } from "@declarative-ai/agents-api";
+import { claudeOptionsRefusal, contextDetailOfClaude, DEFAULT_SETTING_SOURCES, defaultBinaryDeps, readAgentMessage, resolveAgentBinary, TurnHold } from "@declarative-ai/agents-api";
 import { defaultStartMcpBridge, type McpBridge, type StartMcpBridge } from "./mcpBridge.js";
 import { mcpConfigJson, mcpToolName, PERMISSION_PROMPT_TOOL } from "./mcpProtocol.js";
 import { defaultSpawn, exitMessage, type AgentProcess, type SpawnProcess } from "./process.js";
@@ -75,6 +75,8 @@ export interface CliAgentOptions {
   contextUsage?: boolean;
   /** How long that answer may take before the run ends without it. Default {@link CONTEXT_USAGE_TIMEOUT_MS}. */
   contextUsageTimeoutMs?: number;
+  /** Tests: how long a run held past its `result` waits for a new turn once nothing holds it (`TurnHold`). */
+  turnSettleMs?: number;
 }
 
 /**
@@ -351,6 +353,8 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
      */
     let live: AgentProcess | undefined;
     let controls = 0;
+    /** Whether a `result` ends this run, or what it started goes on behind it. */
+    const hold = new TurnHold(config.turnSettleMs);
 
     const messages = async function* cliAgentQuery(): AsyncIterable<AgentStreamMessage> {
     // REFUSE BEFORE SPAWNING, exactly as the codex sibling does. `applySession` makes these two
@@ -468,6 +472,17 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
       }
 
       let sawResult = false;
+      /**
+       * End the process. Closing the input is enough for one with nothing left in it; one still running
+       * a background agent, which only a stop leaves here, would sit out its own bound first (ten minutes,
+       * measured 2026-10-30), so it is ended now.
+       */
+      const close = (): void => {
+        hold.close();
+        c.endInput?.();
+        if (hold.running) c.kill();
+      };
+      hold.endWith(close);
       // The finished turn's result, held while the process is asked how full its context is — the
       // question has to be put BEFORE the input closes, and closing the input is what ends the process.
       let held: AgentStreamMessage | undefined;
@@ -481,6 +496,7 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
         } catch {
           continue; // a non-JSON line is CLI chatter, never a message
         }
+        hold.heard(msg);
         // The answer to OUR question, and only ours: an interrupt's acknowledgement is another
         // control response and still flows through as it did.
         if (asked !== undefined && msg["type"] === "control_response") {
@@ -495,7 +511,7 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
               held = undefined;
               yield result;
             }
-            c.endInput?.();
+            close();
             continue;
           }
         }
@@ -513,20 +529,24 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
         const normalized = readAgentMessage(msg);
         if (normalized.type === "result") {
           sawResult = true;
-          // First, while the process still reads its input: how full is the context now. The answer
-          // comes back as a `control_response` and is handled above; the timer ends the run without it
-          // if it never comes.
-          if (c.write !== undefined && config.contextUsage !== false) {
-            asked = `ctx_${++controls}`;
-            c.write(`${JSON.stringify({ type: "control_request", request_id: asked, request: { subtype: "get_context_usage" } })}\n`);
-            held = normalized;
-            askTimer = setTimeout(() => c.endInput?.(), config.contextUsageTimeoutMs ?? CONTEXT_USAGE_TIMEOUT_MS);
-            continue;
+          // What it started goes on behind this turn, and its end begins another (`TurnHold`): the
+          // input stays open, and the last `result` is the run's.
+          if (!hold.finished()) {
+            // First, while the process still reads its input: how full is the context now. The answer
+            // comes back as a `control_response` and is handled above; the timer ends the run without it
+            // if it never comes.
+            if (c.write !== undefined && config.contextUsage !== false) {
+              asked = `ctx_${++controls}`;
+              c.write(`${JSON.stringify({ type: "control_request", request_id: asked, request: { subtype: "get_context_usage" } })}\n`);
+              held = normalized;
+              askTimer = setTimeout(close, config.contextUsageTimeoutMs ?? CONTEXT_USAGE_TIMEOUT_MS);
+              continue;
+            }
+            // CLOSE THE INPUT. Under streaming input the CLI waits for another message rather than
+            // exiting when a turn finishes, so without this a completed run never settles and `c.exit`
+            // never resolves. Measured: closing stdin exits 0.
+            close();
           }
-          // CLOSE THE INPUT. Under streaming input the CLI waits for another message rather than
-          // exiting when a turn finishes, so without this a completed run never settles and `c.exit`
-          // never resolves. Measured: closing stdin exits 0.
-          c.endInput?.();
         }
         // A CLI-level `{"error": "..."}` line has no `type` we recognise, so it would otherwise pass
         // through opaquely. It is run-fatal and has to reach the adapter as such.
@@ -574,6 +594,7 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
       }
     } finally {
       if (onAbort) opts.abortSignal?.removeEventListener("abort", onAbort);
+      hold.close();
       // ALWAYS kill, and always tear the bridge down. The consumer can finalize this generator early
       // (the adapter throws out of its `for await` on the first error message), and without this the
       // subprocess outlives the run — with the abort listener just removed, nothing can reach it any
@@ -606,7 +627,24 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
         // in a test is the ordinary case, and failing loudly there would make every such test assert
         // an error it does not care about.
         if (write === undefined) return;
+        // Between turns there is no turn to end and no `result` would come: all that is left of the run
+        // is what it left going, and stopping the run stops that.
+        if (hold.stop()) {
+          live?.kill();
+          return;
+        }
         write(`${JSON.stringify({ type: "control_request", request_id: `req_${++controls}`, request: { subtype: "interrupt" } })}
+`);
+      },
+      /**
+       * A message into the run: the turn under way takes it, or it starts one. Said when it cannot be
+       * delivered, because the caller has already told the person it joined the turn.
+       */
+      send: async (text: string): Promise<void> => {
+        const write = live?.write;
+        if (write === undefined || hold.closed) throw new Error("the agent's turn has ended; send the message again");
+        hold.sent();
+        write(`${JSON.stringify({ type: "user", message: { role: "user", content: text }, parent_tool_use_id: null })}
 `);
       },
     };

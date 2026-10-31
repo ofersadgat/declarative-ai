@@ -38,6 +38,7 @@ import { defaultBinaryDeps, resolveAgentBinary, type BinaryDeps } from "./binary
 import { injectedToolDescriptors, MCP_SERVER_NAME, mcpServersRefusal, runInjectedTool } from "./mcpTools.js";
 import { readAgentMessage } from "./streamMessages.js";
 import { contextDetailOfClaude } from "./claudeUsage.js";
+import { TurnHold } from "./turnHold.js";
 import {
   injectedToolCallOf,
   type AgentPermissionCallback,
@@ -61,6 +62,8 @@ interface SdkQuery extends AsyncIterable<Record<string, unknown>> {
   setModel?(model?: string): Promise<void>;
   /** How full the session's context is, by category — the `get_context_usage` control request. */
   getContextUsage?(): Promise<unknown>;
+  /** End the process now, whatever it is running. */
+  close?(): void;
 }
 
 /** How long a finished turn waits for {@link SdkQuery.getContextUsage} before settling without it. */
@@ -490,7 +493,11 @@ function runSdkQuery(opts: AgentQueryOptions, config: SdkAgentOptions): AgentRun
   let query: SdkQuery | undefined;
   let finished = false;
 
-  const stream = sdkMessages(opts, config, input, (q) => (query = q), () => (finished = true));
+  /** Whether a `result` ends this run, or what it started goes on behind it. */
+  const hold = new TurnHold();
+  hold.endWith(() => input.close());
+
+  const stream = sdkMessages(opts, config, input, hold, (q) => (query = q), () => (finished = true));
 
   return {
     [Symbol.asyncIterator]: () => stream[Symbol.asyncIterator](),
@@ -499,10 +506,18 @@ function runSdkQuery(opts: AgentQueryOptions, config: SdkAgentOptions): AgentRun
     // second settle. The turn ends, a `result` still arrives, and the call SUCCEEDS.
     interrupt: async () => {
       if (finished) return;
+      // Between turns there is no turn to end and no `result` would come: all that is left of the run
+      // is what it left going, and stopping the run stops that.
+      if (hold.stop()) {
+        query?.close?.();
+        input.close();
+        return;
+      }
       await query?.interrupt?.();
     },
     send: async (text: string) => {
       if (finished) return;
+      hold.sent();
       input.push(text);
     },
     setPermissionMode: async (mode) => {
@@ -520,6 +535,7 @@ async function* sdkMessages(
   opts: AgentQueryOptions,
   config: SdkAgentOptions,
   input: InputQueue,
+  turns: TurnHold,
   hold: (q: SdkQuery) => void,
   done: () => void,
 ): AsyncIterable<AgentStreamMessage> {
@@ -588,10 +604,13 @@ async function* sdkMessages(
 
   try {
     for await (const msg of q) {
+      turns.heard(msg as Record<string, unknown>);
       const next = readAgentMessage(msg as Record<string, JsonValue>);
+      // What it started goes on behind this turn, and its end begins another (`TurnHold`).
+      const last = next.type === "result" && !turns.finished();
       // Before the result goes out and the input closes: ask how full the context is now. Bounded —
       // an SDK that never answers settles the turn exactly as it did before there was a question.
-      if (next.type === "result" && typeof q.getContextUsage === "function") {
+      if (last && typeof q.getContextUsage === "function") {
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           const answer = await Promise.race([
@@ -614,13 +633,16 @@ async function* sdkMessages(
       if (next.error !== undefined) return;
       // The turn is OVER. In streaming-input mode the SDK waits for more input rather than ending, so
       // without this a one-turn call never returns — it parks on a queue only a `send()` could feed.
-      if (next.type === "result") return;
+      if (last) return;
     }
   } finally {
     // Whatever ended it — the result, an error, a consumer finalizing early — the input queue closes
     // and the control methods go quiet. An open queue would hold the subprocess waiting for a message
     // that is never coming.
     done();
+    turns.close();
     input.close();
+    // Only a stop leaves an agent running here, and the process would sit out its own bound for it.
+    if (turns.running) q.close?.();
   }
 }

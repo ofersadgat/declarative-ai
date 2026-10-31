@@ -659,6 +659,70 @@ describe("steering — ending a turn without ending the process", () => {
  * so these are literally the same objects. Two mappings were two chances to drop the same field — and
  * both dropped every field but the terminal result.
  */
+describe("a run with a background agent — a result ends the turn, not the run", () => {
+  const AGENT = '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a1","task_type":"local_agent"}]}';
+  const NONE = '{"type":"system","subtype":"background_tasks_changed","tasks":[]}';
+  const INIT = '{"type":"system","subtype":"init","session_id":"s"}';
+  const results = (run: AsyncIterable<{ type: string; result?: { text?: string } }>): AsyncGenerator<string> =>
+    (async function* () {
+      for await (const m of run) if (m.type === "result") yield m.result!.text!;
+    })();
+
+  it("keeps the input open past the first result: closing it is what killed the agent", async () => {
+    const { spawn, ended } = fakeSpawn([AGENT, '{"type":"result","result":"LAUNCHED"}', NONE, INIT, '{"type":"result","result":"FINISHED"}']);
+    const seen = results(createCliAgentQuery({ spawn, contextUsage: false })({ prompt: "go" }));
+    expect((await seen.next()).value).toBe("LAUNCHED");
+    expect(ended()).toBe(false);
+    expect((await seen.next()).value).toBe("FINISHED");
+    expect(ended()).toBe(true);
+  });
+
+  it("ends at the first result when only a shell runs behind it", async () => {
+    const { spawn, ended } = fakeSpawn(['{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","task_type":"local_bash"}]}', '{"type":"result","result":"done"}']);
+    const seen = results(createCliAgentQuery({ spawn, contextUsage: false })({ prompt: "go" }));
+    expect((await seen.next()).value).toBe("done");
+    expect(ended()).toBe(true);
+  });
+
+  it("ends the process on a stop between turns: an interrupt would get no result", async () => {
+    const { spawn, written, killed } = fakeSpawn([AGENT, '{"type":"result","result":"LAUNCHED"}', "{}"]);
+    const run = createCliAgentQuery({ spawn, contextUsage: false })({ prompt: "go" });
+    const seen = results(run);
+    await seen.next();
+    await run.interrupt!();
+    expect(killed()).toBe(true);
+    expect(written).toEqual([]);
+  });
+
+  it("ends the process with the turn a stop interrupted, or it would sit out its own bound", async () => {
+    const { spawn, killed, ended } = fakeSpawn([AGENT, "{}", '{"type":"result","subtype":"error_during_execution","terminal_reason":"aborted_streaming","is_error":true}']);
+    const run = createCliAgentQuery({ spawn, contextUsage: false })({ prompt: "go" });
+    const it0 = run[Symbol.asyncIterator]();
+    await it0.next();
+    await run.interrupt!();
+    while (!(await it0.next()).done);
+    expect(ended()).toBe(true);
+    expect(killed()).toBe(true);
+  });
+
+  it("takes a message into the run as the prompt went in", async () => {
+    const { spawn, written } = fakeSpawn(['{"type":"system","subtype":"status"}', '{"type":"result","result":"ok"}']);
+    const run = createCliAgentQuery({ spawn, contextUsage: false })({ prompt: "go" });
+    const it0 = run[Symbol.asyncIterator]();
+    await it0.next();
+    await run.send!("and also this");
+    expect(JSON.parse(written[0]!)).toEqual({ type: "user", message: { role: "user", content: "and also this" }, parent_tool_use_id: null });
+  });
+
+  it("says so when a message comes too late to be read, rather than swallowing it", async () => {
+    const { spawn } = fakeSpawn(['{"type":"result","result":"ok"}', "{}"]);
+    const run = createCliAgentQuery({ spawn, contextUsage: false })({ prompt: "go" });
+    const seen = results(run);
+    await seen.next();
+    await expect(run.send!("too late")).rejects.toThrow(/send the message again/);
+  });
+});
+
 describe("stream-json arrives as the same normalized shape the SDK path produces", () => {
   const lines = [
     '{"type":"system","subtype":"init","model":"claude-opus-4-7"}',
