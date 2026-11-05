@@ -428,11 +428,22 @@ export interface ToolDecisionOptions {
  * state and passes that state's block through. Without it a narrowing could only ever be global,
  * and "this state may write under app/" would have nowhere to live.
  */
-export type ScopeNarrowing = (
+export type ScopeNarrowing = ((
   tool: { name: string; readOnly?: boolean },
   input: FunctionInputs,
   authored?: { scopes?: ScopeDecl[] } | undefined,
-) => PermissionMode | undefined;
+) => PermissionMode | undefined) & {
+  /**
+   * Whether this narrowing may bring SOME call of `tool` below the mode it resolves to — asked with no
+   * input, by {@link ToolGate.modeOf}, before an `allow` is reported as safe to pre-approve.
+   *
+   * A pre-approved tool is never put to the gate, so a narrowing on it never runs: a host whose
+   * `read_file` is `allow` in the project and `ask` outside it had every read pre-approved, and the
+   * `ask` was never reached. `false` is the host's word that nothing it says about the tool can tighten
+   * it. Absent ⇒ it may, and the tool is not pre-approved.
+   */
+  narrows?: (tool: { name: string; readOnly?: boolean }, authored?: { scopes?: ScopeDecl[] } | undefined) => boolean;
+};
 
 /** How restrictive each mode is — `deny` ▸ `ask` ▸ `smart` ▸ `allow`. */
 const MODE_RANK: Record<PermissionMode, number> = { allow: 0, smart: 1, ask: 2, deny: 3 };
@@ -614,6 +625,26 @@ export function withPermission(tool: Tool, opts: Live<WithPermissionOptions>): T
   return wrapped;
 }
 
+/**
+ * `tool`, with `before` run on each call's input before the tool sees it — and still
+ * {@link isPermissionWrapped} where `tool` was, since every call still passes the same wrapper.
+ *
+ * For a host that notes something about a call against its input (who made it, which shell it is in)
+ * where the decision will find it, once the tool has already been wrapped: a plain copy would read as
+ * unwrapped, and a transport with no callback would gate the call a second time.
+ */
+export function beforeEachCall(tool: Tool, before: (input: FunctionInputs) => void): Tool {
+  const out: Tool = {
+    ...tool,
+    async run(input: FunctionInputs, ctx: ExecServices): Promise<JsonValue> {
+      before(input);
+      return tool.run(input, ctx);
+    },
+  };
+  if (PERMISSION_WRAPPED.has(tool)) PERMISSION_WRAPPED.add(out);
+  return out;
+}
+
 /** What {@link withPermission} decides a call with: {@link ToolDecisionOptions}, and the name the call is decided as. */
 export type WithPermissionOptions = Omit<ToolDecisionOptions, "authoredMode"> & { toolName: string; authoredMode?: PermissionMode };
 
@@ -755,6 +786,31 @@ export function createToolGate(opts: Live<ToolGateOptions>): ToolGate {
     const registered = own(o.tools, tool.name);
     return registered !== undefined ? { name: tool.name, readOnly: registered.readOnly } : tool;
   };
+  /** The mode a tool resolves to with no input: the ledger over the authored block, then the profile. */
+  const resolvedMode = (o: ToolGateOptions, it: { name: string; readOnly?: boolean }): PermissionMode => {
+    const profile = o.ledger.resolveProfile(o.sessionId);
+    const mode = o.ledger.resolve(it.name, o.sessionId, authoredMode(o, it.name));
+    const rule = o.profiles?.[profile];
+    if (isTable(rule)) {
+      // A table has an opinion about every name, so there is nothing to escalate for want of one.
+      const said = profileTableMode(rule, it.name, own(o.tools, it.name) !== undefined);
+      return said === undefined ? mode : strictestMode(mode, said);
+    }
+    const scoped = profileScopeOf(profile, it, o.profiles);
+    if (scoped === "out") return "deny";
+    // Same escalation as `decideToolCall`, and it has to be here too: this is the answer that
+    // decides whether the tool is PRE-APPROVED, so resolving it to `allow` would skip the gate
+    // entirely for exactly the tool we could not classify. A profile TABLE is how a caller stops
+    // paying this — see above.
+    return scoped === "unknown" && mode !== "deny" ? "ask" : mode;
+  };
+  /**
+   * An `allow` the host's narrowing may tighten is `smart`: the call's input decides it, which is what
+   * `smart` says, and what keeps it from being pre-approved past the narrowing (see
+   * {@link ScopeNarrowing.narrows}).
+   */
+  const unlessNarrowed = (o: ToolGateOptions, it: { name: string; readOnly?: boolean }, mode: PermissionMode): PermissionMode =>
+    mode === "allow" && o.scopeOf !== undefined && (o.scopeOf.narrows?.(it, o.authored) ?? true) ? "smart" : mode;
   const decisionFor = (o: ToolGateOptions, name: string): ToolDecisionOptions => ({
     ledger: o.ledger,
     sessionId: o.sessionId,
@@ -786,21 +842,7 @@ export function createToolGate(opts: Live<ToolGateOptions>): ToolGate {
       // Pre-approved AT CONFIGURATION so the adapter's callback does not fire — see `preGated`. The
       // wrapper underneath decides the call for real when the tool runs.
       if (o.preGated?.includes(it.name) === true) return "allow";
-      const profile = o.ledger.resolveProfile(o.sessionId);
-      const mode = o.ledger.resolve(it.name, o.sessionId, authoredMode(o, it.name));
-      const rule = o.profiles?.[profile];
-      if (isTable(rule)) {
-        // A table has an opinion about every name, so there is nothing to escalate for want of one.
-        const said = profileTableMode(rule, it.name, own(o.tools, it.name) !== undefined);
-        return said === undefined ? mode : strictestMode(mode, said);
-      }
-      const scoped = profileScopeOf(profile, it, o.profiles);
-      if (scoped === "out") return "deny";
-      // Same escalation as `decideToolCall`, and it has to be here too: this is the answer that
-      // decides whether the tool is PRE-APPROVED, so resolving it to `allow` would skip the gate
-      // entirely for exactly the tool we could not classify. A profile TABLE is how a caller stops
-      // paying this — see above.
-      return scoped === "unknown" && mode !== "deny" ? "ask" : mode;
+      return unlessNarrowed(o, it, resolvedMode(o, it));
     },
   };
 }

@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
+  beforeEachCall,
   createToolGate,
   PermissionLedger,
   planExitTool,
   isPermissionDenied,
+  isPermissionWrapped,
   withPermission,
   type Approver,
   type PermissionDecision,
   type ProfilePredicate,
+  type ScopeNarrowing,
   type SmartApprover,
   type ToolGateOptions,
 } from "../src/permissions.js";
@@ -354,6 +357,43 @@ describe("the delegated gate — the same decision, reached by the other route",
       const ledger = new PermissionLedger({ baseline: { profile: "read-only", tools: { Bash: "deny" } } });
       const { gate } = gateFor({ ledger });
       expect(gate.modeOf({ name: "Bash" })).toBe("deny");
+    });
+
+    it("does not report `allow` for a tool the host's narrowing may tighten, so the narrowing is reached", async () => {
+      // `read_file` allowed in the project and asked about outside it: pre-approved, no call of it was
+      // ever put to the gate, and the read outside ran unasked.
+      const scopeOf: ScopeNarrowing = Object.assign((_tool: { name: string }, input: FunctionInputs) => (String(input["path"]).startsWith("/work/") ? undefined : "ask"), {
+        narrows: (tool: { name: string }) => tool.name === "read_file",
+      });
+      const { gate, approve } = gateFor({
+        tools: { read_file: { readOnly: true }, glob: { readOnly: true } },
+        authored: { tools: { read_file: "allow", glob: "allow" } },
+        scopeOf,
+      });
+      expect(gate.modeOf({ name: "read_file" })).toBe("smart");
+      // The host's word that nothing it says tightens `glob` keeps it pre-approvable.
+      expect(gate.modeOf({ name: "glob" })).toBe("allow");
+      // The call decides: allowed where the narrowing says nothing, asked about where it asks.
+      expect(await gate.check({ name: "read_file" }, { path: "/work/a.ts" })).toEqual({ allow: true });
+      expect(approve.asked).toBe(0);
+      await gate.check({ name: "read_file" }, { path: "/elsewhere/a.ts" });
+      expect(approve.asked).toBe(1);
+    });
+
+    it("beforeEachCall sees each input first, and keeps a wrapped tool wrapped", async () => {
+      const seen: unknown[] = [];
+      const raw: Tool = { description: "t", inputSchema: {}, readOnly: true, run: async (input) => ({ got: input as never }) };
+      const wrapped = withPermission(raw, { toolName: "t", ledger: new PermissionLedger({}), sessionId: "s", approve: scriptedApprover({ decision: "allow", scope: "once" }), authoredMode: "allow" });
+      const before = beforeEachCall(wrapped, (input) => seen.push(input));
+      expect(await before.run({ a: 1 }, {} as ExecServices)).toEqual({ got: { a: 1 } });
+      expect(seen).toEqual([{ a: 1 }]);
+      expect(isPermissionWrapped(before)).toBe(true);
+      expect(isPermissionWrapped(beforeEachCall(raw, () => undefined))).toBe(false);
+    });
+
+    it("does not report `allow` under a narrowing that says nothing of what it narrows", () => {
+      const { gate } = gateFor({ tools: { read_file: { readOnly: true } }, authored: { tools: { read_file: "allow" } }, scopeOf: () => undefined });
+      expect(gate.modeOf({ name: "read_file" })).toBe("smart");
     });
   });
 
