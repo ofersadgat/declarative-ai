@@ -95,11 +95,24 @@ export function deniedResult(reason: string): McpToolResult {
 /**
  * A tool's value as an MCP result: the value as text, and its pictures (`$images`, see `json`'s
  * `splitToolImages`) as `image` content beside it — which the agent hands its model as images.
+ *
+ * A value that says it failed — an object whose `error` is a string, the shape a tool answers with when
+ * it did not do its work (`{ error: "'x' is outside the workspace" }`) — is an error result, as a tool
+ * that throws is. Sent as an ordinary result, the agent's record called the call a success, and so did
+ * everything that read it: a host's list of what a turn changed counted an edit that was refused.
  */
 export function valueResult(output: unknown): McpToolResult {
   const { value, images } = splitToolImages(output);
   const text = typeof value === "string" ? value : JSON.stringify(value ?? null);
-  return { content: [{ type: "text", text }, ...images.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mimeType }))] };
+  return {
+    content: [{ type: "text", text }, ...images.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mimeType }))],
+    ...(isFailedValue(value) ? { isError: true } : {}),
+  };
+}
+
+/** Does a tool's value say it failed: an object (not an array) whose `error` is a string? */
+export function isFailedValue(value: unknown): boolean {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && typeof (value as { error?: unknown }).error === "string";
 }
 
 /** The `tools/list` entries for a set of injected tools. */

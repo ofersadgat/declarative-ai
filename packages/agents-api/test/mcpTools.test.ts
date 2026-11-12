@@ -97,6 +97,16 @@ describe("runInjectedTool — one call, whatever carried it", () => {
     expect(result.content[0]!.text).toBe('{"ok":true}');
   });
 
+  it("answers a value that says it failed (`{ error: string }`) as an error, its text the value", async () => {
+    const failed = await runInjectedTool({ tools: { t: { inputSchema: schema, run: () => ({ error: "'x' is outside the workspace" }) } } }, "t", {});
+    expect(failed).toEqual(textResult('{"error":"\'x\' is outside the workspace"}', true));
+    // Only a STRING error says so: a value that merely has the key, or a list, is an ordinary answer.
+    for (const value of [{ error: null, ok: true }, { job: { error: "timeout" } }, [{ error: "x" }], "error"]) {
+      const result = await runInjectedTool({ tools: { t: { inputSchema: schema, run: () => value } } }, "t", {});
+      expect(result.isError, JSON.stringify(value)).toBeUndefined();
+    }
+  });
+
   it("reports an unknown tool as a tool ERROR the agent reads, not as a transport fault", async () => {
     expect(await runInjectedTool({ tools: {} }, "nope", {})).toEqual(textResult("no tool 'nope' is available", true));
   });
