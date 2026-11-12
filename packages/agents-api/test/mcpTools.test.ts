@@ -6,7 +6,7 @@
  * started. One implementation, tested once, is the point.
  */
 import { describe, expect, it } from "vitest";
-import type { SyncOutputValidator } from "@declarative-ai/exec";
+import type { JsonValue, SyncOutputValidator } from "@declarative-ai/exec";
 import { injectedToolDescriptors, mcpToolName, runInjectedTool, textResult } from "../src/mcpTools.js";
 import { injectedToolCallOf, TOOL_USE_ID_META } from "../src/seam.js";
 
@@ -101,7 +101,7 @@ describe("runInjectedTool — one call, whatever carried it", () => {
     const failed = await runInjectedTool({ tools: { t: { inputSchema: schema, run: () => ({ error: "'x' is outside the workspace" }) } } }, "t", {});
     expect(failed).toEqual(textResult('{"error":"\'x\' is outside the workspace"}', true));
     // Only a STRING error says so: a value that merely has the key, or a list, is an ordinary answer.
-    for (const value of [{ error: null, ok: true }, { job: { error: "timeout" } }, [{ error: "x" }], "error"]) {
+    for (const value of [{ error: null, ok: true }, { job: { error: "timeout" } }, [{ error: "x" }], "error"] as JsonValue[]) {
       const result = await runInjectedTool({ tools: { t: { inputSchema: schema, run: () => value } } }, "t", {});
       expect(result.isError, JSON.stringify(value)).toBeUndefined();
     }
