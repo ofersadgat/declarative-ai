@@ -150,6 +150,13 @@ export const DEFAULT_SETTING_SOURCES = ["project"] as const;
 /** The `providerOptions.claudeCode` keys this transport understands. Anything else is REFUSED: a
  *  setting silently ignored is the failure the whole escape hatch would otherwise introduce. */
 export const CLAUDE_CODE_OPTION_KEYS = [
+  /**
+   * Local PLUGIN folders to load for this run — the SDK's `plugins: [{ type: "local", path }]`, the CLI's
+   * `--plugin-dir`. How a host hands Claude Code skills of its own, which its Skill tool then finds as it
+   * finds any: a host's skills reach the agent natively rather than only through a tool of the host's.
+   * Loaded with `skipMcpDiscovery`: the host owns the run's MCP servers, and a plugin must not add any.
+   */
+  "pluginDirs",
   "settingSources",
   "systemPrompt",
   "appendSystemPrompt",
@@ -240,6 +247,12 @@ function claudeSystemPrompt(providerOptions: Record<string, JsonValue> | undefin
   return { type: "preset", preset: "claude_code", ...(typeof append === "string" ? { append } : {}) };
 }
 
+/** `providerOptions.claudeCode.pluginDirs`, the strings of it — see {@link CLAUDE_CODE_OPTION_KEYS}. */
+export function pluginDirsOf(po: Record<string, JsonValue> | undefined): string[] {
+  const dirs = po?.["pluginDirs"];
+  return Array.isArray(dirs) ? dirs.filter((d): d is string => typeof d === "string" && d.length > 0) : [];
+}
+
 export function sdkOptions(opts: AgentQueryOptions, binaryPath: string | undefined = opts.binaryPath): Record<string, unknown> {
   const po = opts.providerOptions;
   const settings = claudeSettings(po);
@@ -301,6 +314,7 @@ export function sdkOptions(opts: AgentQueryOptions, binaryPath: string | undefin
     ...(settings !== undefined ? { settings } : {}),
     ...(typeof po?.["maxBudgetUsd"] === "number" ? { maxBudgetUsd: po["maxBudgetUsd"] } : {}),
     ...(po?.["extraArgs"] !== undefined ? { extraArgs: po["extraArgs"] } : {}),
+    ...(pluginDirsOf(po).length > 0 ? { plugins: pluginDirsOf(po).map((path) => ({ type: "local" as const, path, skipMcpDiscovery: true })) } : {}),
     // The host's OWN servers. The in-process `dai` that serves injected tools is added beside them where
     // the MCP SDK is in hand (`sdkMcpServer`); these need nothing but their shapes. Claude calls them
     // itself and asks `canUseTool` about each call, as it asks about any tool.

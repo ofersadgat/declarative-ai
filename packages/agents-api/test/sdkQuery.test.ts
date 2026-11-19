@@ -494,3 +494,15 @@ describe("sdkMcpServer — injected tools, without the Zod conversion that rejec
     expect(typeof (servers["dai"]!.instance as { connect?: unknown }).connect).toBe("function");
   });
 });
+
+describe("a host's own plugin folders — its skills, found natively", () => {
+  it("loads each as a local plugin that brings no MCP servers of its own", () => {
+    const options = sdkOptions({ prompt: "hi", providerOptions: { pluginDirs: ["/p/skills-a", "/p/skills-b"] } });
+    expect(options.plugins).toEqual([
+      { type: "local", path: "/p/skills-a", skipMcpDiscovery: true },
+      { type: "local", path: "/p/skills-b", skipMcpDiscovery: true },
+    ]);
+    expect(sdkOptions({ prompt: "hi" }).plugins).toBeUndefined();
+    expect(claudeOptionsRefusal({ prompt: "hi", providerOptions: { pluginDirs: ["/p"] } })).toBeUndefined();
+  });
+});

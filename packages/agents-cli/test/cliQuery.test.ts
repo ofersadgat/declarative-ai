@@ -986,3 +986,12 @@ describe("binaryPath and env reach the subprocess", () => {
     expect(envs[1]).toBeUndefined();
   });
 });
+
+describe("a host's own plugin folders — its skills, found natively", () => {
+  it("passes each as --plugin-dir", () => {
+    const argv = cliArgv({ prompt: "hi", providerOptions: { pluginDirs: ["/p/skills-a", "/p/skills-b"] } });
+    const at = argv.indexOf("--plugin-dir");
+    expect(argv.slice(at, at + 4)).toEqual(["--plugin-dir", "/p/skills-a", "--plugin-dir", "/p/skills-b"]);
+    expect(cliArgv({ prompt: "hi" })).not.toContain("--plugin-dir");
+  });
+});

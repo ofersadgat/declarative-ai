@@ -36,7 +36,7 @@
  * believes it is gated.
  */
 import type { AgentQuery, AgentQueryOptions, AgentRun, AgentStreamMessage, BinaryDeps } from "@declarative-ai/agents-api";
-import { claudeOptionsRefusal, contextDetailOfClaude, DEFAULT_SETTING_SOURCES, defaultBinaryDeps, readAgentMessage, resolveAgentBinary, TurnHold } from "@declarative-ai/agents-api";
+import { claudeOptionsRefusal, contextDetailOfClaude, DEFAULT_SETTING_SOURCES, defaultBinaryDeps, pluginDirsOf, readAgentMessage, resolveAgentBinary, TurnHold } from "@declarative-ai/agents-api";
 import { defaultStartMcpBridge, type McpBridge, type StartMcpBridge } from "./mcpBridge.js";
 import { mcpConfigJson, mcpToolName, PERMISSION_PROMPT_TOOL } from "./mcpProtocol.js";
 import { defaultSpawn, exitMessage, type AgentProcess, type SpawnProcess } from "./process.js";
@@ -330,6 +330,8 @@ export function cliArgv(opts: AgentQueryOptions, config: CliAgentOptions = {}, b
     ...(custom !== undefined ? ["--system-prompt", custom] : []),
     ...(custom === undefined && append !== undefined ? ["--append-system-prompt", append] : []),
     ...(settings !== undefined ? ["--settings", settings] : []),
+    // A host's own plugin folders — its skills, found by the agent's Skill tool as its own are.
+    ...pluginDirsOf(opts.providerOptions).flatMap((dir) => ["--plugin-dir", dir]),
     ...(typeof budget === "number" ? ["--max-budget-usd", String(budget)] : []),
     // The escape hatch's escape hatch: `{flag: "value"}` becomes `--flag value`, `{flag: null}` a bare
     // `--flag`, matching the SDK's `extraArgs` exactly so one config drives both transports.
