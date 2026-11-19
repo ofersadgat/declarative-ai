@@ -181,6 +181,11 @@ interface ImportedName {
   /** A called state's inputs by name, when they are known — and whether its only one is `args`. */
   inputNames?: string[];
   argsInput?: boolean;
+  /**
+   * A called SCRIPT, whose inputs are its function's parameters — so a call of it passes them in
+   * order, as the function is written (`turn(text, conv)`), rather than as one object of names.
+   */
+  positional?: boolean;
   /** Each input's declared type, where the called state declares one. */
   inputSchemas?: Record<string, JsonSchema>;
   /** The output a called script's non-record return lands in. */
@@ -568,7 +573,7 @@ class Compiler {
   }
 
   /** What a called state takes and gives back — its input names, and where a script's whole return is. */
-  private calledShape(file: string): Pick<ImportedName, "inputNames" | "argsInput" | "whole" | "inputSchemas"> {
+  private calledShape(file: string): Pick<ImportedName, "inputNames" | "argsInput" | "whole" | "inputSchemas" | "positional"> {
     const text = this.options.vfs.read(file) ?? "";
     if (/\.(json|ya?ml)$/i.test(file)) {
       const doc = parseReferencedFile(file, text) as { inputs?: Record<string, { schema?: JsonSchema }> } | undefined;
@@ -596,7 +601,7 @@ class Compiler {
     } catch {
       /* an unreadable signature types nothing, which the wire then asserts */
     }
-    return { inputNames: signature.getParameters().map((p) => p.getName()), inputSchemas, ...(record ? {} : { whole: "result" }) };
+    return { inputNames: signature.getParameters().map((p) => p.getName()), inputSchemas, positional: true, ...(record ? {} : { whole: "result" }) };
   }
 
   private stateIdOfFile(file: string, at: TS.Node): string {
@@ -1371,7 +1376,14 @@ class Compiler {
       const target = this.workflowTarget(call);
       partial = this.mountPlan(target.stateId, target, args.values[1], pre);
     } else if (imported?.kind === "state") {
-      partial = this.mountPlan(imported.stateId!, imported, args.values[0], pre);
+      // A script's own signature is positional: `turn(text, conv)` binds by order. One object of
+      // names is still how a JSON state — or a script called that way — is handed its inputs.
+      const first = args.values[0] !== undefined ? unwrap(ts, args.values[0]) : undefined;
+      const byName = args.values.length === 1 && first !== undefined && ts.isObjectLiteralExpression(first) && (imported.inputNames?.length ?? 0) !== 1;
+      partial =
+        imported.positional === true && !byName
+          ? this.positionalMountPlan(imported.stateId!, imported, args.values, pre)
+          : this.mountPlan(imported.stateId!, imported, args.values[0], pre);
     } else if (imported?.kind === "registry") {
       partial = { kind: "script", label: imported.ref!, call: array, script: `$rt.call(${JSON.stringify(imported.ref)}, ...$v._call.args)` };
     } else if (imported?.kind === "operation") {
@@ -1519,6 +1531,28 @@ class Compiler {
   }
 
   /** A called state (SCRIPTS.md §10) — a mount, entered with the call's arguments by name. */
+  /** A called script's mount, its arguments bound to its parameters in order. */
+  private positionalMountPlan(stateId: string, shape: Pick<ImportedName, "inputNames" | "whole" | "inputSchemas">, args: readonly TS.Expression[], pre: TS.Statement[]): Omit<CallSite, "id" | "target" | "node"> {
+    const names = shape.inputNames ?? [];
+    const inputVars: Record<string, string> = {};
+    const inputNames: string[] = [];
+    args.forEach((arg, i) => {
+      const name = names[i];
+      if (name === undefined) return;
+      inputVars[name] = this.typedValue(arg, shape.inputSchemas?.[name], pre, name);
+      inputNames.push(name);
+    });
+    return {
+      kind: "mount",
+      label: stateId,
+      call: this.ts.factory.createObjectLiteralExpression([]),
+      inputVars,
+      stateId,
+      inputNames,
+      ...(shape.whole !== undefined ? { whole: shape.whole } : {}),
+    };
+  }
+
   private mountPlan(stateId: string, shape: Pick<ImportedName, "inputNames" | "argsInput" | "whole" | "inputSchemas">, args: TS.Expression | undefined, pre: TS.Statement[]): Omit<CallSite, "id" | "target" | "node"> {
     const { ts } = this;
     const f = ts.factory;

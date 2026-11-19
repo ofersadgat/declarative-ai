@@ -3,6 +3,9 @@
  * states, run directly under the standalone host — `llm()` to a model, conversations held in memory,
  * `input()` from the person, `workflow()` as a function call, `agent()` through an agent query.
  */
+import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -81,6 +84,31 @@ describe("a script run as a program", () => {
 export default async function main(): Promise<unknown> { return await workflow("./greet.ts", { who: "ada", punct: "?" }); }`,
     });
     expect(await runScript(join(root, "main.ts"), [], { cwd: root, write: () => undefined })).toBe("hello ada?");
+  });
+
+  it("runs the script as it stands at each call — an edited one takes over at the next call (non-durable handoff)", () => {
+    // In a Node process of its own, as a real run is: vitest's loader keys a module by its path and
+    // ignores the query that names its version, which Node's module cache does not.
+    const root = dir({
+      "greet.mjs": `export default async function greet(who) { return "v1 " + who; }`,
+      "check.mts": `
+import { writeFileSync } from "node:fs";
+import { createStandaloneHost } from ${JSON.stringify(join(__dirname, "..", "src", "standalone.ts"))};
+const lines: string[] = [];
+const host = createStandaloneHost({ cwd: process.cwd(), write: (l) => lines.push(l) });
+const out: unknown[] = [];
+out.push(await host.workflow("./greet.mjs", { who: "ada" }));
+out.push(await host.workflow("./greet.mjs", { who: "ada" }));
+writeFileSync("greet.mjs", 'export default async function greet(who) { return "v2 " + who; }');
+out.push(await host.workflow("./greet.mjs", { who: "ada" }));
+console.log(JSON.stringify({ out, lines }));
+`,
+    });
+    const tsx = pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm")).href;
+    const printed = execFileSync(process.execPath, ["--import", tsx, join(root, "check.mts")], { cwd: root, encoding: "utf8" });
+    const { out, lines } = JSON.parse(printed.trim().split("\n").pop()!) as { out: string[]; lines: string[] };
+    expect(out).toEqual(["v1 ada", "v1 ada", "v2 ada"]);
+    expect(lines).toEqual([expect.stringMatching(/running a newer version/)]);
   });
 
   it("resolves input() idle when nobody answers in time, and null at the end of input", async () => {

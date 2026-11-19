@@ -5,7 +5,7 @@
  * Interactive/host behavior now lives in the `CapabilityRegistry<WorkflowMetrics>` (`registry.functions`,
  * @declarative-ai/exec); the engine only ever talks to these interfaces.
  */
-import type { BudgetMetrics, ExecMetrics, Failure, ResolvedValue } from "@declarative-ai/exec";
+import type { BudgetMetrics, ExecMetrics, Failure, JsonValue, ResolvedValue } from "@declarative-ai/exec";
 
 /**
  * What a workflow run accounts for: execution timing and counts, PLUS spend.
@@ -125,7 +125,21 @@ export type EngineEvent =
    * input resolution, so the dispatched op — the thing the hash is OF — does not exist yet), and on
    * a `failed` that never reached dispatch.
    */
-  | { type: "operation.completed"; instanceId: string; stateId: string; op: OperationKind; index?: number; operationId?: string; metrics?: WorkflowMetrics }
+  | {
+      type: "operation.completed";
+      instanceId: string;
+      stateId: string;
+      op: OperationKind;
+      index?: number;
+      operationId?: string;
+      metrics?: WorkflowMetrics;
+      /**
+       * The value, for an operation the ENGINE ran itself and no executor recorded — a compiled script's
+       * code (`$script`, SCRIPTS.md §6.2), whose value is the continuation the states after it read. A
+       * host that loads a run from its records has nowhere else to read it from.
+       */
+      value?: JsonValue;
+    }
   /**
    * `metrics` is present exactly when the operation actually RAN — a post-dispatch failure, where
    * the call was made and the money was spent. A pre-dispatch failure (unresolvable inputs, no
@@ -259,6 +273,14 @@ export type EngineEvent =
     }
   /** A script's `log()` (SCRIPTS.md §13). `site` is `log#<k>`, so a replay writes it once. */
   | { type: "script.log"; instanceId: string; stateId: string; site: string; message: string }
+  /**
+   * A newer version of a state a script calls was taken at a call (JaiRA decision 0029 §3): its states
+   * joined the run's bundle as `version`, and the call that follows enters it. `snapshot` is the host's
+   * name for that version, so a replay can lay it back into the bundle before anything is re-attached.
+   */
+  | { type: "version.adopted"; instanceId: string; stateId: string; version: string; snapshot?: string }
+  /** A newer version that was NOT taken, and why — the call ran the version it was already running. */
+  | { type: "version.declined"; instanceId: string; stateId: string; version: string; reason: string }
   /**
    * A script's `phase()` where it does not cut a state — a `"state"`-mode script's display group
    * (SCRIPTS.md §3). `site` is `phase#<k>`.

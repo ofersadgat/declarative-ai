@@ -249,7 +249,11 @@ export class ScriptRunState {
     /** Prepended to every site — a function call's own, so its calls never share a site with the state's. */
     private readonly prefix = "",
   ) {
-    this.recorded = new Map((records ?? []).map((record, order) => [record.site, { record, order }]));
+    // A call the run was STOPPED under — canceled or interrupted, because the process or the run went
+    // away while it waited — was never answered: it is asked again rather than replayed as a failure.
+    // (A program parked at `input()` when the app closed is the everyday case.)
+    const answered = (records ?? []).filter((record) => record.failure?.classification !== "canceled" && record.failure?.classification !== "interrupted");
+    this.recorded = new Map(answered.map((record, order) => [record.site, { record, order }]));
   }
 
   /** The next site for a call with this content key. */

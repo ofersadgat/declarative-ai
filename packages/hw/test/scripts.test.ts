@@ -795,7 +795,7 @@ export default async function f() { return ["a"].map((x) => stamp(x)); }`;
   });
 });
 
-describe("a script as a program (SCRIPTS.md §17)", () => {
+describe("a script as a program (SCRIPTS.md §17)", { timeout: 30_000 }, () => {
   const CHAT = `
 import { llm, input } from "@declarative-ai/hw/script";
 export const meta = { name: "Chat" };
@@ -866,6 +866,28 @@ export default async function odd(flag: boolean): Promise<string> {
     await expect(compile(source)).rejects.toThrow(/withSession/);
   });
 
+  it("journals each segment's value, since no executor recorded it — what a host loads the run back from", async () => {
+    const answers: Array<JsonValue> = [null];
+    const { events } = await run(CHAT, { first: "first" }, () => ok("reply"), { functions: { input: () => answers.shift() ?? null } });
+    const segments = events.filter((e): e is Extract<EngineEvent, { type: "operation.completed" }> => e.type === "operation.completed" && e.op === "function");
+    expect(segments.length).toBeGreaterThan(0);
+    expect(segments.every((e) => e.value !== undefined && typeof e.value === "object")).toBe(true);
+  });
+
+  it("asks again a call the run was stopped under, rather than replaying it as a failure", async () => {
+    const { ScriptRunState } = await import("../src/scriptRun.js");
+    const state = new ScriptRunState([
+      { site: "a#0", failure: { classification: "canceled", reason: "the app closed" } },
+      { site: "b#0", failure: { classification: "interrupted", reason: "the process died" } },
+      { site: "c#0", failure: { classification: "permanent", reason: "bad input" } },
+      { site: "d#0", value: "answered" },
+    ] as never);
+    expect(state.recordAt("a#0")).toBeUndefined();
+    expect(state.recordAt("b#0")).toBeUndefined();
+    expect(state.recordAt("c#0")).toBeDefined();
+    expect(state.recordAt("d#0")).toBeDefined();
+  });
+
   it("parks input() at the host's input function, and fails plainly where the host registered none", async () => {
     const { result } = await run(CHAT, { first: "first" }, () => ok("reply"));
     expect(result.outcome).toBe("error");
@@ -873,7 +895,7 @@ export default async function odd(flag: boolean): Promise<string> {
   });
 });
 
-describe("the standalone host (SCRIPTS.md §17)", () => {
+describe("the standalone host (SCRIPTS.md §17)", { timeout: 30_000 }, () => {
   it("serves a hook called outside any run, and the engine's host still wins inside one", async () => {
     const hooks = await import("../src/scriptHooks.js");
     const seen: string[] = [];

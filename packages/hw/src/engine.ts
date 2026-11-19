@@ -117,6 +117,7 @@ import { fieldDependencies, fieldsView, materializeFields } from "./fields.js";
 import { bindIntoSlots } from "./loader.js";
 import { EVENT_NAMESPACE, hasDefault, literalPermissions, SCRIPT_CODE_INPUT, SCRIPT_CONTROL, SCRIPT_FILE_INPUT, SCRIPT_FUNCTION, SPAWN_DEFAULTS, type HostedEachKind, type LiteralPermissions, type LoadedField, type SpawnFields } from "./format.js";
 import { hasScriptContext, INPUT_FUNCTION, loadScriptContext, runWithScriptHost, type AgentOptions, type InputOptions, type LlmCall, type ScriptHost } from "./scriptHooks.js";
+import { baseStateIdOf, versionedSource, versionedStateId, versionedStates, versionHashOf, versionOfStateId, type VersionSource } from "./versions.js";
 import { agentCall, answerOf, lowerLlmCall, ScriptCallError, ScriptRunState, ScriptSegments, withSessionOf, type LoweredCall, type ScriptModuleOptions } from "./scriptRun.js";
 import { desugarOperation } from "./loader.js";
 import { isCallableKind, isCallableSchema } from "@declarative-ai/exec";
@@ -208,6 +209,15 @@ function tryScopedId(hash: string | undefined, scope: OperationScope): string {
   return scopedOperationId(hash ?? "unhashable", scope);
 }
 
+/** Whether a value can travel in the journal as it is — a script's continuation always can. */
+function isJsonValue(value: unknown): boolean {
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return true;
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  if (typeof value !== "object" || value instanceof Uint8Array) return false;
+  const proto = Object.getPrototypeOf(value);
+  return (proto === Object.prototype || proto === null) && Object.values(value as Record<string, unknown>).every((v) => v === undefined || isJsonValue(v));
+}
+
 /** A recorded `sessionRef` (`<session>@<seq>`) back as the published node a loaded op carries. */
 function publishedOfRef(ref: string | undefined): PublishedSession | undefined {
   if (ref === undefined) return undefined;
@@ -219,6 +229,13 @@ export type CallResult = { value: ResolvedValue } | { error: string; failure?: F
 
 export interface EngineConfig {
   bundle: WorkflowBundle;
+  /**
+   * Newer versions of the states a script CALLS (JaiRA decision 0029 §3): asked at each such call,
+   * with the running version's hash. An offered version whose inputs match the call's is entered in
+   * place of the running one, under a versioned id, and journaled (`version.adopted`) — see
+   * `versions.ts`. Absent ⇒ a run runs the versions it started with, throughout.
+   */
+  versions?: VersionSource;
   /** The typed capability registry: `functions` (host code, sub-workflows, and delegated agent
    *  adapters alike — ONE map of discriminated entries, DESIGN §5.1), `skills` (named prompt
    *  templates), `tools` (executables an agent may call mid-loop). */
@@ -1138,6 +1155,13 @@ export class WorkflowEngine {
   private readonly splits: SplitEntry[];
 
   constructor(private readonly config: EngineConfig) {
+    if (config.versions !== undefined) {
+      for (const def of Object.values(config.bundle.states)) {
+        for (const child of Object.values(def.children ?? {})) {
+          if (child.called === true && !this.calledHashes.has(child.state)) this.calledHashes.set(child.state, versionHashOf(config.bundle, child.state));
+        }
+      }
+    }
     this.segments = new ScriptSegments(config.scripts);
     this.validator = config.validator ?? new SchemaValidator();
     this.clock = config.clock ?? { now: () => Date.now() };
@@ -2510,6 +2534,73 @@ export class WorkflowEngine {
    * A SYNC child holds the cursor until it resolves (SPEC §10.4); an `async` one does not, which is
    * the entire difference between the two and the only place the flag is read.
    */
+  /**
+   * The version a CALLED state is entered under (decision 0029 §3): the running one, unless the host
+   * offers a newer one whose inputs are this call's — every input the call hands it is one it declares,
+   * and every one it requires is handed. Then its states join the bundle under a versioned id, once per
+   * run, journaled as `version.adopted`, and that id is entered. A version that does not fit is passed
+   * over and journaled as such; the call runs the version it would have run.
+   */
+  /** The versions this run took (decision 0029 §3), each journaled once. */
+  private readonly adoptedVersions = new Set<string>();
+  /**
+   * Each called state's version as the run STARTED with it — hashed before anything ran, since running
+   * a state annotates its loaded form. Filled in the constructor when the host offers versions at all.
+   */
+  private readonly calledHashes = new Map<string, string>();
+  private ownsStates = false;
+
+  private async adoptVersion(instance: Instance, stateId: string, inputs: Record<string, ResolvedValue>): Promise<string> {
+    const base = baseStateIdOf(stateId);
+    const current = versionOfStateId(stateId) ?? this.calledHashes.get(stateId) ?? versionHashOf(this.config.bundle, stateId);
+    let offered;
+    try {
+      offered = await this.config.versions!(base, current);
+    } catch {
+      return stateId;
+    }
+    if (offered === undefined || offered.bundle.states[base] === undefined) return stateId;
+    const version = versionHashOf(offered.bundle, base);
+    // What is offered is what is running — under its plain id or a versioned one, the same content.
+    if (version === current) return stateId;
+    const versioned = versionedStateId(base, version);
+    if (!this.adoptedVersions.has(versioned)) {
+      const declared = offered.bundle.states[base]!.inputs ?? {};
+      const extra = Object.keys(inputs).filter((name) => declared[name] === undefined);
+      const missing = Object.entries(declared)
+        .filter(([name, p]) => p.optional !== true && p.binding === undefined && !(name in inputs))
+        .map(([name]) => name);
+      if (extra.length > 0 || missing.length > 0) {
+        this.emit({
+          type: "version.declined",
+          instanceId: instance.id,
+          stateId: base,
+          version: versioned,
+          reason: `its inputs are not this call's: ${[...extra.map((n) => `'${n}' is not one it takes`), ...missing.map((n) => `'${n}' is required and not handed`)].join("; ")}`,
+        });
+        return stateId;
+      }
+      // The run's OWN copy of the bundle's states from the first adoption on: the bundle a host passed
+      // may be one it hands other runs too, and a version this run took must not appear in theirs.
+      if (!this.ownsStates) {
+        const own = this.config.bundle.source;
+        this.config.bundle = { ...this.config.bundle, states: { ...this.config.bundle.states }, ...(own !== undefined ? { source: { ...own } } : {}) };
+        this.ownsStates = true;
+      }
+      Object.assign(this.config.bundle.states, versionedStates(offered.bundle, base, versioned));
+      if (this.config.bundle.source !== undefined) Object.assign(this.config.bundle.source, versionedSource(offered.bundle, base, versioned));
+      this.adoptedVersions.add(versioned);
+      this.emit({
+        type: "version.adopted",
+        instanceId: instance.id,
+        stateId: base,
+        version: versioned,
+        ...(offered.snapshot !== undefined ? { snapshot: offered.snapshot } : {}),
+      });
+    }
+    return versioned;
+  }
+
   private async enterChild(
     instance: Instance,
     key: string,
@@ -2571,7 +2662,13 @@ export class WorkflowEngine {
     const prior = instance.children.get(key);
     if (prior?.status === "running") prior.abort.abort();
 
-    const childDef = this.config.bundle.states[decl.state];
+    // A state a script CALLS may have a newer version than the one this run started with: the call is
+    // the boundary, and the new version takes it when its inputs are the call's (decision 0029 §3).
+    const stateId =
+      decl.called === true && this.config.versions !== undefined && "values" in resolved && resolved.values !== undefined
+        ? await this.adoptVersion(instance, decl.state, resolved.values)
+        : decl.state;
+    const childDef = this.config.bundle.states[stateId];
     const childAbort = new AbortController();
     /**
      * Cancelling the parent cancels this child — and the wiring is UNHOOKED when the child ends.
@@ -2603,8 +2700,8 @@ export class WorkflowEngine {
       promise: Promise.resolve(),
     };
 
-    this.runChild(instance, key, decl.state, record, onParentAbort, async (): Promise<TerminationRecord> => {
-      if (!childDef) return { outcome: "error", failure: { classification: "permanent", reason: `unknown state '${decl.state}'` } };
+    this.runChild(instance, key, stateId, record, onParentAbort, async (): Promise<TerminationRecord> => {
+      if (!childDef) return { outcome: "error", failure: { classification: "permanent", reason: `unknown state '${stateId}'` } };
       if ("error" in resolved && typeof resolved.error === "string") {
         // A WIRING failure — the caller could not produce an argument, so the callee never happened.
         //
@@ -2627,7 +2724,7 @@ export class WorkflowEngine {
         });
         return { outcome: "error", failure: { classification: "permanent", reason: resolved.error } };
       }
-      const term = await this.runInstance(decl.state, childDef, resolved.values!, childAbort, key, instance, record.instanceId);
+      const term = await this.runInstance(stateId, childDef, resolved.values!, childAbort, key, instance, record.instanceId);
       // Fan-out (§7.3, rule 2) is decided at BIND time: if this producer's blob output feeds two
       // consumers, drain it ONCE here, at the producer's completion, so both siblings read the bytes
       // rather than racing to read one stream. A single-consumer output is left a live stream to pipe.
@@ -4845,6 +4942,8 @@ export class WorkflowEngine {
       ...(index !== undefined ? { index } : {}),
       ...(operationId !== undefined ? { operationId } : {}),
       metrics: settled,
+      // No executor ran this, so no record holds it: the journal is where a loaded run reads it back.
+      ...(isJsonValue(value) ? { value: value as JsonValue } : {}),
     });
     return undefined;
   }

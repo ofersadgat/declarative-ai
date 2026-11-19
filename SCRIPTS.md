@@ -676,5 +676,37 @@ export default async function chat(first: string) {
 }
 ```
 
-Not built: handing a RUNNING program to a newer version of itself (JaiRA decision 0029 §3). It needs the
-engine to load the new version's states into a run in flight and record that, so a replay loads them too.
+### 17.1 A running program takes a newer version at a call
+
+**Status: BUILT** (2026-11-18). A run keeps the workflow it started with — except at the boundary a
+script's CALL of another workflow is. There the host may offer a newer version of the called state
+(`EngineConfig.versions`, asked with the running version's hash), and the call enters it instead:
+
+- **Same inputs, or not at all.** The new version is taken only when every input the call hands it is one
+  it declares and every one it requires is handed. Otherwise the call runs what it was running, and
+  `version.declined` says why.
+- **Side by side, under a versioned id.** The new version's states join the run's bundle as
+  `<state>@v<hash>` (and `…@v<hash>/call_0` below it) — the run's own copy of the bundle, never the host's
+  — so what ran under the old version replays as it ran. The hash is the subtree's content with its own
+  id taken out (`versionHashOf`), computed for every called state before the run starts (a running engine
+  annotates the states it runs), so the same content is never "newer".
+- **Journaled once.** `version.adopted { stateId, version, snapshot? }`, then `instance.entered` naming the
+  versioned id. A replay lays the version back in first (`withVersions`, from the host's snapshot) and
+  re-attaches what was entered.
+- **Non-durable**, the boundary is `workflow()`: the standalone host imports the called script by its
+  content (`?v=<hash>`), so an unchanged file is the module already loaded and an edited one is a fresh
+  import. An ES `import` of a workflow is bound when the program starts, as any import is.
+- **A call of an imported script is positional.** `turn(text, conv)` binds the script's parameters in
+  order; one object of names is still how a JSON state, or a script called that way, is handed its inputs.
+
+Two things make a program resumable at all, version or none:
+
+- **A segment's value is journaled.** A compiled script's code (`$script`) is run by the engine itself,
+  so no executor records what it returned — the continuation the states after it read. Its
+  `operation.completed` carries it (`value`), and a host loading a run from its records reads it there.
+- **A call the run was stopped under is asked again.** A script call settled `canceled` or `interrupted`
+  (the process or the run went away while it waited — a program parked at `input()` when the app closed)
+  was never answered, so a replay does not hand it back as a failure (`ScriptRunState`).
+
+Not built: a boundary at ANY state with the same inputs (the person's ruling allows it). Only calls are
+boundaries, because entering a version's tree in its middle needs its ancestors' instances too.

@@ -7,6 +7,7 @@
  * per run. Because this is an ordinary `Executor`, the generic wrappers compose around it unchanged:
  * `compose(workflow).with(withMemoize({ cache, identify: workflowIdentify(definition) }))`.
  */
+import type { VersionSource } from "./versions.js";
 import {
   EventQueue,
   failureOf,
@@ -104,6 +105,8 @@ export interface WorkflowExecutorOptions {
   directed?: DirectedTransitions;
   /** Where a compiled script's code and imports come from — see {@link EngineConfig.scripts}. Forwarded for the same reason. */
   scripts?: ScriptModuleOptions;
+  /** Newer versions of the states a script calls — see {@link EngineConfig.versions}. Forwarded for the same reason. */
+  versions?: VersionSource;
 }
 
 const CAPABILITIES: Capabilities = {
@@ -252,6 +255,7 @@ export class WorkflowExecutor implements Executor<ExecServices, WorkflowMetrics>
       ...(this.options.entryRefusal !== undefined ? { entryRefusal: this.options.entryRefusal } : {}),
       ...(this.options.directed !== undefined ? { directed: this.options.directed } : {}),
       ...(this.options.scripts !== undefined ? { scripts: this.options.scripts } : {}),
+      ...(this.options.versions !== undefined ? { versions: this.options.versions } : {}),
       services: ctx,
       clock: ctx.clock,
       onEvent: (event) => {

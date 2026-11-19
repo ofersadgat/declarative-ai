@@ -65,6 +65,7 @@ export * from "./expand.js";
 export { evaluateLoadExpression, type LoadExpressionOptions } from "./loadExpr.js";
 export * from "./loader.js";
 export * from "./scriptHooks.js";
+export * from "./versions.js";
 export * from "./scriptCompile.js";
 export * from "./scriptRun.js";
 export * from "./resolve.js";

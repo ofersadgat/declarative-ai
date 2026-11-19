@@ -15,7 +15,8 @@
  *  - `phase()` and `log()` write to stderr, `now()`/`random()` are the clock and the coin.
  */
 import { createInterface } from "node:readline";
-import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AgentOptions, InputOptions, LlmCall, ScriptHost } from "@declarative-ai/hw/script";
@@ -204,6 +205,8 @@ export function createStandaloneHost(options: StandaloneOptions = {}): ScriptHos
   let agentQuery = options.agentQuery;
   let read = options.read;
   const importer = options.importer ?? ((url: string) => import(url));
+  /** The version of each script `workflow()` last ran, by file — to say when a newer one takes over. */
+  const versions = new Map<string, string>();
   let spent = 0;
 
   const llm = async (call: LlmCall, typed: JsonSchema | undefined): Promise<unknown> => {
@@ -297,7 +300,14 @@ export function createStandaloneHost(options: StandaloneOptions = {}): ScriptHos
       : [".jaira/workflows", "workflows", "."].flatMap((dir) => [".ts", ".js", ".mjs"].map((ext) => resolve(cwd, dir, `${named}${ext}`)));
     const file = candidates.find((c) => existsSync(c));
     if (file === undefined) throw new StandaloneCallError(`workflow('${named}'): no script found — a standalone run can call scripts, not JSON states (looked in ${candidates.join(", ")})`);
-    const main = defaultExportOf(await importer(pathToFileURL(file).href));
+    // Non-durable HANDOFF (decision 0029 §3): a call is a boundary, so each call imports the script as
+    // it stands now — named by its content, so an unchanged file is the module already loaded and an
+    // edited one is a fresh import Node's module cache cannot answer with the old code.
+    const version = createHash("sha256").update(readFileSync(file, "utf8")).digest("hex").slice(0, 12);
+    const was = versions.get(file);
+    if (was !== undefined && was !== version) write(`▸ ${named}: running a newer version (${version})`);
+    versions.set(file, version);
+    const main = defaultExportOf(await importer(`${pathToFileURL(file).href}?v=${version}`));
     if (typeof main !== "function") throw new StandaloneCallError(`workflow('${named}'): ${file} has no default export to call`);
     const fn = main as (...a: unknown[]) => unknown;
     if (Array.isArray(args)) return fn(...args);
