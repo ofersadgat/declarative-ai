@@ -659,6 +659,10 @@ out.
 - **A computed `null` session is a fresh conversation** (`sessionFromExpr`), as a written `null` is: a
   program holds `conv = null` until its first call hands it a position. A computed `undefined` is still a
   wiring error.
+- **A computed knob that comes to `undefined` is unset.** `llm({ config: { model: chosen.model } })`
+  runs on the chosen model when there is one, and when there is none the key is left out of the call
+  (`writeField`) — so the defaults answer it, as they would a call that never named one — rather than
+  failing the knob's type. A program hands each message's chosen settings through this way.
 
 A conversation, then, is ordinary code:
 

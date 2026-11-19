@@ -3964,6 +3964,12 @@ export class WorkflowEngine {
       }
       if (isResolveError(r)) return failed(r.error);
       const value = r.value;
+      // A call's KNOB that resolved to nothing is unset (`writeField` leaves it out), not a value its
+      // type must accept — a program hands a message's chosen model through, and a message may choose none.
+      if (value === undefined && /(?:^|\.)config\.[A-Za-z_$][\w$]*$/.test(field.path)) {
+        settled("value", undefined);
+        return { value: undefined as unknown as ResolvedValue };
+      }
       const complaint = this.checkFieldValue(field, value);
       if (complaint !== undefined) return failed(complaint);
       settled("value", value);

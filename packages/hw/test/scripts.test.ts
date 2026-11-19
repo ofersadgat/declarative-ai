@@ -866,6 +866,22 @@ export default async function odd(flag: boolean): Promise<string> {
     await expect(compile(source)).rejects.toThrow(/withSession/);
   });
 
+  it("runs a call on the model a message chose, and on the defaults when it chose none", async () => {
+    const source = `
+import { llm } from "@declarative-ai/hw/script";
+export const meta = { name: "Pick" };
+export default async function pick(text: string, settings: unknown = null): Promise<string> {
+  const chosen = (settings ?? {}) as { model?: string };
+  return await llm({ prompt: text, config: { model: chosen.model } });
+}
+`;
+    const chose = await run(source, { text: "hi", settings: { model: "anthropic/chosen" } }, (call) => ok(call.name.length > 0 ? call.name : "the default"));
+    expect(chose.result.outputs).toEqual({ result: "anthropic/chosen" });
+    const none = await run(source, { text: "hi" }, (call) => ok(call.name.length > 0 ? call.name : "the default"));
+    expect(none.result.outcome).toBe("success");
+    expect(none.result.outputs).toEqual({ result: "the default" });
+  });
+
   it("journals each segment's value, since no executor recorded it — what a host loads the run back from", async () => {
     const answers: Array<JsonValue> = [null];
     const { events } = await run(CHAT, { first: "first" }, () => ok("reply"), { functions: { input: () => answers.shift() ?? null } });

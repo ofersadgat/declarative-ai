@@ -497,6 +497,12 @@ function writeField(def: LoadedState, path: string, authored: ResolvedValue | un
         if (path === MODEL_FIELD && value !== null && typeof value === "object" && !Array.isArray(value)) {
           return { def: { ...def, operation: { ...op, config: { ...payloadOfValue(value), ...base } as JsonValue } as Operation<InlineFamily> } };
         }
+        // A computed knob that came to NOTHING is not set: the key is left out, so the call takes the
+        // default a written-out knob would have overridden (a program's message that chose no model).
+        if (value === undefined && more.length === 1) {
+          const { [more[0]!]: _dropped, ...rest } = base;
+          return { def: { ...def, operation: { ...op, config: rest as JsonValue } as Operation<InlineFamily> } };
+        }
         return { def: { ...def, operation: { ...op, config: writePath(base, more, value) as JsonValue } as Operation<InlineFamily> } };
       }
       default:
