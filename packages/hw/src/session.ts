@@ -380,7 +380,10 @@ export function normalizeSession(
  */
 export function sessionFromExpr(expr: SessionExpr, value: unknown): { session: NormalizedSession } | { error: string } {
   const source = expr.$expr;
-  if (value === undefined || value === null) {
+  // A computed `null` is a fresh conversation, as a written one is: a program holds `conv = null` until
+  // its first call hands it a position (SCRIPTS.md §17). Nothing at all is still a wiring mistake.
+  if (value === null) return { session: null };
+  if (value === undefined) {
     return { error: `session expression '${source}' resolved to nothing — write null to start a fresh conversation, or wire it to an operation that has run` };
   }
   const complaint = validateSessionDecl(value);

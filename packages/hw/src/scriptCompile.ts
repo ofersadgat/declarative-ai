@@ -211,6 +211,8 @@ interface CallSite {
   op?: Record<string, unknown>;
   /** `prompt`: the result is `{ value }`, a non-object `T` wrapped for the wire. */
   unwrap?: boolean;
+  /** `prompt`: the script is handed `{ value, session }` — `llm({ withSession: true })` (SCRIPTS.md §9). */
+  withSession?: boolean;
   /** `script`: the call, as code over `$v._call`. */
   script?: string;
   /**
@@ -934,7 +936,7 @@ class Compiler {
     const callee = unwrap(ts, call.expression);
     if (ts.isIdentifier(callee)) {
       const hook = this.hookOf(callee);
-      if (hook === "llm" || hook === "agent" || hook === "now" || hook === "random" || hook === "workflow") return true;
+      if (hook === "llm" || hook === "agent" || hook === "input" || hook === "now" || hook === "random" || hook === "workflow") return true;
       if (hook === "parallel" || hook === "pipeline") return call.arguments.some((a) => this.hasCut(a, true));
       const imported = this.importedAs(callee);
       if (imported !== undefined) return imported.kind === "state" || imported.kind === "prompt" || imported.kind === "registry" || imported.kind === "operation";
@@ -1337,13 +1339,29 @@ class Compiler {
     const pre = [...args.pre];
     // A call made as code is handed its arguments as `_call.args` — `_call` is always an object.
     const array = f.createObjectLiteralExpression([f.createPropertyAssignment("args", f.createArrayLiteralExpression(args.values))]);
-    const typed = call.typeArguments?.[0] !== undefined ? this.typeArgumentSchema(call) : hook === "llm" || hook === "agent" ? this.inferredOutput(call) : undefined;
+    // `withSession: true` hands the script `{ value, session }`: T is still the VALUE's contract, so it
+    // is read off the `value` the call resolves to, and the call runs as code, where the host pairs it.
+    const paired = hook === "llm" && this.asksWithSession(call);
+    const typed =
+      call.typeArguments?.[0] !== undefined
+        ? this.typeArgumentSchema(call)
+        : hook === "llm" || hook === "agent"
+          ? this.inferredOutput(call, paired ? "value" : undefined)
+          : undefined;
     const withOutput = (schema: JsonSchema | undefined): string => (schema !== undefined ? `.withOutput(${JSON.stringify(schema)})` : "");
 
     let partial: Omit<CallSite, "id" | "target" | "node">;
-    if (hook === "llm") {
+    if (hook === "llm" && paired) {
+      // A real prompt state where its options can be read — so the call is a turn in its conversation
+      // the way an authored one is, journaled with the position it ended at — else code, paired by the host.
+      const plan = this.promptPlan(args.values, typed, call, pre, true);
+      partial = plan ?? { kind: "script", label: this.labelOf(args.values, "llm"), call: array, script: `$rt.llm${withOutput(typed)}(...$v._call.args)`, resultSchema: withSessionSchema(typed ?? ({ type: "string" } as JsonSchema)) };
+    } else if (hook === "llm") {
       const plan = this.promptPlan(args.values, typed, call, pre);
       partial = plan ?? { kind: "script", label: this.labelOf(args.values, "llm"), call: array, script: `$rt.llm${withOutput(typed)}(...$v._call.args)`, resultSchema: typed ?? ({ type: "string" } as JsonSchema) };
+    } else if (hook === "input") {
+      // A person's message, `{ idle: true }`, or `null` when they end the run: any of the three crosses.
+      partial = { kind: "script", label: this.labelOf(args.values, "input"), call: array, script: `$rt.input(...$v._call.args)`, resultSchema: {} as JsonSchema };
     } else if (hook === "agent") {
       const schema = typed ?? this.optionSchema(args.values[1]);
       partial = { kind: "script", label: this.labelOf(args.values, "agent"), call: array, script: `$rt.agent${withOutput(typed)}(...$v._call.args)`, ...(schema !== undefined ? { resultSchema: schema } : {}) };
@@ -1386,7 +1404,7 @@ class Compiler {
    * input — so the generated state shows its model and its prompt as any authored one does. `undefined`
    * when the options are not an object the compiler can read, and the call runs as code instead.
    */
-  private promptPlan(args: readonly TS.Expression[], typed: JsonSchema | undefined, call: TS.CallExpression, pre: TS.Statement[]): Omit<CallSite, "id" | "target" | "node"> | undefined {
+  private promptPlan(args: readonly TS.Expression[], typed: JsonSchema | undefined, call: TS.CallExpression, pre: TS.Statement[], paired = false): Omit<CallSite, "id" | "target" | "node"> | undefined {
     const { ts } = this;
     const f = ts.factory;
     const [a0, a1] = args;
@@ -1429,6 +1447,7 @@ class Compiler {
         if (typeof value === "string") label = value;
       } else if (name === "phase") continue;
       else if (name === "failureValue") return undefined;
+      else if (name === "withSession") continue; // read by the caller: `paired`
       else if (name === "config") {
         const config = unwrap(ts, valueOf);
         if (!ts.isObjectLiteralExpression(config)) return undefined;
@@ -1436,7 +1455,18 @@ class Compiler {
           if (!ts.isPropertyAssignment(k) || !(ts.isIdentifier(k.name) || ts.isStringLiteral(k.name))) return undefined;
           knob(k.name.text, k.initializer);
         }
-      } else if (["tools", "session", "workspace", "permissions", "conversation"].includes(name)) {
+      } else if (name === "session") {
+        // A literal is the field; a computed one — the ref a previous call ended at, or `null` before
+        // there was one — is a typed input the field reads at run time (`{ $expr }`, SPEC §4.2).
+        const value = this.staticValue(valueOf, true);
+        if (value !== undefined) {
+          op.session = value;
+          continue;
+        }
+        const v = this.typedValue(valueOf, undefined, held, "session");
+        inputVars.session = v;
+        op.session = { $expr: `.inputs.${v}` };
+      } else if (["tools", "workspace", "permissions", "conversation"].includes(name)) {
         const value = this.staticValue(valueOf, true);
         if (value === undefined) return undefined;
         op[name] = value;
@@ -1452,6 +1482,7 @@ class Compiler {
     const object = !text && schema !== undefined && (schema as { type?: unknown }).type === "object";
     op.prompt = `{{.inputs.${CALL_INPUT}.prompt}}`;
     op.output = text ? { text: { kind: "text" } } : object || schema === undefined ? { value: { kind: "json", ...(schema !== undefined ? { schema } : {}) } } : { value: { schema } };
+    const resultSchema = (text ? { type: "string" } : (schema ?? {})) as JsonSchema;
     return {
       kind: "prompt",
       label: label ?? this.labelOf([prompt], "llm"),
@@ -1459,7 +1490,8 @@ class Compiler {
       op,
       inputVars,
       unwrap: !text && !object && schema !== undefined,
-      resultSchema: (text ? { type: "string" } : (schema ?? {})) as JsonSchema,
+      ...(paired ? { withSession: true } : {}),
+      resultSchema: paired ? withSessionSchema(resultSchema) : resultSchema,
     };
   }
 
@@ -1743,12 +1775,35 @@ class Compiler {
    * that is what the call returns, so it is the contract the model is held to. Text (`string`), or a
    * type nothing constrains, asks for text as an unwritten `T` does.
    */
-  inferredOutput(call: TS.CallExpression): JsonSchema | undefined {
+  /** Whether an `llm()` call's options say `withSession: true` — they must, literally. */
+  private asksWithSession(call: TS.CallExpression): boolean {
+    const { ts } = this;
+    for (const arg of call.arguments) {
+      const options = unwrap(ts, arg);
+      if (!ts.isObjectLiteralExpression(options)) continue;
+      for (const member of options.properties) {
+        if (!ts.isPropertyAssignment(member) || !(ts.isIdentifier(member.name) || ts.isStringLiteral(member.name)) || member.name.text !== "withSession") continue;
+        const value = unwrap(ts, member.initializer);
+        if (value.kind === ts.SyntaxKind.TrueKeyword) return true;
+        if (value.kind === ts.SyntaxKind.FalseKeyword) return false;
+        throw this.error(member, "`withSession` must be written `true` or `false` — it changes what the call returns, so it has to be known when compiling");
+      }
+    }
+    return false;
+  }
+
+  inferredOutput(call: TS.CallExpression, member?: string): JsonSchema | undefined {
     const { ts } = this;
     if (call.pos < 0) return undefined;
     const signature = this.checker.getResolvedSignature(call);
     if (signature === undefined) return undefined;
     let type = awaited(ts, this.checker, signature.getReturnType());
+    if (member !== undefined) {
+      // `{ value: T; session }` — the contract is T's.
+      const property = type.getProperty(member);
+      if (property === undefined) return undefined;
+      type = this.checker.getTypeOfSymbolAtLocation(property, call);
+    }
     if (type.isUnion()) {
       const present = type.types.filter((t) => (t.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) === 0);
       if (present.length === 1) type = present[0]!;
@@ -3411,12 +3466,19 @@ class MachineBuilder {
       // call's answer, so the code is handed the answer without it, unless the call asked for one.
       const declaresSession = JSON.stringify(site.resultSchema ?? {}).includes('"session"');
       const object = (site.resultSchema as { type?: unknown } | undefined)?.type === "object";
+      // `withSession`: the answer, and the position the call ENDED at — which the session layer reports
+      // on the call's metrics (`sessionRef`), and so on its node's `usage`, whatever the answer's shape.
+      const valueObject = site.withSession === true && ((site.resultSchema as { properties?: { value?: { type?: unknown } } } | undefined)?.properties?.value?.type === "object");
       const result =
-        site.kind === "prompt" && site.unwrap
-          ? ".operation[0].output.value"
-          : site.kind === "prompt" && object && !declaresSession
-            ? { $expr: "omit(.operation[0].output, ['session'])" }
-            : ".operation[0].output";
+        site.kind === "prompt" && site.withSession === true
+          ? {
+              $expr: `{ value: ${site.unwrap ? ".operation[0].output.value" : valueObject ? "omit(.operation[0].output, ['session'])" : ".operation[0].output"}, session: { id: .operation[0].usage.sessionRef } }`,
+            }
+          : site.kind === "prompt" && site.unwrap
+            ? ".operation[0].output.value"
+            : site.kind === "prompt" && object && !declaresSession
+              ? { $expr: "omit(.operation[0].output, ['session'])" }
+              : ".operation[0].output";
       const outputs: Record<string, NamedParameterDecl> = {};
       for (const field of [SCRIPT_CONTROL.next, SCRIPT_CONTROL.entry, SCRIPT_CONTROL.returned, CALL_INPUT, ITEMS_OUTPUT, ...[...node.out].sort()]) {
         outputs[field] = { ...(this.hoistedSchema(field, node.composite) ?? {}), ...(field === SCRIPT_CONTROL.next ? {} : { optional: true }), binding: `.operation[1].output.${field}` } as NamedParameterDecl;
@@ -3887,4 +3949,17 @@ export function staleGenerated(document: StateDef, current: CompiledScript): str
     }
   }
   return undefined;
+}
+
+
+/** The wire type of what `llm({ withSession: true })` resolves to: the value, and where its conversation ended. */
+function withSessionSchema(value: JsonSchema): JsonSchema {
+  return {
+    type: "object",
+    properties: {
+      value,
+      session: { anyOf: [{ type: "object", properties: { id: { type: "string" } }, required: ["id"] }, { type: "null" }] },
+    },
+    required: ["value", "session"],
+  } as JsonSchema;
 }

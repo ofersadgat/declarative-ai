@@ -619,3 +619,62 @@ out.
    both states, so a call there appears under whichever phase was current. Acceptable?
 4. **Guards that do not lift.** A condition the expression language cannot say is decided by the
    code and read as `_next`. Label such a rule with the source condition's text?
+
+## 17. A script is also a program: durable and non-durable
+
+**Status: BUILT** (2026-11-18, for JaiRA decision 0029). One file runs two ways:
+
+| | Durable | Non-durable |
+| --- | --- | --- |
+| How | compiled to states and run by the engine (§3) | `dai-script my-workflow.ts [args…]` — `node` with the hooks wired |
+| `llm()`, `agent()`, `input()` | a state each: journaled, resumable | just run |
+| An imported workflow | mounted as a child state | a function call |
+| After a crash | resumes from the last state | gone |
+
+- **The hooks are a real import.** `@declarative-ai/hw/script` is an export of hw (`src/script.ts`), so
+  plain `node` resolves it. Under the engine a hook reaches the run's host through `AsyncLocalStorage`, as
+  before; outside any run it reaches the STANDALONE host, if one is installed
+  (`installStandaloneHost`, kept on `globalThis` so every copy of the module sees one). The engine's host
+  always wins inside a run.
+- **`@declarative-ai/script`** is the standalone host and the runner. `llm()` calls the model through
+  `@declarative-ai/llm`'s router, with conversations held in memory and addressed as the engine's are
+  (`<stream>@<seq>`; continuing an earlier position branches). `agent()` runs a coding agent through
+  `agents-cli` (Claude Code by default) and keeps Claude's null-on-failure contract. `input()` reads a line
+  from stdin, `null` at end of input. `workflow()` imports the named script and calls it, binding a named
+  argument object by the function's parameter names. A registered function (`$REGISTRY`) exists only where
+  an engine registered it, and is refused plainly. Importing the package installs its host when none is.
+- **`input(options?)`** waits for a person's next message. Durable, it is the host's registered `input`
+  function (`INPUT_FUNCTION`), dispatched and recorded like any call, so a replay hands back the message
+  rather than asking again; a host that registered none fails it plainly. It resolves the message
+  (`{ text, files?, settings? }`), `{ idle: true }` once `idle` elapses, or `null` when the run is ended.
+  In `"calls"` mode it is a cut of its own.
+- **`llm({ …, withSession: true })`** resolves `{ value, session }`: the answer, and the position the call
+  ENDED at, which the next call continues from (`session: turn.session`) or forks. `T` is still the value's
+  contract — the compiler reads it off `value` — so the model is asked for `T`, never for the pair. Where
+  the options can be read, the call is still a PROMPT STATE: its `session` may be computed (a typed input
+  the field reads as `{ $expr }`), and its result is bound as
+  `{ value: …, session: { id: .operation[0].usage.sessionRef } }` — the position the session layer reports
+  on the call's metrics, whatever the answer's shape. So a conversation written as a loop is journaled
+  turn by turn, as an authored one is. `withSession` must be written `true` or `false`.
+- **A computed `null` session is a fresh conversation** (`sessionFromExpr`), as a written `null` is: a
+  program holds `conv = null` until its first call hands it a position. A computed `undefined` is still a
+  wiring error.
+
+A conversation, then, is ordinary code:
+
+```ts
+import { llm, input } from "@declarative-ai/hw/script";
+export default async function chat(first: string) {
+  let text: string | null = first;
+  let conv: { id: string } | null = null;
+  while (text !== null) {
+    const turn = await llm({ prompt: text, session: conv, withSession: true });
+    conv = turn.session;
+    const next = await input();
+    text = next !== null && next.idle !== true ? next.text : null;
+  }
+}
+```
+
+Not built: handing a RUNNING program to a newer version of itself (JaiRA decision 0029 §3). It needs the
+engine to load the new version's states into a run in flight and record that, so a replay loads them too.

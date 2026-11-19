@@ -1,0 +1,51 @@
+{
+  "name": "@declarative-ai/script",
+  "version": "0.1.0",
+  "description": "Run a workflow script as a plain program: the standalone host behind @declarative-ai/hw/script's hooks, and the dai-script runner.",
+  "keywords": [
+    "declarative-ai",
+    "workflow",
+    "script",
+    "ai"
+  ],
+  "author": "Ofer Sadgat",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ofersadgat/declarative-ai.git",
+    "directory": "packages/script"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "dai-script": "./bin/dai-script.mjs"
+  },
+  "files": [
+    "dist",
+    "src",
+    "bin"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json"
+  },
+  "dependencies": {
+    "@declarative-ai/agents-api": "^0.1.0",
+    "@declarative-ai/agents-cli": "^0.1.0",
+    "@declarative-ai/hw": "^0.1.0",
+    "@declarative-ai/json": "^0.1.0",
+    "@declarative-ai/llm": "^0.1.0"
+  }
+}

@@ -116,8 +116,8 @@ import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, 
 import { fieldDependencies, fieldsView, materializeFields } from "./fields.js";
 import { bindIntoSlots } from "./loader.js";
 import { EVENT_NAMESPACE, hasDefault, literalPermissions, SCRIPT_CODE_INPUT, SCRIPT_CONTROL, SCRIPT_FILE_INPUT, SCRIPT_FUNCTION, SPAWN_DEFAULTS, type HostedEachKind, type LiteralPermissions, type LoadedField, type SpawnFields } from "./format.js";
-import { hasScriptContext, loadScriptContext, runWithScriptHost, type AgentOptions, type LlmCall, type ScriptHost } from "./scriptHooks.js";
-import { agentCall, answerOf, lowerLlmCall, ScriptCallError, ScriptRunState, ScriptSegments, type LoweredCall, type ScriptModuleOptions } from "./scriptRun.js";
+import { hasScriptContext, INPUT_FUNCTION, loadScriptContext, runWithScriptHost, type AgentOptions, type InputOptions, type LlmCall, type ScriptHost } from "./scriptHooks.js";
+import { agentCall, answerOf, lowerLlmCall, ScriptCallError, ScriptRunState, ScriptSegments, withSessionOf, type LoweredCall, type ScriptModuleOptions } from "./scriptRun.js";
 import { desugarOperation } from "./loader.js";
 import { isCallableKind, isCallableSchema } from "@declarative-ai/exec";
 import { isOperationValue } from "./resolve.js";
@@ -4894,6 +4894,7 @@ export class WorkflowEngine {
     return {
       llm: (call, schema) => this.scriptCall(instance, run, call, schema),
       agent: (prompt, options, schema) => this.scriptCall(instance, run, agentCall(prompt, options as AgentOptions, this.segments.agentDefaults), schema),
+      input: (options) => this.scriptInput(instance, run, options),
       workflow: (ref, args) => this.scriptWorkflow(instance, run, ref, args),
       call: (ref, args) => this.scriptRegistryCall(instance, run, ref, args),
       recorded: (name, fn) => this.scriptRecorded(instance, run, name, fn),
@@ -4933,10 +4934,13 @@ export class WorkflowEngine {
     const phase = lowered.phase ?? run.phase;
     const recorded = run.recordAt(site);
     let outcome: { value: unknown } | { failure: Failure };
+    // A `withSession` call records the PAIR it handed the script, so a replay reads back the position.
+    let paired = false;
     if (recorded !== undefined) {
       await run.release(site);
       run.spent += recorded.costUsd ?? 0;
       outcome = recorded.failure !== undefined ? { failure: recorded.failure } : { value: recorded.value };
+      paired = lowered.withSession === true;
     } else {
       if (run.calls >= this.segments.maxCalls) {
         throw new ScriptCallError({ classification: "permanent", reason: `the script made ${run.calls} calls — the limit is ${this.segments.maxCalls}` });
@@ -4947,14 +4951,19 @@ export class WorkflowEngine {
       }
       run.calls++;
       let cost = 0;
+      let sessionRef: string | undefined;
       const isolated = lowered.isolated ? `${instance.resourceKey}#isolated:${site}` : undefined;
-      const answer = await this.runEmbeddedOp(instance, lowered.op, undefined, site, lowered.env, (m) => (cost = m.costUsd ?? 0), isolated);
+      const answer = await this.runEmbeddedOp(instance, lowered.op, undefined, site, lowered.env, (m) => {
+        cost = m.costUsd ?? 0;
+        sessionRef = (m as { sessionRef?: string }).sessionRef;
+      }, isolated);
       run.spent += cost;
       outcome = isPending(answer)
         ? { failure: { classification: "permanent", reason: "the call did not resolve" } }
         : "error" in answer
           ? { failure: answer.failure ?? { classification: "permanent", reason: answer.error } }
-          : { value: answer.value };
+          : { value: lowered.withSession === true ? withSessionOf(lowered, answer.value, sessionRef) : answer.value };
+      paired = lowered.withSession === true;
       this.emit({
         type: "script.call.settled",
         instanceId: instance.id,
@@ -4970,7 +4979,18 @@ export class WorkflowEngine {
       if (lowered.hasFailureValue) return lowered.failureValue;
       throw new ScriptCallError(outcome.failure);
     }
-    return answerOf(lowered, outcome.value);
+    return paired ? outcome.value : answerOf(lowered, outcome.value);
+  }
+
+  /**
+   * One `input()` from a script (SCRIPTS.md §17): the host's registered `input` function, dispatched
+   * and recorded like any call — so the run parks where the host's gate parks it, and a replay hands
+   * back the message the person sent rather than asking them again.
+   */
+  private async scriptInput(instance: Instance, run: ScriptRunState, options: InputOptions): Promise<unknown> {
+    const { label, ...args } = options;
+    const op = desugarOperation({ function: INPUT_FUNCTION, args: args as Record<string, JsonValue> }, instance.stateId);
+    return this.scriptDispatch(instance, run, { op, env: { ...(environmentOf(instance.def) ?? {}) }, unwrap: false, hasFailureValue: false, isolated: false, label: typeof label === "string" ? label : "input()" });
   }
 
   /**

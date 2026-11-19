@@ -508,11 +508,13 @@ describe("an expression's resolved value", () => {
   });
 
   it("REFUSES nothing, naming the expression so the wiring is findable", () => {
-    for (const value of [undefined, null]) {
-      const outcome = sessionFromExpr(at(".inputs.thread"), value);
-      expect(outcome).toHaveProperty("error");
-      expect((outcome as { error: string }).error).toContain(".inputs.thread");
-    }
+    const outcome = sessionFromExpr(at(".inputs.thread"), undefined);
+    expect(outcome).toHaveProperty("error");
+    expect((outcome as { error: string }).error).toContain(".inputs.thread");
+  });
+
+  it("reads a computed null as a fresh conversation, as a written one is — a program's conv before its first call", () => {
+    expect(sessionFromExpr(at(".inputs.thread"), null)).toEqual({ session: null });
   });
 
   it("REFUSES an empty id and an empty name, for the same reason", () => {

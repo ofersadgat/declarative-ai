@@ -794,3 +794,118 @@ export default async function f() { return ["a"].map((x) => stamp(x)); }`;
     expect(result.outputs).toEqual({ result: true });
   });
 });
+
+describe("a script as a program (SCRIPTS.md §17)", () => {
+  const CHAT = `
+import { llm, input } from "@declarative-ai/hw/script";
+export const meta = { name: "Chat" };
+export default async function chat(first: string): Promise<{ replies: string[]; positions: string[] }> {
+  let msg: { text: string } | null = { text: first };
+  let conv: { id: string } | null = null;
+  let replies: string[] = [];
+  let positions: string[] = [];
+  while (msg !== null) {
+    const turn = await llm<string>({ prompt: msg.text, session: conv, withSession: true });
+    conv = turn.session;
+    replies = [...replies, turn.value];
+    positions = [...positions, conv === null ? "" : conv.id];
+    const next = await input({ prompt: "next?" });
+    msg = next !== null && next.idle !== true ? { text: next.text } : null;
+  }
+  return { replies, positions };
+}
+`;
+
+  it("loops over input(), each call continuing the conversation where the last one ended", async () => {
+    const answers: Array<JsonValue> = [{ text: "second" }, { text: "third" }, null];
+    let n = 0;
+    const { result, calls, events } = await run(CHAT, { first: "first" }, () => ok(`reply ${++n}`), {
+      functions: { input: () => answers.shift() ?? null },
+    });
+    expect(result.outcome).toBe("success");
+    // Each turn is a PROMPT STATE, journaled with the position it ended at — so a reader that finds a
+    // conversation by its states' sessions (JaiRA's conversation view) finds this one.
+    const turns = events.filter((e): e is Extract<EngineEvent, { type: "operation.completed" }> => e.type === "operation.completed" && e.op === "prompt");
+    expect(turns.map((e) => (e.metrics as { sessionRef?: string }).sessionRef)).toHaveLength(3);
+    const outputs = result.outputs as { replies: string[]; positions: string[] };
+    expect(outputs.replies).toEqual(["reply 1", "reply 2", "reply 3"]);
+    expect(calls.map(textOf)).toEqual(["first", "second", "third"]);
+    // One stream, three positions along it: the second call continued where the first ended, and so on.
+    const stream = (ref: string) => ref.slice(0, ref.lastIndexOf("@"));
+    expect(outputs.positions.every((p) => p.includes("@"))).toBe(true);
+    expect(new Set(outputs.positions.map(stream)).size).toBe(1);
+    expect(outputs.positions.map((p) => Number(p.slice(p.lastIndexOf("@") + 1)))).toEqual([1, 2, 3]);
+  });
+
+  it("asks the model for T, not for the pair — withSession changes only what the script is handed", async () => {
+    const source = `
+import { llm } from "@declarative-ai/hw/script";
+export const meta = { name: "Typed" };
+export default async function typed(): Promise<{ n: number; has: boolean }> {
+  const r = await llm<{ n: number }>({ prompt: "count", withSession: true });
+  return { n: r.value.n, has: r.session !== null };
+}
+`;
+    const { result, calls } = await run(source, {}, () => ok({ n: 3 }));
+    expect(result.outcome).toBe("success");
+    expect(result.outputs).toEqual({ n: 3, has: true });
+    const sent = JSON.stringify(calls[0]!.op.output);
+    expect(sent).toContain('"n"');
+    expect(sent).not.toContain('"session"');
+  });
+
+  it("refuses a withSession the compiler cannot read, since it changes what the call returns", async () => {
+    const source = `
+import { llm } from "@declarative-ai/hw/script";
+export const meta = { name: "Odd" };
+export default async function odd(flag: boolean): Promise<string> {
+  const r = await llm({ prompt: "x", withSession: flag });
+  return String(r);
+}
+`;
+    await expect(compile(source)).rejects.toThrow(/withSession/);
+  });
+
+  it("parks input() at the host's input function, and fails plainly where the host registered none", async () => {
+    const { result } = await run(CHAT, { first: "first" }, () => ok("reply"));
+    expect(result.outcome).toBe("error");
+    expect(JSON.stringify(result)).toMatch(/no function 'input' is registered/);
+  });
+});
+
+describe("the standalone host (SCRIPTS.md §17)", () => {
+  it("serves a hook called outside any run, and the engine's host still wins inside one", async () => {
+    const hooks = await import("../src/scriptHooks.js");
+    const seen: string[] = [];
+    const standalone = {
+      llm: async (call: { prompt: string }) => (seen.push(`llm:${call.prompt}`), "from standalone"),
+      agent: async () => null,
+      input: async () => ({ text: "typed" }),
+      workflow: async () => null,
+      call: async () => null,
+      recorded: async (_n: string, fn: () => unknown) => fn(),
+      phase: () => undefined,
+      log: () => undefined,
+      now: () => 0,
+      random: () => 0,
+      budget: { total: null, spent: () => 0, remaining: () => Number.POSITIVE_INFINITY },
+    };
+    const previous = hooks.installStandaloneHost(standalone as never);
+    try {
+      expect(await (hooks.llm as unknown as (p: string) => Promise<unknown>)("hello")).toBe("from standalone");
+      expect(await hooks.input()).toEqual({ text: "typed" });
+      expect(seen).toEqual(["llm:hello"]);
+      // Inside a run the engine's host answers, whatever is installed outside.
+      const { result } = await run(`
+import { llm } from "@declarative-ai/hw/script";
+export const meta = { name: "Inside" };
+export default async function inside(): Promise<string> { return await llm("inside"); }
+`, {}, () => ok("from the engine"));
+      expect(result.outputs).toEqual({ result: "from the engine" });
+      expect(seen).toEqual(["llm:hello"]);
+    } finally {
+      hooks.installStandaloneHost(previous);
+    }
+    await expect((async () => (hooks.llm as unknown as (p: string) => Promise<unknown>)("orphan"))()).rejects.toThrow(/standalone host/);
+  });
+});

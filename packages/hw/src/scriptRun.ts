@@ -125,10 +125,12 @@ export interface LoweredCall {
   phase?: string;
   /** The call asked for a private workspace — `agent({ isolation: "worktree" })`. */
   isolated: boolean;
+  /** The script is handed `{ value, session }` — `llm({ withSession: true })` (SCRIPTS.md §9). */
+  withSession?: boolean;
 }
 
 /** Fields of an `llm()` call that are not operation knobs. */
-const CALL_OWN = new Set(["prompt", "system", "config", "output", "failureValue", "label", "phase", "template", "inputs"]);
+const CALL_OWN = new Set(["prompt", "system", "config", "output", "failureValue", "label", "phase", "template", "inputs", "withSession"]);
 
 /**
  * Lower one `llm()` call (SCRIPTS.md §9) over the defaults its state resolves in.
@@ -196,6 +198,7 @@ export function lowerLlmCall(stateId: string, defaults: OperationFields | undefi
     ...(typeof call.label === "string" ? { label: call.label } : {}),
     ...(typeof call.phase === "string" ? { phase: call.phase } : {}),
     isolated,
+    ...(call.withSession === true ? { withSession: true } : {}),
   };
 }
 
@@ -297,6 +300,15 @@ export class ScriptCallError extends Error {
 export function answerOf(lowered: LoweredCall, value: unknown): unknown {
   if (!lowered.unwrap) return value;
   return value !== null && typeof value === "object" ? (value as { value?: unknown }).value : value;
+}
+
+/**
+ * A `withSession` call's answer: the value as the script reads it, and the position its conversation
+ * ended at — `<session>@<seq>`, the ref a next call continues from. What is RECORDED is this pair, so a
+ * replay hands back the same position the first run did.
+ */
+export function withSessionOf(lowered: LoweredCall, value: unknown, sessionRef: string | undefined): { value: unknown; session: { id: string } | null } {
+  return { value: answerOf(lowered, value), session: sessionRef !== undefined ? { id: sessionRef } : null };
 }
 
 export type { JsonValue };

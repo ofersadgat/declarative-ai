@@ -25,6 +25,10 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./script": {
+      "types": "./dist/script.d.ts",
+      "default": "./dist/script.js"
+    },
     "./package.json": "./package.json"
   },
   "main": "./dist/index.js",

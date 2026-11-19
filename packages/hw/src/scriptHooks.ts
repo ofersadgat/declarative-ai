@@ -1,6 +1,6 @@
 /**
- * The hooks a workflow script calls (SCRIPTS.md §6, §9) — `llm`, `agent`, `parallel`, `pipeline`,
- * `phase`, `log`, `workflow`, `now`, `random`, `budget`.
+ * The hooks a workflow script calls (SCRIPTS.md §6, §9) — `llm`, `agent`, `input`, `parallel`,
+ * `pipeline`, `phase`, `log`, `workflow`, `now`, `random`, `budget`.
  *
  * ## One module, reached two ways
  *
@@ -20,8 +20,17 @@
  *
  * `parallel` and `pipeline` are plain JavaScript over promises and need no host — they are Claude's
  * semantics exactly, and nothing about them is recorded: only the calls inside them are.
+ *
+ * ## Outside any engine: the standalone host
+ *
+ * A script is also a plain program (SCRIPTS.md §17): `@declarative-ai/hw/script` is an export of this
+ * package, so `node my-workflow.ts` resolves it, and a call made with no engine's host in scope goes
+ * to the STANDALONE host, when one is installed ({@link installStandaloneHost} —
+ * `@declarative-ai/script` installs one that calls models and agents directly). The engine's host
+ * always wins inside a run, so one file runs durably under the engine and non-durably under `node`.
  */
 import type { JsonSchema } from "@declarative-ai/json";
+import type { SessionRef } from "./session.js";
 
 /** The specifier a script or function module imports the hooks from. */
 export const HOOK_MODULE = "@declarative-ai/hw/script";
@@ -44,6 +53,12 @@ export interface LlmCall {
   /** A display label for the call's record. Not part of its identity. */
   label?: string;
   /**
+   * Hand back where the call's conversation ENDED as well as its value: the call resolves to
+   * `{ value, session }`, and `session` is the ref the next call continues from (`session: turn.session`)
+   * or forks (SCRIPTS.md §9). Not part of the operation — it changes only what the script is handed.
+   */
+  withSession?: boolean;
+  /**
    * A prompt IMPORT's template, rendered with `inputs` — `{{.inputs.x}}` holes and all — where a plain
    * `prompt` is text (SCRIPTS.md §10).
    */
@@ -61,12 +76,51 @@ export interface AgentOptions extends Partial<Omit<LlmCall, "prompt">> {
   phase?: string;
 }
 
+/** What `llm({ …, withSession: true })` resolves to. */
+export interface WithSession<T> {
+  value: T;
+  /** Where the call's conversation ended; `null` when the executor kept no conversation. */
+  session: SessionRef | null;
+}
+
+/** What `input()` takes (SCRIPTS.md §17). */
+export interface InputOptions {
+  /** What the person is being asked — shown where they answer. */
+  prompt?: string;
+  /**
+   * How long to wait for an answer before resolving `{ idle: true }` instead: seconds, or a string
+   * like `"4h"`, `"30m"`. Absent ⇒ wait indefinitely.
+   */
+  idle?: number | string;
+  /** A display label for the call's record. */
+  label?: string;
+  [option: string]: unknown;
+}
+
+/**
+ * What `input()` resolves to: the person's message — its text, any files, and the settings they
+ * chose for it — or `{ idle: true }` when `idle` elapsed, or `null` when they ended the run.
+ */
+export interface InputMessage {
+  text: string;
+  files?: unknown[];
+  /** The per-message settings the person chose (model, reasoning, tools, …): the program decides. */
+  settings?: Record<string, unknown>;
+  idle?: false;
+}
+export type InputAnswer = InputMessage | { idle: true } | null;
+
+/** The function a durable `input()` dispatches: a host registers the gate under this name. */
+export const INPUT_FUNCTION = "input";
+
 /** What one instance's script run can do — implemented by the engine, per instance. */
 export interface ScriptHost {
   /** One `llm()` call: dispatched (or replayed) at its own site. Throws on failure. */
   llm(call: LlmCall, schema: JsonSchema | undefined): Promise<unknown>;
   /** One `agent()` call — `llm()` with agent defaults, `null` on failure. */
   agent(prompt: string, options: AgentOptions, schema: JsonSchema | undefined): Promise<unknown>;
+  /** One `input()`: wait for a person's next message (SCRIPTS.md §17). */
+  input?(options: InputOptions): Promise<unknown>;
   /** A called state (SCRIPTS.md §10). */
   workflow(ref: unknown, args: unknown): Promise<unknown>;
   /** A registered function a script imported from `$REGISTRY` (SCRIPTS.md §10). */
@@ -109,10 +163,36 @@ export function runWithScriptHost<T>(host: ScriptHost, fn: () => T): T {
   return store.run(host, fn);
 }
 
+/**
+ * The standalone host lives on `globalThis`, under a registered symbol, so every copy of this module
+ * a process loads (the built one, a source one a test imports) sees the same host.
+ */
+const STANDALONE = Symbol.for("@declarative-ai/hw/script#standalone");
+type WithStandalone = { [STANDALONE]?: ScriptHost };
+
+/**
+ * Install the host a hook uses when no engine's host is in scope — what makes a script a plain program
+ * (`node my-workflow.ts`). `undefined` removes it. Returns the host it replaced.
+ */
+export function installStandaloneHost(standalone: ScriptHost | undefined): ScriptHost | undefined {
+  const g = globalThis as WithStandalone;
+  const previous = g[STANDALONE];
+  if (standalone === undefined) delete g[STANDALONE];
+  else g[STANDALONE] = standalone;
+  return previous;
+}
+
+/** The standalone host, if one is installed. */
+export function standaloneHost(): ScriptHost | undefined {
+  return (globalThis as WithStandalone)[STANDALONE];
+}
+
 function host(hook: string): ScriptHost {
-  const current = store?.getStore();
+  const current = store?.getStore() ?? standaloneHost();
   if (current === undefined) {
-    throw new Error(`${hook}() was called outside a workflow run — it can only run inside a script or a function a workflow called`);
+    throw new Error(
+      `${hook}() was called outside a workflow run — it can only run inside a script or a function a workflow called, or under a standalone host (run the file with dai-script, or install one with installStandaloneHost)`,
+    );
   }
   return current;
 }
@@ -180,6 +260,16 @@ export async function pipeline(items: readonly unknown[], ...stages: Array<(prev
 /** Claude's item cap for `parallel`/`pipeline` — an explicit error, never a silent truncation. */
 const MAX_ITEMS = 4096;
 
+/**
+ * Wait for the person's next message (SCRIPTS.md §17). Under the engine it is a gate the run parks
+ * at; under the standalone host it reads the terminal. Resolves `null` when the person ends the run.
+ */
+export function input(options?: InputOptions | string): Promise<unknown> {
+  const h = host("input");
+  if (h.input === undefined) return Promise.reject(new Error("this host cannot ask a person for input"));
+  return h.input(typeof options === "string" ? { prompt: options } : (options ?? {}));
+}
+
 export function phase(title: string): void {
   host("phase").phase(String(title));
 }
@@ -217,6 +307,7 @@ export const budget = {
 export const hookModule: Readonly<Record<string, unknown>> = Object.freeze({
   llm,
   agent,
+  input,
   parallel,
   pipeline,
   phase,
@@ -250,8 +341,12 @@ interface HwLlmCall {
   conversation?: unknown;
   failureValue?: unknown;
   label?: string;
+  withSession?: boolean;
   [knob: string]: unknown;
 }
+interface HwSessionRef { id: string }
+interface HwInputOptions { prompt?: string; idle?: number | string; label?: string; [option: string]: unknown }
+interface HwMessage { text: string; files?: unknown[]; settings?: Record<string, unknown>; idle?: false }
 interface HwAgentOptions extends Partial<Omit<HwLlmCall, "prompt">> {
   schema?: object;
   effort?: string;
@@ -263,9 +358,12 @@ interface HwBudget { readonly total: number | null; spent(): number; remaining()
 `;
 
 const HOOK_SIGNATURES = (prefix: string): string => `
+${prefix} function llm<T = string>(call: HwLlmCall & { withSession: true }): Promise<{ value: T; session: HwSessionRef | null }>;
+${prefix} function llm<T = string>(prompt: string, call: Partial<HwLlmCall> & { withSession: true }): Promise<{ value: T; session: HwSessionRef | null }>;
 ${prefix} function llm<T = string>(call: HwLlmCall): Promise<T>;
 ${prefix} function llm<T = string>(prompt: string, call?: Partial<HwLlmCall>): Promise<T>;
 ${prefix} function agent<T = string>(prompt: string, options?: HwAgentOptions): Promise<T | null>;
+${prefix} function input(options?: HwInputOptions | string): Promise<HwMessage | { idle: true } | null>;
 ${prefix} function parallel<T>(thunks: ReadonlyArray<() => Promise<T> | T>): Promise<Array<T | null>>;
 ${prefix} function pipeline(items: readonly any[], ...stages: Array<(prev: any, item: any, index: number) => any>): Promise<any[]>;
 ${prefix} function phase(title: string): void;

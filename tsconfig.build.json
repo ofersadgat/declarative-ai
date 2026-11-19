@@ -32,6 +32,9 @@
       "path": "./packages/promptop/tsconfig.build.json"
     },
     {
+      "path": "./packages/script/tsconfig.build.json"
+    },
+    {
       "path": "./packages/tools/tsconfig.build.json"
     },
     {
