@@ -13,6 +13,10 @@
  *  - `input()` reads the terminal, and resolves `null` at end of input;
  *  - `workflow()` imports the named script and calls it — an imported workflow is a function call here;
  *  - `phase()` and `log()` write to stderr, `now()`/`random()` are the clock and the coin.
+ *
+ * Handed a {@link ScriptReport} (`report.ts`), it also tells an engine what it does as it does it — each
+ * call and what it said, what a phase, a log line or an `input()` was — and asks it about each tool an
+ * agent wants to use: the run is then visible and gated there, and still runs here.
  */
 import { createInterface } from "node:readline";
 import { createHash } from "node:crypto";
@@ -24,6 +28,7 @@ import type { JsonSchema, JsonValue } from "@declarative-ai/json";
 import { createModelRouter, executeLlmCall, type ModelRouter } from "@declarative-ai/llm";
 import type { AgentQuery, AgentQueryOptions } from "@declarative-ai/agents-api";
 import { createCliAgentQuery } from "@declarative-ai/agents-cli";
+import type { ScriptReport } from "./report.js";
 
 /** One turn of a conversation held in memory. */
 export interface StandaloneTurn {
@@ -55,6 +60,11 @@ export interface StandaloneOptions {
    * as ES modules whatever the folder's `package.json` says.
    */
   importer?: (url: string) => Promise<unknown>;
+  /**
+   * Where the run is being reported (SCRIPTS.md §17.4): each call, what it said, and what a phase, a log
+   * line or an `input()` was, go there as they happen, and an agent's tool uses are asked of it.
+   */
+  report?: ScriptReport;
 }
 
 /** Conversations held in memory, addressed the way the engine's are: `<stream>@<seq>`. */
@@ -113,7 +123,14 @@ function routerExecute(router: () => ModelRouter): NonNullable<StandaloneOptions
 }
 
 /** A failed call, thrown into the script with the reason it failed. */
-export class StandaloneCallError extends Error {}
+export class StandaloneCallError extends Error {
+  /** A failed `withSession` call's conversation: where it ended, with the asked turn in it (SCRIPTS.md §9). */
+  readonly session?: { id: string };
+  constructor(message: string, session?: string) {
+    super(message);
+    if (session !== undefined) this.session = { id: session };
+  }
+}
 
 /**
  * A loaded script's default export — through a CommonJS interop wrapper too (`default.default`), which
@@ -208,6 +225,11 @@ export function createStandaloneHost(options: StandaloneOptions = {}): ScriptHos
   /** The version of each script `workflow()` last ran, by file — to say when a newer one takes over. */
   const versions = new Map<string, string>();
   let spent = 0;
+  const report = options.report;
+  let calls = 0;
+  /** What a session a call continues is called, as the script holds it. */
+  const refOf = (session: unknown): string | null =>
+    session !== null && typeof session === "object" && typeof (session as { id?: unknown }).id === "string" ? (session as { id: string }).id : null;
 
   const llm = async (call: LlmCall, typed: JsonSchema | undefined): Promise<unknown> => {
     const config = (call.config ?? {}) as Record<string, unknown>;
@@ -228,16 +250,35 @@ export function createStandaloneHost(options: StandaloneOptions = {}): ScriptHos
       messages: [...from.turns, { role: "user" as const, content: prompt }],
       ...(sent !== undefined ? { schema: sent } : {}),
     };
+    const callId = `c${++calls}`;
+    report?.callStarted({
+      id: callId,
+      kind: "llm",
+      model,
+      ...(typeof call.system === "string" ? { system: call.system } : {}),
+      prompt,
+      session: refOf(call.session),
+      ...(sent !== undefined ? { schema: sent } : {}),
+    });
     const result = await execute(def);
     spent += result.costUsd ?? 0;
     if ("error" in result) {
+      // The asked turn stays in the conversation, as a failed call's record does in the engine's.
+      const failedAt = call.withSession === true ? conversations.append(from, [...from.turns, { role: "user", content: prompt }]) : undefined;
+      await report?.callSettled(callId, { error: result.error, ...(failedAt !== undefined ? { session: failedAt, messages: [{ role: "user", content: prompt }] } : {}), ...(result.costUsd !== undefined ? { costUsd: result.costUsd } : {}) });
       if ("failureValue" in call) return call.failureValue;
-      throw new StandaloneCallError(result.error);
+      throw new StandaloneCallError(result.error, failedAt);
     }
     const raw = result.value;
     const value = wrapped && raw !== null && typeof raw === "object" ? (raw as { value?: unknown }).value : raw;
     const said = typeof raw === "string" ? raw : JSON.stringify(raw);
     const id = conversations.append(from, [...from.turns, { role: "user", content: prompt }, { role: "assistant", content: said }]);
+    await report?.callSettled(callId, {
+      value: raw,
+      session: id,
+      messages: [{ role: "user", content: prompt }, { role: "assistant", content: said }],
+      ...(result.costUsd !== undefined ? { costUsd: result.costUsd } : {}),
+    });
     return call.withSession === true ? { value, session: { id } } : value;
   };
 
@@ -248,12 +289,31 @@ export function createStandaloneHost(options: StandaloneOptions = {}): ScriptHos
     const from = conversations.start(opts.session);
     const configured = (opts.config as { model?: unknown } | undefined)?.model;
     const model = agentModel(typeof opts.model === "string" ? opts.model : typeof configured === "string" ? configured : undefined);
+    const callId = `c${++calls}`;
+    report?.callStarted({
+      id: callId,
+      kind: "agent",
+      ...(model !== undefined ? { model } : {}),
+      prompt,
+      session: refOf(opts.session),
+      ...(schema !== undefined ? { schema } : {}),
+      cwd,
+    });
     const query: AgentQueryOptions = {
       prompt,
       cwd,
       ...(model !== undefined ? { model } : {}),
       ...(schema !== undefined && JSON.stringify(schema) !== '{"type":"string"}' ? { schema } : {}),
       ...(from.agentSession !== undefined ? { resume: from.agentSession } : {}),
+      // Reported: each tool the agent wants is asked of the engine the run reports to (gated there).
+      ...(report !== undefined
+        ? {
+            canUseTool: async (req: { toolName: string; input: unknown }) => {
+              const answer = await report.approve(callId, { toolName: req.toolName, input: req.input });
+              return answer.allow ? { allow: true as const } : { allow: false as const, ...(answer.reason !== undefined ? { reason: answer.reason } : {}) };
+            },
+          }
+        : {}),
     } as AgentQueryOptions;
     let answer: unknown = null;
     let failed: string | undefined;
@@ -275,10 +335,17 @@ export function createStandaloneHost(options: StandaloneOptions = {}): ScriptHos
     // Claude's null contract: an agent() that failed resolves to its failureValue, `null` by default.
     if (failed !== undefined) {
       write(`agent(): ${failed}`);
+      await report?.callSettled(callId, { error: failed, ...(providerSession !== undefined ? { providerSession } : {}) });
       return "failureValue" in opts ? opts.failureValue : null;
     }
     const said = typeof answer === "string" ? answer : JSON.stringify(answer);
     const id = conversations.append(from, [...from.turns, { role: "user", content: prompt }, { role: "assistant", content: said }], providerSession);
+    await report?.callSettled(callId, {
+      value: answer as JsonValue,
+      session: id,
+      messages: [{ role: "user", content: prompt }, { role: "assistant", content: said }],
+      ...(providerSession !== undefined ? { providerSession } : {}),
+    });
     return opts.withSession === true ? { value: answer, session: { id } } : answer;
   };
 
@@ -287,6 +354,7 @@ export function createStandaloneHost(options: StandaloneOptions = {}): ScriptHos
     const line = read(opts.prompt ?? ">");
     const ms = idleMs(opts.idle);
     const answer = ms === undefined ? await line : await Promise.race([line, new Promise<"idle">((r) => setTimeout(() => r("idle"), ms).unref?.())]);
+    report?.note("input", { prompt: opts.prompt ?? ">", answer: answer === "idle" ? { idle: true } : answer === null ? null : { text: answer } });
     if (answer === "idle") return { idle: true };
     if (answer === null) return null;
     return { text: answer };
@@ -307,6 +375,7 @@ export function createStandaloneHost(options: StandaloneOptions = {}): ScriptHos
     const was = versions.get(file);
     if (was !== undefined && was !== version) write(`▸ ${named}: running a newer version (${version})`);
     versions.set(file, version);
+    report?.note("workflow", { script: named, file, version, ...(was !== undefined && was !== version ? { newer: true } : {}) });
     const main = defaultExportOf(await importer(`${pathToFileURL(file).href}?v=${version}`));
     if (typeof main !== "function") throw new StandaloneCallError(`workflow('${named}'): ${file} has no default export to call`);
     const fn = main as (...a: unknown[]) => unknown;
@@ -329,8 +398,14 @@ export function createStandaloneHost(options: StandaloneOptions = {}): ScriptHos
       throw new StandaloneCallError(`'${ref}' is a registered function — it exists only where an engine registered it; run this script durably to call it`);
     },
     recorded: async (_name, fn) => fn(),
-    phase: (title) => write(`▸ ${title}`),
-    log: (message) => write(message),
+    phase: (title) => {
+      write(`▸ ${title}`);
+      report?.note("phase", { title });
+    },
+    log: (message) => {
+      write(message);
+      report?.note("log", { message });
+    },
     now: () => Date.now(),
     random: () => Math.random(),
     budget: {

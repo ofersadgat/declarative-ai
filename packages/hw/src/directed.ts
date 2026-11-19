@@ -27,7 +27,11 @@
 import type { ResolvedValue } from "@declarative-ai/exec";
 
 /** Who asked for a directed transition: a person directly, or a control conversation on their behalf. */
-export type TransitionAsker = "person" | "control";
+/**
+ * Who asked for a directed transition: a person, a control conversation, or — for the way down a run
+ * hands to a newer version of itself at a boundary (JaiRA decision 0029 §3) — the VERSION it switched to.
+ */
+export type TransitionAsker = "person" | "control" | "version";
 
 export interface DirectedTransition {
   /**
@@ -60,6 +64,13 @@ export interface DirectedTransition {
    * entered on the way are handed nothing but what a standing rule wires.
    */
   inputs?: Record<string, ResolvedValue>;
+  /**
+   * What each composite ENTERED ON THE WAY DOWN is handed, over its mount's wiring — `along[0]` for `to`,
+   * then one per step of {@link path} but the last. Absent: those composites take only what a standing
+   * rule wires, as a person's move hands them. A run handed to a newer version of itself part way down
+   * (JaiRA decision 0029 §3) hands each the inputs the old one had.
+   */
+  along?: ReadonlyArray<Record<string, ResolvedValue>>;
   by: TransitionAsker;
   /**
    * Interrupt instead of wait. Absent/false ⇒ the move is HELD while a sync child holds the cursor and
@@ -76,6 +87,8 @@ export interface DirectedTransition {
 export interface DirectedDescent {
   path: readonly string[];
   inputs?: Record<string, ResolvedValue>;
+  /** What each composite still to be entered on the way is handed — see {@link DirectedTransition.along}. */
+  along?: ReadonlyArray<Record<string, ResolvedValue>>;
   by: TransitionAsker;
   skip?: boolean;
 }
@@ -88,6 +101,7 @@ export function nextStepOf(instanceId: string, descent: DirectedDescent): Direct
     to: to!,
     ...(rest.length > 0 ? { path: rest } : {}),
     ...(descent.inputs !== undefined ? { inputs: descent.inputs } : {}),
+    ...(descent.along !== undefined && descent.along.length > 0 ? { along: descent.along } : {}),
     by: descent.by,
     ...(descent.skip === true ? { skip: true } : {}),
   };
@@ -99,6 +113,8 @@ export function descentOf(move: DirectedTransition): DirectedDescent | undefined
   return {
     path: [...move.path],
     ...(move.inputs !== undefined ? { inputs: move.inputs } : {}),
+    // The composite this move enters takes the first; the rest go on down with the way.
+    ...(move.along !== undefined && move.along.length > 1 ? { along: move.along.slice(1) } : {}),
     by: move.by,
     ...(move.skip === true ? { skip: true } : {}),
   };
@@ -117,6 +133,11 @@ export type DirectedOutcome = { status: "queued" | "held" | "taking" } | { statu
 /** The half of the engine the port speaks to. */
 export interface DirectedTarget {
   direct(move: DirectedTransition): DirectedOutcome;
+  /**
+   * Take a newer version of the run's root now, at the `input()` it waits at (JaiRA decision 0029 §3);
+   * resolves whether it did. Absent on a target that runs no versions.
+   */
+  takeNewerVersion?(): Promise<boolean>;
 }
 
 /**
@@ -135,6 +156,17 @@ export class DirectedTransitions {
     if (this.target !== undefined) return this.target.direct(move);
     this.queue.push(move);
     return { status: "queued" };
+  }
+
+  /**
+   * Ask the run to take a newer version of itself NOW, at the `input()` it waits at (JaiRA decision 0029
+   * §3), rather than at the next boundary it enters — so a message answers the improved code even when
+   * the improvement landed while the run waited. The waiting `input()` is stepped past and asked again
+   * by the newer version: answer THAT one. `false` when nothing is attached, nothing newer fits, or the
+   * run is not waiting at an `input()`; the waiting one is then still the one to answer.
+   */
+  takeNewerVersion(): Promise<boolean> {
+    return this.target?.takeNewerVersion?.() ?? Promise.resolve(false);
   }
 
   /** Moves handed over and not yet claimed by any engine. */

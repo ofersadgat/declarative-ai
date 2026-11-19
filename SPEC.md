@@ -221,6 +221,15 @@ child: it is eligible ONLY in the round that child's completion triggered, so a
 child that finished earlier no longer diverts anything and an unconditional `to`
 means "after this child, go here" rather than "from now on, always go here".
 
+A rule on the state's own list can answer the state's OWN operation the same way: `"after":
+"operation"` makes it eligible only in the round that operation's completion triggered. That matters
+for a state with both an operation and children — a rule that enters a child after the operation,
+guarded on the operation's output, stays true; on the plain list, every later round that found nothing
+else to do would enter that child again. Only the state's own list may say it, only a state with an
+operation, and never a standing rule. A compiled script's composites write the rules after their own
+code this way (SCRIPTS.md §6). A run that stopped between the operation and its first round still owes
+that round when it is loaded: the operation completed, no transition taken, no child entered.
+
 The guarantee is **once per completion**: every child that finishes has its list
 evaluated exactly once, in the first evaluation round that STARTS after it
 finished. A round fixes the set of children it answers for before it runs any

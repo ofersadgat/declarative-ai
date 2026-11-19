@@ -216,8 +216,15 @@ interface CallSite {
   op?: Record<string, unknown>;
   /** `prompt`: the result is `{ value }`, a non-object `T` wrapped for the wire. */
   unwrap?: boolean;
-  /** `prompt`: the script is handed `{ value, session }` — `llm({ withSession: true })` (SCRIPTS.md §9). */
+  /** The script is handed `{ value, session }` — `llm({ withSession: true })` (SCRIPTS.md §9) — and a `catch` the failed call's position. */
   withSession?: boolean;
+  /**
+   * The call state's KEY, when it is not `call_<id>`: an `input()` is `input` (then `input_2`, …, in the
+   * order they are written) so that the same wait has the same state in every version of the script —
+   * adding a call elsewhere renumbers the others, and a running program switches to a newer version at
+   * a state the two versions share (SCRIPTS.md §17.1).
+   */
+  key?: string;
   /** `script`: the call, as code over `$v._call`. */
   script?: string;
   /**
@@ -296,7 +303,7 @@ interface Hoisted {
 }
 
 /** Names that are the continuation's, never a variable's. */
-const CONTROL_NAMES: ReadonlySet<string> = new Set([...Object.values(SCRIPT_CONTROL), "_call", "_result", "_error", "_items"]);
+const CONTROL_NAMES: ReadonlySet<string> = new Set([...Object.values(SCRIPT_CONTROL), "_call", "_result", "_error", "_error_session", "_items"]);
 
 /** A fan-out's items as a state hands them on — what the element mount's `each` wire reads, and it reads a list. */
 const ITEMS_OUTPUT = "_items";
@@ -306,6 +313,12 @@ const ITEMS_SCHEMA = { type: "array", items: {} } as unknown as JsonSchema;
 const CALL_INPUT = "_call";
 const RESULT_INPUT = "_result";
 const ERROR_INPUT = "_error";
+/**
+ * Where a failed `llm({ withSession: true })` call's conversation ended (SCRIPTS.md §9): the position
+ * its record was written at, read where a successful call's is (`usage.sessionRef`) — so a `catch` can
+ * go on AFTER what the failed call said, rather than over it.
+ */
+const ERROR_SESSION_INPUT = "_error_session";
 
 class Compiler {
   readonly ts: typeof TS;
@@ -585,19 +598,32 @@ class Compiler {
       }
       return { inputNames: names, inputSchemas };
     }
-    // A script: its exported function's parameters, or Claude's `args`.
-    const sf = this.program.getSourceFile(file);
-    const moduleSymbol = sf !== undefined ? this.checker.getSymbolAtLocation(sf) : undefined;
-    const exported = moduleSymbol !== undefined ? this.checker.getExportsOfModule(moduleSymbol) : [];
+    // A script: its exported function's parameters, or Claude's `args`. One this script imports is in
+    // its program; one it only NAMES — `workflow("helper", …)` — is read in a program of its own, so its
+    // signature is the one it declares rather than an `args` it never took.
+    let sf = this.program.getSourceFile(file);
+    let checker = this.checker;
+    if (sf === undefined && /\.(ts|js)$/i.test(file)) {
+      const own = createScriptProgram(this.context, file, {
+        vfs: this.options.vfs,
+        requirePath: this.options.requirePath,
+        ...(this.options.roots !== undefined ? { roots: this.options.roots } : {}),
+        compilerOptions: { allowJs: true, checkJs: false, ...this.options.compilerOptions },
+      });
+      sf = own.getSourceFile(file);
+      checker = own.getTypeChecker();
+    }
+    const moduleSymbol = sf !== undefined ? checker.getSymbolAtLocation(sf) : undefined;
+    const exported = moduleSymbol !== undefined ? checker.getExportsOfModule(moduleSymbol) : [];
     const fn = exported.find((e) => e.getName() === "default") ?? exported.find((e) => e.getName() !== "meta");
-    const type = fn !== undefined && sf !== undefined ? this.checker.getTypeOfSymbolAtLocation(fn, sf) : undefined;
+    const type = fn !== undefined && sf !== undefined ? checker.getTypeOfSymbolAtLocation(fn, sf) : undefined;
     const signature = type?.getCallSignatures()[0];
     if (signature === undefined) return { inputNames: ["args"], argsInput: true, whole: "result" };
-    const returned = awaited(this.ts, this.checker, signature.getReturnType());
-    const record = (returned.flags & this.ts.TypeFlags.Object) !== 0 && this.checker.getPropertiesOfType(returned).length > 0 && !this.checker.isArrayType(returned);
+    const returned = awaited(this.ts, checker, signature.getReturnType());
+    const record = (returned.flags & this.ts.TypeFlags.Object) !== 0 && checker.getPropertiesOfType(returned).length > 0 && !checker.isArrayType(returned);
     const inputSchemas: Record<string, JsonSchema> = {};
     try {
-      for (const p of readSignature(this.ts, this.checker, sf!, signature, file).parameters) if (Object.keys(p.schema).length > 0) inputSchemas[p.name] = p.schema;
+      for (const p of readSignature(this.ts, checker, sf!, signature, file).parameters) if (Object.keys(p.schema).length > 0) inputSchemas[p.name] = p.schema;
     } catch {
       /* an unreadable signature types nothing, which the wire then asserts */
     }
@@ -1360,13 +1386,13 @@ class Compiler {
       // A real prompt state where its options can be read — so the call is a turn in its conversation
       // the way an authored one is, journaled with the position it ended at — else code, paired by the host.
       const plan = this.promptPlan(args.values, typed, call, pre, true);
-      partial = plan ?? { kind: "script", label: this.labelOf(args.values, "llm"), call: array, script: `$rt.llm${withOutput(typed)}(...$v._call.args)`, resultSchema: withSessionSchema(typed ?? ({ type: "string" } as JsonSchema)) };
+      partial = plan ?? { kind: "script", label: this.labelOf(args.values, "llm"), call: array, script: `$rt.llm${withOutput(typed)}(...$v._call.args)`, resultSchema: withSessionSchema(typed ?? ({ type: "string" } as JsonSchema)), withSession: true };
     } else if (hook === "llm") {
       const plan = this.promptPlan(args.values, typed, call, pre);
       partial = plan ?? { kind: "script", label: this.labelOf(args.values, "llm"), call: array, script: `$rt.llm${withOutput(typed)}(...$v._call.args)`, resultSchema: typed ?? ({ type: "string" } as JsonSchema) };
     } else if (hook === "input") {
       // A person's message, `{ idle: true }`, or `null` when they end the run: any of the three crosses.
-      partial = { kind: "script", label: this.labelOf(args.values, "input"), call: array, script: `$rt.input(...$v._call.args)`, resultSchema: {} as JsonSchema };
+      partial = { kind: "script", label: this.labelOf(args.values, "input"), call: array, script: `$rt.input(...$v._call.args)`, resultSchema: {} as JsonSchema, key: "input" };
     } else if (hook === "agent") {
       const schema = typed ?? this.optionSchema(args.values[1]);
       partial = { kind: "script", label: this.labelOf(args.values, "agent"), call: array, script: `$rt.agent${withOutput(typed)}(...$v._call.args)`, ...(schema !== undefined ? { resultSchema: schema } : {}) };
@@ -1399,7 +1425,12 @@ class Compiler {
 
   private addSite(node: TS.Node, partial: Omit<CallSite, "id" | "target" | "node">): CallSite {
     const target = this.syntheticVar("r", partial.resultSchema);
-    const site: CallSite = { id: this.sites.length, target: target.name, node, ...partial };
+    let key = partial.key;
+    if (key === "input") {
+      const before = this.sites.filter((s) => s.key !== undefined && /^input(_\d+)?$/.test(s.key)).length;
+      key = before === 0 ? "input" : `input_${before + 1}`;
+    }
+    const site: CallSite = { id: this.sites.length, target: target.name, node, ...partial, ...(key !== undefined ? { key } : {}) };
     this.sites.push(site);
     return site;
   }
@@ -2866,7 +2897,7 @@ class MachineBuilder {
       for (const region of this.sets.get(block.id) ?? []) {
         const composite = this.composites.get(region)!;
         const line = this.c.lineOf(site.node);
-        if (site.kind === "prompt" || site.kind === "script") this.node(composite, `call_${site.id}`, "call", [block.term.to], site.label, line, site);
+        if (site.kind === "prompt" || site.kind === "script") this.node(composite, callKeyOf(site), "call", [block.term.to], site.label, line, site);
         else this.node(composite, `after_${site.id}`, "after", [block.term.to], `after ${site.label}`, line, site);
         if (site.handler !== undefined) this.node(composite, `catch_${site.handler.id}`, "catch", [site.handler.block], "catch", this.c.blocks[site.handler.block]!.line, undefined, site.handler);
       }
@@ -2993,7 +3024,7 @@ class MachineBuilder {
       }
       if (term.kind === "call") {
         const site = this.c.sites[term.site]!;
-        if (site.kind === "prompt" || site.kind === "script") push(`call_${site.id}`, { kind: "node", node: composite.nodes.find((n) => n.key === `call_${site.id}`)! });
+        if (site.kind === "prompt" || site.kind === "script") push(callKeyOf(site), { kind: "node", node: composite.nodes.find((n) => n.key === callKeyOf(site))! });
         else push(`mount_${site.id}`, { kind: "mount", mount: this.mount(node, site) });
       } else if (term.kind === "phase" && term.phase !== composite.region) {
         const key = this.phaseKeys.get(term.phase)!;
@@ -3361,7 +3392,11 @@ class MachineBuilder {
         // The CALL failed — not the code after it, which catches its own throws.
         when: `${self}.outcome === 'error' && ${self}.operation[0].outcome === 'error'`,
         to: handler.key,
-        inputs: { [ERROR_INPUT]: `${self}.failure`, ...Object.fromEntries([...handler.in].sort().map((v) => [v, `${self}.inputs.${v}`])) },
+        inputs: {
+          [ERROR_INPUT]: `${self}.failure`,
+          ...(node.site!.withSession === true ? { [ERROR_SESSION_INPUT]: `${self}.operation[0].usage.sessionRef` } : {}),
+          ...Object.fromEntries([...handler.in].sort().map((v) => [v, `${self}.inputs.${v}`])),
+        },
       } as unknown as TransitionDecl);
     }
     return rules;
@@ -3468,7 +3503,9 @@ class MachineBuilder {
       inputs,
       ...(Object.keys(outputs).length > 0 ? { outputs } : {}),
       operation: { script: { code: this.module(composite.head), file: this.c.scriptFile }, output: this.continuationOutput(composite.head.out, composite) },
-      ...(hasChildren ? { children, sequence: [], transitions: this.rulesOf(composite.head) } : {}),
+      // The rules after the composite's own code answer that code finishing — once, in the round it
+      // triggers (`after: "operation"`), never in a later round that finds nothing else to do.
+      ...(hasChildren ? { children, sequence: [], transitions: this.rulesOf(composite.head).map((rule) => ({ ...rule, after: "operation" as const })) } : {}),
       generated: { ...spec.generated, at, ...(composite.kind === "root" && this.c.returnsWhole ? { whole: "result" } : {}) },
     });
     if (composite.kind === "root") {
@@ -3486,7 +3523,11 @@ class MachineBuilder {
     const inputs: Record<string, ParameterDecl> = {};
     if (node.kind === "call") inputs[CALL_INPUT] = { optional: true, description: "The call's arguments." };
     if (node.kind === "after") inputs[RESULT_INPUT] = { optional: true, description: "What the call returned." };
-    if (node.kind === "catch") inputs[ERROR_INPUT] = { optional: true, description: "Why the call failed." };
+    if (node.kind === "catch") {
+      inputs[ERROR_INPUT] = { optional: true, description: "Why the call failed." };
+      // Untyped, as `_error` is: `usage` is the executor's measurement record, and the code checks it is a string.
+      inputs[ERROR_SESSION_INPUT] = { optional: true, description: "Where a failed call that asked for its session ended its conversation." };
+    }
     for (const v of [...node.in].sort()) inputs[v] = this.slotOf(v);
     const tail = { script: { code: this.module(node), file: this.c.scriptFile }, output: this.continuationOutput(node.out, node.composite) };
     let doc: Record<string, unknown>;
@@ -3648,7 +3689,9 @@ class MachineBuilder {
     for (const h of this.c.helperStatements) lines.push(this.print(h));
     lines.push(`  let $ln = ${node.line};`);
     if (node.kind === "catch" && node.handler?.param !== undefined) {
-      lines.push(`  $v.${node.handler.param} = Object.assign(new Error(String($v._error?.reason ?? "the call failed")), { classification: $v._error?.classification });`);
+      lines.push(
+        `  $v.${node.handler.param} = Object.assign(new Error(String($v._error?.reason ?? "the call failed")), { classification: $v._error?.classification }, typeof $v.${ERROR_SESSION_INPUT} === "string" ? { session: { id: $v.${ERROR_SESSION_INPUT} } } : {});`,
+      );
     }
     lines.push("  try {");
     lines.push("  $dispatch: for (;;) {");
@@ -3702,7 +3745,7 @@ class MachineBuilder {
     }
     const site = this.c.sites[term.site]!;
     const args = (this.c.rewrite(f.createExpressionStatement(site.call), false).node as TS.ExpressionStatement).expression;
-    const key = site.kind === "prompt" || site.kind === "script" ? `call_${site.id}` : composite.mounts.find((m) => m.site === site && m.from === node)!.key;
+    const key = site.kind === "prompt" || site.kind === "script" ? callKeyOf(site) : composite.mounts.find((m) => m.site === site && m.from === node)!.key;
     void ts;
     // A fan-out hands on its items as a list of their own, which the `each` wire reads.
     if (site.kind === "map") return leave(key, [f.createPropertyAssignment(ITEMS_OUTPUT, f.createPropertyAccessExpression(f.createParenthesizedExpression(args), "items"))]);
@@ -3996,4 +4039,10 @@ function withSessionSchema(value: JsonSchema): JsonSchema {
     },
     required: ["value", "session"],
   } as JsonSchema;
+}
+
+
+/** A call state's key: `call_<id>`, or the one the site chose (an `input()`'s stable `input`). */
+function callKeyOf(site: Pick<CallSite, "id" | "key">): string {
+  return site.key ?? `call_${site.id}`;
 }

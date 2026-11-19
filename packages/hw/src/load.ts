@@ -44,6 +44,8 @@ export interface ScriptCallRecord {
   site: string;
   value?: ResolvedValue;
   failure?: Failure;
+  /** A failed `withSession` call's end position — `script.call.settled.session`. */
+  session?: string;
   costUsd?: number;
 }
 

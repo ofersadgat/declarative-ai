@@ -2,11 +2,14 @@
 /**
  * dai-script — run a workflow script as a plain program (SCRIPTS.md §17).
  *
- *   dai-script <file> [arg …] [--model <route/model>] [--cwd <dir>]
+ *   dai-script <file> [arg …] [--model <route/model>] [--cwd <dir>] [--no-report]
  *
  * Each positional argument after the file is parsed as JSON when it is JSON, and passed as a string
  * otherwise; they are the default export's parameters, in order. What the function returns is printed
  * as JSON on stdout; phases, logs and the input prompt go to stderr, so the result can be piped.
+ *
+ * When an engine that takes reports is listening (SCRIPTS.md §17.3) — JaiRA, open on this machine — the
+ * run is reported to it; `--no-report` (or `DAI_SCRIPT_REPORT=0`) runs it unreported.
  */
 const argv = process.argv.slice(2);
 const options = {};
@@ -15,8 +18,9 @@ for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === "--model") options.model = argv[++i];
   else if (a === "--cwd") options.cwd = argv[++i];
+  else if (a === "--no-report") options.reporting = false;
   else if (a === "-h" || a === "--help") {
-    process.stdout.write("usage: dai-script <file> [arg …] [--model <route/model>] [--cwd <dir>]\n");
+    process.stdout.write("usage: dai-script <file> [arg …] [--model <route/model>] [--cwd <dir>] [--no-report]\n");
     process.exit(0);
   } else positional.push(a);
 }

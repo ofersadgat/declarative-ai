@@ -1025,6 +1025,19 @@ export interface TransitionDecl {
    * follows the workflow as if the rule were not there.
    */
   standing?: boolean;
+  /**
+   * What this rule ANSWERS: `"operation"` — the state's own operation completing. Such a rule is
+   * eligible only in the round that completion triggered (SPEC §3.3), once per completion, exactly as a
+   * rule written on a child's mount is eligible only in the round that child's end triggered. Absent: a
+   * rule of the state's list, consulted in every round.
+   *
+   * The difference matters for a state that has both an operation and children. A rule that enters a
+   * child after the operation, guarded on the operation's output, holds from then on — so on the
+   * state's plain list, any later round that finds nothing else to do enters that child again. A
+   * compiled script's composite is such a state: its own code runs first, and the calls it makes are
+   * its children (SCRIPTS.md §6), so the rules after its code are written with this.
+   */
+  after?: "operation";
 }
 
 /**

@@ -129,6 +129,24 @@ describe("transclusion", () => {
     expect(op.config).toEqual({ model: "override", temperature: 0.2 });
   });
 
+  it("leaves JSON Schema's own `$ref` alone inside a call of an operation LIST", () => {
+    // What a script's `llm<{ a: Verdict; b: Verdict }>` compiles to: a call and the code after it, the
+    // call's output schema naming its type once in `$defs`.
+    const verdict = { type: "object", properties: { verdict: { type: "string" } }, required: ["verdict"] };
+    const output = { type: "object", properties: { a: { $ref: "#/$defs/Verdict" }, b: { $ref: "#/$defs/Verdict" } }, required: ["a", "b"], $defs: { Verdict: verdict } };
+    const def = {
+      outputs: { both: { binding: ".operation[0].output" } },
+      operation: [
+        { kind: "prompt", prompt: "Judge both.", model: "m", output: { value: { kind: "json", schema: output } } },
+        { kind: "prompt", prompt: "Again.", model: "m" },
+      ],
+    };
+    const files = { [`${WF}/t.json`]: JSON.stringify(def) };
+    const state = loadBundle({ "t.json": def }, "t", opts(files)).states.t!;
+    const first = (state.operation as unknown as Array<{ output?: { schema?: unknown } }>)[0]!;
+    expect(first.output?.schema).toEqual(output);
+  });
+
   it("loads a prompt from a .md file as text", () => {
     const files = {
       [`${ROOT}/prompts/goals.md`]: "Extract goals from {{.inputs.issue}}.",

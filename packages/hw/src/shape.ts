@@ -21,7 +21,18 @@ export type Shape =
    * `operation`). Only a value position can hold a scoped name (NAMES.md §5): a name reads as a value
    * per instance, and structure has to be there before there is an instance to read it for.
    */
-  | { t: "object"; fields?: Record<string, Shape>; rest?: Shape; value?: true }
+  | {
+      t: "object";
+      fields?: Record<string, Shape>;
+      rest?: Shape;
+      value?: true;
+      /**
+       * The position also takes a LIST of such objects, each walked by this shape — `operation`, which
+       * is one call or a list of them (SPEC §7.1d). Without it a list here is untyped, and a JSON Schema
+       * `$ref` in one call's output schema would be read as a file.
+       */
+      list?: true;
+    }
   | { t: "array"; of: Shape; value?: true }
   /** A plain string or number: a reference here must be written `{"$ref": …}`. */
   | { t: "scalar" }
@@ -89,7 +100,9 @@ const operationFields: Record<string, Shape> = {
   function: scalar,
   args: { t: "object", rest: anyJson },
   input: slotMap,
-  output: parameter,
+  // One output slot, or a map of NAMED ones (`{ value: { kind, schema } }`, what a script's call
+  // writes): the slot's own fields by name, and any other key a slot.
+  output: { ...parameter, rest: parameter },
   // Execution environment, inherited by the same rule as everything else.
   session: { t: "name", position: "session" },
   workspace: { t: "name", position: "workspace" },
@@ -111,7 +124,7 @@ const operationFields: Record<string, Shape> = {
   providerOptions: { t: "object", rest: anyJson, value: true },
 };
 
-const operation: Shape = { t: "object", fields: operationFields };
+const operation: Shape = { t: "object", fields: operationFields, list: true };
 
 /**
  * An `environment` block: an operation's fields, all optional, plus what only a DEFAULTS layer can

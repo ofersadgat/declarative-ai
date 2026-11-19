@@ -269,16 +269,23 @@ export type EngineEvent =
       outcome: "value" | "error";
       value?: ResolvedValue;
       failure?: Failure;
+      /**
+       * A failed `llm({ withSession: true })`: where its conversation ended (`<session>@<seq>`) — the
+       * record it wrote — handed to the `catch` as the error's `session` (SCRIPTS.md §9), and back the
+       * same on a replay.
+       */
+      session?: string;
       costUsd?: number;
     }
   /** A script's `log()` (SCRIPTS.md §13). `site` is `log#<k>`, so a replay writes it once. */
   | { type: "script.log"; instanceId: string; stateId: string; site: string; message: string }
   /**
-   * A newer version of a state a script calls was taken at a call (JaiRA decision 0029 §3): its states
-   * joined the run's bundle as `version`, and the call that follows enters it. `snapshot` is the host's
-   * name for that version, so a replay can lay it back into the bundle before anything is re-attached.
+   * A newer version was taken (JaiRA decision 0029 §3): of a state a script calls, at the call; or of
+   * the run's ROOT, `at` the child it was about to enter — the root mounts it as `$version` and ends with
+   * it. Its states joined the run's bundle as `version`. `snapshot` is the host's name for that version,
+   * so a replay can lay it back into the bundle before anything is re-attached.
    */
-  | { type: "version.adopted"; instanceId: string; stateId: string; version: string; snapshot?: string }
+  | { type: "version.adopted"; instanceId: string; stateId: string; version: string; snapshot?: string; at?: string; from?: string }
   /** A newer version that was NOT taken, and why — the call ran the version it was already running. */
   | { type: "version.declined"; instanceId: string; stateId: string; version: string; reason: string }
   /**

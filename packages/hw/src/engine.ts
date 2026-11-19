@@ -115,9 +115,10 @@ import { isArtifactRef, type ArtifactRef, type EngineEvent, type OperationKind, 
 // Computed fields (SPEC §5.3): evaluated once at entry, written into a per-instance definition.
 import { fieldDependencies, fieldsView, materializeFields } from "./fields.js";
 import { bindIntoSlots } from "./loader.js";
+import { childrenReadBy } from "./validate.js";
 import { EVENT_NAMESPACE, hasDefault, literalPermissions, SCRIPT_CODE_INPUT, SCRIPT_CONTROL, SCRIPT_FILE_INPUT, SCRIPT_FUNCTION, SPAWN_DEFAULTS, type HostedEachKind, type LiteralPermissions, type LoadedField, type SpawnFields } from "./format.js";
 import { hasScriptContext, INPUT_FUNCTION, loadScriptContext, runWithScriptHost, type AgentOptions, type InputOptions, type LlmCall, type ScriptHost } from "./scriptHooks.js";
-import { baseStateIdOf, versionedSource, versionedStateId, versionedStates, versionHashOf, versionOfStateId, type VersionSource } from "./versions.js";
+import { baseStateIdOf, versionedSource, versionedStateId, versionedStates, versionHashOf, versionOfStateId, VERSION_CHILD, withVersionMount, type OfferedVersion, type VersionSource } from "./versions.js";
 import { agentCall, answerOf, lowerLlmCall, ScriptCallError, ScriptRunState, ScriptSegments, withSessionOf, type LoweredCall, type ScriptModuleOptions } from "./scriptRun.js";
 import { desugarOperation } from "./loader.js";
 import { isCallableKind, isCallableSchema } from "@declarative-ai/exec";
@@ -207,6 +208,83 @@ function askerOf(askUser: AskUser | undefined, instanceId: string): AskUser | un
 
 function tryScopedId(hash: string | undefined, scope: OperationScope): string {
   return scopedOperationId(hash ?? "unhashable", scope);
+}
+
+
+/**
+ * The state's own operation, as a member of `Instance.justFinished`: its completion is answered in the
+ * round it triggers, once, as a child's is — what a rule `after: "operation"` is eligible in (SPEC §3.3).
+ * Not a child key: a key is a declared name, and no name starts with `$`.
+ */
+const OPERATION_DONE = "$operation";
+
+/**
+ * A state's own rules a round consults: all of them, except that a rule `after: "operation"` is eligible
+ * only in the round that answers the operation's completion (SPEC §3.3) — once per completion, as a
+ * child's mount rules are.
+ */
+function stateRulesFor(def: LoadedState, eligible: readonly string[]): readonly LoadedTransition[] {
+  const rules = def.transitions ?? [];
+  return eligible.includes(OPERATION_DONE) ? rules : rules.filter((t) => t.after !== "operation");
+}
+
+/**
+ * Whether a loaded instance's completed operation was never answered: no transition taken since and no
+ * child entered — the stopped run ended between the operation and its first round.
+ */
+function owesOperationRound(loaded: LoadedInstance): boolean {
+  return (loaded.index ?? 0) === 0 && (loaded.children ?? []).length === 0;
+}
+
+/**
+ * A compiled `input()`'s key — `input`, `input_2`, … in the order the code waits (`scriptCompile`). The
+ * wait is the boundary every version of a conversation shares: it has done nothing until it is answered,
+ * so a run waiting at one can always be stepped past and the wait asked again by a newer version.
+ */
+const INPUT_KEY = /^input(_\d+)?$/;
+
+/**
+ * Whether an instance OWNS the run: the root, or the version a root (or a version before it) handed the
+ * run to — so a conversation improved twice takes the second improvement too, one level deeper.
+ */
+function ownsRun(instance: Instance): boolean {
+  if (instance.parent === undefined) return true;
+  return instance.childKey === VERSION_CHILD && instance.parent.handedOff === true && ownsRun(instance.parent);
+}
+
+
+/**
+ * Why two versions of a boundary's state are NOT the same boundary, or `undefined` when they are: the
+ * same inputs by name and by type — for a compiled script's state, the variables live at that point —
+ * and, for a compiled call, the same call (its label).
+ */
+function sameBoundary(key: string, old: LoadedState | undefined, next: LoadedState | undefined): string | undefined {
+  if (old === undefined || next === undefined) return "the state is missing";
+  const a = old.inputs ?? {};
+  const b = next.inputs ?? {};
+  const names = (m: Record<string, unknown>) => Object.keys(m).sort().join(",");
+  if (names(a) !== names(b)) return `the state takes other inputs (${names(a)} → ${names(b)})`;
+  for (const name of Object.keys(a)) {
+    if (JSON.stringify(a[name]?.schema ?? null) !== JSON.stringify(b[name]?.schema ?? null)) return `'${name}' has another type`;
+  }
+  // An `input()` IS its key — the wait, whatever it now asks; any other compiled call is told by what it calls.
+  if ((old as { generated?: unknown }).generated !== undefined && !INPUT_KEY.test(key) && old.label !== next.label) return `it is another call ('${old.label}' → '${next.label}')`;
+  return undefined;
+}
+
+/**
+ * A child the old run had already entered at this level that the newer version's state there reads —
+ * through anything but the wiring of `next`, the child about to be entered, whose inputs are handed over
+ * resolved. A compiled script's states read nothing but their live variables, which the boundary hands
+ * over whole, so only a level written by hand is asked.
+ */
+function readsWhatRan(next: LoadedState, old: { passes: ReadonlyArray<ReadonlyMap<string, unknown>> }, enters: string): string | undefined {
+  if ((next as { generated?: unknown }).generated !== undefined) return undefined;
+  const mounts = { ...(next.children ?? {}) };
+  if (mounts[enters] !== undefined) mounts[enters] = { ...mounts[enters]!, inputs: undefined } as LoadedChild;
+  const reads = childrenReadBy({ ...next, children: mounts });
+  for (const pass of old.passes) for (const ran of pass.keys()) if (ran !== enters && reads.has(ran)) return ran;
+  return undefined;
 }
 
 /** Whether a value can travel in the journal as it is — a script's continuation always can. */
@@ -624,6 +702,22 @@ interface Instance {
   id: string;
   stateId: string;
   def: LoadedState;
+  /**
+   * This root handed the run to a newer version of itself (decision 0029 §3): its `$version` child runs
+   * from the boundary on, and the root ends with that child's outcome, never with a rule of its own.
+   */
+  handedOff?: true;
+  /**
+   * Its loop is WAITING on its children, with nothing of its own in hand — the one moment a newer
+   * version can be mounted beside it from outside the loop (`takeNewerVersion`) without racing a round.
+   */
+  idle?: true;
+  /** A switch to a newer version is being made from the wait (`takeNewerVersion`). */
+  switching?: true;
+  /** Mounting the newer version it handed the run to failed: it ends with this, from its loop. */
+  switchFailure?: Failure;
+  /** Its loop has ended: no switch is made under it from here. */
+  versionClosed?: true;
   childKey?: string;
   parent?: Instance;
   inputs: Record<string, ResolvedValue>;
@@ -1156,6 +1250,7 @@ export class WorkflowEngine {
 
   constructor(private readonly config: EngineConfig) {
     if (config.versions !== undefined) {
+      if (config.bundle.states[config.bundle.rootId] !== undefined) this.rootHash = versionOfStateId(config.bundle.rootId) ?? versionHashOf(config.bundle, config.bundle.rootId);
       for (const def of Object.values(config.bundle.states)) {
         for (const child of Object.values(def.children ?? {})) {
           if (child.called === true && !this.calledHashes.has(child.state)) this.calledHashes.set(child.state, versionHashOf(config.bundle, child.state));
@@ -1433,6 +1528,10 @@ export class WorkflowEngine {
       id: loaded.id,
       stateId: loaded.stateId,
       def,
+      // A version that had handed the run to a newer one still has: it ends with that child.
+      ...((parent === undefined || (loaded.childKey === VERSION_CHILD && parent.handedOff === true)) && (loaded.children ?? []).some((c) => c.childKey === VERSION_CHILD)
+        ? { handedOff: true as const }
+        : {}),
       childKey: loaded.childKey,
       parent,
       inputs: this.rehydrateArtifacts(loaded.inputs),
@@ -1511,9 +1610,11 @@ export class WorkflowEngine {
       );
       instance.callsDone = recorded.length;
       instance.opRun = recorded.length === calls.length;
+      if (instance.opRun && owesOperationRound(loaded)) instance.justFinished.unshift(OPERATION_DONE);
     } else if (loaded.operation !== undefined && def.operation !== undefined && !isOperationList(def.operation)) {
       const record = loaded.operation as LoadedOperation;
       instance.opRun = true;
+      if (owesOperationRound(loaded)) instance.justFinished.unshift(OPERATION_DONE);
       instance.operation = operationNodeOf("success", record.metrics, record.model ?? modelOfOp(def.operation), publishedOfRef(record.sessionRef), record.value);
       const failure = this.acceptOpOutputs(instance, def.operation.kind === "prompt" ? "prompt" : "function", record.value, def.operation.output.kind);
       // A recorded value failing this state's own contract should be unreachable — the definition
@@ -1684,6 +1785,15 @@ export class WorkflowEngine {
   }
 
   private async evaluationLoop(instance: Instance, initialEvaluation = false): Promise<TerminationRecord> {
+    try {
+      return await this.evaluationRounds(instance, initialEvaluation);
+    } finally {
+      // No newer version is mounted under an instance that has ended (`takeNewerVersion`).
+      instance.versionClosed = true;
+    }
+  }
+
+  private async evaluationRounds(instance: Instance, initialEvaluation: boolean): Promise<TerminationRecord> {
     const def = instance.def;
     // SPEC §3.3: transitions are evaluated when an operation completes or a child
     // terminates — not on bare entry (the first operation runs first) and not when an
@@ -1706,6 +1816,25 @@ export class WorkflowEngine {
         const entered = await this.enterDirected(instance, owed.to, owed.inputs, owed.descent);
         if (typeof entered === "object") return this.finish(instance, "error", entered.failure);
         evaluationDue = false;
+        continue;
+      }
+
+      // A root that HANDED the run to a newer version of itself ends with it, and takes no rule of its
+      // own: its spine is the old version's, and the new one now owns where the run goes.
+      if (instance.handedOff === true) {
+        const handed = instance.children.get(VERSION_CHILD);
+        if (handed !== undefined && handed.status === "done") {
+          if (handed.outcome === "success") return { outcome: "success", outputs: handed.outputs ?? {} };
+          return this.finish(instance, handed.outcome ?? "error", handed.failure ?? { classification: "permanent", reason: "the newer version it handed the run to failed" });
+        }
+        if (instance.switchFailure !== undefined) return this.finish(instance, "error", instance.switchFailure);
+        if (handed !== undefined) {
+          if (!(await this.waitForAnyChild(instance))) return this.finish(instance, "error", { classification: "permanent", reason: "the newer version it handed the run to is no longer running" });
+          continue;
+        }
+        // Being entered from the wait (`takeNewerVersion`): whatever woke this — the wait it stepped
+        // past, ending — is no round's to answer. It waits for the newer version to be there.
+        await instance.notify.wait();
         continue;
       }
 
@@ -1822,6 +1951,7 @@ export class WorkflowEngine {
         instance.opRun = true;
         const failure = await this.runOperation(instance);
         if (failure) return this.finish(instance, failureOutcome(instance), failure);
+        if (!instance.justFinished.includes(OPERATION_DONE)) instance.justFinished.push(OPERATION_DONE);
         evaluationDue = true;
         continue;
       }
@@ -2185,7 +2315,7 @@ export class WorkflowEngine {
     // With a way down still to go, the asker's inputs are the TARGET's and travel with the descent:
     // the composite entered here is handed only what a standing rule wires into it.
     const descent = descentOf(move);
-    const inputs = descent !== undefined ? handed : { ...handed, ...(move.inputs ?? {}) };
+    const inputs = descent !== undefined ? { ...handed, ...(move.along?.[0] ?? {}) } : { ...handed, ...(move.inputs ?? {}) };
 
     // WHO is stepped over — fixed now, before anything is journaled or interrupted. A skip
     // interrupts the running children the spine put there (sequence members, and whichever child
@@ -2476,12 +2606,14 @@ export class WorkflowEngine {
     };
     // Every ordinary rule first, then every standing one — the order `orderedTransitions` states,
     // and the two must agree (see there).
+    // The state's own list, less the rules that answer its operation when this round does not.
+    const own = stateRulesFor(instance.def, eligible);
     for (const standing of [false, true]) {
       for (const key of eligible) {
         const taken = firstOf(instance.def.children?.[key]?.transitions, standing);
         if (taken) return taken;
       }
-      const taken = firstOf(instance.def.transitions, standing);
+      const taken = firstOf(own, standing);
       if (taken) return taken;
     }
     return listening ? WAITING : undefined;
@@ -2520,6 +2652,8 @@ export class WorkflowEngine {
     if (instance.justFinished.length === 0) return [];
     const eligible = new Set(instance.justFinished);
     const order = [
+      // The state's own operation runs before any child, and is answered first.
+      OPERATION_DONE,
       ...(instance.def.sequence ?? []),
       // An authored `sequence` may omit children; they still run (by transition) and still finish.
       ...Object.keys(instance.def.children ?? {}).filter((k) => !(instance.def.sequence ?? []).includes(k)),
@@ -2541,6 +2675,257 @@ export class WorkflowEngine {
    * run, journaled as `version.adopted`, and that id is entered. A version that does not fit is passed
    * over and journaled as such; the call runs the version it would have run.
    */
+  /**
+   * Hand the run to a newer version of its ROOT at a state boundary (decision 0029 §3): the root is about
+   * to enter `key` with `inputs`, and the host offers a version whose root has that same child, whose
+   * state takes the same inputs (the same names and types — for a compiled script's states, its live
+   * variables — and the same call), and which takes this root's own inputs. Then the new version's
+   * states join the run under a versioned id, the root mounts it as its `$version` child — entered with
+   * the root's own inputs, its way down directed at `key` with `inputs` — and the root never takes a rule
+   * of its own again: it ends with that child (`handedOff`). The old version's states, and what ran under
+   * them, are untouched.
+   *
+   * `undefined` when there is no such version, and the root enters `key` as it would have.
+   */
+  private async handOffAt(
+    root: Instance,
+    /** The composites from just below the root down to the one entering `key` — empty at the root itself. */
+    chain: readonly Instance[],
+    key: string,
+    decl: LoadedChild,
+    inputs: Record<string, ResolvedValue>,
+  ): Promise<"started" | "parked" | { failure: Failure } | undefined> {
+    const found = await this.newerVersionAt(root, chain, key, decl);
+    if (found === undefined) return undefined;
+    const way = [...chain.map((c) => c.childKey!), key];
+    if (chain.length === 0) {
+      this.mountVersion(root, key, found);
+      this.pendingDescents.set(WorkflowEngine.descentKey(root.id, VERSION_CHILD), { path: way, inputs, by: "version" });
+      return this.enterChild(root, VERSION_CHILD, root.inputs);
+    }
+    // Below the root: the root is waiting on the branch this runs in, and the branch is stepped past as
+    // a directed skip steps past a state — decided and journaled first, interrupted last — while the
+    // newer version is entered beside it, its way down handing each composite what the old one had.
+    const top = root.children.get(chain[0]!.childKey!);
+    if (root.idle !== true || !this.quietAlong(root, chain) || top === undefined || top.instanceId !== chain[0]!.id) return undefined;
+    this.mountVersion(root, way.join("/"), found);
+    top.skipped = true;
+    this.skipJournaled.add(top.instanceId);
+    this.emit({ type: "instance.terminated", instanceId: top.instanceId, stateId: chain[0]!.stateId, outcome: "skipped" });
+    this.pendingDescents.set(WorkflowEngine.descentKey(root.id, VERSION_CHILD), { path: way, inputs, along: chain.map((c) => c.inputs), by: "version" });
+    const entered = await this.enterChild(root, VERSION_CHILD, root.inputs);
+    top.abort.abort(new SkipAbort());
+    if (typeof entered === "object") {
+      root.switchFailure = entered.failure;
+      root.notify.signal();
+    }
+    // This state is on the branch just stepped past: it ends, `skipped`, at its loop's next turn.
+    return "started";
+  }
+
+  /**
+   * Where `instance` stands in the run its OWNER holds: that owner, and the composites from just below it
+   * down to `instance`. `undefined` off a single branch of the owner's — inside a called state (which
+   * takes a newer version of its own) or one ELEMENT of a fan-out.
+   */
+  private branchOf(instance: Instance): { owner: Instance; chain: Instance[] } | undefined {
+    const chain: Instance[] = [];
+    let at = instance;
+    while (!ownsRun(at)) {
+      const parent = at.parent;
+      if (parent === undefined || at.childKey === undefined || at.address[at.address.length - 1]?.element !== undefined) return undefined;
+      const mount = parent.def.children?.[at.childKey];
+      if (mount === undefined || mount.called === true || (mount.each?.length ?? 0) > 0) return undefined;
+      chain.unshift(at);
+      at = parent;
+    }
+    return { owner: at, chain };
+  }
+
+  /**
+   * Whether nothing else of the run is in flight beside the branch (decision 0029 §3: "the switch waits
+   * for a point where no other part of A is in flight"): the owner runs only the branch's first
+   * composite, each composite only the next, and the last nothing at all.
+   */
+  private quietAlong(owner: Instance, chain: readonly Instance[]): boolean {
+    const levels = [owner, ...chain];
+    return levels.every((level, i) => {
+      const running = [...level.children.values()].filter((rec) => rec.status === "running");
+      const next = chain[i];
+      return next === undefined ? running.length === 0 : running.length === 1 && running[0]!.instanceId === next.id;
+    });
+  }
+
+  /**
+   * Take a newer version of the run's root NOW, at the `input()` it waits at (decision 0029 §3) — the
+   * {@link DirectedTarget} half of {@link DirectedTransitions.takeNewerVersion}.
+   *
+   * A conversation spends its life waiting for the next message, so a lesson nearly always lands while
+   * it waits, past the boundary it waits at. The wait has done nothing — it is the one state that can be
+   * stepped past at no cost — so the run that owns it is asked, at its loop's next turn, to do what it
+   * would have done had the version been there when it entered the wait: hand the run to the newer
+   * version with its way down at the same `input()`, which asks again. The host then answers that one.
+   *
+   * Resolves whether it switched: `false` when nothing is offered, what is offered does not share the
+   * wait's boundary (`version.declined` says why), or the run is not waiting at an `input()`.
+   */
+  async takeNewerVersion(): Promise<boolean> {
+    if (this.config.versions === undefined) return false;
+    let owner = this.rootInstance;
+    while (owner !== undefined && owner.handedOff === true) {
+      const handed = owner.children.get(VERSION_CHILD);
+      owner = handed !== undefined ? this.liveInstances.get(handed.instanceId) : undefined;
+    }
+    if (owner === undefined || owner.versionClosed === true || owner.switching === true || !this.liveInstances.has(owner.id)) return false;
+    owner.switching = true;
+    try {
+      return await this.switchAtWait(owner);
+    } finally {
+      owner.switching = undefined;
+    }
+  }
+
+  /**
+   * The switch {@link takeNewerVersion} asks for — made beside the owner's loop, never inside it, because
+   * a loop woken with nothing finished runs a round, and a round with nothing to answer re-reads the
+   * state's own rules: a compiled script's would enter its first call again.
+   *
+   * Only while the loop is IDLE, waiting on its children, and the one thing running is an `input()` still
+   * waiting for its answer, and a newer version shares that boundary. Then, in the order a directed skip
+   * keeps — decided and journaled before anything is interrupted — the version is mounted and the root
+   * handed off (its loop now waits for `$version` and answers no round of its own), the wait is recorded
+   * `skipped`, the newer version is entered with its way down at the same `input()`, handed what this one
+   * was, and only then is the old wait interrupted.
+   */
+  private async switchAtWait(root: Instance): Promise<boolean> {
+    if (!ownsRun(root) || root.handedOff === true) return false;
+    const waiting = (): { key: string; rec: ChildRecord; decl: LoadedChild; instance: Instance } | undefined => {
+      if (root.idle !== true || root.versionClosed === true || root.handedOff === true) return undefined;
+      const running = [...root.children].filter(([, rec]) => rec.status === "running");
+      if (running.length !== 1) return undefined;
+      const [key, rec] = running[0]!;
+      const decl = root.def.children?.[key];
+      const instance = this.liveInstances.get(rec.instanceId);
+      if (!INPUT_KEY.test(key) || rec.skipped === true || decl === undefined || instance === undefined) return undefined;
+      return { key, rec, decl, instance };
+    };
+    const at = waiting();
+    if (at === undefined) return false;
+    const found = await this.newerVersionAt(root, [], at.key, at.decl);
+    // Answered, or moved on, while the version was looked up: the run takes it at its next boundary.
+    if (found === undefined || waiting()?.rec !== at.rec) return false;
+    this.mountVersion(root, at.key, found);
+    at.rec.skipped = true;
+    this.skipJournaled.add(at.rec.instanceId);
+    this.emit({ type: "instance.terminated", instanceId: at.rec.instanceId, stateId: at.decl.state, outcome: "skipped" });
+    this.pendingDescents.set(WorkflowEngine.descentKey(root.id, VERSION_CHILD), { path: [at.key], inputs: at.instance.inputs, by: "version" });
+    const entered = await this.enterChild(root, VERSION_CHILD, root.inputs);
+    at.rec.abort.abort(new SkipAbort());
+    if (typeof entered === "object") {
+      root.switchFailure = entered.failure;
+      root.notify.signal();
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * The newer version of the root a boundary can be handed to: the host offers one which has the same
+   * way down — every composite of `chain` at the same key, each taking the inputs the old one was entered
+   * with — to the same child, whose state takes the same inputs (the same names and types: for a
+   * compiled script's states, its live variables; and the same call); which takes the root's own inputs;
+   * and, where a level was written by hand, whose states read nothing that level had already run — a
+   * child the old run entered is not in the new one ("the whole state the rest of B reads"). One that
+   * does not fit is journaled as `version.declined`, once per version and boundary.
+   */
+  private async newerVersionAt(root: Instance, chain: readonly Instance[], key: string, decl: LoadedChild): Promise<{ offered: OfferedVersion; versioned: string } | undefined> {
+    const base = baseStateIdOf(root.stateId);
+    const current = versionOfStateId(root.stateId) ?? this.rootHash ?? versionHashOf(this.config.bundle, root.stateId);
+    let offered;
+    try {
+      offered = await this.config.versions!(base, current);
+    } catch {
+      return undefined;
+    }
+    if (offered === undefined) return undefined;
+    const newRoot = offered.bundle.states[base];
+    if (newRoot === undefined) return undefined;
+    const version = versionHashOf(offered.bundle, base);
+    if (version === current) return undefined;
+    const versioned = versionedStateId(base, version);
+    const way = [...chain.map((c) => c.childKey!), key];
+    const at = way.join("/");
+    const problem = ((): string | undefined => {
+      // The way down, level by level: the old instance there, and the new version's state.
+      const levels: Array<{ old: Instance; next: LoadedState }> = [{ old: root, next: newRoot }];
+      for (const [i, composite] of chain.entries()) {
+        const mount = levels[i]!.next.children?.[composite.childKey!];
+        const next = mount !== undefined ? offered.bundle.states[mount.state] : undefined;
+        if (next === undefined) return `it has no '${way.slice(0, i + 1).join("/")}'`;
+        levels.push({ old: composite, next });
+      }
+      const newDecl = levels[levels.length - 1]!.next.children?.[key];
+      if (newDecl === undefined) return `it has no '${at}' to switch at`;
+      const boundary = sameBoundary(key, this.config.bundle.states[decl.state], offered.bundle.states[newDecl.state]);
+      if (boundary !== undefined) return boundary;
+      for (const [i, level] of levels.entries()) {
+        const declared = level.next.inputs ?? {};
+        const extra = Object.keys(level.old.inputs).filter((n) => declared[n] === undefined);
+        const missing = Object.entries(declared).filter(([n, p]) => p.optional !== true && p.binding === undefined && !(n in level.old.inputs)).map(([n]) => n);
+        if (extra.length > 0 || missing.length > 0) return `${i === 0 ? "its" : `'${way.slice(0, i).join("/")}'`} inputs are not this run's (${[...extra, ...missing].join(", ")})`;
+        const read = readsWhatRan(level.next, level.old, way[i]!);
+        if (read !== undefined) return `${i === 0 ? "it" : `'${way.slice(0, i).join("/")}'`} reads what '${read}' produced in this run, which a version starting at '${at}' would not have`;
+      }
+      return undefined;
+    })();
+    if (problem !== undefined) {
+      if (!this.declinedVersions.has(`${versioned}\n${at}`)) {
+        this.declinedVersions.add(`${versioned}\n${at}`);
+        this.emit({ type: "version.declined", instanceId: root.id, stateId: base, version: versioned, reason: `not at '${at}': ${problem}` });
+      }
+      return undefined;
+    }
+    return { offered, versioned };
+  }
+
+  /**
+   * The newer version's states join the run under its versioned id, once; the switch is journaled
+   * (`version.adopted`, `at` the boundary, `from` the version handing off); and the root mounts it as its
+   * `$version` child and is `handedOff` from here on.
+   */
+  private mountVersion(root: Instance, key: string, found: { offered: OfferedVersion; versioned: string }): void {
+    const { offered, versioned } = found;
+    const base = baseStateIdOf(root.stateId);
+    if (!this.ownsStates) {
+      const own = this.config.bundle.source;
+      this.config.bundle = { ...this.config.bundle, states: { ...this.config.bundle.states }, ...(own !== undefined ? { source: { ...own } } : {}) };
+      this.ownsStates = true;
+    }
+    if (!this.adoptedVersions.has(versioned)) {
+      Object.assign(this.config.bundle.states, versionedStates(offered.bundle, base, versioned));
+      if (this.config.bundle.source !== undefined) Object.assign(this.config.bundle.source, versionedSource(offered.bundle, base, versioned));
+      this.adoptedVersions.add(versioned);
+    }
+    this.emit({
+      type: "version.adopted",
+      instanceId: root.id,
+      stateId: base,
+      version: versioned,
+      at: key,
+      // The version that handed off — the run's root, or a version that had taken the run before it.
+      from: root.stateId,
+      ...(offered.snapshot !== undefined ? { snapshot: offered.snapshot } : {}),
+    });
+    root.def = withVersionMount(root.def, root.stateId, versioned, this.config.bundle.states[versioned]);
+    this.config.bundle.states[root.stateId] = root.def;
+    root.handedOff = true;
+  }
+
+  /** Versions passed over at a boundary, each journaled once per boundary. */
+  private readonly declinedVersions = new Set<string>();
+  /** The root's version as the run started with it — hashed before anything ran. */
+  private rootHash: string | undefined;
+
   /** The versions this run took (decision 0029 §3), each journaled once. */
   private readonly adoptedVersions = new Set<string>();
   /**
@@ -2661,6 +3046,17 @@ export class WorkflowEngine {
     // instance under the same key is canceled and replaced.
     const prior = instance.children.get(key);
     if (prior?.status === "running") prior.abort.abort();
+
+    // A state about to enter a child is at a STATE BOUNDARY (decision 0029 §3) — the root's, or one on a
+    // quiet branch below it: when a newer version of the whole workflow has this child, on the same way
+    // down, with the same inputs, the run is handed to it here.
+    if (key !== VERSION_CHILD && this.config.versions !== undefined && "values" in resolved && resolved.values !== undefined) {
+      const branch = this.branchOf(instance);
+      if (branch !== undefined && branch.owner.handedOff !== true && this.quietAlong(branch.owner, branch.chain)) {
+        const handed = await this.handOffAt(branch.owner, branch.chain, key, decl, resolved.values);
+        if (handed !== undefined) return handed;
+      }
+    }
 
     // A state a script CALLS may have a newer version than the one this run started with: the call is
     // the boundary, and the new version takes it when its inputs are the call's (decision 0029 §3).
@@ -4222,7 +4618,7 @@ export class WorkflowEngine {
   private orderedTransitions(instance: Instance, eligible: readonly string[]): LoadedTransition[] {
     const out: LoadedTransition[] = [];
     for (const key of eligible) out.push(...(instance.def.children?.[key]?.transitions ?? []));
-    out.push(...(instance.def.transitions ?? []));
+    out.push(...stateRulesFor(instance.def, eligible));
     // STANDING rules go LAST, behind every ordinary rule of the round, wherever they were written
     // (SPEC §3.3): an offer that stands beside the workflow must never pre-empt a rule of it.
     return [...out.filter((t) => t.standing !== true), ...out.filter((t) => t.standing === true)];
@@ -4569,7 +4965,12 @@ export class WorkflowEngine {
     if (!this.hasRunningChildren(instance)) return false;
     const wake = instance.notify.wait();
     if ((!this.cursorHeld(instance) && this.armGuards(instance)) || this.missedWake(instance)) return true;
-    await wake;
+    instance.idle = true;
+    try {
+      await wake;
+    } finally {
+      instance.idle = undefined;
+    }
     return true;
   }
 
@@ -4932,8 +5333,12 @@ export class WorkflowEngine {
     } catch (e) {
       if (instance.abort.signal.aborted || instance.timedOut) return undefined; // loop top handles
       const failure = e instanceof ScriptCallError ? e.failure : { classification: "permanent" as const, reason: `the script threw: ${(e as Error)?.message ?? String(e)}` };
-      this.settleNode(instance, index, operationNodeOf("error", metrics(), undefined, undefined, undefined));
-      return fail(failure, operationId, metrics());
+      // A failed `withSession` call's position rides where a prompt state's does (`usage.sessionRef`),
+      // so a `catch` across the cut reads it the same way (SCRIPTS.md §9).
+      const failedAt = e instanceof ScriptCallError ? e.session?.id : undefined;
+      const settled = failedAt !== undefined ? { ...metrics(), sessionRef: failedAt } : metrics();
+      this.settleNode(instance, index, operationNodeOf("error", settled, undefined, undefined, undefined));
+      return fail(failure, operationId, settled);
     }
     const settled = metrics();
     this.settleNode(instance, index, operationNodeOf("success", settled, undefined, undefined, value as ResolvedValue));
@@ -5039,12 +5444,15 @@ export class WorkflowEngine {
     const phase = lowered.phase ?? run.phase;
     const recorded = run.recordAt(site);
     let outcome: { value: unknown } | { failure: Failure };
-    // A `withSession` call records the PAIR it handed the script, so a replay reads back the position.
+    // A `withSession` call records the PAIR it handed the script, so a replay reads back the position —
+    // and, failed, where its conversation ended, so a `catch` goes on after what it said.
     let paired = false;
+    let failedAt: string | undefined;
     if (recorded !== undefined) {
       await run.release(site);
       run.spent += recorded.costUsd ?? 0;
       outcome = recorded.failure !== undefined ? { failure: recorded.failure } : { value: recorded.value };
+      failedAt = recorded.session;
       paired = lowered.withSession === true;
     } else {
       if (run.calls >= this.segments.maxCalls) {
@@ -5069,6 +5477,7 @@ export class WorkflowEngine {
           ? { failure: answer.failure ?? { classification: "permanent", reason: answer.error } }
           : { value: lowered.withSession === true ? withSessionOf(lowered, answer.value, sessionRef) : answer.value };
       paired = lowered.withSession === true;
+      if ("failure" in outcome && paired) failedAt = sessionRef;
       this.emit({
         type: "script.call.settled",
         instanceId: instance.id,
@@ -5076,13 +5485,13 @@ export class WorkflowEngine {
         site,
         ...(lowered.label !== undefined ? { label: lowered.label } : {}),
         ...(phase !== undefined ? { phase } : {}),
-        ...("failure" in outcome ? { outcome: "error" as const, failure: outcome.failure } : { outcome: "value" as const, value: outcome.value as ResolvedValue }),
+        ...("failure" in outcome ? { outcome: "error" as const, failure: outcome.failure, ...(failedAt !== undefined ? { session: failedAt } : {}) } : { outcome: "value" as const, value: outcome.value as ResolvedValue }),
         costUsd: cost,
       });
     }
     if ("failure" in outcome) {
       if (lowered.hasFailureValue) return lowered.failureValue;
-      throw new ScriptCallError(outcome.failure);
+      throw new ScriptCallError(outcome.failure, failedAt);
     }
     return paired ? outcome.value : answerOf(lowered, outcome.value);
   }

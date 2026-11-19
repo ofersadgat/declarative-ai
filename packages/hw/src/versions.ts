@@ -3,17 +3,22 @@
  *
  * A run keeps the workflow it started with. When a state a script CALLS has changed since — a lesson
  * edited it — the engine may hand the next call to the new version instead: the new version's states
- * join the run's bundle under VERSIONED ids (`chat/turn@v1a2b3c4d5e6f`, and `…@v…/call_0` below it), so
+ * join the run's bundle under VERSIONED ids (`turn@v1a2b3c4d5e6f`, and `…@v…/call_0` below it), so
  * the old version's states are untouched, every instance already run under them replays as it ran, and
  * the switch is an ordinary child entry the journal records (`version.adopted`, then
  * `instance.entered` naming the versioned id). A replay loads the same versions back into the bundle
  * first and re-attaches what was entered — nothing is decided twice.
  *
+ * The ROOT may be handed a newer version of itself the same way, at any child it is about to enter whose
+ * state takes the same inputs in both (SCRIPTS.md §17.2): the new version is mounted under the root as
+ * `$version` ({@link withVersionMount}) and runs from that boundary on.
+ *
  * A version's identity is the content of its subtree with its own id taken out, so the same states under
  * a versioned name hash as they did under the plain one: a call never "adopts" what it is already running.
  */
 import { createHash } from "node:crypto";
-import type { LoadedState, StateDef, WorkflowBundle } from "./format.js";
+import type { LoadedChild, LoadedState, StateDef, WorkflowBundle } from "./format.js";
+import { desugarBinding } from "./loader.js";
 
 /** `chat/turn@v1a2b3c4d5e6` → `chat/turn`; an unversioned id is its own base. */
 export function baseStateIdOf(id: string): string {
@@ -104,6 +109,8 @@ export interface AdoptedVersion {
   base: string;
   versioned: string;
   bundle: Pick<WorkflowBundle, "states" | "source">;
+  /** The run's root id, when this is a version of the ROOT taken at a boundary — mounted as `$version`. */
+  root?: string;
 }
 
 /** A bundle with versions a run adopted laid in beside its own states — what a replay must load. */
@@ -114,8 +121,29 @@ export function withVersions<B extends Pick<WorkflowBundle, "states" | "source">
   for (const a of adopted) {
     Object.assign(states, versionedStates(a.bundle, baseStateIdOf(a.base), a.versioned));
     if (source !== undefined) Object.assign(source, versionedSource(a.bundle, baseStateIdOf(a.base), a.versioned));
+    // A version of the ROOT, taken at a boundary: mounted under the root as `$version`, as the run did.
+    if (a.root !== undefined && states[a.root] !== undefined) states[a.root] = withVersionMount(states[a.root]!, a.root, a.versioned, states[a.versioned]);
   }
   return { ...bundle, states, ...(source !== undefined ? { source } : {}) };
+}
+
+/** The child a root mounts the newer version of itself under, when it hands the run to it. */
+export const VERSION_CHILD = "$version";
+
+/**
+ * A root's definition with its `$version` mount: the newer version of itself it handed the run to. Each
+ * input that version REQUIRES is wired from the root's own input of the same name — the handoff took it
+ * only when the run has every one — so the mount is a whole one to whatever validates the bundle, a run
+ * resumed with it included. The handoff itself hands the root's inputs over the wires, per name.
+ */
+export function withVersionMount(def: LoadedState, rootId: string, versioned: string, next: LoadedState | undefined): LoadedState {
+  const inputs: NonNullable<LoadedChild["inputs"]> = {};
+  for (const [name, param] of Object.entries(next?.inputs ?? {})) {
+    if (param.optional === true || param.binding !== undefined) continue;
+    inputs[name] = desugarBinding(`.inputs.${name}`, `${rootId} children.${VERSION_CHILD}.inputs.${name}`, rootId);
+  }
+  const mount: LoadedChild = { state: versioned, ...(Object.keys(inputs).length > 0 ? { inputs } : {}) };
+  return { ...def, children: { ...(def.children ?? {}), [VERSION_CHILD]: mount } };
 }
 
 /** A newer version a host offers for a called state — its bundle, rooted at that state's id. */

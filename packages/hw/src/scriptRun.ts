@@ -295,8 +295,14 @@ export class ScriptRunState {
 
 /** A failed call, thrown into the script: its classification travels with it. */
 export class ScriptCallError extends Error {
-  constructor(readonly failure: Failure) {
+  /** A failed `withSession` call's conversation, as a `catch` reads it — where to continue AFTER what it said. */
+  readonly session?: { id: string };
+  constructor(
+    readonly failure: Failure,
+    session?: string,
+  ) {
     super(failure.reason);
+    if (session !== undefined) this.session = { id: session };
   }
 }
 

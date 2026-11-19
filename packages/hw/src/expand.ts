@@ -275,7 +275,7 @@ function expandNode(value: unknown, shape: Shape, options: Walk, path: string[],
   }
 
   if (Array.isArray(value)) {
-    const of = shape.t === "array" ? shape.of : { t: "any" as const };
+    const of = shape.t === "array" ? shape.of : shape.t === "object" && shape.list === true ? shape : { t: "any" as const };
     const list: Shape = shape.t === "array" ? shape : { t: "array", of };
     const out: unknown[] = [];
     value.forEach((item, i) => {

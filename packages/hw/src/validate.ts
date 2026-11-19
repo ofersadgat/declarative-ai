@@ -383,6 +383,13 @@ function validateState(
       if ((t as { standing?: unknown }).standing !== undefined && typeof (t as { standing?: unknown }).standing !== "boolean") {
         err(`${where}[${i}].standing`, "`standing` must be true or false");
       }
+      const after = (t as { after?: unknown }).after;
+      if (after !== undefined) {
+        if (after !== "operation") err(`${where}[${i}].after`, "`after` names what a rule answers, and the one thing it can name is `\"operation\"`");
+        else if (t.standing === true) err(`${where}[${i}].after`, "a standing rule answers nothing in particular; it cannot be `after` the operation");
+        else if (mountKey !== undefined) err(`${where}[${i}].after`, "a rule on a child's mount answers that child; only the state's own list can answer its operation");
+        else if (def.operation === undefined) err(`${where}[${i}].after`, "this state has no operation for the rule to answer");
+      }
       if (t.standing === true) {
         if (t.when === undefined) err(`${where}[${i}].when`, "a standing rule needs a `when` — it is taken when its guard comes true, and has none");
         if (TERMINATES.has(t.to)) err(`${where}[${i}].to`, "a standing rule enters a child; it cannot terminate the state");
@@ -766,6 +773,52 @@ function firstChildRefOf(ref: Ref<InlineFamily>): string | undefined {
   }
   if ("refs" in ref) return firstChildRefInTree(ref.refs);
   return undefined;
+}
+
+/** Every child a desugared binding reads — {@link firstChildRefOf}'s traversal, collecting all of them. */
+function childRefsOf(ref: Ref<InlineFamily>, out: Set<string>): void {
+  if ("op" in ref) {
+    const producer = ref.op;
+    if (typeof producer === "string") {
+      out.add(producer);
+      return;
+    }
+    if (producer.kind !== "function") return;
+    const path = pathOfRef(ref);
+    if (path !== undefined) {
+      if (path[0] === "children" && path[1] !== undefined) out.add(path[1]);
+      return;
+    }
+    for (const p of Object.values(producer.input)) if (p.binding) childRefsOf(p.binding, out);
+    return;
+  }
+  if ("refs" in ref) childRefsInTree(ref.refs, out);
+}
+
+function childRefsInTree(tree: RefTree<InlineFamily>, out: Set<string>): void {
+  if (tree === null || typeof tree !== "object") return;
+  if (Array.isArray(tree)) {
+    for (const item of tree) childRefsInTree(item, out);
+    return;
+  }
+  const before = out.size;
+  childRefsOf(tree as Ref<InlineFamily>, out);
+  if (out.size === before) for (const sub of Object.values(tree)) childRefsInTree(sub as RefTree<InlineFamily>, out);
+}
+
+/**
+ * Every CHILD a state reads — through its bindings, its outputs, its children's wiring, its rules'
+ * guards and the wiring its rules hand on. What a run handed to a newer version of a state part way
+ * through could not give it: a child the old run had already entered is not in the new one
+ * (JaiRA decision 0029 §3, "the same inputs means the whole state the rest of B reads").
+ */
+export function childrenReadBy(def: LoadedState): Set<string> {
+  const out = new Set<string>();
+  for (const [, ref] of bindingsOf(def)) childRefsOf(ref, out);
+  for (const t of [...(def.transitions ?? []), ...Object.values(def.children ?? {}).flatMap((child) => child.transitions ?? [])]) {
+    for (const ref of Object.values(t.inputRefs ?? {})) childRefsOf(ref, out);
+  }
+  return out;
 }
 
 function firstChildRefInTree(tree: RefTree<InlineFamily>): string | undefined {

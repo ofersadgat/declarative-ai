@@ -12,6 +12,9 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createStandaloneHost, idleMs, runScript, type StandaloneLlmDefinition } from "../src/index.js";
 
+// Never reported to an engine this machine happens to be running (§17.4): these runs are the plain kind.
+process.env["DAI_SCRIPT_REPORT"] = "0";
+
 function dir(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "dai-script-"));
   for (const [name, text] of Object.entries(files)) writeFileSync(join(root, name), text);

@@ -238,7 +238,10 @@ compiler finds it by walking the control flow and tracking the current phase:
   the entry point there, and the live variables the target needs.
 - **Transitions go on the mount.** hw lets a child reach a sibling only through its parent (SPEC
   §3.1), so every exit becomes a rule on the child's mount (SPEC §3.3): `{ name, when, to, inputs }`.
-  The rule's `inputs` hand the target its live variables.
+  The rule's `inputs` hand the target its live variables. The composite's OWN code — what runs
+  before its first call — has no mount, so the rules after it are on the composite's own list,
+  written `after: "operation"`: they answer that code finishing, once, and no later round that finds
+  nothing else to do enters its first call again (SPEC §3.3).
 - **Guards are LIFTED where they can be.** A branch whose condition reads only variables the state
   outputs becomes the guard itself, in the expression language (`.operation.output.round < 3`,
   `.children.call_0.output.r.ok`), so the rule reads like one a person wrote. A condition that
@@ -656,6 +659,14 @@ out.
   `{ value: …, session: { id: .operation[0].usage.sessionRef } }` — the position the session layer reports
   on the call's metrics, whatever the answer's shape. So a conversation written as a loop is journaled
   turn by turn, as an authored one is. `withSession` must be written `true` or `false`.
+- **A failed `withSession` call hands its error the position too** — `error.session`, where its
+  conversation ended — when it wrote a record (a call stopped or failed mid-reply did; one refused before
+  it was made did not). The failed call is a record: what it was asked, and what it said before it
+  stopped. A `catch` that continues from `error.session` goes on AFTER it, so the words that call was
+  given stay in the conversation; one that continues from the last good position replaces it. In a prompt
+  state the `catch` reads it off the failed call's node (`.operation[0].usage.sessionRef`); a call made as
+  code records it on `script.call.settled.session`, so a replay hands back the same; the standalone host
+  appends the asked turn and hands its position.
 - **A computed `null` session is a fresh conversation** (`sessionFromExpr`), as a written `null` is: a
   program holds `conv = null` until its first call hands it a position. A computed `undefined` is still a
   wiring error.
@@ -672,8 +683,13 @@ export default async function chat(first: string) {
   let text: string | null = first;
   let conv: { id: string } | null = null;
   while (text !== null) {
-    const turn = await llm({ prompt: text, session: conv, withSession: true });
-    conv = turn.session;
+    try {
+      const turn = await llm({ prompt: text, session: conv, withSession: true });
+      conv = turn.session;
+    } catch (stopped) {
+      // Stopped or failed: go on after what was said, and wait for the next message.
+      conv = (stopped as { session?: { id: string } }).session ?? conv;
+    }
     const next = await input();
     text = next !== null && next.idle !== true ? next.text : null;
   }
@@ -712,5 +728,69 @@ Two things make a program resumable at all, version or none:
   (the process or the run went away while it waited — a program parked at `input()` when the app closed)
   was never answered, so a replay does not hand it back as a failure (`ScriptRunState`).
 
-Not built: a boundary at ANY state with the same inputs (the person's ruling allows it). Only calls are
-boundaries, because entering a version's tree in its middle needs its ancestors' instances too.
+### 17.2 A running workflow takes a newer version of itself at any state boundary
+
+**Status: BUILT** (2026-11-18). The person's ruling: a run may switch "at any state boundary given that
+the state boundary has the same inputs in the new version as the old one", and `input()` "should always
+be a state boundary". So the boundary is not only a call: every child the run's ROOT is about to enter.
+
+- **The same boundary in both versions.** The host offers a newer root (`versions`, asked about the root
+  with its hash). It is taken at the child being entered when the new root has that child, its state takes
+  the same inputs — by name and by type; for a compiled script's state, the variables live there — and,
+  for a compiled call, makes the same call (its label); and when the new root takes the run's own inputs.
+  An `input()` is its key, whatever it now asks. Otherwise the run goes on, and `version.declined` names
+  the boundary and why — once per version and boundary.
+- **A child of the old version.** The root mounts the new one as its `$version` child (`withVersionMount`,
+  each input it requires wired from the root's own), entered with the root's inputs, its way down
+  directed straight at the boundary with the inputs that child was about to be handed (`by: "version"`).
+  The old root takes no rule of its own again: it ends with `$version`'s outcome. A version that took the
+  run hands it on the same way, one level deeper — `version.adopted { at, from }` says where, and which
+  version handed off. A replay mounts it again (`AdoptedVersion.root`).
+- **An `input()`'s key is stable**: `input`, `input_2`, … in the order the code waits, not a call number —
+  so it is the same boundary in a version that adds a call before it.
+- **From the wait itself.** A program spends its life waiting at `input()`, so an update nearly always
+  lands PAST the boundary it stands at. `DirectedTransitions.takeNewerVersion()` asks the run to switch from
+  there: when the root is idle, waiting on its children, the one thing running is an `input()`, and a
+  newer version shares that boundary, the wait — which has done nothing — is stepped past as a directed
+  skip steps past a state (recorded `skipped`, journaled before it is interrupted), and the new version
+  asks again. Made beside the root's loop, never by waking it — a wake that changes nothing is a round
+  that answers nothing. It resolves whether it switched; a host asks when a message arrives, and answers
+  whichever `input()` then waits.
+
+Not built: a boundary below the root — entering a version's tree in its middle needs its ancestors'
+instances too. The root's children, and a call's, are the boundaries.
+
+### 17.3 A plain program reports to an engine that will listen
+
+**Status: BUILT** (2026-11-19, for JaiRA decision 0029, ruling 12: "A non-durable run reports to JaiRA
+when it can reach it"). A script run as a plain program — `dai-script my-workflow.ts`, or `node` with
+`@declarative-ai/script` imported — tells an engine that takes reports what it does, as it does it, so the
+run is visible and gated there. It is still a plain program: it makes its own calls, with the keys of its
+own environment, reads `input()` from its own terminal, and is gone when its process is. Nothing about it
+can be resumed. With no engine listening, nothing changes.
+
+- **Finding one.** An engine that takes reports advertises itself in `$DAI_HOME/endpoints/` (default
+  `~/.declarative-ai/endpoints/`): a JSON file `{ name, socket, token, protocol, pid }`, written when it
+  starts listening and removed when it stops; one whose `pid` is gone is passed over (`findEndpoints`).
+  `$DAI_SCRIPT_ENDPOINT` names one directly — the advert, or a file holding it — and
+  `DAI_SCRIPT_REPORT=0` turns reporting off. `runScript` looks before it calls the script (its `meta`
+  goes with the hello); the host `import "@declarative-ai/script"` installs looks at the run's first call
+  and ends the report when the process is about to exit (`createDiscoveringHost`).
+- **The wire** (`report.ts`, protocol 1) is newline-delimited JSON on the advertised socket — a Unix
+  socket, or a named pipe on Windows. A request `{ id, method, params }` is answered `{ id, result }` or
+  `{ id, error: { message } }`; a notification has no `id`.
+
+  | method | kind | params → result |
+  | --- | --- | --- |
+  | `hello` | request | `{ token, protocol, run: { file, args, cwd, pid, meta? } }` → `{ run, name, version?, url? }` |
+  | `call.started` | notification | `{ call: { id, kind: "llm" \| "agent", model?, system?, prompt, session, schema?, cwd? } }` |
+  | `call.settled` | request | `{ id, outcome: { value? \| error?, session?, messages?, costUsd?, providerSession? } }` → `{}` |
+  | `approve` | request | `{ id, toolName, input }` → `{ allow, reason? }` |
+  | `note` | notification | `{ kind: "phase" \| "log" \| "input" \| "workflow", … }` |
+  | `end` | request | `{ value }` or `{ error }` → `{}` |
+
+  A session is named as the program holds it (`s1@2`); the endpoint keeps its own and maps between them.
+  A connection that closes before `end` is a run that ended without saying how.
+- **Gated there.** A reported `agent()` hands the agent a permission callback that asks the endpoint about
+  each tool use, by the agent's own tool name; what the endpoint cannot answer is refused, never allowed.
+  A report that cannot be delivered is lost, never the run's failure.

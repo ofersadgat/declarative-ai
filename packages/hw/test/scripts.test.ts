@@ -369,6 +369,23 @@ export default async function f(items: string[]) { const out = await Promise.all
     expect(result.outputs).toEqual({ result: 42 });
   });
 
+  it("hands a script named in workflow() — not imported — the parameters it declares, by name", async () => {
+    const child = `export const meta = { name: "child" };\nexport default async function child(n: number, label: string): Promise<{ said: string }> { return { said: label + ":" + String(n * 2) }; }`;
+    const source = `export const meta = { name: "parent" };\nexport default async function parent(): Promise<string> { const r = await workflow("child", { n: 21, label: "twice" }); return r.said; }`;
+    const both = { [`${ROOT}/child.ts`]: child, [`${ROOT}/s.ts`]: source };
+    const childDocs = await compileScript({ file: `${ROOT}/child.ts`, stateId: "child", vfs: vfsOf(both), requirePath: [ROOT] });
+    const parent = await compile(source, { [`${ROOT}/child.ts`]: child });
+    // The mount wires what the child declares — never Claude's `args`, which it does not take.
+    const mounted = Object.values(parent.documents).flatMap((doc) => Object.values((doc as StateDef).children ?? {})).find((c) => c.state === "child");
+    expect(mounted).toBeDefined();
+    const bundle = loadBundle({ ...(parent.documents as Record<string, StateDef>), ...(childDocs.documents as Record<string, StateDef>) }, "s");
+    expect(validateBundle(bundle, {} as never).errors).toEqual([]);
+    const engine = new WorkflowEngine({ bundle, registry: newRegistry(), validator: new SchemaValidator(), persistence: new InMemoryPersistence(), scripts: { vfs: vfsOf(both), requirePath: [ROOT] } } as never);
+    const result = await engine.run({ inputs: {} });
+    expect(result.failure?.reason).toBeUndefined();
+    expect(result.outputs).toEqual({ result: "twice:42" });
+  });
+
   it("throws a called state's failure into the script, where it can be caught", async () => {
     const failing = JSON.stringify({ operation: { prompt: "explode" } });
     const source = `import bad from "./bad";\nexport default async function f() { try { await bad(); return "no"; } catch (e) { return "caught"; } }`;
@@ -835,6 +852,67 @@ export default async function chat(first: string): Promise<{ replies: string[]; 
     expect(outputs.positions.every((p) => p.includes("@"))).toBe(true);
     expect(new Set(outputs.positions.map(stream)).size).toBe(1);
     expect(outputs.positions.map((p) => Number(p.slice(p.lastIndexOf("@") + 1)))).toEqual([1, 2, 3]);
+  });
+
+  /** A program whose reply may fail: the `catch` goes on from where the failed call's conversation ended. */
+  const KEEPING = (tools: boolean) => `
+import { llm, input } from "@declarative-ai/hw/script";
+export const meta = { name: "Keeping" };
+export default async function keeping(first: string): Promise<{ replies: string[]; kept: string[] }> {
+  let msg: { text: string } | null = { text: first };
+  let conv: { id: string } | null = null;
+  let replies: string[] = [];
+  let kept: string[] = [];
+  const none: string[] = [];
+  while (msg !== null) {
+    try {
+      const turn = await llm<string>({ prompt: msg.text, session: conv, withSession: true${tools ? ", tools: msg.text.length > 1000 ? none : []" : ""} });
+      conv = turn.session;
+      replies = [...replies, turn.value];
+    } catch (stopped) {
+      const failed = stopped as { session?: { id: string } };
+      if (failed.session !== undefined) conv = failed.session;
+      kept = [...kept, failed.session === undefined ? "" : failed.session.id];
+    }
+    const next = await input({ prompt: "next?" });
+    msg = next !== null && next.idle !== true ? { text: next.text } : null;
+  }
+  return { replies, kept };
+}
+`;
+  const failing = (reason: string) => ({ error: { classification: "permanent" as const, reason }, metrics: { durationMs: 1, costUsd: 0, costSource: "table" as const } });
+
+  it("hands a failed withSession call's error the position its conversation ended at, so the next call goes on AFTER it", async () => {
+    const answers: Array<JsonValue> = [{ text: "second" }, { text: "third" }, null];
+    let n = 0;
+    const { result, calls } = await run(KEEPING(false), { first: "first" }, (call) => (textOf(call) === "second" ? failing("stopped") : ok(`reply ${++n}`)), {
+      functions: { input: () => answers.shift() ?? null },
+    });
+    expect(result.outcome).toBe("success");
+    const outputs = result.outputs as { replies: string[]; kept: string[] };
+    expect(outputs.replies).toEqual(["reply 1", "reply 2"]);
+    // The failed call wrote its record at 1 and ended at 2; the third call continues there — after it,
+    // so what "second" said is in the conversation it reads — rather than over it at 1.
+    expect(outputs.kept).toHaveLength(1);
+    expect(outputs.kept[0]).toMatch(/@2$/);
+    const at = (i: number) => (calls[i]!.ctx.session as { at: { id: string; seq: number } }).at;
+    expect([at(0).seq, at(1).seq, at(2).seq]).toEqual([0, 1, 2]);
+    expect(at(2).id).toBe(at(1).id);
+  });
+
+  it("does the same for a call made as code, and records the position so a replay hands back the same", async () => {
+    const answers: Array<JsonValue> = [{ text: "second" }, { text: "third" }, null];
+    let n = 0;
+    const { result, calls, events } = await run(KEEPING(true), { first: "first" }, (call) => (textOf(call) === "second" ? failing("stopped") : ok(`reply ${++n}`)), {
+      functions: { input: () => answers.shift() ?? null },
+    });
+    expect(result.outcome).toBe("success");
+    const outputs = result.outputs as { replies: string[]; kept: string[] };
+    expect(outputs.kept).toHaveLength(1);
+    expect(outputs.kept[0]).toMatch(/@2$/);
+    const settled = events.filter((e): e is Extract<EngineEvent, { type: "script.call.settled" }> => e.type === "script.call.settled" && e.outcome === "error");
+    expect(settled.map((e) => e.session)).toEqual([outputs.kept[0]]);
+    expect((calls[2]!.ctx.session as { at: { seq: number } }).at.seq).toBe(2);
   });
 
   it("asks the model for T, not for the pair — withSession changes only what the script is handed", async () => {
