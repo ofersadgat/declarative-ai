@@ -6,7 +6,7 @@
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -92,7 +92,17 @@ export default async function main(): Promise<unknown> { return await workflow("
   it("runs the script as it stands at each call — an edited one takes over at the next call (non-durable handoff)", () => {
     // In a Node process of its own, as a real run is: vitest's loader keys a module by its path and
     // ignores the query that names its version, which Node's module cache does not.
+    // Its imports of the other packages go to their source, as vitest's aliases send this file's:
+    // their `exports` name `dist`, which CI does not build before it tests.
+    const packages = join(__dirname, "..", "..");
+    const paths = Object.fromEntries(
+      readdirSync(packages).flatMap((pkg) => [
+        [`@declarative-ai/${pkg}`, [join(packages, pkg, "src", "index.ts")]],
+        [`@declarative-ai/${pkg}/*`, [join(packages, pkg, "src", "*.ts")]],
+      ]),
+    );
     const root = dir({
+      "tsconfig.json": JSON.stringify({ compilerOptions: { paths } }),
       "greet.mjs": `export default async function greet(who) { return "v1 " + who; }`,
       "check.mts": `
 import { writeFileSync } from "node:fs";
