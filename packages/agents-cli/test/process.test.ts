@@ -104,6 +104,71 @@ describe("resolveProgram", () => {
   });
 });
 
+describe("resolveProgram: the launchers Node.js itself ships", () => {
+  const FNM = "C:\\Users\\me\\AppData\\Roaming\\fnm\\node-versions\\v26.13.1\\installation";
+  /** npm 11's `npm.cmd`, as it ships beside `node.exe`: its entry is a variable, not cmd-shim's `%dp0%` line. */
+  const NPM_CMD = [
+    ":: Created by npm, please don't edit manually.",
+    "@ECHO OFF",
+    "SETLOCAL",
+    'SET "NODE_EXE=%~dp0\\node.exe"',
+    'IF NOT EXIST "%NODE_EXE%" (',
+    '  SET "NODE_EXE=node"',
+    ")",
+    'SET "NPM_PREFIX_JS=%~dp0\\node_modules\\npm\\bin\\npm-prefix.js"',
+    'SET "NPM_CLI_JS=%~dp0\\node_modules\\npm\\bin\\npm-cli.js"',
+    `FOR /F "delims=" %%F IN ('CALL "%NODE_EXE%" "%NPM_PREFIX_JS%"') DO (`,
+    '  SET "NPM_PREFIX_NPM_CLI_JS=%%F\\node_modules\\npm\\bin\\npm-cli.js"',
+    ")",
+    'IF EXIST "%NPM_PREFIX_NPM_CLI_JS%" (',
+    '  SET "NPM_CLI_JS=%NPM_PREFIX_NPM_CLI_JS%"',
+    ")",
+    '"%NODE_EXE%" "%NPM_CLI_JS%" %*',
+  ].join("\r\n");
+  /** corepack's `pnpm.cmd`: `%~dp0`, not cmd-shim's `%dp0%`. */
+  const COREPACK_CMD = [
+    "@SETLOCAL",
+    '@IF EXIST "%~dp0\\node.exe" (',
+    '  "%~dp0\\node.exe"  "%~dp0\\node_modules\\corepack\\dist\\pnpm.js" %*',
+    ") ELSE (",
+    "  @SET PATHEXT=%PATHEXT:;.JS;=;%",
+    '  node  "%~dp0\\node_modules\\corepack\\dist\\pnpm.js" %*',
+    ")",
+  ].join("\r\n");
+
+  it("follows npm's own npm.cmd to npm-cli.js — spawning it as it is fails with EINVAL", () => {
+    // Settings → Connections ran `npm install -g @openai/codex` right after fnm installed Node, and the
+    // step failed "'npm install -g @openai/codex' could not be started: spawn EINVAL".
+    const files = fs({ [`${FNM}\\npm.cmd`]: NPM_CMD, [`${FNM}\\node.exe`]: true });
+    expect(resolveProgram("npm", { ...files, pathDirs: [FNM] })).toEqual({
+      file: `${FNM}\\node.exe`,
+      prefix: [`${FNM}\\node_modules\\npm\\bin\\npm-cli.js`],
+    });
+  });
+
+  it("reads a launcher named outright by its path, .cmd and all — not `npm.cmd.cmd`", () => {
+    // How the install plan names npm when it is off this app's PATH: by the path it was found at.
+    const files = fs({ [`${FNM}\\npm.cmd`]: NPM_CMD, [`${FNM}\\node.exe`]: true });
+    expect(resolveProgram(`${FNM}\\npm.cmd`, files)).toEqual({
+      file: `${FNM}\\node.exe`,
+      prefix: [`${FNM}\\node_modules\\npm\\bin\\npm-cli.js`],
+    });
+    expect(resolveProgram(`${NPM}\\codex.CMD`, fs({ [`${NPM}\\codex.CMD`]: SHIM })).prefix).toEqual([`${NPM}\\node_modules\\@openai\\codex\\bin\\codex.js`]);
+  });
+
+  it("follows corepack's pnpm.cmd to the entry it runs", () => {
+    expect(resolveProgram("pnpm", { ...fs({ [`${FNM}\\pnpm.cmd`]: COREPACK_CMD }), pathDirs: [FNM] })).toEqual({
+      file: "C:\\Program Files\\nodejs\\node.exe",
+      prefix: [`${FNM}\\node_modules\\corepack\\dist\\pnpm.js`],
+    });
+  });
+
+  it("hands back a launcher it cannot read as it was named", () => {
+    const opaque = `${FNM}\\tool.cmd`;
+    expect(resolveProgram(opaque, fs({ [opaque]: "@ECHO OFF\r\nstart something.exe %*" }))).toEqual({ file: opaque, prefix: [] });
+  });
+});
+
 describe("hostNode", () => {
   // Electron has no console, so a console program a shim's entry starts (codex.js → codex.exe) got a new,
   // VISIBLE one — a terminal window per call. A real node.exe keeps the whole chain on a hidden console.

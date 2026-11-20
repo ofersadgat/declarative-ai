@@ -173,8 +173,39 @@ export function hostNode(pathDirs: readonly string[], exists: (path: string) => 
   return found !== undefined ? { node: found, runAsNode: false } : { node: process.execPath, runAsNode: true };
 }
 
-/** The JS entry an npm `.cmd` shim delegates to, relative to the shim's own directory. */
+/** The JS entry an npm `.cmd` shim (cmd-shim's format) delegates to, relative to the shim's own directory. */
 const SHIM_ENTRY = /"%dp0%[\\/]([^"]+\.[cm]?js)"/i;
+
+/** The same, as corepack's shims (`pnpm.cmd`, `yarn.cmd` beside `node.exe`) spell it: `%~dp0`, not `%dp0%`. */
+const DP0_ENTRY = /"%~dp0[\\/]?([^"]+\.[cm]?js)"/i;
+
+/**
+ * npm's own launcher (`npm.cmd`, `npx.cmd` beside `node.exe`), which is not cmd-shim's: it names its
+ * entry in a variable (`SET "NPM_CLI_JS=%~dp0\node_modules\npm\bin\npm-cli.js"`) and runs that
+ * (`"%NODE_EXE%" "%NPM_CLI_JS%" %*`).
+ */
+const LAUNCHER_RUN = /^\s*"%NODE_EXE%"\s+"%(\w+)%"\s+%\*\s*$/im;
+
+/**
+ * The JS entry a `.cmd` launcher runs, relative to its own directory, in each shape npm and Node ship.
+ *
+ * npm's launcher then asks the global prefix for a newer npm (`npm install -g npm` there) and runs that
+ * one instead when it exists; that takes running Node, so here it is the npm beside the launcher — an
+ * older npm at worst, which installs into the same prefix.
+ */
+function launcherEntry(text: string): string | undefined {
+  const shim = text.match(SHIM_ENTRY)?.[1];
+  if (shim !== undefined) return shim;
+  const variable = text.match(LAUNCHER_RUN)?.[1];
+  if (variable !== undefined) {
+    const set = new RegExp(`^\\s*SET\\s+"${variable}=%~dp0[\\\\/]?([^"]+\\.[cm]?js)"`, "im").exec(text)?.[1];
+    if (set !== undefined) return set;
+  }
+  return text.match(DP0_ENTRY)?.[1];
+}
+
+/** A `.cmd`/`.bat`: Windows runs one only through `cmd.exe`, so it is read for what it runs. */
+const LAUNCHER = /\.(cmd|bat)$/i;
 
 /** A JS file is a program only to an interpreter — Windows cannot spawn one directly. */
 const JS_ENTRY = /\.[cm]?js$/i;
@@ -217,6 +248,8 @@ export function resolveProgram(command: string, deps: ProgramDeps): ResolvedProg
   const candidates = (ext: string): string[] => dirs.map((dir) => (dir === "" ? `${command}${ext}` : `${dir}\\${command}${ext}`));
 
   const lower = command.toLowerCase();
+  // A launcher named outright (`…\npm.cmd`, as a caller that found it off the PATH spells it): read it, not `npm.cmd.cmd`.
+  const launcher = LAUNCHER.test(lower);
   // A JS entry — what `resolveAgentBinary` falls back to for an older `@anthropic-ai/claude-code`, and
   // what a caller may pin directly. It is not a program: run it under the interpreter, exactly as a
   // resolved shim is, rather than handing Windows a file it cannot execute.
@@ -224,8 +257,9 @@ export function resolveProgram(command: string, deps: ProgramDeps): ResolvedProg
   if (binary.some((ext) => lower.endsWith(ext))) return { file: command, prefix: [] };
   if (binary.some((ext) => candidates(ext).some((candidate) => deps.exists(candidate)))) return { file: command, prefix: [] };
 
-  for (const candidate of [...candidates(".cmd"), ...candidates(".bat")]) {
-    const entry = deps.readText(candidate)?.match(SHIM_ENTRY)?.[1];
+  for (const candidate of launcher ? candidates("") : [...candidates(".cmd"), ...candidates(".bat")]) {
+    const text = deps.readText(candidate);
+    const entry = text !== undefined ? launcherEntry(text) : undefined;
     if (entry === undefined) continue;
     const cut = Math.max(candidate.lastIndexOf("\\"), candidate.lastIndexOf("/"));
     const dir = cut >= 0 ? candidate.slice(0, cut) : ".";
