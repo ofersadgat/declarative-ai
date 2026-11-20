@@ -7,9 +7,11 @@
  *
  * ## Finding an endpoint
  *
- * An engine that takes reports ADVERTISES itself: a JSON file in `$DAI_HOME/endpoints/` (default
- * `~/.declarative-ai/endpoints/`), `{ "name", "socket", "token", "protocol", "pid" }`, written when it
- * starts listening and taken away when it stops. One whose `pid` is no longer running is passed over.
+ * An engine that takes reports ADVERTISES itself ({@link advertiseEndpoint}): a JSON file
+ * `{ "name", "socket", "token", "protocol", "pid" }` in {@link endpointsDir} — `$DAI_ENDPOINTS`, else this
+ * user's directory in the system's temporary one — written when it starts listening and taken away when
+ * it stops. One whose `pid` is no longer running is passed over, and so is every advert in a directory
+ * that is not this user's alone.
  * `$DAI_SCRIPT_ENDPOINT` names one directly — the advert itself, or a file holding it — and
  * `DAI_SCRIPT_REPORT=0` turns reporting off.
  *
@@ -32,8 +34,8 @@
  * maps between them. A connection that closes before `end` is a run that ended without saying how.
  */
 import { createConnection, type Socket } from "node:net";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JsonSchema, JsonValue } from "@declarative-ai/json";
 
@@ -51,6 +53,8 @@ export interface EndpointAdvert {
   protocol: number;
   /** The advertising process — an advert whose process is gone is passed over. */
   pid?: number;
+  /** The advertising engine's version, for a person reading the file. */
+  version?: string;
 }
 
 /** The run, as `hello` describes it. */
@@ -115,9 +119,56 @@ export interface ScriptReport {
   close(): void;
 }
 
-/** Where endpoints advertise: `$DAI_HOME/endpoints`, else `~/.declarative-ai/endpoints`. */
+/**
+ * Where endpoints advertise: `$DAI_ENDPOINTS`, else this user's directory in the system's temporary one —
+ * `/tmp/declarative-ai-endpoints-<uid>` on macOS and Linux, `%TEMP%\declarative-ai-endpoints` on Windows.
+ * An advert lasts only as long as its process, so it is kept where the system keeps what does not outlive
+ * a session, not in the person's home. On macOS and Linux it is `/tmp` itself, as tmux keeps its sockets,
+ * rather than `$TMPDIR` or `$XDG_RUNTIME_DIR`: a script run from a terminal, ssh or cron must look where an
+ * engine opened from the desktop wrote, and those differ between them. `/tmp` is shared, so the directory
+ * carries the user's id and is trusted only while it is theirs alone (`ownedPrivately`); Windows' `%TEMP%`
+ * is already the user's own.
+ */
 export function endpointsDir(env: NodeJS.ProcessEnv = process.env): string {
-  return join(env["DAI_HOME"] && env["DAI_HOME"].length > 0 ? env["DAI_HOME"] : join(homedir(), ".declarative-ai"), "endpoints");
+  const named = env["DAI_ENDPOINTS"];
+  if (named !== undefined && named.length > 0) return named;
+  if (process.platform === "win32") return join(tmpdir(), "declarative-ai-endpoints");
+  return join("/tmp", `declarative-ai-endpoints-${process.getuid?.() ?? "user"}`);
+}
+
+/**
+ * Whether a directory is this user's alone. In a directory anyone else could write to, an advert could be
+ * someone else's, and a run would send them its prompts, its answers and its tools to approve.
+ */
+function ownedPrivately(dir: string): boolean {
+  if (process.platform === "win32") return true;
+  try {
+    const stat = lstatSync(dir);
+    return stat.isDirectory() && stat.uid === process.getuid?.() && (stat.mode & 0o077) === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Advertise an endpoint as `<name>.json` in {@link endpointsDir}, making the directory — this user's only —
+ * when it is not there, and refusing one that is not this user's alone. Returns the advert's path; the
+ * engine removes it when it stops listening.
+ *
+ * Call it again while listening: it puts back an advert the system's cleaning of its temporary directory
+ * took away (macOS and many Linuxes clear what has not changed in days), and a rewritten advert is never
+ * that old.
+ */
+export function advertiseEndpoint(name: string, advert: EndpointAdvert, env: NodeJS.ProcessEnv = process.env): string {
+  const dir = endpointsDir(env);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (!ownedPrivately(dir)) throw new Error(`${dir} is not this user's alone, so nothing is advertised there`);
+  const file = join(dir, `${name}.json`);
+  // Written beside it and renamed over it, so a run looking never reads half of one.
+  const partial = `${file}.${process.pid}.partial`;
+  writeFileSync(partial, `${JSON.stringify(advert, null, 2)}\n`, { mode: 0o600 });
+  renameSync(partial, file);
+  return file;
 }
 
 function pidAlive(pid: number | undefined): boolean {
@@ -154,7 +205,7 @@ export function findEndpoints(env: NodeJS.ProcessEnv = process.env): EndpointAdv
     return advert !== undefined ? [advert] : [];
   }
   const dir = endpointsDir(env);
-  if (!existsSync(dir)) return [];
+  if (!existsSync(dir) || !ownedPrivately(dir)) return [];
   const found: Array<{ advert: EndpointAdvert; at: number }> = [];
   for (const name of readdirSync(dir)) {
     if (!name.endsWith(".json")) continue;

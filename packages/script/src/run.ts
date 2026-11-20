@@ -17,7 +17,7 @@ export interface RunScriptOptions extends StandaloneOptions {
    * finds one (`findEndpoints`), `false` never does. A `report` already given is used as it is.
    */
   reporting?: boolean;
-  /** Where discovery reads `$DAI_HOME`, `$DAI_SCRIPT_ENDPOINT` and `$DAI_SCRIPT_REPORT`. Default: `process.env`. */
+  /** Where discovery reads `$DAI_ENDPOINTS`, `$DAI_SCRIPT_ENDPOINT` and `$DAI_SCRIPT_REPORT`. Default: `process.env`. */
   env?: NodeJS.ProcessEnv;
 }
 

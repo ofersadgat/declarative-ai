@@ -5,12 +5,12 @@
  * not take it, it is the plain program it always was.
  */
 import { createServer, type Server, type Socket } from "node:net";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentQuery } from "@declarative-ai/agents-api";
-import { findEndpoints, REPORT_PROTOCOL, runScript } from "../src/index.js";
+import { advertiseEndpoint, endpointsDir, findEndpoints, REPORT_PROTOCOL, runScript } from "../src/index.js";
 
 function dir(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "dai-report-"));
@@ -166,14 +166,44 @@ describe("a run reported to an engine", () => {
 });
 
 describe("finding an endpoint", () => {
-  it("reads the adverts under $DAI_HOME/endpoints, passing over one whose process is gone or that speaks another protocol", () => {
-    const home = mkdtempSync(join(tmpdir(), "dai-home-"));
-    mkdirSync(join(home, "endpoints"));
-    writeFileSync(join(home, "endpoints", "live.json"), JSON.stringify({ name: "Live", socket: "/tmp/a.sock", token: "t", protocol: REPORT_PROTOCOL, pid: process.pid }));
-    writeFileSync(join(home, "endpoints", "gone.json"), JSON.stringify({ name: "Gone", socket: "/tmp/b.sock", token: "t", protocol: REPORT_PROTOCOL, pid: 2 ** 22 + 12345 }));
-    writeFileSync(join(home, "endpoints", "newer.json"), JSON.stringify({ name: "Newer", socket: "/tmp/c.sock", token: "t", protocol: REPORT_PROTOCOL + 1, pid: process.pid }));
-    writeFileSync(join(home, "endpoints", "junk.json"), "{");
-    expect(findEndpoints({ DAI_HOME: home }).map((a) => a.name)).toEqual(["Live"]);
-    expect(findEndpoints({ DAI_HOME: home, DAI_SCRIPT_REPORT: "0" })).toEqual([]);
+  it("reads the adverts in $DAI_ENDPOINTS, passing over one whose process is gone or that speaks another protocol", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dai-endpoints-"));
+    writeFileSync(join(dir, "live.json"), JSON.stringify({ name: "Live", socket: "/tmp/a.sock", token: "t", protocol: REPORT_PROTOCOL, pid: process.pid }));
+    writeFileSync(join(dir, "gone.json"), JSON.stringify({ name: "Gone", socket: "/tmp/b.sock", token: "t", protocol: REPORT_PROTOCOL, pid: 2 ** 22 + 12345 }));
+    writeFileSync(join(dir, "newer.json"), JSON.stringify({ name: "Newer", socket: "/tmp/c.sock", token: "t", protocol: REPORT_PROTOCOL + 1, pid: process.pid }));
+    writeFileSync(join(dir, "junk.json"), "{");
+    expect(findEndpoints({ DAI_ENDPOINTS: dir }).map((a) => a.name)).toEqual(["Live"]);
+    expect(findEndpoints({ DAI_ENDPOINTS: dir, DAI_SCRIPT_REPORT: "0" })).toEqual([]);
+  });
+
+  it("keeps adverts in this user's directory in the system's temporary one, not in the home directory", () => {
+    const dir = endpointsDir({});
+    expect(dir.startsWith(homedir())).toBe(false);
+    if (process.platform === "win32") expect(dir).toBe(join(tmpdir(), "declarative-ai-endpoints"));
+    else expect(dir).toBe(`/tmp/declarative-ai-endpoints-${process.getuid!()}`);
+  });
+
+  it("advertises in a directory it makes this user's alone, and a run finds what it advertised", () => {
+    const dir = join(mkdtempSync(join(tmpdir(), "dai-endpoints-")), "endpoints");
+    const file = advertiseEndpoint("engine", { name: "Engine", socket: "/tmp/e.sock", token: "t", protocol: REPORT_PROTOCOL, pid: process.pid, version: "1.2.3" }, { DAI_ENDPOINTS: dir });
+    expect(file).toBe(join(dir, "engine.json"));
+    expect(readdirSync(dir)).toEqual(["engine.json"]);
+    if (process.platform !== "win32") {
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+    }
+    expect(findEndpoints({ DAI_ENDPOINTS: dir }).map((a) => a.name)).toEqual(["Engine"]);
+    // Advertising again — as an engine does while it listens — puts back an advert that was cleaned away.
+    rmSync(file);
+    advertiseEndpoint("engine", { name: "Engine", socket: "/tmp/e.sock", token: "t", protocol: REPORT_PROTOCOL, pid: process.pid }, { DAI_ENDPOINTS: dir });
+    expect(findEndpoints({ DAI_ENDPOINTS: dir }).map((a) => a.name)).toEqual(["Engine"]);
+  });
+
+  it.skipIf(process.platform === "win32")("trusts no advert in a directory others can write to, and advertises nothing there", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dai-endpoints-"));
+    writeFileSync(join(dir, "planted.json"), JSON.stringify({ name: "Planted", socket: "/tmp/p.sock", token: "t", protocol: REPORT_PROTOCOL, pid: process.pid }));
+    chmodSync(dir, 0o777);
+    expect(findEndpoints({ DAI_ENDPOINTS: dir })).toEqual([]);
+    expect(() => advertiseEndpoint("engine", { name: "Engine", socket: "/tmp/e.sock", token: "t", protocol: REPORT_PROTOCOL }, { DAI_ENDPOINTS: dir })).toThrow(/not this user's alone/);
   });
 });

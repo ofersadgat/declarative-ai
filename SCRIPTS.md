@@ -769,9 +769,16 @@ run is visible and gated there. It is still a plain program: it makes its own ca
 own environment, reads `input()` from its own terminal, and is gone when its process is. Nothing about it
 can be resumed. With no engine listening, nothing changes.
 
-- **Finding one.** An engine that takes reports advertises itself in `$DAI_HOME/endpoints/` (default
-  `~/.declarative-ai/endpoints/`): a JSON file `{ name, socket, token, protocol, pid }`, written when it
-  starts listening and removed when it stops; one whose `pid` is gone is passed over (`findEndpoints`).
+- **Finding one.** An engine that takes reports advertises itself (`advertiseEndpoint`, from
+  `@declarative-ai/script/report`, which installs no host): a JSON file `{ name, socket, token, protocol,
+  pid }` in `$DAI_ENDPOINTS`, else this user's directory in the system's temporary one —
+  `/tmp/declarative-ai-endpoints-<uid>` on macOS and Linux, `%TEMP%\declarative-ai-endpoints` on Windows —
+  written when it starts listening, written again while it listens (so the system's cleaning of its
+  temporary directory never takes it for long) and removed when it stops. An advert lasts as long as its
+  process, so nothing of it is kept in the person's home. `/tmp` is the same for a terminal, ssh, cron and
+  the desktop, where `$TMPDIR` and `$XDG_RUNTIME_DIR` are not; it is shared, so a directory that is not
+  this user's alone (owned by them, mode `0700`) is neither read nor written. One whose `pid` is gone is
+  passed over (`findEndpoints`).
   `$DAI_SCRIPT_ENDPOINT` names one directly — the advert, or a file holding it — and
   `DAI_SCRIPT_REPORT=0` turns reporting off. `runScript` looks before it calls the script (its `meta`
   goes with the hello); the host `import "@declarative-ai/script"` installs looks at the run's first call
