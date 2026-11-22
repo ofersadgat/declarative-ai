@@ -21,6 +21,8 @@ export * from "./runtime.js";
 // The agent's OWN session file, read back — the concrete `AgentSessionReader` over
 // `~/.claude/projects`, and the fold that keeps what the stream never carried.
 export * from "./nativeSession.js";
+// A replayed conversation written as that file, so a resume carries it as real turns (`nativeSeed.ts`).
+export * from "./nativeSeed.js";
 // The agent as an `Executor` (DESIGN §4.4) — a `PromptExecutor` whose call reaches an agent, which is
 // what lets a PROMPT op be answered by one. The registry-entry adapters in `runtime.js` remain, and
 // now delegate here rather than carrying their own copy of the session and tool logic.

@@ -267,6 +267,14 @@ export interface AgentQueryOptions {
    * the lineage edge records such a branch as summary-seeded rather than as a native fork.
    */
   messages?: readonly JsonValue[];
+  /**
+   * The same replay, SPLIT for an adapter that can write it as its own session (`nativeSeed.ts`):
+   * `prior` is the conversation before this call, and `prompt` is what this call says, rendered as
+   * `prompt` would be without the history in front of it. Present beside `messages` and `prompt`,
+   * never instead of them: an adapter that cannot seed ignores it and renders as before, and one that
+   * seeds and fails falls back the same way.
+   */
+  seed?: { prior: readonly JsonValue[]; prompt: string };
 }
 
 /**

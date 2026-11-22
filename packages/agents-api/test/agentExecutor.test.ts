@@ -244,6 +244,29 @@ describe("one session implementation, two transports (the point of the split)", 
     expect(seen()?.messages).toBeDefined();
   });
 
+  it("splits a replay into the history and this call's own message, for an adapter that can seed a session", async () => {
+    const { query, seen } = capturing();
+    const history: ModelMessage[] = [
+      { role: "user", content: "earlier" },
+      { role: "assistant", content: [{ type: "text", text: "said before" }] as never },
+    ];
+    await new AgentExecutor({ query }).start(op("go on"), {
+      session: session({ mode: "fork", forkFrom: { handle: "foreign", provider: "codex-cli" }, messages: history }),
+    }).result;
+    // The rendered whole is still there for an adapter that cannot seed…
+    expect(seen()?.prompt).toContain("USER: earlier");
+    // …and the split beside it: the history as messages, and the new message rendered as any turn's is.
+    expect(seen()?.seed).toEqual({ prior: history, prompt: "go on" });
+  });
+
+  it("offers no seed when there is nothing but this call to replay", async () => {
+    const { query, seen } = capturing();
+    await new AgentExecutor({ query }).start(op("first"), {
+      session: session({ mode: "fork", forkFrom: { handle: "foreign", provider: "codex-cli" }, messages: [] }),
+    }).result;
+    expect(seen()?.seed).toBeUndefined();
+  });
+
   /**
    * A branch that does not start at the remote's tip is still ONE server-side copy.
    *

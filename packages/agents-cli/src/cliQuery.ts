@@ -36,7 +36,7 @@
  * believes it is gated.
  */
 import type { AgentQuery, AgentQueryOptions, AgentRun, AgentStreamMessage, BinaryDeps } from "@declarative-ai/agents-api";
-import { claudeOptionsRefusal, contextDetailOfClaude, DEFAULT_SETTING_SOURCES, defaultBinaryDeps, pluginDirsOf, readAgentMessage, resolveAgentBinary, TurnHold } from "@declarative-ai/agents-api";
+import { claudeOptionsRefusal, contextDetailOfClaude, DEFAULT_SETTING_SOURCES, defaultBinaryDeps, pluginDirsOf, readAgentMessage, resolveAgentBinary, TurnHold, writeNativeSeed } from "@declarative-ai/agents-api";
 import { defaultStartMcpBridge, type McpBridge, type StartMcpBridge } from "./mcpBridge.js";
 import { mcpConfigJson, mcpToolName, PERMISSION_PROMPT_TOOL } from "./mcpProtocol.js";
 import { defaultSpawn, exitMessage, type AgentProcess, type SpawnProcess } from "./process.js";
@@ -426,9 +426,19 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
         command = resolved.path;
         if (resolved.warning !== undefined) (config.warn ?? ((m: string) => console.warn(m)))(resolved.warning);
       }
+      // A REPLAY this agent can carry as its own turns: the history written as a session file of its
+      // own and resumed, with only this call's message as the prompt (`nativeSeed.ts`). Rendered into
+      // the prompt instead, the whole conversation reached the agent as one message of quoted JSON
+      // (JaiRA t-5uwe4jt33x). A transcript it cannot seed, or a file it cannot write, renders as before.
+      const configDir = opts.env?.["CLAUDE_CONFIG_DIR"];
+      const seeded =
+        opts.seed !== undefined && opts.resume === undefined && opts.cwd !== undefined
+          ? await writeNativeSeed(opts.seed.prior, opts.cwd, configDir !== undefined ? { configDir } : {})
+          : undefined;
+      const call: AgentQueryOptions = seeded === undefined ? opts : { ...opts, resume: seeded, prompt: opts.seed!.prompt };
       // The prompt as the stream's first message — still the channel with no length limit (see
       // {@link cliArgv}), in the shape a stream-json session reads.
-      const promptLine = `${JSON.stringify({ type: "user", message: { role: "user", content: opts.prompt ?? "" }, parent_tool_use_id: null })}
+      const promptLine = `${JSON.stringify({ type: "user", message: { role: "user", content: call.prompt ?? "" }, parent_tool_use_id: null })}
 `;
       // WHEN it goes in is the fix for a race that killed real runs. The CLI does not wait for an
       // `--mcp-config` server: it starts the model turn as soon as it has input, and it resolves
@@ -438,7 +448,7 @@ export function createCliAgentQuery(config: CliAgentOptions = {}): AgentQuery {
       // handshake is done gets the prompt AFTER that, and the first decision finds the tool; a bridge
       // that cannot (a fake) gets it at spawn, as before.
       const gate = bridge?.ready;
-      const c = spawn([command, ...cliArgv(opts, config, bridge?.url)], {
+      const c = spawn([command, ...cliArgv(call, config, bridge?.url)], {
         cwd: opts.cwd,
         ...(opts.env !== undefined ? { env: opts.env } : {}),
         ...(gate === undefined ? { stdin: promptLine } : {}),

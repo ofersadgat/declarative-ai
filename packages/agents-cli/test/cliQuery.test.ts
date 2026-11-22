@@ -1,4 +1,8 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { nativeSessionPath } from "@declarative-ai/agents-api";
 import { isOk, type ExecServices, type FunctionInputs } from "@declarative-ai/exec";
 import { BRIDGE_UNREACHABLE, bridgeFailureCode, cliArgv, cliRefusal, createCliAgentQuery } from "../src/cliQuery.js";
 import { stderrTail, type AgentProcess, type SpawnProcess } from "../src/process.js";
@@ -609,6 +613,49 @@ describe("the prompt channel", () => {
 
     expect((JSON.parse(stdins[0]!) as { message: { content: string } }).message.content).toHaveLength(66_000);
     expect(argv[0]!.join(" ").length).toBeLessThan(1_000);
+  });
+});
+
+/**
+ * A REPLAY carried as the agent's own turns: the history written as a session file and resumed, and
+ * only this call's message on stdin (JaiRA t-5uwe4jt33x, where the whole conversation went in as one
+ * rendered message).
+ */
+describe("a replay the agent can seed", () => {
+  const prior = [
+    { role: "user", content: "push it" },
+    { role: "assistant", content: [{ type: "text", text: "pushed" }] },
+  ];
+
+  it("resumes a session holding the history, with only the new message as the prompt", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cli-seed-"));
+    try {
+      const { spawn, argv, stdins } = fakeSpawn(['{"type":"result","result":"done"}']);
+      const opts = { prompt: "USER: push it\n\nASSISTANT: pushed\n\nUSER: now tag it", messages: [], seed: { prior, prompt: "now tag it" }, cwd: "C:\\proj", env: { CLAUDE_CONFIG_DIR: root } };
+      for await (const _ of createCliAgentQuery({ spawn })(opts)) void _;
+
+      const resumed = argv[0]![argv[0]!.indexOf("--resume") + 1]!;
+      expect(argv[0]).not.toContain("--fork-session");
+      expect(JSON.parse(stdins[0]!)).toMatchObject({ message: { content: "now tag it" } });
+      const lines = (await readFile(nativeSessionPath(resumed, "C:\\proj", root), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+      expect(lines.map((l) => l.message.content)).toEqual(["push it", [{ type: "text", text: "pushed" }]]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("renders the replay as before when the history is not in the agent's shape", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cli-seed-"));
+    try {
+      const { spawn, argv, stdins } = fakeSpawn(['{"type":"result","result":"done"}']);
+      const opts = { prompt: "rendered", messages: [], seed: { prior: [{ role: "system", content: "x" }], prompt: "new" }, cwd: "C:\\proj", env: { CLAUDE_CONFIG_DIR: root } };
+      for await (const _ of createCliAgentQuery({ spawn })(opts)) void _;
+
+      expect(argv[0]).not.toContain("--resume");
+      expect(JSON.parse(stdins[0]!)).toMatchObject({ message: { content: "rendered" } });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

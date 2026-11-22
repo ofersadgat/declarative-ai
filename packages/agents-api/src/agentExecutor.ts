@@ -526,6 +526,26 @@ export class AgentExecutor extends PromptExecutor {
     this.capabilities = options.capabilities ?? DELEGATED_CAPS;
   }
 
+  /** How many of a replayed call's trailing messages are what THIS call says — keyed by the very
+   *  definition `applySession` handed back, which is the one `invoke` receives. */
+  private readonly sentCount = new WeakMap<LlmCallDefinition, number>();
+
+  /**
+   * The base decides; this remembers where its replay splits. `applySession` puts history and this
+   * call's own turns into ONE `messages` array, and only it knows where one ends — what `seed` needs
+   * so an adapter that writes the history as its own session sends just the new turns as its prompt.
+   */
+  protected override async applySession(
+    definition: LlmCallDefinition,
+    ctx: ExecServices,
+  ): Promise<{ definition: LlmCallDefinition; sent: ModelMessage[] }> {
+    const applied = await super.applySession(definition, ctx);
+    if (applied.definition !== definition && applied.definition.messages !== undefined && applied.definition.providerSessionId === undefined) {
+      this.sentCount.set(applied.definition, applied.sent.length);
+    }
+    return applied;
+  }
+
   /** Present only when this transport can actually read a conversation back. The distinction is
    *  load-bearing: an absent reader means a resync starts EMPTY, and §11 requires that to be visible
    *  rather than mistaken for a conversation that happened to have nothing in it. */
@@ -1179,6 +1199,7 @@ export class AgentExecutor extends PromptExecutor {
           }
         : {}),
       ...(replayed !== undefined ? { messages: replayed as never } : {}),
+      ...(replayed !== undefined ? this.seedOf(definition, replayed) : {}),
       /**
        * Route the agent's native tool-approval callback through our GATE (DESIGN §5.1, "Delegated
        * approval fidelity").
@@ -1514,6 +1535,21 @@ export class AgentExecutor extends PromptExecutor {
    * transcript is rendered into text. That lossiness is why SESSIONS.md records such a branch as
    * summary-seeded rather than as a native fork, and it is why the cheap paths avoid replay entirely.
    */
+  /** The replay split as {@link AgentQueryOptions.seed}, when `applySession` said where it falls. */
+  private seedOf(definition: LlmCallDefinition, replayed: readonly ModelMessage[]): Pick<AgentQueryOptions, "seed"> {
+    const sent = this.sentCount.get(definition);
+    if (sent === undefined || sent > replayed.length) return {};
+    const cut = replayed.length - sent;
+    const prior = replayed.slice(0, cut);
+    if (prior.length === 0) return {};
+    // One typed message renders as it does on any other turn — not as a `USER:` line of a transcript.
+    const tail = replayed.slice(cut);
+    const { messages: _history, ...rest } = definition;
+    const only = tail.length === 1 && tail[0]!.role === "user" && typeof tail[0]!.content === "string" ? tail[0]!.content : undefined;
+    const prompt = this.renderPrompt(only !== undefined ? { ...rest, prompt: only } : { ...rest, messages: tail });
+    return { seed: { prior: prior as unknown as JsonValue[], prompt } };
+  }
+
   protected renderPrompt(definition: LlmCallDefinition): string {
     // A SLASH COMMAND is a command to the agent (`/compact keep the decision`), not a message: it
     // works only as the first thing the agent reads, so the system text is not put in front of it —
