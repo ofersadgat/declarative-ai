@@ -204,13 +204,29 @@ function normalizeCall(first: unknown, second: unknown): LlmCall {
   throw new TypeError("llm() takes a prompt string, or an object with a 'prompt'");
 }
 
-interface Typed<F> {
-  (...args: unknown[]): unknown;
+/**
+ * `llm()` as a script's author sees it — the SAME overloads the script checker declares
+ * ({@link HOOK_MODULE_SOURCE}). They have to agree: an editor or `tsc` reads these, the compiler reads
+ * those, and a script that is clean under one and red under the other is a script nobody can trust
+ * either about. `llm<T>(…)` is how a script states its output contract (SCRIPTS.md §9).
+ */
+export interface LlmHook {
+  <T = string>(call: LlmCall & { withSession: true }): Promise<WithSession<T>>;
+  <T = string>(prompt: string, call: Partial<LlmCall> & { withSession: true }): Promise<WithSession<T>>;
+  <T = string>(call: LlmCall): Promise<T>;
+  <T = string>(prompt: string, call?: Partial<LlmCall>): Promise<T>;
   /**
    * The same hook with its OUTPUT CONTRACT fixed — what `llm<T>(…)` compiles to (SCRIPTS.md §9): the
    * type argument is gone at run time, and this carries the schema it was converted to.
    */
-  withOutput(schema: JsonSchema): F;
+  withOutput(schema: JsonSchema): LlmHook;
+}
+
+/** `agent()` as a script's author sees it — see {@link LlmHook}. `null` when the agent failed. */
+export interface AgentHook {
+  <T = string>(prompt: string, options?: AgentOptions): Promise<T | null>;
+  /** The same hook with its output contract fixed — what `agent<T>(…)` compiles to. */
+  withOutput(schema: JsonSchema): AgentHook;
 }
 
 function typedLlm(schema: JsonSchema | undefined): (first: unknown, second?: unknown) => Promise<unknown> {
@@ -223,11 +239,16 @@ function typedAgent(schema: JsonSchema | undefined): (prompt: unknown, options?:
   };
 }
 
-export const llm = Object.assign(typedLlm(undefined), { withOutput: (schema: JsonSchema) => typedLlm(schema) }) as unknown as Typed<ReturnType<typeof typedLlm>>;
-export const agent = Object.assign(typedAgent(undefined), { withOutput: (schema: JsonSchema) => typedAgent(schema) }) as unknown as Typed<ReturnType<typeof typedAgent>>;
+const typedLlmHook = (schema: JsonSchema | undefined): LlmHook =>
+  Object.assign(typedLlm(schema), { withOutput: (fixed: JsonSchema) => typedLlmHook(fixed) }) as unknown as LlmHook;
+const typedAgentHook = (schema: JsonSchema | undefined): AgentHook =>
+  Object.assign(typedAgent(schema), { withOutput: (fixed: JsonSchema) => typedAgentHook(fixed) }) as unknown as AgentHook;
+
+export const llm: LlmHook = typedLlmHook(undefined);
+export const agent: AgentHook = typedAgentHook(undefined);
 
 /** Claude's `parallel`: a barrier, and a thunk that throws resolves to `null`. */
-export async function parallel(thunks: ReadonlyArray<() => unknown>): Promise<unknown[]> {
+export async function parallel<T>(thunks: ReadonlyArray<() => Promise<T> | T>): Promise<Array<T | null>> {
   if (!Array.isArray(thunks)) throw new TypeError("parallel() takes an array of functions");
   if (thunks.length > MAX_ITEMS) throw new RangeError(`parallel() takes at most ${MAX_ITEMS} items; got ${thunks.length}`);
   return Promise.all(thunks.map(async (thunk) => {
@@ -264,10 +285,10 @@ const MAX_ITEMS = 4096;
  * Wait for the person's next message (SCRIPTS.md §17). Under the engine it is a gate the run parks
  * at; under the standalone host it reads the terminal. Resolves `null` when the person ends the run.
  */
-export function input(options?: InputOptions | string): Promise<unknown> {
+export function input(options?: InputOptions | string): Promise<InputAnswer> {
   const h = host("input");
   if (h.input === undefined) return Promise.reject(new Error("this host cannot ask a person for input"));
-  return h.input(typeof options === "string" ? { prompt: options } : (options ?? {}));
+  return h.input(typeof options === "string" ? { prompt: options } : (options ?? {})) as Promise<InputAnswer>;
 }
 
 export function phase(title: string): void {
