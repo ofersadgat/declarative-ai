@@ -1025,3 +1025,114 @@ export default async function inside(): Promise<string> { return await llm("insi
     await expect((async () => (hooks.llm as unknown as (p: string) => Promise<unknown>)("orphan"))()).rejects.toThrow(/standalone host/);
   });
 });
+
+describe("renderUI and interruptSignal (JaiRA decision 0033)", { timeout: 30_000 }, () => {
+  it("ties a config to the call it wraps, writes it on the call's state, and runs the call as if it were not there", async () => {
+    const source = `export default async function f() {
+  const a = await renderUI(llm("first"), { title: "Reply", role: "conversation" });
+  const b = await llm("second");
+  return a + " / " + b;
+}`;
+    const { documents } = await compile(source);
+    expect(documents["s/call_0"]!.present).toEqual({ title: "Reply", role: "conversation" });
+    expect(documents["s/call_1"]!.present).toBeUndefined();
+    const { result } = await run(source, {}, echoing);
+    expect(result.outputs).toEqual({ result: "said first / said second" });
+  });
+
+  it("draws every call a described helper makes under its config, the call's own scope winning", async () => {
+    const source = `const check = renderUI(async (text: string) => {
+  const seen = await llm("look at " + text);
+  const said = await renderUI(llm("judge " + seen), { title: "Verdict" });
+  return said;
+}, { role: "aside", title: "Checking", renderers: [["llm", "aside", "tool"]] });
+export default async function f() {
+  const r = await llm("reply");
+  const c = await check(r);
+  const d = await renderUI(async () => await llm("again"), { role: "hidden" })();
+  return { r, c, d };
+}`;
+    const { documents } = await compile(source);
+    const presented = Object.values(documents).filter((d) => d.present !== undefined).map((d) => d.present).sort((x, y) => (JSON.stringify(x) < JSON.stringify(y) ? -1 : 1));
+    expect(presented).toEqual([
+      { role: "aside", title: "Checking", renderers: [["llm", "aside", "tool"]] },
+      { role: "aside", title: "Verdict", renderers: [["llm", "aside", "tool"]] },
+      { role: "hidden" },
+    ]);
+    const { result } = await run(source, {}, echoing);
+    expect(result.outputs).toEqual({ r: "said reply", c: "said judge said look at said reply", d: "said again" });
+  });
+
+  it("names the step with a config's label", async () => {
+    const { documents } = await compile(`export default async function f() { return await renderUI(llm("x"), { label: "classify" }); }`);
+    expect(documents["s/call_0"]!.label).toBe("classify");
+  });
+
+  it("refuses a config the compiler cannot read, and warns where it cannot tell which call is meant", async () => {
+    await expect(compile(`export default async function f(t: string) { return await renderUI(llm("x"), { title: t }); }`)).rejects.toThrow(/renderUI's config must be/);
+    const compiled = await compile(`export default async function f() { const p = llm("x"); const v = await p; return renderUI(v, { title: "late" }) + (await llm("y")); }`);
+    expect(compiled.warnings.join("\\n")).not.toMatch(/renderUI cannot tell/); // no call inside it: nothing to tie, nothing lowered
+  });
+
+  it("ties a config to the call a promise is, where calls are not states of their own ('state' mode), and pairs each dispatch with its site", async () => {
+    const source = `export const meta = { compile: "state" };
+const p = llm("one");
+renderUI(p, { role: "aside", title: "First" });
+const x = await p;
+const y = await renderUI(llm("two"), { title: "Second" });
+const z = renderUI(await llm("three"), { title: "too late" });
+return x + y + z;`;
+    const { result, events, compiled } = await run(source, {}, (c) => ok(textOf(c)));
+    expect(Object.keys(compiled.documents)).toEqual(["s"]);
+    expect(result.outputs).toEqual({ result: "onetwothree" });
+    const settled = events.filter((e) => e.type === "script.call.settled") as Array<{ site: string; present?: unknown }>;
+    expect(settled.map((e) => e.present)).toEqual([{ role: "aside", title: "First" }, { title: "Second" }, undefined]);
+    const dispatched = events.filter((e) => e.type === "operation.dispatched") as Array<{ site?: string }>;
+    expect(dispatched.map((e) => e.site)).toEqual(settled.map((e) => e.site));
+  });
+
+  it("registers every model call a scope makes under the scope's signal, unless a call names its own", async () => {
+    const source = `export default async function f() {
+  const s = interruptSignal();
+  const mine = interruptSignal();
+  const both = await renderUI(async () => {
+    const a = await llm("first");
+    const b = await llm({ prompt: "second", interrupt: mine });
+    return a + " / " + b;
+  }, { role: "aside", interrupt: s })();
+  const c = await llm("outside");
+  return { both, c, s, mine };
+}`;
+    const { documents } = await compile(source);
+    // The signal is not drawing: it is no part of the config written on the call's state.
+    expect(Object.values(documents).filter((d) => d.present !== undefined).map((d) => d.present)).toEqual([{ role: "aside" }, { role: "aside" }]);
+    const { calls, result } = await run(source, {}, echoing);
+    const out = result.outputs as { s: string; mine: string; both: string; c: string };
+    expect(out.both).toBe("said first / said second");
+    expect(calls.map((c) => [textOf(c), (c.op as unknown as { config?: { interrupt?: string } }).config?.interrupt])).toEqual([
+      ["first", out.s],
+      ["second", out.mine],
+      ["outside", undefined],
+    ]);
+  });
+
+  it("refuses a config whose other fields are computed", async () => {
+    await expect(compile(`export default async function f(t: string) { const s = interruptSignal(); return await renderUI(llm("x"), { interrupt: s, title: t }); }`)).rejects.toThrow(/only `interrupt` may be computed/);
+  });
+
+  it("records an interrupt signal once, and hands the same id back on a replay", async () => {
+    const source = `export default async function f() {
+  const s = interruptSignal();
+  const a = await llm({ prompt: "first", interrupt: s });
+  const t = interruptSignal();
+  return { s, t, a };
+}`;
+    const { result, events } = await run(source, {}, echoing);
+    const out = { result: result.outputs as { s: string; t: string; a: string } };
+    expect(out.result.s).toMatch(/^signal-/);
+    expect(out.result.t).toMatch(/^signal-/);
+    expect(out.result.s).not.toBe(out.result.t);
+    const settled = events.filter((e) => e.type === "script.call.settled" && (e as { value?: unknown }).value === out.result.s);
+    expect(settled).toHaveLength(1);
+  });
+});

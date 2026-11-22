@@ -1202,6 +1202,11 @@ function resourceKeyFor(def: LoadedState, parent: Instance | undefined, selfAddr
   return key;
 }
 
+/** Where a call's `renderUI` config is kept between the call being made and it settling. */
+interface PresentHolder {
+  config?: Record<string, JsonValue>;
+}
+
 export class WorkflowEngine {
   /** The name each resource key came from — what `workspaceFor` is told beside the key. */
   private readonly workspaceNames = new Map<string, ScopedName>();
@@ -5271,7 +5276,7 @@ export class WorkflowEngine {
     }
     let outcome;
     try {
-      const services = await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, session, toolsOrFailure.gate, scope, op.kind, toolsOrFailure.authored);
+      const services = await this.servicesFor(resourceKey, instance, toolsOrFailure.tools, session, toolsOrFailure.gate, scope, op.kind, toolsOrFailure.authored, siteKey);
       const within = op.kind === "function" ? this.functionHost(instance, `${op.functionRef}@${scope.sequence}`) : <T,>(fn: () => T): T => fn();
       const handle = within(() => this.operations.start(rendered, services));
       onHandle?.(handle);
@@ -5401,12 +5406,26 @@ export class WorkflowEngine {
       this.emit({ type: "script.call.settled", instanceId: instance.id, stateId: instance.stateId, site, outcome: "value", value });
       return value;
     };
+    // A call's `renderUI` config, told after the call is made (`present`), recorded when it settles.
+    const presented = new WeakMap<object, PresentHolder>();
+    const held = (make: (holder: PresentHolder) => Promise<unknown>): Promise<unknown> => {
+      const holder: PresentHolder = {};
+      const made = make(holder);
+      presented.set(made, holder);
+      return made;
+    };
     return {
-      llm: (call, schema) => this.scriptCall(instance, run, call, schema),
-      agent: (prompt, options, schema) => this.scriptCall(instance, run, agentCall(prompt, options as AgentOptions, this.segments.agentDefaults), schema),
-      input: (options) => this.scriptInput(instance, run, options),
+      llm: (call, schema) => held((h) => this.scriptCall(instance, run, call, schema, h)),
+      agent: (prompt, options, schema) => held((h) => this.scriptCall(instance, run, agentCall(prompt, options as AgentOptions, this.segments.agentDefaults), schema, h)),
+      input: (options) => held((h) => this.scriptInput(instance, run, options, h)),
       workflow: (ref, args) => this.scriptWorkflow(instance, run, ref, args),
-      call: (ref, args) => this.scriptRegistryCall(instance, run, ref, args),
+      call: (ref, args) => held((h) => this.scriptRegistryCall(instance, run, ref, args, h)),
+      present: (target, config) => {
+        const holder = target !== null && typeof target === "object" ? presented.get(target) : undefined;
+        // A signal is no part of how a call is drawn, and the call is already made: it reaches nothing here.
+        const { interrupt: _signal, ...drawn } = config as Record<string, JsonValue>;
+        if (holder !== undefined) holder.config = drawn;
+      },
       recorded: (name, fn) => this.scriptRecorded(instance, run, name, fn),
       phase: (title) => {
         run.phase = title;
@@ -5415,6 +5434,16 @@ export class WorkflowEngine {
       log: (message) => recordOnce("log", (site) => this.emit({ type: "script.log", instanceId: instance.id, stateId: instance.stateId, site, message })),
       now: () => recordedValue("now", () => this.clock.now()),
       random: () => recordedValue("random", () => Math.random()),
+      // An interrupt id, recorded as `now()` is: a replay hands back the same one, so the calls a
+      // resumed run registers under it are reached by the same signal as before.
+      interruptSignal: () => {
+        const site = run.site("interruptSignal");
+        const recorded = run.recordAt(site);
+        if (recorded !== undefined && typeof recorded.value === "string") return recorded.value;
+        const value = `signal-${this.newInstanceId()}`;
+        this.emit({ type: "script.call.settled", instanceId: instance.id, stateId: instance.stateId, site, outcome: "value", value });
+        return value;
+      },
       budget: {
         total,
         spent: () => run.spent,
@@ -5428,12 +5457,12 @@ export class WorkflowEngine {
    * site of its own, answered from the record when an earlier run of this code already made it, and
    * otherwise dispatched through the same path any embedded call takes — then journaled.
    */
-  private async scriptCall(instance: Instance, run: ScriptRunState, call: LlmCall, schema: JsonSchema | undefined): Promise<unknown> {
-    return this.scriptDispatch(instance, run, lowerLlmCall(instance.stateId, instance.def.scriptDefaults, call, schema));
+  private async scriptCall(instance: Instance, run: ScriptRunState, call: LlmCall, schema: JsonSchema | undefined, holder?: PresentHolder): Promise<unknown> {
+    return this.scriptDispatch(instance, run, lowerLlmCall(instance.stateId, instance.def.scriptDefaults, call, schema), holder);
   }
 
   /** One operation a script's code makes: sited, replayed from its record or dispatched, and journaled. */
-  private async scriptDispatch(instance: Instance, run: ScriptRunState, lowered: LoweredCall): Promise<unknown> {
+  private async scriptDispatch(instance: Instance, run: ScriptRunState, lowered: LoweredCall, holder?: PresentHolder): Promise<unknown> {
     let key: string;
     try {
       key = hashOperation(lowered.op);
@@ -5485,6 +5514,7 @@ export class WorkflowEngine {
         site,
         ...(lowered.label !== undefined ? { label: lowered.label } : {}),
         ...(phase !== undefined ? { phase } : {}),
+        ...(holder?.config !== undefined ? { present: holder.config } : {}),
         ...("failure" in outcome ? { outcome: "error" as const, failure: outcome.failure, ...(failedAt !== undefined ? { session: failedAt } : {}) } : { outcome: "value" as const, value: outcome.value as ResolvedValue }),
         costUsd: cost,
       });
@@ -5501,23 +5531,23 @@ export class WorkflowEngine {
    * and recorded like any call — so the run parks where the host's gate parks it, and a replay hands
    * back the message the person sent rather than asking them again.
    */
-  private async scriptInput(instance: Instance, run: ScriptRunState, options: InputOptions): Promise<unknown> {
+  private async scriptInput(instance: Instance, run: ScriptRunState, options: InputOptions, holder?: PresentHolder): Promise<unknown> {
     const { label, ...args } = options;
     const op = desugarOperation({ function: INPUT_FUNCTION, args: args as Record<string, JsonValue> }, instance.stateId);
-    return this.scriptDispatch(instance, run, { op, env: { ...(environmentOf(instance.def) ?? {}) }, unwrap: false, hasFailureValue: false, isolated: false, label: typeof label === "string" ? label : "input()" });
+    return this.scriptDispatch(instance, run, { op, env: { ...(environmentOf(instance.def) ?? {}) }, unwrap: false, hasFailureValue: false, isolated: false, label: typeof label === "string" ? label : "input()" }, holder);
   }
 
   /**
    * A REGISTERED function a script imported from `$REGISTRY` (SCRIPTS.md §10): a function operation
    * with the call's one argument as its inputs by name, dispatched and recorded like any call.
    */
-  private async scriptRegistryCall(instance: Instance, run: ScriptRunState, ref: string, args: readonly unknown[]): Promise<unknown> {
+  private async scriptRegistryCall(instance: Instance, run: ScriptRunState, ref: string, args: readonly unknown[], holder?: PresentHolder): Promise<unknown> {
     const named = args[0];
     if (args.length > 1 || (named !== undefined && (named === null || typeof named !== "object" || Array.isArray(named)))) {
       throw new ScriptCallError({ classification: "permanent", reason: `'${ref}' takes its arguments by name — call it with one object` });
     }
     const op = desugarOperation({ function: ref, args: (named ?? {}) as Record<string, JsonValue> }, instance.stateId);
-    return this.scriptDispatch(instance, run, { op, env: { ...(environmentOf(instance.def) ?? {}) }, unwrap: false, hasFailureValue: false, isolated: false, label: ref });
+    return this.scriptDispatch(instance, run, { op, env: { ...(environmentOf(instance.def) ?? {}) }, unwrap: false, hasFailureValue: false, isolated: false, label: ref }, holder);
   }
 
   /**
@@ -6144,6 +6174,8 @@ export class WorkflowEngine {
     opKind?: OperationKind,
     /** The operation's resolved permission block, when its environment carries one — see {@link resolveTools}. */
     authored?: LiteralPermissions,
+    /** The call's site key — a script's `<content hash>#<k>` — named on its dispatch, so a reader can pair the two. */
+    site?: string,
   ): Promise<ExecServices> {
     const services = this.childServices(instance.id);
     if (gate !== undefined) services.gate = gate;
@@ -6169,6 +6201,7 @@ export class WorkflowEngine {
           op: opKind,
           ...(index !== undefined ? { index } : {}),
           operationId: dispatch.id,
+          ...(site !== undefined ? { site } : {}),
         });
     } else {
       delete services.scope;

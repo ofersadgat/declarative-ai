@@ -18,6 +18,9 @@ export {
   recorded,
   now,
   random,
+  renderUI,
+  interruptSignal,
+  Interrupted,
   budget,
   installStandaloneHost,
   standaloneHost,
@@ -29,6 +32,8 @@ export {
   type InputMessage,
   type InputOptions,
   type LlmCall,
+  type RenderConfig,
+  type RendererRef,
   type ScriptHost,
   type WithSession,
 } from "./scriptHooks.js";

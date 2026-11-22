@@ -47,7 +47,8 @@ export default async function work(task: string): Promise<unknown> {
 /** An endpoint that records what it is told and answers as `answer` says. */
 function endpoint(answer: (method: string, params: Record<string, unknown>) => unknown = () => ({})): { server: Server; socket: string; heard: Array<{ method: string; params: Record<string, unknown> }> } {
   const heard: Array<{ method: string; params: Record<string, unknown> }> = [];
-  const socket = join(mkdtempSync(join(tmpdir(), "dai-ep-")), "e.sock");
+  // A named pipe on Windows, where a socket is never a file; a Unix socket in a folder of its own elsewhere.
+  const socket = process.platform === "win32" ? `\\\\.\\pipe\\dai-ep-${process.pid}-${Math.random().toString(36).slice(2)}` : join(mkdtempSync(join(tmpdir(), "dai-ep-")), "e.sock");
   const server = createServer((conn: Socket) => {
     let buffer = "";
     conn.setEncoding("utf8");
@@ -178,7 +179,8 @@ describe("finding an endpoint", () => {
 
   it("keeps adverts in this user's directory in the system's temporary one, not in the home directory", () => {
     const dir = endpointsDir({});
-    expect(dir.startsWith(homedir())).toBe(false);
+    // Windows keeps its temporary directory inside the home (`%LOCALAPPDATA%\Temp`): there it is the temp one.
+    if (process.platform !== "win32") expect(dir.startsWith(homedir())).toBe(false);
     if (process.platform === "win32") expect(dir).toBe(join(tmpdir(), "declarative-ai-endpoints"));
     else expect(dir).toBe(`/tmp/declarative-ai-endpoints-${process.getuid!()}`);
   });

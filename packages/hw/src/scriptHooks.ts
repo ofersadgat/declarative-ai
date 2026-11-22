@@ -132,6 +132,17 @@ export interface ScriptHost {
   /** Journaled: recorded the first time, replayed after. */
   now(): number;
   random(): number;
+  /**
+   * A fresh interrupt id (decision 0033 §6 in JaiRA): recorded, so a replay hands back the same one.
+   * Optional — a host without one is given a random id, which only that run's own calls know.
+   */
+  interruptSignal?(): string;
+  /**
+   * How a call already made is drawn — `renderUI(promise, config)` where a call is not a state of its
+   * own (the coarser modes): the host ties the config to the call the promise is, and records it with
+   * it. A target it did not make is ignored. Optional — a host that draws nothing need not.
+   */
+  present?(target: unknown, config: RenderConfig): void;
   readonly budget: { total: number | null; spent(): number; remaining(): number };
 }
 
@@ -315,6 +326,65 @@ export function random(): number {
   return host("random").random();
 }
 
+/** A renderer by its id, with options bound to it; `null` draws nothing. */
+export type RendererRef = string | { id: string; options?: Record<string, unknown> } | null;
+
+/**
+ * How a call is drawn — a hint to whatever shows the run, never to the run. Every field is optional;
+ * a scope's fields are the defaults of every call inside it that does not say otherwise.
+ */
+export interface RenderConfig {
+  /** An open string — `aside`, `hidden`, or one a registry knows: what a view shows, folds or hides. */
+  role?: string;
+  /** What the call is called where it is drawn in a conversation. */
+  title?: string;
+  /** The step's name everywhere — the same as the call's own `label`. */
+  label?: string;
+  renderer?: RendererRef;
+  /** Registry entries for the calls inside this scope: `[function, role, renderer]`, `"*"` for either. */
+  renderers?: ReadonlyArray<readonly [string, string, RendererRef]>;
+  /** An `interruptSignal()` id every model call inside is registered under — the one field that may be computed. */
+  interrupt?: string;
+}
+
+/**
+ * Say how a call — or every call a function makes — is drawn. It changes nothing about how the call
+ * runs: under the engine the compiler ties the config to the call site, and this returns its argument;
+ * anywhere else it simply returns its argument.
+ *
+ *   await renderUI(llm({ … }), { title: "Reply" });
+ *   const check = renderUI(async (text: string) => { … }, { role: "aside", title: "Checking" });
+ *
+ * The config must be a literal the compiler can read.
+ */
+export function renderUI<T>(target: T, config: RenderConfig): T {
+  // Where the call is not a state of its own, the host is told which call this is (a promise it made).
+  (store?.getStore() ?? standaloneHost())?.present?.(target, config);
+  return target;
+}
+
+/**
+ * A fresh id calls can be registered under, so one interrupt reaches them all: `llm({ …, interrupt: s })`.
+ * Recorded under the engine, so a replay hands back the same id.
+ */
+export function interruptSignal(): string {
+  const fresh = (store?.getStore() ?? standaloneHost())?.interruptSignal?.();
+  return fresh ?? `signal-${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+}
+
+/**
+ * Why an interrupted call failed: what it was interrupted with, when anything. A run that does not
+ * catch one ends STOPPED, not failed.
+ */
+export class Interrupted extends Error {
+  readonly reason: unknown;
+  constructor(reason?: unknown) {
+    super(reason === undefined ? "interrupted" : `interrupted: ${typeof reason === "string" ? reason : JSON.stringify(reason)}`);
+    this.name = "Interrupted";
+    this.reason = reason;
+  }
+}
+
 /** Claude's `budget` — read through the current host, so it is the running instance's. */
 export const budget = {
   get total(): number | null {
@@ -338,6 +408,9 @@ export const hookModule: Readonly<Record<string, unknown>> = Object.freeze({
   recorded,
   now,
   random,
+  renderUI,
+  interruptSignal,
+  Interrupted,
   budget,
 });
 
@@ -363,7 +436,17 @@ interface HwLlmCall {
   failureValue?: unknown;
   label?: string;
   withSession?: boolean;
+  interrupt?: string;
   [knob: string]: unknown;
+}
+type HwRenderer = string | { id: string; options?: Record<string, unknown> } | null;
+interface HwRenderConfig {
+  role?: string;
+  title?: string;
+  label?: string;
+  renderer?: HwRenderer;
+  renderers?: ReadonlyArray<readonly [string, string, HwRenderer]>;
+  interrupt?: string;
 }
 interface HwSessionRef { id: string }
 interface HwInputOptions { prompt?: string; idle?: number | string; label?: string; [option: string]: unknown }
@@ -392,6 +475,9 @@ ${prefix} function log(message: string): void;
 ${prefix} function workflow(ref: string | { scriptPath: string }, args?: unknown): Promise<any>;
 ${prefix} function now(): number;
 ${prefix} function random(): number;
+${prefix} function renderUI<T>(target: T, config: HwRenderConfig): T;
+${prefix} function interruptSignal(): string;
+${prefix} class Interrupted extends Error { readonly reason: unknown; constructor(reason?: unknown); }
 ${prefix} const budget: HwBudget;
 `;
 

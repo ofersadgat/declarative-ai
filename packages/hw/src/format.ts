@@ -1138,6 +1138,11 @@ export interface StateDef {
   whenToUse?: string;
   /** Present on a document compiled from a script: where it came from (SCRIPTS.md §12). */
   generated?: GeneratedDecl;
+  /**
+   * How this state's call is drawn — a script's `renderUI` config (`role`, `title`, `label`,
+   * `renderer`, `renderers`). For whatever shows the run; the engine never reads it.
+   */
+  present?: Record<string, JsonValue>;
 }
 
 /**

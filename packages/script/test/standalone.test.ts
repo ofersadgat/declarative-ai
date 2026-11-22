@@ -106,7 +106,7 @@ export default async function main(): Promise<unknown> { return await workflow("
       "greet.mjs": `export default async function greet(who) { return "v1 " + who; }`,
       "check.mts": `
 import { writeFileSync } from "node:fs";
-import { createStandaloneHost } from ${JSON.stringify(join(__dirname, "..", "src", "standalone.ts"))};
+import { createStandaloneHost } from ${JSON.stringify(pathToFileURL(join(__dirname, "..", "src", "standalone.ts")).href)};
 const lines: string[] = [];
 const host = createStandaloneHost({ cwd: process.cwd(), write: (l) => lines.push(l) });
 const out: unknown[] = [];

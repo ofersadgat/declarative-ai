@@ -243,6 +243,22 @@ interface CallSite {
   failureValue?: boolean;
   /** The `try` the call sits in, when it does. */
   handler?: Handler;
+  /**
+   * How the call is drawn — `renderUI`'s config, the scopes around the call merged, nearest winning.
+   * Written on the call's state as `present`; nothing in the engine reads it.
+   */
+  present?: Record<string, JsonValue>;
+}
+
+/**
+ * Merge `renderUI` configs, outer first: a field the inner one names wins, and `renderers` add up —
+ * the inner scope's entries after the outer's, so a registry built from them lets the inner win.
+ */
+function mergePresent(outer: Record<string, JsonValue>, inner: Record<string, JsonValue>): Record<string, JsonValue> {
+  const merged: Record<string, JsonValue> = { ...outer, ...inner };
+  const renderers = [...((outer["renderers"] as JsonValue[] | undefined) ?? []), ...((inner["renderers"] as JsonValue[] | undefined) ?? [])];
+  if (renderers.length > 0) merged["renderers"] = renderers;
+  return merged;
 }
 
 /** A lowered `try`: its catch block, and the variable its `catch (e)` binds. */
@@ -329,6 +345,10 @@ class Compiler {
   private program!: TS.Program;
   private readonly warnings: string[] = [];
   mode: ScriptMode = "calls";
+  /** The `renderUI` scopes being lowered, outermost first — every call site made inside takes them. */
+  private presentScopes: Array<Record<string, JsonValue>> = [];
+  /** Their `interrupt` signals, outermost first — the one field a config may compute (decision 0033 §6). */
+  private interruptScopes: TS.Expression[] = [];
 
   /** Hoisted variables by symbol, and by the unique name each lives under in `$v`. */
   readonly hoisted = new Map<TS.Symbol, Hoisted>();
@@ -936,6 +956,9 @@ class Compiler {
     const { ts } = this;
     const e = unwrap(ts, callee);
     if (ts.isArrowFunction(e) || ts.isFunctionExpression(e)) return e;
+    // `renderUI(fn, { … })` is `fn`, drawn as the config says (decision 0033 §4).
+    const presented = this.renderUIOf(e);
+    if (presented !== undefined) return presented.target !== undefined ? this.helperOf(presented.target) : undefined;
     if (!ts.isIdentifier(e)) return undefined;
     const symbol = this.checker.getSymbolAtLocation(e);
     const declaration = symbol?.valueDeclaration;
@@ -944,8 +967,77 @@ class Compiler {
     if (ts.isVariableDeclaration(declaration) && declaration.initializer !== undefined) {
       const init = unwrap(ts, declaration.initializer);
       if ((ts.isArrowFunction(init) || ts.isFunctionExpression(init)) && (declaration.parent.flags & ts.NodeFlags.Const) !== 0) return init;
+      if (this.renderUIOf(init) !== undefined && (declaration.parent.flags & ts.NodeFlags.Const) !== 0) return this.helperOf(init);
     }
     return undefined;
+  }
+
+  // --- renderUI (decision 0033 §4) -----------------------------------------------------------------
+
+  /**
+   * `renderUI(target, config)`: what it describes and the config, read at compile time — every field a
+   * literal but `interrupt`, the `interruptSignal()` id the calls inside are registered under, which is
+   * a value of the run's and so may be any expression.
+   */
+  private renderUIOf(node: TS.Node): { target: TS.Expression | undefined; config: Record<string, JsonValue>; interrupt?: TS.Expression } | undefined {
+    const { ts } = this;
+    const e = ts.isExpression(node) ? unwrap(ts, node) : node;
+    if (!ts.isCallExpression(e)) return undefined;
+    const callee = unwrap(ts, e.expression);
+    if (!ts.isIdentifier(callee) || this.hookOf(callee) !== "renderUI") return undefined;
+    const [target, written] = e.arguments;
+    const refuse = (at: TS.Node): never => {
+      throw this.error(at, "renderUI's config must be an object the compiler can read — a literal, or a constant (only `interrupt` may be computed)");
+    };
+    const bare = written !== undefined ? unwrap(ts, written) : undefined;
+    if (bare !== undefined && ts.isObjectLiteralExpression(bare)) {
+      const named = (p: TS.ObjectLiteralElementLike): string | undefined =>
+        (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) ? p.name.text : undefined;
+      const field = bare.properties.find((p) => named(p) === "interrupt");
+      if (field !== undefined) {
+        const interrupt = ts.isPropertyAssignment(field) ? field.initializer : this.shorthandValue(field as TS.ShorthandPropertyAssignment);
+        const config: Record<string, JsonValue> = {};
+        for (const p of bare.properties) {
+          if (p === field) continue;
+          const name = named(p);
+          const value = name !== undefined && ts.isPropertyAssignment(p) ? this.staticValue(p.initializer, true) : undefined;
+          if (name === undefined || value === undefined) refuse(p);
+          config[name!] = value!;
+        }
+        return { target, config, interrupt };
+      }
+    }
+    const config = written !== undefined ? this.staticValue(written, true) : {};
+    if (config === null || config === undefined || typeof config !== "object" || Array.isArray(config)) refuse(written ?? e);
+    return { target, config: config as Record<string, JsonValue> };
+  }
+
+  /**
+   * The config a helper is drawn under, when the callee is `renderUI(fn, …)` or a constant bound to
+   * one — the scope every call inlined from it takes.
+   */
+  private presentOfCallee(callee: TS.Expression): { config: Record<string, JsonValue>; interrupt?: TS.Expression } | undefined {
+    const { ts } = this;
+    const e = unwrap(ts, callee);
+    const direct = this.renderUIOf(e);
+    if (direct !== undefined) return direct;
+    if (!ts.isIdentifier(e)) return undefined;
+    const declaration = this.checker.getSymbolAtLocation(e)?.valueDeclaration;
+    if (declaration === undefined || !ts.isVariableDeclaration(declaration) || declaration.initializer === undefined) return undefined;
+    return this.renderUIOf(declaration.initializer);
+  }
+
+  /** Lower something with a `renderUI` scope around it. */
+  private presenting<T>(scope: { config: Record<string, JsonValue>; interrupt?: TS.Expression } | undefined, lower: () => T): T {
+    if (scope === undefined) return lower();
+    this.presentScopes.push(scope.config);
+    if (scope.interrupt !== undefined) this.interruptScopes.push(scope.interrupt);
+    try {
+      return lower();
+    } finally {
+      this.presentScopes.pop();
+      if (scope.interrupt !== undefined) this.interruptScopes.pop();
+    }
   }
 
   /** Whether a helper makes a call, through however many helpers it calls itself. */
@@ -967,7 +1059,7 @@ class Compiler {
     const callee = unwrap(ts, call.expression);
     if (ts.isIdentifier(callee)) {
       const hook = this.hookOf(callee);
-      if (hook === "llm" || hook === "agent" || hook === "input" || hook === "now" || hook === "random" || hook === "workflow") return true;
+      if (hook === "llm" || hook === "agent" || hook === "input" || hook === "now" || hook === "random" || hook === "interruptSignal" || hook === "workflow") return true;
       if (hook === "parallel" || hook === "pipeline") return call.arguments.some((a) => this.hasCut(a, true));
       const imported = this.importedAs(callee);
       if (imported !== undefined) return imported.kind === "state" || imported.kind === "prompt" || imported.kind === "registry" || imported.kind === "operation";
@@ -1145,6 +1237,16 @@ class Compiler {
     }
     if (ts.isCallExpression(e)) {
       if (this.isCutCall(e)) return this.cut(e);
+      // `renderUI(call, { … })` IS the call, drawn as the config says: the call is lowered inside the
+      // config's scope, and the wrapper — which only returns its argument — is dropped.
+      const presented = this.renderUIOf(e);
+      if (presented !== undefined && presented.target !== undefined) {
+        const target = presented.target;
+        const bare = unwrap(ts, target);
+        const inner = ts.isAwaitExpression(bare) ? unwrap(ts, bare.expression) : bare;
+        if (ts.isCallExpression(inner) && this.isCutCall(inner)) return this.presenting(presented, () => this.anfExpr(target));
+        this.warnings.push(`${this.where(e)}: renderUI cannot tell which call this describes — it describes a call written inside it, or a function`);
+      }
       const pre: TS.Statement[] = [];
       const argsCut = e.arguments.some((a) => this.hasCut(a));
       let callee = e.expression;
@@ -1362,7 +1464,8 @@ class Compiler {
     const isPromiseAll = ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression) && callee.expression.text === "Promise" && callee.name.text === "all";
     if (hook === undefined && imported === undefined && !isPromiseAll) {
       const helper = this.helperOf(call.expression);
-      if (helper !== undefined) return this.inline(call, helper);
+      // A helper `renderUI` describes: every call inlined from it is drawn under its config.
+      if (helper !== undefined) return this.presenting(this.presentOfCallee(call.expression), () => this.inline(call, helper));
     }
     if (hook === "parallel" || hook === "pipeline" || isPromiseAll) return this.fanOut(call, hook ?? "all");
 
@@ -1398,6 +1501,9 @@ class Compiler {
       partial = { kind: "script", label: this.labelOf(args.values, "agent"), call: array, script: `$rt.agent${withOutput(typed)}(...$v._call.args)`, ...(schema !== undefined ? { resultSchema: schema } : {}) };
     } else if (hook === "now" || hook === "random") {
       partial = { kind: "script", label: `${hook}()`, call: array, script: `$rt.${hook}()`, resultSchema: { type: "number" } as JsonSchema };
+    } else if (hook === "interruptSignal") {
+      // A fresh id, recorded: a replay hands back the same one (decision 0033 §6).
+      partial = { kind: "script", label: "interruptSignal()", call: array, script: "$rt.interruptSignal()", resultSchema: { type: "string" } as JsonSchema };
     } else if (hook === "workflow") {
       const target = this.workflowTarget(call);
       partial = this.mountPlan(target.stateId, target, args.values[1], pre);
@@ -1419,6 +1525,19 @@ class Compiler {
     } else {
       throw this.error(call, "this call cannot be cut");
     }
+    // A `renderUI` scope's signal (decision 0033 §6): every model call inside is registered under the
+    // nearest, as its own `interrupt` option would be — unless the call names one of its own.
+    const signal = this.interruptScopes.at(-1);
+    if (signal !== undefined && (hook === "llm" || hook === "agent")) {
+      if (partial.kind === "prompt" && partial.op !== undefined) {
+        if (partial.op["interrupt"] === undefined) {
+          const v = this.typedValue(signal, { type: "string" } as JsonSchema, pre, "interrupt");
+          partial = { ...partial, op: { ...partial.op, interrupt: { $binding: { $expr: `.inputs.${v}` } } }, inputVars: { ...(partial.inputVars ?? {}), interrupt: v } };
+        }
+      } else {
+        this.warnings.push(`${this.where(call)}: this call runs as code, so the renderUI scope's interrupt does not reach it — give it an interrupt option of its own`);
+      }
+    }
     const site = this.addSite(call, partial);
     return { pre: [...pre, this.marker(site)], value: vRef(ts, site.target) };
   }
@@ -1430,7 +1549,10 @@ class Compiler {
       const before = this.sites.filter((s) => s.key !== undefined && /^input(_\d+)?$/.test(s.key)).length;
       key = before === 0 ? "input" : `input_${before + 1}`;
     }
-    const site: CallSite = { id: this.sites.length, target: target.name, node, ...partial, ...(key !== undefined ? { key } : {}) };
+    // The `renderUI` scopes this call sits in, nearest winning; a `label` there names the step.
+    const present = this.presentScopes.reduce<Record<string, JsonValue> | undefined>((merged, scope) => mergePresent(merged ?? {}, scope), undefined);
+    const label = typeof present?.["label"] === "string" ? (present["label"] as string) : partial.label;
+    const site: CallSite = { id: this.sites.length, target: target.name, node, ...partial, label, ...(key !== undefined ? { key } : {}), ...(present !== undefined ? { present } : {}) };
     this.sites.push(site);
     return site;
   }
@@ -3559,6 +3681,8 @@ class MachineBuilder {
         outputs[field] = { ...(this.hoistedSchema(field, node.composite) ?? {}), ...(field === SCRIPT_CONTROL.next ? {} : { optional: true }), binding: `.operation[1].output.${field}` } as NamedParameterDecl;
       }
       doc = { label: node.label, inputs, outputs, operation: [call, { ...tail, input: { [RESULT_INPUT]: { binding: result } } }] };
+      // How the call is drawn (`renderUI`) — for whatever shows the run; the engine never reads it.
+      if (site.present !== undefined) doc.present = site.present;
     } else {
       doc = { label: node.label, inputs, outputs: this.nodeOutputs(node.out, node.composite), operation: tail };
     }

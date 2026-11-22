@@ -801,3 +801,60 @@ can be resumed. With no engine listening, nothing changes.
 - **Gated there.** A reported `agent()` hands the agent a permission callback that asks the endpoint about
   each tool use, by the agent's own tool name; what the endpoint cannot answer is refused, never allowed.
   A report that cannot be delivered is lost, never the run's failure.
+
+## 18. How a call is drawn, and reaching a call in flight
+
+**Status: BUILT** (2026-11-22, for JaiRA decision 0033: "one view of a run").
+
+### 18.1 `renderUI`
+
+```ts
+import { llm, renderUI } from "@declarative-ai/hw/script";
+
+const reply = await renderUI(llm({ prompt: text, session: conv, withSession: true }), { title: "Reply" });
+const check = renderUI(async (text: string) => { … }, { role: "aside", title: "Checking for a correction" });
+```
+
+`renderUI(target, config)` says how a call, or every call a function makes, is drawn by whatever shows
+the run. It changes nothing about how anything runs: it returns its argument, and the engine never reads
+the config.
+
+- **A call.** `renderUI(<call>, config)`, `renderUI(await <call>, config)` or `renderUI(<promise of a
+  call>, config)`: in `"calls"` mode the compiler ties the config to that call site, and writes it on
+  the call's state as `present`, beside `label`. The wrapper itself is dropped from the lowered code.
+- **A function.** `renderUI(fn, config)` is `fn`, configured: every call inlined from it, through however
+  many helpers, takes the config as its default. Bound to a `const` (`const check = renderUI(…)`) or
+  called where it is written (`renderUI(async () => …, config)()`).
+- **Scopes nest.** A call takes every scope around it, outermost first, the nearest naming a field
+  winning; their `renderers` add up, the inner scope's after the outer's. A `label` in a scope names the
+  step, as the call's own `label` does.
+- **The config is a literal** the compiler can read (a constant will do), but for `interrupt`; anything
+  else computed is a compile error. A first argument the compiler cannot tie to a call site — a variable holding an earlier promise —
+  is a warning, and draws nothing differently.
+- **Its fields** are open, read by whatever shows the run: `role` (a string — `aside`, `hidden`, or one the
+  viewer's registry knows), `title`, `label`, `renderer` (an id, `{ id, options }`, or `null` for nothing)
+  and `renderers` (`[function, role, renderer]` rows, `"*"` for either).
+- **`interrupt`** — an `interruptSignal()` id, and so the one field that may be computed — registers every
+  `llm()` and `agent()` call inside the scope under it (§18.2), unless a call names one of its own. It is no
+  part of the config written on a state. A call that runs as code (its options unreadable) is not reached,
+  and the compiler warns.
+- **In the coarser modes** (`"phases"`, `"state"`) a call is not a state of its own. There
+  `renderUI(promise, config)` tells the host which call the promise is, and the config is recorded on the
+  call's `script.call.settled` as `present`; each `operation.dispatched` a script's code makes names its
+  `site`, so a reader pairs the call's record with what was said of it. `renderUI(await llm(…))` hands the
+  host a value, not a call, and draws nothing differently; a scope's `interrupt` does not reach these calls.
+
+### 18.2 `interruptSignal`
+
+```ts
+const s = interruptSignal();
+const a = await llm({ prompt: "…", interrupt: s });
+```
+
+`interruptSignal()` returns a fresh id, recorded like `now()`, so a replay hands back the same one. A call
+made with `interrupt: s` (or a list of ids) is registered under it while it runs, as well as under its own
+state; whatever runs the engine can then interrupt every call an id reaches. The id reaches the executor
+as the knob `config.interrupt`, which the host reads and takes out before a model sees it. An interrupted
+call fails as `canceled`, its reason `interrupted: <what it was interrupted with>`: the script may catch
+it, and a run that does not ends stopped rather than failed. `Interrupted` is exported for scripts that
+throw one of their own.

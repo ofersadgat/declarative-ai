@@ -114,7 +114,16 @@ export type EngineEvent =
    * nothing. Not emitted when the position claim is refused — no row exists, and the typed
    * `positionTaken` failure already carries the fork signal.
    */
-  | { type: "operation.dispatched"; instanceId: string; stateId: string; op: OperationKind; index?: number; operationId: string }
+  | {
+      type: "operation.dispatched";
+      instanceId: string;
+      stateId: string;
+      op: OperationKind;
+      index?: number;
+      operationId: string;
+      /** The call's site, when a script's code made it (`<content hash>#<k>`) — what its `script.call.settled` names. */
+      site?: string;
+    }
   /**
    * `operationId` is the SCOPED id — the op's content hash folded with the dispatch site
    * `(instanceId, sequence)`, exactly the id `withRecord` keys the record by (`scopedOperationId`),
@@ -266,6 +275,8 @@ export type EngineEvent =
       label?: string;
       /** The phase the call was grouped under — Claude's `opts.phase`, or the current `phase()`. */
       phase?: string;
+      /** How the call is drawn — `renderUI`'s config, where the call is not a state of its own. */
+      present?: Record<string, JsonValue>;
       outcome: "value" | "error";
       value?: ResolvedValue;
       failure?: Failure;
